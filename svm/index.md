@@ -327,7 +327,7 @@ $$
 则优化目标变成了
 
 $$
-\min _{{w}, b} \frac{1}{2}\|{w}\|^{2}+C \sum_{i=1}^{m} \ell_{0 / 1}\left(y_{i}\left({w}^{\mathrm{T}} {x}_{i}+b\right)-1\right),
+\min _{w, b} \frac{1}{2}\|{w}\|^{2}+C \sum_{i=1}^{m} \ell_{0 / 1}\left(y_{i}\left({w}^{\mathrm{T}} {x}_{i}+b\right)-1\right),
 $$
 
 
@@ -351,7 +351,7 @@ hinge 损失: $\ell_{\text {hinge }}(z)=\max (0,1-z)$;
 若采用 hinge 损失, 则变成
 
 $$
-\min _{{w}, b} \frac{1}{2}\|{w}\|^{2}+C \sum_{i=1}^{m} \max \left(0,1-y_{i}\left({w}^{\mathrm{T}} {x}_{i}+b\right)\right)
+\min _{w, b} \frac{1}{2}\|{w}\|^{2}+C \sum_{i=1}^{m} \max \left(0,1-y_{i}\left({w}^{\mathrm{T}} {x}_{i}+b\right)\right)
 $$
 
 

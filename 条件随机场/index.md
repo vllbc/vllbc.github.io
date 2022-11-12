@@ -38,7 +38,7 @@ $$
 给出。规范化因子保证 $P(Y)$ 构成一个概率分布。函数 $\Psi_C\left(Y_C\right)$ 称为势函数 (potential function)。这里要求势函数 $\Psi_C\left(Y_C\right)$ 是严格正的, 通常定义为指数函数:
 
 $$
-\Psi_C\left(Y_C\right)=\exp \left\{-E\left(Y_C\right)\right\}
+\Psi_C\left(Y_C\right)=\exp \left\\{-E\left(Y_C\right)\right\\}
 $$
 
 
@@ -286,8 +286,8 @@ $$
 
 $$
 \begin{gathered}
-\delta_i(l)=\max _{1 \leqslant j \leqslant m}\left\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\}, \quad l=1,2, \cdots, m \\\\
-\Psi_i(l)=\arg \max _{1 \leqslant j \leqslant m}\left\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\}, \quad l=1,2, \cdots, m
+\delta_i(l)=\max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m \\\\
+\Psi_i(l)=\arg \max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m
 \end{gathered}
 $$
 
@@ -327,8 +327,8 @@ $$
 
 $$
 \begin{gathered}
-\delta_i(l)=\max _{1 \leqslant j \leqslant m}\left\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\}, \quad l=1,2, \cdots, m \\\\
-\Psi_i(l)=\arg \max _{1 \leqslant j \leqslant m}\left\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\}, \quad l=1,2, \cdots, m
+\delta_i(l)=\max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m \\\\
+\Psi_i(l)=\arg \max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m
 \end{gathered}
 $$
 

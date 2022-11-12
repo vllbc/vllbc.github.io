@@ -95,7 +95,7 @@ $$
 条件独立性假设(最简单的概率图模型(有向图))，目的是简化计算
 
 ## 推导
-对于数据集$\{(x_i, y_i)\}^N_{i=1}$，$x_i \in R^p , \quad y_i \in \{ 0, 1\}$
+对于数据集$\\{(x_i, y_i)\\}^N_{i=1}$，$x_i \in R^p , \quad y_i \in \\{ 0, 1\\}$
 
 
 $$
@@ -174,7 +174,7 @@ $$
 P\left(Y=c_{k}\right)=\frac{\sum_{i=1}^{N} I\left(y_{i}=c_{k}\right)}{N}, \quad k=1,2, \cdots, K
 $$
 
-设第 $j$ 个特征 $x^{(j)}$ 可能取值的集合为 $\left\{a_{j 1}, a_{j 2}, \cdots, a_{j S_{j}}\right\}$, 条件概率 $P\left(X^{(j)}=a_{j l} \mid Y=\right.$ $c_{k}$ ) 的极大似然估计是
+设第 $j$ 个特征 $x^{(j)}$ 可能取值的集合为 $\left\\{a_{j 1}, a_{j 2}, \cdots, a_{j S_{j}}\right\\}$, 条件概率 $P\left(X^{(j)}=a_{j l} \mid Y=\right.$ $c_{k}$ ) 的极大似然估计是
 
 $$
 \begin{aligned}

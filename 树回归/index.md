@@ -39,7 +39,7 @@ $$
 
 $$
 \begin{gathered}
-R_{1}(j, s)=\left\{x \mid x^{(j)} \leq s\right\}, R_{2}(j, s)=\left\{x \mid x^{(j)}>s\right\} \\\\
+R_{1}(j, s)=\left\\{x \mid x^{(j)} \leq s\right\\}, R_{2}(j, s)=\left\\{x \mid x^{(j)}>s\right\\} \\\\
 \hat{c}_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
 x \in R_{m}, m=1,2
 \end{gathered}

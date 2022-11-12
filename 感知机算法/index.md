@@ -6,7 +6,7 @@
 
 ## 感知机模型
 
-假设输入空间（特征空间) 是 $\mathcal{X} \subseteq \mathbf{R}^n$, 输出空间是 $\mathcal{Y}=\{+1,-1\}$ 。输入 $x \in \mathcal{X}$ 表示实例的特征向量, 对应于输入空间 (特征空间 ) 的点; 输出 $y \in \mathcal{Y}$ 表示实例的类别。由输入空间到输出空间的如下函数
+假设输入空间（特征空间) 是 $\mathcal{X} \subseteq \mathbf{R}^n$, 输出空间是 $\mathcal{Y}=\\{+1,-1\\}$ 。输入 $x \in \mathcal{X}$ 表示实例的特征向量, 对应于输入空间 (特征空间 ) 的点; 输出 $y \in \mathcal{Y}$ 表示实例的类别。由输入空间到输出空间的如下函数
 
 $$
 f(x)=\operatorname{sign}(w \cdot x+b)
@@ -15,7 +15,7 @@ $$
 称为感知机。其中, $w$ 和 $b$ 为感知机模型参数, $w \in \mathbf{R}^n$ 叫作权值 (weight) 或权值向 量 (weight vector), $b \in \mathbf{R}$ 叫作偏置 (bias), $w \cdot x$ 表示 $w$ 和 $x$ 的内积。sign 是符号 函数, 即
 
 $$
-\operatorname{sign}(x)=\left\{\begin{array}{cc}
+\operatorname{sign}(x)=\left\\{\begin{array}{cc}
 +1, & x \geqslant 0 \\\\
 -1, & x<0
 \end{array}\right.
@@ -79,7 +79,7 @@ $$
 ## 算法流程
 总结可得，感知机算法流程如下：
 
-输入: 训练数据集 $T=\left\{\left(x_1, y_1\right),\left(x_2, y_2\right), \cdots,\left(x_N, y_N\right)\right\}$, 其中 $x_i \in \mathcal{X}=\mathbf{R}^n, y_i \in$ $\mathcal{Y}=\{-1,+1\}, i=1,2, \cdots, N$; 学习率 $\eta(0<\eta \leqslant 1)$;
+输入: 训练数据集 $T=\left\\{\left(x_1, y_1\right),\left(x_2, y_2\right), \cdots,\left(x_N, y_N\right)\right\\}$, 其中 $x_i \in \mathcal{X}=\mathbf{R}^n, y_i \in$ $\mathcal{Y}=\\{-1,+1\\}, i=1,2, \cdots, N$; 学习率 $\eta(0<\eta \leqslant 1)$;
 输出: $w, b$; 感知机模型 $f(x)=\operatorname{sign}(w \cdot x+b)$ 。
 (1) 选取初值 $w_0, b_0$;
 (2) 在训练集中选取数据 $\left(x_i, y_i\right)$;
@@ -122,7 +122,7 @@ $$
 若定义新变量 $y^{\prime}$, 使
 
 $$
-y_i^{\prime}=\left\{\begin{array}{lll}
+y_i^{\prime}=\left\\{\begin{array}{lll}
 y_i,  \text { 若 } & {y}_i \in \omega_0 \\\\
 -{y}_i, \text { 若 } & {y}_i \in \omega_1
 \end{array} \quad i=1,2, \ldots, m\right.

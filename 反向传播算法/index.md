@@ -18,7 +18,7 @@ $$
 $$
 
 $$
-\frac{\partial g(z)}{\partial z}=-\frac{1}{(1+e^{-z})^2}(-e^{-z})=\frac{e^{-z}}{1+e^{-z}}=\frac{1}{1+{{e}^{-z}}}\times(1-\frac{1}{1+{{e}^{-z}}})=g(z)(1-g(z))
+\frac{\partial g(z)}{\partial z}=-\frac{1}{(1+e^{-z})^2}(-e^{-z})=\frac{e^{-z}}{1+e^{-z}}=\frac{1}{1+e^{-z}}\times(1-\frac{1}{1+e^{-z}})=g(z)(1-g(z))
 $$
 
 所以

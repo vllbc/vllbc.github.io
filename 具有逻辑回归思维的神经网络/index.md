@@ -196,7 +196,7 @@ $$
 然后通过对所有训练样例求和来计算成本:
 
 $$
-J\left( w,b \right)=\frac{1}{m}\sum\limits_{i=1}^{m}{L\left( {{\hat{y}}}^{(i)}},{{y}^{(i)}} \right)=\frac{1}{m}\sum\limits_{i=1}^{m}{\left( -{y}^{(i)}}\log {{{\hat{y}}}^{(i)}}-(1-{{y}^{(i)}})\log (1-{{{\hat{y}}}^{(i)}}) \right)
+J\left( w,b \right)=\frac{1}{m}\sum\limits_{i=1}^{m}L\left( \hat{y}^{(i)},y^{(i)} \right)=\frac{1}{m}\sum\limits_{i=1}^{m}\left( -y^{(i)}\log \hat{y}^{(i)}-(1-y^{(i)})\log (1-\hat{y}^{(i)}) \right)
 $$
 
 建立神经网络的主要步骤是： 
@@ -214,7 +214,7 @@ $$
 
 其中，sigmoid代表一个常用的逻辑函数为S形函数（Sigmoid function），公式为： 
 $$
-g\left( z \right)=\frac{1}{1+{{e}^{-z}}}
+g\left( z \right)=\frac{1}{1+e^{-z}}
 $$
 
 
@@ -290,7 +290,7 @@ $$
 $$
 
 $$
-\frac{\partial g(z)}{\partial z}=-\frac{1}{(1+e^{-z})^2}(-e^{-z})=\frac{e^{-z}}{1+e^{-z}}=\frac{1}{1+{{e}^{-z}}}\times(1-\frac{1}{1+{{e}^{-z}}})=g(z)(1-g(z))
+\frac{\partial g(z)}{\partial z}=-\frac{1}{(1+e^{-z})^2}(-e^{-z})=\frac{e^{-z}}{1+e^{-z}}=\frac{1}{1+e^{-z}}\times(1-\frac{1}{1+e^{-z}})=g(z)(1-g(z))
 $$
 
 所以
