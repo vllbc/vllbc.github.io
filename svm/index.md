@@ -1,5 +1,11 @@
-# SVM
-
+---
+title: "SVM"
+date: 2022-07-29
+lastmod: 2022-11-11
+categories: ['Machine Learning', '分类算法']
+tags: ['Machine Learning', '分类算法']
+author: "vllbc"
+---
 
 # SVM
 
@@ -455,6 +461,5 @@ SVM是深度学习流行之前的首选分类方法，在许多任务上都有�
 ## 参考
 
 >[https://zhuanlan.zhihu.com/p/77750026](https://zhuanlan.zhihu.com/p/77750026)
-
 
 
