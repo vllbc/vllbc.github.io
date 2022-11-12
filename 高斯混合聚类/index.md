@@ -36,7 +36,7 @@ $$
 那么模型的参数要怎么估计呢，很显然可以使用EM算法，$\gamma$为隐变量，其实我这里的叙述顺序是有问题的，其实是EM算法中求Q函数的过程中需要计算的一个值，详细的过程在本博客的EM算法里面。总之得到了$\gamma_{jk}$后，就得到了Q函数:
 
 $$
-Q\left(\theta, \theta^{(i)}\right)=\sum_{k=1}^K\left\{n_k \log \alpha_k+\sum_{j=1}^N \hat{\gamma}\_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\\}
+Q\left(\theta, \theta^{(i)}\right)=\sum_{k=1}^K\left\\{n_k \log \alpha_k+\sum_{j=1}^N \hat{\gamma}\_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\}
 $$
 
 极大似然估计Q函数就可以得到参数的下一轮估计值：
