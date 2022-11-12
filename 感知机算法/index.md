@@ -62,7 +62,7 @@ $$
 
 $$
 \begin{aligned}
-&\nabla_w L(w, b)=-\sum_{{x}_i \in M} y_i x_i \\\\
+&\nabla_w L(w, b)=-\sum_{x_i \in M} y_i x_i \\\\
 &\nabla_b L(w, b)=-\sum_{x_i \in M} y_i
 \end{aligned}
 $$
