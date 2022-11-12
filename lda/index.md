@@ -79,7 +79,7 @@ $$
 现在的问题就是这些都是矩阵，不能像上面那样直接优化，需要替换优化目标。
 
 $$
-\underbrace{arg\;max}_W\;\;J(W) = \frac{\prod\limits_{diag}W^TS_bW}{\prod\limits_{diag}W^TS_wW}
+\underbrace{arg\;max}\_W\;\;J(W) = \frac{\prod\limits_{diag}W^TS_bW}{\prod\limits_{diag}W^TS_wW}
 $$
 其中 $\prod_{diag}A$为A的主对角线元素的乘积,W为$n \times d$的矩阵，n为原来的维度，d为映射到超平面的维度，则最终的目标就变成了：
 

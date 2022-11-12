@@ -118,8 +118,8 @@ $$
 $$
 \begin{align}S&=\frac{1}{N}\sum\limits_{i=1}^N(x_i-\overline{x})(x_i-\overline{x})^T\nonumber\\\\
 &=\frac{1}{N}(x_1-\overline{x},x_2-\overline{x},\cdots,x_N-\overline{x})(x_1-\overline{x},x_2-\overline{x},\cdots,x_N-\overline{x})^T\nonumber\\\\
-&=\frac{1}{N}(X^T-\frac{1}{N}X^T\mathbb{I}_{N1}\mathbb{I}_{N1}^T)(X^T-\frac{1}{N}X^T\mathbb{I}_{N1}\mathbb{I}_{N1}^T)^T\nonumber\\\\
-&=\frac{1}{N}X^T(E_N-\frac{1}{N}\mathbb{I}_{N1}\mathbb{I}_{1N})(E_N-\frac{1}{N}\mathbb{I}_{N1}\mathbb{I}_{1N})^TX\nonumber\\\\
+&=\frac{1}{N}(X^T-\frac{1}{N}X^T\mathbb{I}\_{N1}\mathbb{I}\_{N1}^T)(X^T-\frac{1}{N}X^T\mathbb{I}\_{N1}\mathbb{I}\_{N1}^T)^T\nonumber\\\\
+&=\frac{1}{N}X^T(E_N-\frac{1}{N}\mathbb{I}\_{N1}\mathbb{I}\_{1N})(E_N-\frac{1}{N}\mathbb{I}\_{N1}\mathbb{I}\_{1N})^TX\nonumber\\\\
 &=\frac{1}{N}X^TH_NH_N^TX\nonumber\\\\
 &=\frac{1}{N}X^TH_NH_NX=\frac{1}{N}X^THX
 \end{align}

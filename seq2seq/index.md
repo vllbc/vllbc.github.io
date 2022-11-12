@@ -105,7 +105,7 @@ BLEU，全称是Bilingual Evaluation Understudy，它的主要思想是基于N-g
 我们将BLEU定义为：
 
 $$
-\exp \left(\min \left(0,1-\frac{len_{\text {label }}}{len_{\text {pred }}}\right)\right) \prod_{n=1}^{k} p_{n}^{1 / 2^{n}}
+\exp \left(\min\left(0,1-\frac{len_{\text {label }}}{len_{\text {pred }}}\right)\right) \prod_{n=1}^{k} p_{n}^{1 / 2^{n}}
 $$ 
 
 长的 $n$ 元语法。另外, 用 $p_{n}$ 表示 $n$ 元语法的精确度, 它是两个数量的比值：第一个是预测序 列与标签序列中匹配的 $n$ 元语法的数量, 第二个是预测序列中 $n$ 元语法的数量的比率。具体 地说, 给定标签序列 $A 、 B 、 C 、 D 、 E 、 F$ 和预测序列 $A 、 B 、 B 、 C 、 D$, 我们有 $p_{1}=4 / 5 、 p_{2}=3 / 4 、 p_{3}=1 / 3$ 和 $p_{4}=0$ 。

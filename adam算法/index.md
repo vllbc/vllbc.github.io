@@ -70,21 +70,21 @@ RMSProp和Adagrad算法的最大区别就是在于更新累积梯度值 r 的�
 adam算法比起adagrad和RMSProp，不仅加入了一阶和二阶moment的计算。而且加入了bias-correction term。以下将展开分析：
 
 ### adam的更新率（stepsize)
-adam算法中最重要的就是每次迭代的迭代率（step size），他决定了adam算法的效率。根据上 文的算法， step size等于: $\Delta_{t}=\alpha \cdot \widehat{m}_{t} / \sqrt{\hat{v}_{t}}$
+adam算法中最重要的就是每次迭代的迭代率（step size），他决定了adam算法的效率。根据上 文的算法， step size等于: $\Delta_{t}=\alpha \cdot \widehat{m}\_{t} / \sqrt{\hat{v}\_{t}}$
 1) 当 $\left(1-\beta_{1}\right)>\sqrt{1-\beta_{2}}$ 的时候，它的上界满足不等式:
 $\left|\Delta_{t}\right| \leq \alpha \cdot\left(1-\beta_{1}\right) / \sqrt{1-\beta_{2}}$
 2) 否则 $\left|\Delta_{t}\right| \leq \alpha$
 1）通常发生在数据很稀疏的时候。当数据密集的时候， stepsize会更小。
-3) 当 $\left(1-\beta_{1}\right)=\sqrt{1-\beta_{2}}$ 的时候，因为 $\left|\widehat{m}_{t} / \sqrt{\hat{v}_{t}}\right|<1$ 所以，也满足条件 2 的 $\left|\Delta_{t}\right| \leq \alpha$
+3) 当 $\left(1-\beta_{1}\right)=\sqrt{1-\beta_{2}}$ 的时候，因为 $\left|\widehat{m}\_{t} / \sqrt{\hat{v}\_{t}}\right|<1$ 所以，也满足条件 2 的 $\left|\Delta_{t}\right| \leq \alpha$
 总结以上3个条件，可以近似得出stepsize 满足 $\left|\Delta_{t}\right| \cong \alpha$
-这里的 $\widehat{m}_{t} / \sqrt{\hat{v}_{t}}$ 通常也成为信噪比（Signal-to-noise ratio SNR)，并且满足SND越小， stepsize也越小。
+这里的 $\widehat{m}\_{t} / \sqrt{\hat{v}\_{t}}$ 通常也成为信噪比（Signal-to-noise ratio SNR)，并且满足SND越小， stepsize也越小。
 
 ### 初始化偏差矫正项
 原算法中的这两行
 $$
 \begin{aligned}
-&\widehat{m}_{t} \leftarrow m_{t} /\left(1-\beta_{1}^{t}\right) \\\\
-&\hat{v}_{t} \leftarrow v_{t} /\left(1-\beta_{2}^{t}\right)
+&\widehat{m}\_{t} \leftarrow m_{t} /\left(1-\beta_{1}^{t}\right) \\\\
+&\hat{v}\_{t} \leftarrow v_{t} /\left(1-\beta_{2}^{t}\right)
 \end{aligned}
 $$
 称为偏差校正项(bias-correction term),他使用了滑动平均值(EMA: exponential moving average)的思想，例如计算二次moment的 $v_{t}=\beta_{2} \cdot v_{t-1}+\left(1-\beta_{2}\right) \cdot g_{t}^{2}$ 可以写成如下的形 式：

@@ -78,7 +78,7 @@ NCF就是一个端对端的模型。
 
 ## 参考
 
->[https://zhuanlan.zhihu.com/p/69888124][https://zhuanlan.zhihu.com/p/69888124]有关计算可以看这个。
+>[https://zhuanlan.zhihu.com/p/69888124](https://zhuanlan.zhihu.com/p/69888124)有关计算可以看这个。
 
 
 

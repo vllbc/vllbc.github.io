@@ -118,7 +118,7 @@ seaborn.pairplot(data, hue=None, hue_order=None, palette=None, vars=None, x_vars
 ```
 数据指定：
 > vars : 与data使用，否则使用data的全部变量。参数类型：numeric类型的变量list。
-{x, y}_vars : 与data使用，否则使用data的全部变量。参数类型：numeric类型的变量list。
+{x, y}\_vars : 与data使用，否则使用data的全部变量。参数类型：numeric类型的变量list。
 dropna : 是否剔除缺失值。参数类型：boolean, optional
 
 特殊参数：
@@ -132,7 +132,7 @@ hue_order : list of strings Order for the levels of the hue variable in the pale
 palette : 调色板颜色
 markers : 使用不同的形状。参数类型：list
 aspect : scalar, optional。Aspect * size gives the width (in inches) of each facet.
-{plot, diag, grid}_kws : 指定其他参数。参数类型：dicts
+{plot, diag, grid}\_kws : 指定其他参数。参数类型：dicts
 
 
 

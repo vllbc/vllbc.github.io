@@ -4,7 +4,7 @@
 ## 范数的定义
 
 $$
-{\lVert x \rVert}_p := \left(\sum_{i=1}^n{\lvert x_i\rvert}^p\right)^{\frac{1}{p}}
+{\lVert x \rVert}\_p := \left(\sum_{i=1}^n{\lvert x_i\rvert}^p\right)^{\frac{1}{p}}
 $$
 
 ## 标准化与归一化

@@ -16,7 +16,7 @@ HMM可以看做是处理序列模型的传统方法。
 设 $Q$ 是所有可能的状态的集合, $V$ 是所有可能的观测的集合:
 
 $$
-Q=\left\\{q_1, q_2, \cdots, q_N\right\\}, \quad V=\left\\{v_1, v_2, \cdots, v_M\right\\}
+Q=\left\\{q_1, q_2, \cdots, q_N\right\\\}, \quad V=\left\\{v_1, v_2, \cdots, v_M\right\\\}
 $$
 
 其中, $N$ 是可能的状态数, $M$ 是可能的观测数。
@@ -96,7 +96,7 @@ $$
 (1) 按照初始状态分布 $\pi$ 产生状态 $i_1$;
 (2) 令 $t=1$;
 (3) 按照状态 $i_t$ 的观测概率分布 $b_{i_t}(k)$ 生成 $o_t$ :
-(4) 按照状态 $i_t$ 的状态转移概率分布 $\left\\{a_{i_t i_{t+1}}\right\\}$ 产生状态 $i_{t+1}, i_{t+1}=1,2, \cdots, N$;
+(4) 按照状态 $i_t$ 的状态转移概率分布 $\left\\{a_{i_t i_{t+1}}\right\\\}$ 产生状态 $i_{t+1}, i_{t+1}=1,2, \cdots, N$;
 (5) 令 $t=t+1$; 如果 $t<T$, 转步 (3); 否则, 终止。
 
 ## 概率计算问题
@@ -296,20 +296,20 @@ $$
 ## 预测问题
 
 ### 近似算法
-近似算法的想法是, 在每个时刻 $t$ 选择在该时刻最有可能出现的状态 $i_t^*$, 从而得 到一个状态序列 $I^*=\left(i_1^*, i_2^*, \cdots, i_T^*\right)$, 将它作为预测的结果。
+近似算法的想法是, 在每个时刻 $t$ 选择在该时刻最有可能出现的状态 $i_t^* $, 从而得 到一个状态序列 $I^* =\left(i_1^* , i_2^* , \cdots, i_T^* \right)$, 将它作为预测的结果。
 给定隐马尔可夫模型 $\lambda$ 和观测序列 $O$, 在时刻 $t$ 处于状态 $q_i$ 的概率 $\gamma_t(i)$ 是
 
 $$
 \gamma_t(i)=\frac{\alpha_t(i) \beta_t(i)}{P(O \mid \lambda)}=\frac{\alpha_t(i) \beta_t(i)}{\sum_{j=1}^N \alpha_t(j) \beta_t(j)}
 $$
 
-在每一时刻 $t$ 最有可能的状态 $i_t^*$ 是
+在每一时刻 $t$ 最有可能的状态 $i_t^* $ 是
 
 $$
-i_t^*=\arg \max _{1 \leqslant i \leqslant N}\left[\gamma_t(i)\right], \quad t=1,2, \cdots, T
+i_t^* =\arg \max_{1 \leqslant i \leqslant N}\left[\gamma_t(i)\right], \quad t=1,2, \cdots, T
 $$
 
-从而得到状态序列 $I^*=\left(i_1^*, i_2^*, \cdots, i_T^*\right)$ 。
+从而得到状态序列 $I^* =\left(i_1^* , i_2^* , \cdots, i_T^* \right)$ 。
 近似算法的优点是计算简单, 其缺点是不能保证预测的状态序列整体是最有可能 的状态序列, 因为预测的状态序列可能有实际不发生的部分。事实上, 上述方法得到 的状态序列中有可能存在转移概率为 0 的相邻状态, 即对某些 $i, j, a_{i j}=0$ 时。尽管 如此, 近似算法仍然是有用的。
 
 近似算法就是一种贪心的算法，每个时刻都取最有可能的状态，但整体序列并不一定是最优解。
@@ -320,7 +320,7 @@ $$
 首先导入两个变量 $\delta$ 和 $\Psi$ 。定义在时刻 $t$ 状态为 $i$ 的所有单个路径 $\left(i_1, i_2, \cdots, i_t\right)$ 中概率最大值为
 
 $$
-\delta_t(i)=\max _{i_1, i_2, \cdots, i_{t-1}} P\left(i_t=i, i_{t-1}, \cdots, i_1, o_t, \cdots, o_1 \mid \lambda\right), \quad i=1,2, \cdots, N
+\delta_t(i)=\max_{i_1, i_2, \cdots, i_{t-1}} P\left(i_t=i, i_{t-1}, \cdots, i_1, o_t, \cdots, o_1 \mid \lambda\right), \quad i=1,2, \cdots, N
 $$
 
 后面的部分与前向算法的部分有点类似。
@@ -329,15 +329,15 @@ $$
 
 $$
 \begin{aligned}
-\delta_{t+1}(i) &=\max _{i_1, i_2, \cdots, i_t} P\left(i_{t+1}=i, i_t, \cdots, i_1, o_{t+1}, \cdots, o_1 \mid \lambda\right) \\\\
-&=\max _{1 \leqslant j \leqslant N}\left[\delta_t(j) a_{j i}\right] b_i\left(o_{t+1}\right), \quad i=1,2, \cdots, N ; \quad t=1,2, \cdots, T-1
+\delta_{t+1}(i) &=\max_{i_1, i_2, \cdots, i_t} P\left(i_{t+1}=i, i_t, \cdots, i_1, o_{t+1}, \cdots, o_1 \mid \lambda\right) \\\\
+&=\max_{1 \leqslant j \leqslant N}\left[\delta_t(j) a_{j i}\right] b_i\left(o_{t+1}\right), \quad i=1,2, \cdots, N ; \quad t=1,2, \cdots, T-1
 \end{aligned}
 $$
 
 定义在时刻 $t$ 状态为 $i$ 的所有单个路径 $\left(i_1, i_2, \cdots, i_{t-1}, i\right)$ 中概率最大的路径的 第 $t-1$ 个结点为
 
 $$
-\Psi_t(i)=\arg \max _{1 \leqslant j \leqslant N}\left[\delta_{t-1}(j) a_{j i}\right], \quad i=1,2, \cdots, N
+\Psi_t(i)=\arg \max_{1 \leqslant j \leqslant N}\left[\delta_{t-1}(j) a_{j i}\right], \quad i=1,2, \cdots, N
 $$
 
 可以简单理解为找到使得从t-1的j到t的i式子$\delta_{t-1}(j)a_{ji}$最大的j，也就是说$\Psi_t(i)$代表t-1时刻的最佳状态值，如果t时刻的最佳状态值是i的话，那么t-1时刻的最佳状态值就是$\Psi_t(i)$，后面回溯要用到
@@ -345,7 +345,7 @@ $$
 下面介绍维特比算法。
 
 输入: 模型 $\lambda=(A, B, \pi)$ 和观测 $O=\left(o_1, o_2, \cdots, o_T\right)$;
-输出: 最优路径 $I^*=\left(i_1^*, i_2^*, \cdots, i_T^*\right)$ 。
+输出: 最优路径 $I^* =\left(i_1^* , i_2^* , \cdots, i_T^* \right)$ 。
 （1）初始化
 
 $$
@@ -361,8 +361,8 @@ $$
 
 $$
 \begin{array}{ll}
-\delta_t(i)=\max _{1 \leqslant j \leqslant N}\left[\delta_{t-1}(j) a_{j i}\right] b_i\left(o_t\right), \quad i=1,2, \cdots, N \\\\
-\Psi_t(i)=\arg \max _{1 \leqslant j \leqslant N}\left[\delta_{t-1}(j) a_{j i}\right], \quad i=1,2, \cdots, N
+\delta_t(i)=\max_{1 \leqslant j \leqslant N}\left[\delta_{t-1}(j) a_{j i}\right] b_i\left(o_t\right), \quad i=1,2, \cdots, N \\\\
+\Psi_t(i)=\arg \max_{1 \leqslant j \leqslant N}\left[\delta_{t-1}(j) a_{j i}\right], \quad i=1,2, \cdots, N
 \end{array}
 $$
 
@@ -371,8 +371,8 @@ $$
 
 $$
 \begin{gathered}
-P^*=\max _{1 \leqslant i \leqslant N} \delta_T(i) \\\\
-i_T^*=\arg \max _{1 \leqslant i \leqslant N}\left[\delta_T(i)\right]
+P^* =\max_{1 \leqslant i \leqslant N} \delta_T(i) \\\\
+i_T^* =\arg \max_{1 \leqslant i \leqslant N}\left[\delta_T(i)\right]
 \end{gathered}
 $$
 
@@ -381,10 +381,10 @@ $$
 (4) 最优路径回溯。对 $t=T-1, T-2, \cdots, 1$
 
 $$
-i_t^*=\Psi_{t+1}\left(i_{t+1}^*\right)
+i_t^* =\Psi_{t+1}\left(i_{t+1}^* \right)
 $$
 
-求得最优路径 $I^*=\left(i_1^*, i_2^*, \cdots, i_T^*\right)$ 。
+求得最优路径 $I^* =\left(i_1^* , i_2^* , \cdots, i_T^* \right)$ 。
 
 #### 书上的例子
 

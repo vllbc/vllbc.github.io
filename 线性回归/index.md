@@ -18,6 +18,7 @@ HorsePower = 0.0015 * annualSalary - 0.99 * hoursListeningToPublicRadio
 ## 正规方程推导
 
 将向量表达形式转为矩阵表达形式，则有 $J(\theta)=\frac{1}{2}(X \theta-y)^{2}$ ，其中 $X$ 为 $m$ 行 $n$ 列的矩阵（ $m$ 为样本个数， $n$ 为特 征个数)， $\theta$ 为 $n$ 行1列的矩阵， $y$ 为 $m$ 行1列的矩阵，对 $J(\theta)$ 进行如下变换
+
 $$
 \begin{aligned}
 &J(\theta)=\frac{1}{2}(X \theta-y)^{T}(X \theta-y) \\\\
@@ -25,14 +26,18 @@ $$
 &=\frac{1}{2}\left(\theta^{T} X^{T} X \theta-\theta^{T} X^{T} y-y^{T} X \theta-y^{T} y\right)
 \end{aligned}
 $$
+
 接下来对 $J(\theta)$ 偏导，需要用到以下几个矩阵的求导法则:
+
 $$
 \begin{aligned}
 &\frac{d A B}{d B}=A^{T} \\\\
 &\frac{d X^{T} A X}{d X}=2 A X
 \end{aligned}
 $$
+
 所以有:
+
 $$
 \begin{aligned}
 &\frac{\partial J(\theta)}{\partial \theta}=\frac{1}{2}\left(2 X^{T} X \theta-X^{T} y-\left(y^{T} X\right)^{T}-0\right) \\\\
@@ -42,6 +47,7 @@ $$
 {\text { 则有 } \theta=\left(X^{T} X\right)^{-1} X^{T} y}
 \end{aligned}
 $$
+
 ![png](正规方程推导.png)
 
 值得注意的是，上述公式中包含逆矩阵，也就是说，这个方程只在逆矩阵存在的时候使用，也即是这个矩阵是一个方阵，并且其行列式不为0。
@@ -54,23 +60,30 @@ $$
 
 其中的一个方法是局部加权线性回归（Locally Weighted Linear [Regression](https://cuijiahua.com/blog/tag/regression/)，LWLR）。
 普通线性回归:
+
 $$
 \min J_R=\sum_{i=1}^m\left(g\left(x_i\right)-y_i\right)^2
 $$
+
 局部加权线性回归:
+
 $$
 \min J_{L R}=\sum_{i=1}^m \theta_i\left(g\left(x_i\right)-y_i\right)^2
 $$
+
 这里唯一的区别是加入了权重 $\theta$, 采用之前的最小二乘法求解权数 $\mathbf{w}$ :
+
 $$
-\hat{\mathbf{w}}^*=\arg \min _{\hat{\mathbf{w}}} \theta(\mathbf{y}-\mathbf{X} \hat{\mathbf{w}})^T(\mathbf{y}-\mathbf{X} \hat{\mathbf{w}})
+\hat{\mathbf{w}}^* =\arg \min_{\hat{\mathbf{w}}} \theta(\mathbf{y}-\mathbf{X} \hat{\mathbf{w}})^T(\mathbf{y}-\mathbf{X} \hat{\mathbf{w}})
 $$
+
 在该方法中，我们给待预测点附近的每个点赋予一定的权重。与kNN一样，这种算法每次预测均需要事先选取出对应的数据子集。该算法解除回归系数W的形式如下：
 
 
 $$
 \hat{w} = (X^T\theta X)^{-1}X^T\theta y
 $$
+
 其中W是一个矩阵，这个公式跟我们上面推导的公式的区别就在于W，它用来给每个店赋予权重。
 
 LWLR使用"核"（与支持向量机中的核类似）来对附近的点赋予更高的权重。核的类型可以自由选择，最常用的核就是高斯核，高斯核对应的权重如下：
@@ -82,9 +95,11 @@ $$
 
 
 这样就构造了一个只含对角元素的权重矩阵 $w$ ，并且点xi与 $x$ 越接近， $\theta(i, i)$ 的值越大，当 $x i$ 与 $x$ 非常接近时， $\theta(i, i)$ 的值趋于 1 ，我们再回头看之前的优化式:
+
 $$
 \min J_{L R}=\sum_{i=1}^m \theta_i\left(g\left(x_i\right)-y_i\right)^2
 $$
+
 对于一个数据点，与其靠近的点，权重大，与其相距较远的点，权重小，从而优化问题会有所偏倚，靠近的点对该数据点的回归拟合起较大作用，而相距较远的 点由于权数很小，造成的影响基本可以忽略不计，这样就等同于每个点的回归都是基于与其相距较近的点为基础，而忽略了较远的点，这也就是同部加权线性回归局部的由来，因为它着重考虑目标点同部的数据点为回归基础.
 
 可以看到，加权函数只有一个系数，那就是分母上的 $k$ ，当K取很小时， exp得到的很多值均趋于 0 ，此时只有很少一部分样本用于训练，而当k取很大时， exp的值 不会很快趋于 0 ，从而会有一大部分点用于训练，我们可以通过调整k的值，决定这个‘局部'的大小究竟是多大

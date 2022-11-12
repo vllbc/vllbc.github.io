@@ -61,7 +61,7 @@ $$
 权值通常用单词频率-逆文本频率 (term frequency-inverse document frequency, TF-IDF）表示，其定义是
 
 $$
-\operatorname{TFIDF}_{i j}=\frac{\mathrm{tf}_{i j}}{\mathrm{tf}_{\bullet j}} \log \frac{\mathrm{df}}{\mathrm{df}_i}, \quad i=1,2, \cdots, m ; \quad j=1,2, \cdots, n
+\operatorname{TFIDF}\_{i j}=\frac{\mathrm{tf}\_{i j}}{\mathrm{tf}\_{\bullet j}} \log \frac{\mathrm{df}}{\mathrm{df}\_i}, \quad i=1,2, \cdots, m ; \quad j=1,2, \cdots, n
 $$
 
 直观上讲，可以直接用每一列作为文本语义表达， 因此可以通过余弦相似度等计算文本之间的相似性，并且矩阵稀疏，计算量较少。但其并不关心文本中词语出现的顺序等信息，因此需要改进。
@@ -173,7 +173,7 @@ $$
 
 $$
 \begin{aligned}
-x_j & \approx U_k\left(\Sigma_k V_k^{\mathrm{T}}\right)_j \\\\
+x_j & \approx U_k\left(\Sigma_k V_k^{\mathrm{T}}\right)\_j \\\\
 &=\left[\begin{array}{llll}
 u_1 & u_2 & \cdots & u_k
 \end{array}\right]\left[\begin{array}{c}
@@ -192,7 +192,7 @@ $$
 ## PLSA
 ### 生成模型
 
-假设有单词集合 $W=\left\\{w_1, w_2, \cdots, w_M\right\\}$, 其中 $M$ 是单词个数; 文本 (指标) 集 合 $D=\left\\{d_1, d_2, \cdots, d_N\right\\}$, 其中 $N$ 是文本个数; 话题集合 $Z=\left\\{z_1, z_2, \cdots, z_K\right\\}$, 其中 $K$ 是预先设定的话题个数。随机变量 $w$ 取值于单词集合; 随机变量 $d$ 取值于文本集 合, 随机变量 $z$ 取值于话题集合。概率分布 $P(d)$ 、条件概率分布 $P(z \mid d)$ 、条件概率分 布 $P(w \mid z)$ 皆属于多项分布, 其中 $P(d)$ 表示生成文本 $d$ 的概率, $P(z \mid d)$ 表示文本 $d$ 生 成话题 $z$ 的概率, $P(w \mid z)$ 表示话题 $z$ 生成单词 $w$ 的概率。
+假设有单词集合 $W=\left\\{w_1, w_2, \cdots, w_M\right\\\}$, 其中 $M$ 是单词个数; 文本 (指标) 集 合 $D=\left\\{d_1, d_2, \cdots, d_N\right\\\}$, 其中 $N$ 是文本个数; 话题集合 $Z=\left\\{z_1, z_2, \cdots, z_K\right\\\}$, 其中 $K$ 是预先设定的话题个数。随机变量 $w$ 取值于单词集合; 随机变量 $d$ 取值于文本集 合, 随机变量 $z$ 取值于话题集合。概率分布 $P(d)$ 、条件概率分布 $P(z \mid d)$ 、条件概率分 布 $P(w \mid z)$ 皆属于多项分布, 其中 $P(d)$ 表示生成文本 $d$ 的概率, $P(z \mid d)$ 表示文本 $d$ 生 成话题 $z$ 的概率, $P(w \mid z)$ 表示话题 $z$ 生成单词 $w$ 的概率。
 
 每个文本 $d$ 拥有自己的话题概率分布 $P(z \mid d)$, 每个话题 $z$ 拥有自己的单词概率分 布 $P(w \mid z)$; 也就是说一个文本的内容由其相关话题决定, 一个话题的内容由其相关单词决定。
 
@@ -269,7 +269,7 @@ $$
 Plsa是含有隐变量的模型，其学习通常使用EM算法。
 E步是计算Q函数，M步是极大化Q函数。
 
-设单词集合为 $W=\left\\{w_1, w_2, \cdots, w_M\right\\}$, 文本集合为 $D=\left\\{d_1, d_2, \cdots, d_N\right\\}$, 话 题集合为 $Z=\left\\{z_1, z_2, \cdots, z_K\right\\}$ 。给定单词-文本共现数据 $T=\left\\{n\left(w_i, d_j\right)\right\\}, i=$ $1,2, \cdots, M, j=1,2, \cdots, N$, 目标是估计概率潜在语义分析模型（生成模型）的 参数。如果使用极大似然估计, 对数似然函数是
+设单词集合为 $W=\\{w_1, w_2, \cdots, w_M\\\}$, 文本集合为 $D=\\{d_1, d_2, \cdots, d_N\\\}$, 话 题集合为 $Z=\left\\{z_1, z_2, \cdots, z_K\right\\\}$ 。给定单词-文本共现数据 $T=\left\\{n\left(w_i, d_j\right)\right\\\}, i=$ $1,2, \cdots, M, j=1,2, \cdots, N$, 目标是估计概率潜在语义分析模型（生成模型）的 参数。如果使用极大似然估计, 对数似然函数是
 
 $$
 \begin{aligned}
@@ -283,7 +283,7 @@ $\mathrm{E}$ 步：计算 $Q$ 函数
 $Q$ 函数为完全数据的对数似然函数对不完全数据的条件分布的期望。针对概率潜 在语义分析的生成模型, $Q$ 函数是
 
 $$
-Q=\sum_{k=1}^K\left\\{\sum_{j=1}^N n\left(d_j\right)\left[\log P\left(d_j\right)+\sum_{i=1}^M \frac{n\left(w_i, d_j\right)}{n\left(d_j\right)} \log P\left(w_i \mid z_k\right) P\left(z_k \mid d_j\right)\right]\right\\} P\left(z_k \mid w_i, d_j\right)
+Q=\sum_{k=1}^K\left\\{\sum_{j=1}^N n\left(d_j\right)\left[\log P\left(d_j\right)+\sum_{i=1}^M \frac{n\left(w_i, d_j\right)}{n\left(d_j\right)} \log P\left(w_i \mid z_k\right) P\left(z_k \mid d_j\right)\right]\right\\\} P\left(z_k \mid w_i, d_j\right)
 $$
 
 式中 $n\left(d_j\right)=\sum_{i=1}^M n\left(w_i, d_j\right)$ 表示文本 $d_j$ 中的单词个数, $n\left(w_i, d_j\right)$ 表示单词 $w_i$ 在文本 $d_j$ 中出现的次数。条件概率分布 $P\left(z_k \mid w_i, d_j\right)$ 代表不完全数据, 是已知变量。条件概 率分布 $P\left(w_i \mid z_k\right)$ 和 $P\left(z_k \mid d_j\right)$ 的乘积代表完全数据, 是末知变量。
@@ -337,7 +337,7 @@ $$
 
 ### 总结算法
 
-输入: 设单词集合为 $W=\left\\{w_1, w_2, \cdots, w_M\right\\}$, 文本集合为 $D=\left\\{d_1, d_2, \cdots, d_N\right\\}$, 话题集合为 $Z=\left\\{z_1, z_2, \cdots, z_K\right\\}$, 共现数据 $\left\\{n\left(w_i, d_j\right)\right\\}, i=1,2, \cdots, M, j=1$, $2, \cdots, N$;
+输入: 设单词集合为 $W=\left\\{w_1, w_2, \cdots, w_M\right\\\}$, 文本集合为 $D=\left\\{d_1, d_2, \cdots, d_N\right\\\}$, 话题集合为 $Z=\left\\{z_1, z_2, \cdots, z_K\right\\\}$, 共现数据 $\left\\{n\left(w_i, d_j\right)\right\\\}, i=1,2, \cdots, M, j=1$, $2, \cdots, N$;
 输出: $P\left(w_i \mid z_k\right)$ 和 $P\left(z_k \mid d_j\right)$ 。
 (1) 设置参数 $P\left(w_i \mid z_k\right)$ 和 $P\left(z_k \mid d_j\right)$ 的初始值。
 (2) 迭代执行以下 $\mathrm{E}$ 步, $\mathrm{M}$ 步, 直到收敛为止。
@@ -508,11 +508,11 @@ LDA是在Plsa的基础上，为单词分布和主题分布增加了两个狄利�
 
 #### 模型要素
 
-潜在狄利克雷分配 (LDA) 使用三个集合: 一是单词集合 $W=\left\\{w_1, \cdots, w_v, \cdots\right.$, $\left.w_V\right\\}$, 其中 $w_v$ 是第 $v$ 个单词, $v=1,2, \cdots, V, V$ 是单词的个数。二是文本集合 $D=\left\\{\mathbf{w}_1, \cdots, \mathbf{w}_m, \cdots, \mathbf{w}_M\right\\}$, 其中 $\mathbf{w}_m$ 是第 $m$ 个文本, $m=1,2, \cdots, M, M$ 是文本 的个数。文本 $\mathbf{w}_m$ 是一个单词序列 $\mathbf{w}_m=\left(w_{m 1}, \cdots, w_{m n}, \cdots, w_{m N_m}\right)$, 其中 $w_{m n}$ 是 文本 $\mathbf{w}_m$ 的第 $n$ 个单词, $n=1,2, \cdots, N_m, N_m$ 是文本 $\mathbf{w}_m$ 中单词的个数。三是主题集合集合 $Z=\left\\{z_1, \cdots, z_k, \cdots, z_K\right\\}$, 其中 $z_k$ 是第 $k$ 个话题, $k=1,2, \cdots, K, K$ 是话题的个数。
+潜在狄利克雷分配 (LDA) 使用三个集合: 一是单词集合 $W=\left\\{w_1, \cdots, w_v, \cdots\right.$, $\left.w_V\right\\\}$, 其中 $w_v$ 是第 $v$ 个单词, $v=1,2, \cdots, V, V$ 是单词的个数。二是文本集合 $D=\left\\{\mathbf{w}\_1, \cdots, \mathbf{w}\_m, \cdots, \mathbf{w}\_M\right\\\}$, 其中 $\mathbf{w}\_m$ 是第 $m$ 个文本, $m=1,2, \cdots, M, M$ 是文本 的个数。文本 $\mathbf{w}\_m$ 是一个单词序列 $\mathbf{w}\_m=\left(w_{m 1}, \cdots, w_{m n}, \cdots, w_{m N_m}\right)$, 其中 $w_{m n}$ 是 文本 $\mathbf{w}\_m$ 的第 $n$ 个单词, $n=1,2, \cdots, N_m, N_m$ 是文本 $\mathbf{w}\_m$ 中单词的个数。三是主题集合集合 $Z=\left\\{z_1, \cdots, z_k, \cdots, z_K\right\\\}$, 其中 $z_k$ 是第 $k$ 个话题, $k=1,2, \cdots, K, K$ 是话题的个数。
 
-- 每一个话题 $z_k$ 由一个单词的条件概率分布 $p\left(w \mid z_k\right)$ 决定, $w \in W$ 。分布 $p\left(w \mid z_k\right)$ 服从多项分布 (严格意义上类别分布), 其参数为 $\varphi_k$ 。参数 $\varphi_k$ 服从狄利克雷分布 (先验分布), 其超参数为 $\beta$ 。参数 $\varphi_k$ 是一个 $V$ 维向量 $\varphi_k=\left(\varphi_{k 1}, \varphi_{k 2}, \cdots, \varphi_{k V}\right)$, 其中 $\varphi_{k v}$ 表示话题 $z_k$ 生成单词 $w_v$ 的概率。所有话题的参数向量构成一个 $K \times V$ 矩阵 $\varphi=\left\\{\varphi_k\right\\}_{k=1}^K$ 。超参数 $\beta$ 也是一个 $V$ 维向量 $\beta=\left(\beta_1, \beta_2, \cdots, \beta_V\right)_{\text {。 }}$(对于话题$z_k$其生成单词$w_v$先验服从狄利克雷分布，因此是一个V维向量)
-- 每一个文本 $\mathbf{w}_m$ 由一个话题的条件概率分布 $p\left(z \mid \mathbf{w}_m\right)$ 决定, $z \in Z_{\text {。 }}$ 分布 $p\left(z \mid \mathbf{w}_m\right)$ 服从多项分布 (严格意义上类别分布), 其参数为 $\theta_m$ 。参数 $\theta_m$ 服从狄利克雷分布 (先验分布), 其超参数为 $\alpha$ , 参数 $\theta_m$ 是一个 $K$ 维向量 $\theta_m=\left(\theta_{m 1}, \theta_{m 2}, \cdots, \theta_{m K}\right)$, 其中 $\theta_{m k}$ 表示文本 $\mathrm{w}_m$ 生成话题 $z_k$ 的概率。所有文本的参数向量构成一个 $M \times K$ 矩阵 $\theta=\left\\{\theta_m\right\\}_{m=1}^M$ 。超参数 $\alpha$ 也是一个 $K$ 维向量 $\alpha=\left(\alpha_1, \alpha_2, \cdots, \alpha_K\right)$ 。
-- 每一个文本 $\mathbf{w}_m$ 中的每一个单词 $w_{m n}$ 由该文本的话题分布 $p\left(z \mid \mathbf{w}_m\right)$ 以及所有话 题的单词分布 $p\left(w \mid z_k\right)$ 决定。
+- 每一个话题 $z_k$ 由一个单词的条件概率分布 $p\left(w \mid z_k\right)$ 决定, $w \in W$ 。分布 $p\left(w \mid z_k\right)$ 服从多项分布 (严格意义上类别分布), 其参数为 $\varphi_k$ 。参数 $\varphi_k$ 服从狄利克雷分布 (先验分布), 其超参数为 $\beta$ 。参数 $\varphi_k$ 是一个 $V$ 维向量 $\varphi_k=\left(\varphi_{k 1}, \varphi_{k 2}, \cdots, \varphi_{k V}\right)$, 其中 $\varphi_{k v}$ 表示话题 $z_k$ 生成单词 $w_v$ 的概率。所有话题的参数向量构成一个 $K \times V$ 矩阵 $\varphi=\left\\{\varphi_k\right\\\}\_{k=1}^K$ 。超参数 $\beta$ 也是一个 $V$ 维向量 $\beta=\left(\beta_1, \beta_2, \cdots, \beta_V\right)\_{\text {。 }}$(对于话题$z_k$其生成单词$w_v$先验服从狄利克雷分布，因此是一个V维向量)
+- 每一个文本 $\mathbf{w}\_m$ 由一个话题的条件概率分布 $p\left(z \mid \mathbf{w}\_m\right)$ 决定, $z \in Z_{\text {。 }}$ 分布 $p\left(z \mid \mathbf{w}\_m\right)$ 服从多项分布 (严格意义上类别分布), 其参数为 $\theta_m$ 。参数 $\theta_m$ 服从狄利克雷分布 (先验分布), 其超参数为 $\alpha$ , 参数 $\theta_m$ 是一个 $K$ 维向量 $\theta_m=\left(\theta_{m 1}, \theta_{m 2}, \cdots, \theta_{m K}\right)$, 其中 $\theta_{m k}$ 表示文本 $\mathrm{w}\_m$ 生成话题 $z_k$ 的概率。所有文本的参数向量构成一个 $M \times K$ 矩阵 $\theta=\left\\{\theta_m\right\\\}\_{m=1}^M$ 。超参数 $\alpha$ 也是一个 $K$ 维向量 $\alpha=\left(\alpha_1, \alpha_2, \cdots, \alpha_K\right)$ 。
+- 每一个文本 $\mathbf{w}\_m$ 中的每一个单词 $w_{m n}$ 由该文本的话题分布 $p\left(z \mid \mathbf{w}\_m\right)$ 以及所有话 题的单词分布 $p\left(w \mid z_k\right)$ 决定。
 
 
 #### 生成过程
@@ -523,20 +523,20 @@ LDA 文本集合的生成过程如下:
 随机生成 $K$ 个话题的单词分布。具体过程如下, 按照狄利克雷分布 $\operatorname{Dir}(\beta)$ 随机 生成一个参数向量 $\varphi_k, \varphi_k \sim \operatorname{Dir}(\beta)$, 作为话题 $z_k$ 的单词分布 $p\left(w \mid z_k\right), w \in W, k=$ $1,2, \cdots, K$ 。
 
 2.生成主题分布
-随机生成 $M$ 个文本的主题分布。具体过程如下: 按照狄利克雷分布 $\operatorname{Dir}(\alpha)$ 随 机生成一个参数向量 $\theta_m, \theta_m \sim \operatorname{Dir}(\alpha)$, 作为文本 $\mathbf{w}_m$ 的主题分布 $p\left(z \mid \mathbf{w}_m\right), m=$ $1,2, \cdots, M_{}$ 。
+随机生成 $M$ 个文本的主题分布。具体过程如下: 按照狄利克雷分布 $\operatorname{Dir}(\alpha)$ 随 机生成一个参数向量 $\theta_m, \theta_m \sim \operatorname{Dir}(\alpha)$, 作为文本 $\mathbf{w}\_m$ 的主题分布 $p\left(z \mid \mathbf{w}\_m\right), m=$ $1,2, \cdots, M_{}$ 。
 
 3.生成文本的单词序列
-随机生成 $M$ 个文本的 $N_m$ 个单词。文本 $\mathbf{w}_m(m=1,2, \cdots, M)$ 的单词 $w_{m n}(n=$ $\left.1,2, \cdots, N_m\right)$ 的生成过程如下:
+随机生成 $M$ 个文本的 $N_m$ 个单词。文本 $\mathbf{w}\_m(m=1,2, \cdots, M)$ 的单词 $w_{m n}(n=$ $\left.1,2, \cdots, N_m\right)$ 的生成过程如下:
 
 3.1 首先按照多项分布 $\operatorname{Mult}\left(\theta_m\right)$ 随机生成一个话题 $z_{m n}, z_{m n} \sim \operatorname{Mult}\left(\theta_m\right)$
-3.2 然后按照多项分布 $\operatorname{Mult}\left(\varphi_{z_{m n}}\right)$ 随机生成一个单词 $w_{m n}, w_{m n} \sim \operatorname{Mult}\left(\varphi_{z_{m n}}\right)_{\text {。 }}$
-文本 $\mathbf{w}_m$ 本身是单词序列 $\mathbf{w}_m=\left(w_{m 1}, w_{m 2}, \cdots, w_{m N_m}\right)$, 对应着隐式的话题序列 $\mathbf{z}_m=\left(z_{m 1}, z_{m 2}, \cdots, z_{m N_m}\right) 。$
+3.2 然后按照多项分布 $\operatorname{Mult}\left(\varphi_{z_{m n}}\right)$ 随机生成一个单词 $w_{m n}, w_{m n} \sim \operatorname{Mult}\left(\varphi_{z_{m n}}\right)\_{\text {。 }}$
+文本 $\mathbf{w}\_m$ 本身是单词序列 $\mathbf{w}\_m=\left(w_{m 1}, w_{m 2}, \cdots, w_{m N_m}\right)$, 对应着隐式的话题序列 $\mathbf{z}\_m=\left(z_{m 1}, z_{m 2}, \cdots, z_{m N_m}\right) 。$
 
 引用一下LDA数学八卦的图：
 ![](image/Pasted%20image%2020221019104516.png)
 
-- $\vec{\alpha} \rightarrow \vec{\theta}_m \rightarrow z_{m, n}$, 这个过程表示在生成第 $m$ 篇文档的时候，先从第一个坛子中抽了一个doc-topic 骰子 $\vec{\theta}_m$,然后投这个骰子生成了文档$m$中第 $n$ 个词的topic编号 $z_{m, n}$ ；
-- $\vec{\beta} \rightarrow \vec{\varphi}_k \rightarrow w_{m, n} \mid k=z_{m, n}$, 这个过程表示用如下动作生成语料中第 $m$ 篇文档的第 $n$ 个词: 在上帝手头的 $K$ 个topic-word 骰子 $\vec{\varphi}_k$ 中，挑选编号为 $k=z_{m, n}$ 的那个骰子进行投掷，然后生成 word $w_{m, n}$ ;
+- $\vec{\alpha} \rightarrow \vec{\theta}\_m \rightarrow z_{m, n}$, 这个过程表示在生成第 $m$ 篇文档的时候，先从第一个坛子中抽了一个doc-topic 骰子 $\vec{\theta}\_m$,然后投这个骰子生成了文档$m$中第 $n$ 个词的topic编号 $z_{m, n}$ ；
+- $\vec{\beta} \rightarrow \vec{\varphi}\_k \rightarrow w_{m, n} \mid k=z_{m, n}$, 这个过程表示用如下动作生成语料中第 $m$ 篇文档的第 $n$ 个词: 在上帝手头的 $K$ 个topic-word 骰子 $\vec{\varphi}\_k$ 中，挑选编号为 $k=z_{m, n}$ 的那个骰子进行投掷，然后生成 word $w_{m, n}$ ;
   
 理解 LDA最重要的就是理解这两个物理过程。LDA 模型在基于 $K$ 个 topic 生成语料中的 $M$ 篇文档的过程中， 由于是 bag-of-words 模型，有一些物理过程是相互独立可交换的。由此，LDA生成模型中， $M$ 篇文档会对应 于 $M$ 个独立的 Dirichlet-Multinomial 共轭结构；K个 个 topic 会对应于 $K$ 个独立的 Dirichlet-Multinomial 共轭结 构。所以理解 LDA 所需要的所有数学就是理解 Dirichlet-Multiomail 共轭，其它都就是理解物理过程。
 
@@ -544,9 +544,9 @@ LDA 文本集合的生成过程如下:
 
 (1) 对于话题 $z_k(k=1,2, \cdots, K)$ :
 	生成多项分布参数 $\varphi_k \sim \operatorname{Dir}(\beta)$, 作为话题的单词分布 $p\left(w \mid z_k\right)$;
-(2) 对于文本 $\mathbf{w}_m(m=1,2, \cdots, M)$;
-	生成多项分布参数 $\theta_m \sim \operatorname{Dir}(\alpha)$, 作为文本的话题分布 $p\left(z \mid \mathbf{w}_m\right)$;
-(3) 对于文本 $\mathbf{w}_m$ 的单词 $w_{m n}\left(m=1,2, \cdots, M, n=1,2, \cdots, N_m\right)$ :
+(2) 对于文本 $\mathbf{w}\_m(m=1,2, \cdots, M)$;
+	生成多项分布参数 $\theta_m \sim \operatorname{Dir}(\alpha)$, 作为文本的话题分布 $p\left(z \mid \mathbf{w}\_m\right)$;
+(3) 对于文本 $\mathbf{w}\_m$ 的单词 $w_{m n}\left(m=1,2, \cdots, M, n=1,2, \cdots, N_m\right)$ :
 	(a) 采样生成话题 $z_{m n} \sim \operatorname{Mult}\left(\theta_m\right)$, 作为单词对应的话题;
 	(b) 采样生成单词 $w_{m n} \sim \operatorname{Mult}\left(\varphi_{z_{m n}}\right)$ 。
 
@@ -572,21 +572,21 @@ $$
 第 $m$ 个文本的联合概率分布可以表为
 
 $$
-p\left(\mathbf{w}_m, \mathbf{z}_m, \theta_m, \varphi \mid \alpha, \beta\right)=\prod_{k=1}^K p\left(\varphi_k \mid \beta\right) p\left(\theta_m \mid \alpha\right) \prod_{n=1}^{N_m} p\left(z_{m n} \mid \theta_m\right) p\left(w_{m n} \mid z_{m n}, \varphi\right)
+p\left(\mathbf{w}\_m, \mathbf{z}\_m, \theta_m, \varphi \mid \alpha, \beta\right)=\prod_{k=1}^K p\left(\varphi_k \mid \beta\right) p\left(\theta_m \mid \alpha\right) \prod_{n=1}^{N_m} p\left(z_{m n} \mid \theta_m\right) p\left(w_{m n} \mid z_{m n}, \varphi\right)
 $$
 
-其中 $\mathbf{w}_m$ 表示该文本中的单词序列, $\mathbf{z}_m$ 表示该文本的话题序列, $\theta_m$ 表示该文本的话 题分布参数。
+其中 $\mathbf{w}\_m$ 表示该文本中的单词序列, $\mathbf{z}\_m$ 表示该文本的话题序列, $\theta_m$ 表示该文本的话 题分布参数。
 LDA 模型的联合分布含有隐变量, 对隐变量进行积分得到边缘分布。
 参数 $\theta_m$ 和 $\varphi$ 给定条件下第 $m$ 个文本的生成概率是
 
 $$
-p\left(\mathbf{w}_m \mid \theta_m, \varphi\right)=\prod_{n=1}^{N_m}\left[\sum_{k=1}^K p\left(z_{m n}=k \mid \theta_m\right) p\left(w_{m n} \mid \varphi_k\right)\right]
+p\left(\mathbf{w}\_m \mid \theta_m, \varphi\right)=\prod_{n=1}^{N_m}\left[\sum_{k=1}^K p\left(z_{m n}=k \mid \theta_m\right) p\left(w_{m n} \mid \varphi_k\right)\right]
 $$
 
 超参数 $\alpha$ 和 $\beta$ 给定条件下第 $m$ 个文本的生成概率是
 
 $$
-p\left(\mathbf{w}_m \mid \alpha, \beta\right)=\prod_{k=1}^K \int p\left(\varphi_k \mid \beta\right)\left[\int p\left(\theta_m \mid \alpha\right) \prod_{n=1}^{N_m}\left[\sum_{l=1}^K p\left(z_{m n}=l \mid \theta_m\right) p\left(w_{m n} \mid \varphi_l\right)\right] \mathrm{d} \theta_m\right] \mathrm{d} \varphi_k
+p\left(\mathbf{w}\_m \mid \alpha, \beta\right)=\prod_{k=1}^K \int p\left(\varphi_k \mid \beta\right)\left[\int p\left(\theta_m \mid \alpha\right) \prod_{n=1}^{N_m}\left[\sum_{l=1}^K p\left(z_{m n}=l \mid \theta_m\right) p\left(w_{m n} \mid \varphi_l\right)\right] \mathrm{d} \theta_m\right] \mathrm{d} \varphi_k
 $$
 
 超参数 $\alpha$ 和 $\beta$ 给定条件下所有文本的生成概率是
@@ -609,14 +609,14 @@ $$
 LDA 模型的学习通常采用收缩的吉布斯抽样 (collapsed Gibbs sampling) , 基本想法是, 通过对隐变量 $\theta$ 和 $\varphi$ 积分, 得到边缘概率分布 $p(\mathbf{w}, \mathbf{z} \mid \alpha, \beta)$ (也是联合分 布), 其中变量 $\mathbf{w}$ 是可观测的, 变量 $\mathbf{z}$ 是不可观测的; 对后验概率分布 $p(\mathbf{z} \mid \mathbf{w}, \alpha, \beta)$ 进 行吉布斯抽样, 得到分布 $p(\mathbf{z} \mid \mathbf{w}, \alpha, \beta)$ 的样本集合; 再利用这个样本集合对参数 $\theta$ 和 $\varphi$ 进行估计, 最终得到 LDA 模型 $p(\mathbf{w}, \mathbf{z}, \theta, \varphi \mid \alpha, \beta)$ 的所有参数估计。
 #### 算法流程
 
-输入: 文本的单词序列 $\mathbf{w}=\left\\{\mathbf{w}_1, \cdots, \mathbf{w}_m, \cdots, \mathbf{w}_M\right\\}, \mathbf{w}_m=\left(w_{m 1}, \cdots, w_{m n}, \cdots\right.$, $\left.w_{m_{N_m}}\right)$;
+输入: 文本的单词序列 $\mathbf{w}=\left\\{\mathbf{w}\_1, \cdots, \mathbf{w}\_m, \cdots, \mathbf{w}\_M\right\\\}, \mathbf{w}\_m=\left(w_{m 1}, \cdots, w_{m n}, \cdots\right.$, $\left.w_{m_{N_m}}\right)$;
 
-输出: 文本的话题序列 $\mathrm{z}=\left\\{\mathbf{z}_1, \cdots, \mathbf{z}_m, \cdots, \mathbf{z}_M\right\\}, \mathbf{z}_m=\left(z_{m 1}, \cdots, z_{m n}, \cdots, z_{m_{N_m}}\right)$ 的后验概率分布 $p(\mathbf{z} \mid \mathbf{w}, \alpha, \beta)$ 的样本计数, 模型的参数 $\varphi$ 和 $\theta$ 的估计值;
+输出: 文本的话题序列 $\mathrm{z}=\left\\{\mathbf{z}\_1, \cdots, \mathbf{z}\_m, \cdots, \mathbf{z}\_M\right\\\}, \mathbf{z}\_m=\left(z_{m 1}, \cdots, z_{m n}, \cdots, z_{m_{N_m}}\right)$ 的后验概率分布 $p(\mathbf{z} \mid \mathbf{w}, \alpha, \beta)$ 的样本计数, 模型的参数 $\varphi$ 和 $\theta$ 的估计值;
 参数: 超参数 $\alpha$ 和 $\beta$, 话题个数 $K$ 。
 
 (1) 设所有计数矩阵的元素 $n_{m k}, n_{k v}$, 计数向量的元素 $n_m, n_k$ 初值为 0 ;
 
-(2) 对所有文本 $\mathbf{w}_m, m=1,2, \cdots, M$
+(2) 对所有文本 $\mathbf{w}\_m, m=1,2, \cdots, M$
 对第 $m$ 个文本中的所有单词 $w_{m n}, n=1,2, \cdots, N_m$
 (a) 抽样话题 $z_{m n}=z_k \sim \operatorname{Mult}\left(\frac{1}{K}\right)$;(对于文本m，其多项分布的参数为$\frac{1}{K}$，由$\alpha$生成，即$\theta_m \sim Dir(\alpha)$，$\theta_m$为长度为K的向量。)
 
@@ -626,7 +626,7 @@ LDA 模型的学习通常采用收缩的吉布斯抽样 (collapsed Gibbs samplin
 增加话题-单词和计数 $n_k=n_k+1$;
 
 （3）循环执行以下操作, 直到进入燃烧期
-对所有文本 $\mathbf{w}_m, m=1,2, \cdots, M$
+对所有文本 $\mathbf{w}\_m, m=1,2, \cdots, M$
 对第 $m$ 个文本中的所有单词 $w_{m n}, n=1,2, \cdots, N_m$
 
 (a) 当前的单词 $w_{m n}$ 是第 $v$ 个单词, 话题指派 $z_{m n}$ 是第 $k$ 个话题;
@@ -635,7 +635,7 @@ LDA 模型的学习通常采用收缩的吉布斯抽样 (collapsed Gibbs samplin
 (b) 按照满条件分布进行抽样
 
 $$
-p\left(z_i \mid \mathbf{z}_{-i}, \mathbf{w}, \alpha, \beta\right) \propto \frac{n_{k v}+\beta_v}{\sum_{v=1}^V\left(n_{k v}+\beta_v\right)} \cdot \frac{n_{m k}+\alpha_k}{\sum_{k=1}^K\left(n_{m k}+\alpha_k\right)}
+p\left(z_i \mid \mathbf{z}\_{-i}, \mathbf{w}, \alpha, \beta\right) \propto \frac{n_{k v}+\beta_v}{\sum_{v=1}^V\left(n_{k v}+\beta_v\right)} \cdot \frac{n_{m k}+\alpha_k}{\sum_{k=1}^K\left(n_{m k}+\alpha_k\right)}
 $$
 
 得到新的第 $k^{\prime}$ 个话题, 分配给 $z_{m n}$;

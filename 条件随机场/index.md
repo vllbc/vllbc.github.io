@@ -8,7 +8,7 @@
 
 无向图是指没有方向的图。
 
-概率图模型是由图表示的概率分布。设有联合概率分布P(Y), Y是一组随机变量，由无向图$G=(V,E)$表示概率分布P(Y)，即在图G中，结点$v\in V$表示一个随机变量$Y_v$，$Y=(Y_v)_{v\in V}$，边e表示随机变量之间的依赖关系。
+概率图模型是由图表示的概率分布。设有联合概率分布P(Y), Y是一组随机变量，由无向图$G=(V,E)$表示概率分布P(Y)，即在图G中，结点$v\in V$表示一个随机变量$Y_v$，$Y=(Y_v)\_{v\in V}$，边e表示随机变量之间的依赖关系。
 
 ## 概率无向图模型
 
@@ -38,7 +38,7 @@ $$
 给出。规范化因子保证 $P(Y)$ 构成一个概率分布。函数 $\Psi_C\left(Y_C\right)$ 称为势函数 (potential function)。这里要求势函数 $\Psi_C\left(Y_C\right)$ 是严格正的, 通常定义为指数函数:
 
 $$
-\Psi_C\left(Y_C\right)=\exp \left\\{-E\left(Y_C\right)\right\\}
+\Psi_C\left(Y_C\right)=\exp \\{-E\left(Y_C\right)\\\}
 $$
 
 
@@ -240,17 +240,17 @@ $$
 
 $$
 \begin{aligned}
-y^* &=\arg \max _y P_w(y \mid x) \\\\
-&=\arg \max _y \frac{\exp (w \cdot F(y, x))}{Z_w(x)} \\\\
-&=\arg \max _y \exp (w \cdot F(y, x)) \\\\
-&=\arg \max _y(w \cdot F(y, x))
+y^*  &=\arg \max_y P_w(y \mid x) \\\\
+&=\arg \max_y \frac{\exp (w \cdot F(y, x))}{Z_w(x)} \\\\
+&=\arg \max_y \exp (w \cdot F(y, x)) \\\\
+&=\arg \max_y(w \cdot F(y, x))
 \end{aligned}
 $$
 
 于是, 条件随机场的预测问题成为求非规范化概率最大的最优路径问题
 
 $$
-\max _y(w \cdot F(y, x))
+\max_y(w \cdot F(y, x))
 $$
 
 这里, 路径表示标记序列。其中,
@@ -266,7 +266,7 @@ $$
 注意, 这时只需计算非规范化概率, 而不必计算概率, 可以大大提高效率。为了求解最 优路径, 写成如下形式:
 
 $$
-\max _y \sum_{i=1}^n w \cdot F_i\left(y_{i-1}, y_i, x\right)
+\max_y \sum_{i=1}^n w \cdot F_i\left(y_{i-1}, y_i, x\right)
 $$
 
 其中,
@@ -286,37 +286,37 @@ $$
 
 $$
 \begin{gathered}
-\delta_i(l)=\max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m \\\\
-\Psi_i(l)=\arg \max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m
+\delta_i(l)=\max_{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\\}, \quad l=1,2, \cdots, m \\\\
+\Psi_i(l)=\arg \max_{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\\}, \quad l=1,2, \cdots, m
 \end{gathered}
 $$
 
 直到 $i=n$ 时终止。这时求得非规范化概率的最大值为
 
 $$
-\operatorname{max}_y(w \cdot F(y, x))=\max _{1 \leqslant j \leqslant m} \delta_n(j)
+\operatorname{max}\_y(w \cdot F(y, x))=\max_{1 \leqslant j \leqslant m} \delta_n(j)
 $$
 
 及最优路径的终点
 
 $$
-y_n^*=\arg \max _{1 \leqslant j \leqslant m} \delta_n(j)
+y_n^*  =\arg \max_{1 \leqslant j \leqslant m} \delta_n(j)
 $$
 
 由此最优路径终点返回,
 
 $$
-y_i^*=\Psi_{i+1}\left(y_{i+1}^*\right), \quad i=n-1, n-2, \cdots, 1
+y_i^*  =\Psi_{i+1}\left(y_{i+1}^*  \right), \quad i=n-1, n-2, \cdots, 1
 $$
 
-求得最优路径 $y^*=\left(y_1^*, y_2^*, \cdots, y_n^*\right)^{\mathrm{T}}$ 。
+求得最优路径 $y^* =\left(y_1^* , y_2^* , \cdots, y_n^* \right)^{\mathrm{T}}$ 。
 
 综上所述, 得到条件随机场预测的维特比算法。
 
 
 (条件随机场预测的维特比算法)
 输入: 模型特征向量 $F(y, x)$ 和权值向量 $w$, 观测序列 $x=\left(x_1, x_2, \cdots, x_n\right)$;
-输出: 最优路径 $y^*=\left(y_1^*, y_2^*, \cdots, y_n^*\right)$ 。
+输出: 最优路径 $y^* =\left(y_1^* , y_2^* , \cdots, y_n^* \right)$ 。
 (1) 初始化
 
 $$
@@ -327,8 +327,8 @@ $$
 
 $$
 \begin{gathered}
-\delta_i(l)=\max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m \\\\
-\Psi_i(l)=\arg \max _{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\}, \quad l=1,2, \cdots, m
+\delta_i(l)=\max_{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\\}, \quad l=1,2, \cdots, m \\\\
+\Psi_i(l)=\arg \max_{1 \leqslant j \leqslant m}\left\\{\delta_{i-1}(j)+w \cdot F_i\left(y_{i-1}=j, y_i=l, x\right)\right\\\}, \quad l=1,2, \cdots, m
 \end{gathered}
 $$
 
@@ -336,18 +336,18 @@ $$
 
 $$
 \begin{gathered}
-\max _y(w \cdot F(y, x))=\max _{1 \leqslant j \leqslant m} \delta_n(j) \\\\
-y_n^*=\arg \max _{1 \leqslant j \leqslant m} \delta_n(j)
+\max_y(w \cdot F(y, x))=\max_{1 \leqslant j \leqslant m} \delta_n(j) \\\\
+y_n^* =\arg \max_{1 \leqslant j \leqslant m} \delta_n(j)
 \end{gathered}
 $$
 
 (4) 返回路径
 
 $$
-y_i^*=\Psi_{i+1}\left(y_{i+1}^*\right), \quad i=n-1, n-2, \cdots, 1
+y_i^* =\Psi_{i+1}\left(y_{i+1}^* \right), \quad i=n-1, n-2, \cdots, 1
 $$
 
-求得最优路径 $y^*=\left(y_1^*, y_2^*, \cdots, y_n^*\right)_{\text {。 }}$
+求得最优路径 $y^* =\left(y_1^* , y_2^* , \cdots, y_n^* \right)\_{\text {。 }}$
 
 自己的理解就是非规范化概率每个i代表时间步i，要对所有的$\lambda_k t_k$和 $\mu_ks_k$ 进行筛选，找出符合条件的相加，这里要注意下标的理解。括号里的和HMM的类似，代表y的取值。
 

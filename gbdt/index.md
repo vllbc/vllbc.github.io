@@ -10,15 +10,15 @@ GBDT**(Gradient Boosting Decision Tree)**是一种迭代的[决策树](https://s
 选择最优切分变量j与切分点s：遍历变量j，对规定的切分变量j扫描切分点s，选择使下式得到最小 值时的(j,s)对。其中Rm是被划分的输入空间， $\mathrm{cm}$ 是空间Rm对应的固定输出值。
 
 $$
-\min _{j, s}\left[\min _{c_{1}} \sum_{x_{i} \in R_{i}(j, s)}\left(y_{i}-c_{1}\right)^{2}+\min _{c_{2}} \sum_{x_{i} \in R_{i}(j, s)}\left(y_{i}-c_{1}\right)^{2}\right]
+\min_{j, s}\left[\min_{c_{1}} \sum_{x_{i} \in R_{i}(j, s)}\left(y_{i}-c_{1}\right)^{2}+\min_{c_{2}} \sum_{x_{i} \in R_{i}(j, s)}\left(y_{i}-c_{1}\right)^{2}\right]
 $$
 
 用选定的(j,s)对，划分区域并决定相应的输出值
 
 $$
 \begin{gathered}
-R_{1}(j, s)=\left\\{x \mid x^{(j)} \leq s\right\\}, R_{2}(j, s)=\left\\{x \mid x^{(j)}>s\right\\} \\\\
-\hat{c}_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
+R_{1}(j, s)=\left\\{x \mid x^{(j)} \leq s\right\\\}, R_{2}(j, s)=\left\\{x \mid x^{(j)}>s\right\\\} \\\\
+\hat{c}\_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
 x \in R_{m}, m=1,2
 \end{gathered}
 $$
@@ -26,7 +26,7 @@ $$
 继续对两个子区域调用上述步骤，将输入空间划分为 $M$ 个区域R1,R2,..,Rm，生成决策树。
 
 $$
-f(x)=\sum_{m=1}^{M} \hat{c}_{m} I\left(x \epsilon R_{m}\right)
+f(x)=\sum_{m=1}^{M} \hat{c}\_{m} I\left(x \epsilon R_{m}\right)
 $$
 
 当输入空间划分确定时，可以用平方误差来表示回归树对于训练数据的预测方法，用平方误差最小 的准则求解每个单元上的最优输出值。
@@ -94,7 +94,7 @@ GBDT算法:
 (1) 初始化弱学习器
 
 $$
-f_{0}(x)=\arg \min _{c} \sum_{i=1}^{N} L\left(y_{i}, c\right)
+f_{0}(x)=\arg \min_{c} \sum_{i=1}^{N} L\left(y_{i}, c\right)
 $$
 
 (2) 对 $m=1,2, \ldots, M$ 有:
@@ -111,13 +111,13 @@ $$
 (c) 对叶子区域 $j=1,2, . . J$ 计算最佳拟合值
 
 $$
-\Upsilon_{j m}=\underbrace{\arg \min }_{\Upsilon} \sum_{x_{i} \in R_{j m}} L\left(y_{i}, f_{m-1}\left(x_{i}\right)+\Upsilon\right)
+\Upsilon_{j m}=\underbrace{\arg \min}\_{\Upsilon} \sum_{x_{i} \in R_{j m}} L\left(y_{i}, f_{m-1}\left(x_{i}\right)+\Upsilon\right)
 $$
 
 也可以理解为：
 
 $$
-\Upsilon_{jm} = \underbrace{\arg \min}_{\Upsilon} \sum_{x_i \in R_{jm}} L(r_{im}, \Upsilon)
+\Upsilon_{jm} = \underbrace{\arg \min}\_{\Upsilon} \sum_{x_i \in R_{jm}} L(r_{im}, \Upsilon)
 $$
 
 

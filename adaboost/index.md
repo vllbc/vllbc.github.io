@@ -37,12 +37,13 @@ $$
 上面叙述的是一般的Adaboost算法的解释，其实还有另外一种解释，就是adaboost为加法模型、损失函数为指数函数、学习算法为前向分步算法的二类分类学习方法。
 那么什么是前向分步算法？
 
-输入: 训练数据集$T=\\{\left(x_1, y_1 \right),\left(x_2, y_2\right), \cdots,\left(x_N, y_N\right)\\}$; 损失函数 $L(y, f(x))$; 基函数集 $\\{b(x ; \gamma)\\}$;
+输入: 训练数据集$T=\\{\left(x_1, y_1 \right),\left(x_2, y_2\right), \cdots,\left(x_N, y_N\right)\\\}$; 损失函数 $L(y, f(x))$; 基函数集 $\\{b(x ; \gamma)\\\}$;
 输出: 加法模型 $f(x)$ 。
 
 (1) 初始化 $f_0(x)=0$;
 (2) 对 $m=1,2, \cdots, M$
 (a) 极小化损失函数
+
 $$
 \left(\beta_m, \gamma_m\right)=\arg \min_{\beta, \gamma} \sum_{i=1}^N L\left(y_i, f_{m-1}\left(x_i\right)+\beta b\left(x_i ; \gamma\right)\right)
 $$

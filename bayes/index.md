@@ -100,11 +100,11 @@ $$
 
 $$
 \begin{aligned}
-\hat{y} &= \arg \max P(y|X) \\\\
-& = \arg \max \frac{P(X,y)}{P(X)}  \\\\ 
-& = \arg \max \frac{P(y)P(X|y)}{P(X)} \\\\
-& = \arg \max P(y) P(X|y) \\\\
-& = \arg \max P(y)P(x_1,x_2,\dots x_p| y)
+\hat{y} &= \arg \maxP(y|X) \\\\
+& = \arg \max\frac{P(X,y)}{P(X)}  \\\\ 
+& = \arg \max\frac{P(y)P(X|y)}{P(X)} \\\\
+& = \arg \maxP(y) P(X|y) \\\\
+& = \arg \maxP(y)P(x_1,x_2,\dots x_p| y)
 \end{aligned}
 $$
 
@@ -113,7 +113,7 @@ $$
 即最终的式子就是
 
 $$
-\hat{y} = \arg \max P(y)\prod_{j=1}^p P(x_j|y)
+\hat{y} = \arg \maxP(y)\prod_{j=1}^p P(x_j|y)
 $$
 
 这就是朴素贝叶斯的主要推导。
@@ -148,10 +148,10 @@ $$
 贝叶斯判定准则：为最小化总体条件风险，只需在每个样本上选择那个能使条件风险$R(c\mid x)$最小的类别标记，即：
 
 $$
-h^{*}(x) = \underbrace{\arg \min  }_{c\in \gamma} R(c\mid x)
+h^{*}(x) = \underbrace{\arg \min }\_{c\in \gamma} R(c\mid x)
 $$
 
-此时，$h^*(x)$称为贝叶斯最优分类器，与之对应的总体风险$R(h^*)$称为贝叶斯风险。$1-R(h*)$反映了分类器所能达到的最好性能。
+此时，$h^* (x)$称为贝叶斯最优分类器，与之对应的总体风险$R(h^* )$称为贝叶斯风险。$1-R(h*)$反映了分类器所能达到的最好性能。
 
 如果使用上面的0-1损失函数，此时的条件风险：
 
@@ -162,7 +162,7 @@ $$
 于是此时的最优分类器变为了
 
 $$
-h^*(x) = \arg \min (1-P(c\mid x)) = \arg \max P(c\mid x)
+h^* (x) = \arg \min(1-P(c\mid x)) = \arg \maxP(c\mid x)
 $$
 
 这就是后验概率最大化的含义。
@@ -174,7 +174,7 @@ $$
 P\left(Y=c_{k}\right)=\frac{\sum_{i=1}^{N} I\left(y_{i}=c_{k}\right)}{N}, \quad k=1,2, \cdots, K
 $$
 
-设第 $j$ 个特征 $x^{(j)}$ 可能取值的集合为 $\left\\{a_{j 1}, a_{j 2}, \cdots, a_{j S_{j}}\right\\}$, 条件概率 $P\left(X^{(j)}=a_{j l} \mid Y=\right.$ $c_{k}$ ) 的极大似然估计是
+设第 $j$ 个特征 $x^{(j)}$ 可能取值的集合为 $\left\\{a_{j 1}, a_{j 2}, \cdots, a_{j S_{j}}\right\\\}$, 条件概率 $P\left(X^{(j)}=a_{j l} \mid Y=\right.$ $c_{k}$ ) 的极大似然估计是
 
 $$
 \begin{aligned}

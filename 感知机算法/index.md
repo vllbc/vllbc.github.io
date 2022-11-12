@@ -79,7 +79,7 @@ $$
 ## 算法流程
 总结可得，感知机算法流程如下：
 
-输入: 训练数据集 $T=\left\\{\left(x_1, y_1\right),\left(x_2, y_2\right), \cdots,\left(x_N, y_N\right)\right\\}$, 其中 $x_i \in \mathcal{X}=\mathbf{R}^n, y_i \in$ $\mathcal{Y}=\\{-1,+1\\}, i=1,2, \cdots, N$; 学习率 $\eta(0<\eta \leqslant 1)$;
+输入: 训练数据集 $T=\left\\{\left(x_1, y_1\right),\left(x_2, y_2\right), \cdots,\left(x_N, y_N\right)\right\\\}$, 其中 $x_i \in \mathcal{X}=\mathbf{R}^n, y_i \in$ $\mathcal{Y}=\\{-1,+1\\}, i=1,2, \cdots, N$; 学习率 $\eta(0<\eta \leqslant 1)$;
 输出: $w, b$; 感知机模型 $f(x)=\operatorname{sign}(w \cdot x+b)$ 。
 (1) 选取初值 $w_0, b_0$;
 (2) 在训练集中选取数据 $\left(x_i, y_i\right)$;
@@ -123,15 +123,15 @@ $$
 
 $$
 y_i^{\prime}=\left\\{\begin{array}{lll}
-y_i,  \text { 若 } & {y}_i \in \omega_0 \\\\
--{y}_i, \text { 若 } & {y}_i \in \omega_1
+y_i,  \text { 若 } & {y}\_i \in \omega_0 \\\\
+-{y}\_i, \text { 若 } & {y}\_i \in \omega_1
 \end{array} \quad i=1,2, \ldots, m\right.
 $$
 
 样本可分性条件变为：存在 $\alpha$, 使
 
 $$
-{\alpha}^T {y}_i^{\prime}>0, i=1,2, \ldots, m
+{\alpha}^T {y}\_i^{\prime}>0, i=1,2, \ldots, m
 $$
 
 $y^{\prime}$ 称作规范化增广样本向量, 仍记作 $y$ 。
@@ -163,7 +163,7 @@ $$
 $$
 
 即每次迭代时把错分的样本按照某个系数加到权向量上。
-当没有错分样本时, 得到一个合适的解 $\alpha^*$ 。
+当没有错分样本时, 得到一个合适的解 $\alpha^* $ 。
 
 
 ### 固定增量法

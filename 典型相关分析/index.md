@@ -22,7 +22,7 @@ $$
 我们CCA的优化目标是最大化ρ(X′,Y′)得到对应的投影向量a,b，即
 
 $$
-\underbrace{argmax}_{a,b}\frac{cov(X',Y')}{\sqrt{D(X')D(Y')}}
+\underbrace{argmax}\_{a,b}\frac{cov(X',Y')}{\sqrt{D(X')D(Y')}}
 $$
 
 在投影前，我们一般会把原始数据进行标准化，得到均值为0而方差为1的数据X和Y。这样我们有：
@@ -39,14 +39,14 @@ $$
 
 
 $$
-\underbrace{argmax}_{a,b}\frac{a^TS_{XY}b}{\sqrt{a^TS_{XX}a}\sqrt{b^TS_{YY}b}}
+\underbrace{argmax}\_{a,b}\frac{a^TS_{XY}b}{\sqrt{a^TS_{XX}a}\sqrt{b^TS_{YY}b}}
 $$
 
 由于分子分母增大相同的倍数，优化目标结果不变，我们可以采用和SVM类似的优化方法，固定分母，优化分子，具体的转化为：
 
 
 $$
-\underbrace{argmax}_{a,b}\quad a^TS_{XY}b \\\\
+\underbrace{argmax}\_{a,b}\quad a^TS_{XY}b \\\\
 s.t.\quad a^TS_{XX}a=1,b^TS_{YY}b=1 \\\\
 \text{因为已经标准化了，因此方差为0}
 $$
