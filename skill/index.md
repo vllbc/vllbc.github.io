@@ -1,4 +1,4 @@
-# skill
+# python小技巧
 
 
 ## **两个数的交换**
@@ -924,7 +924,42 @@ class SubPerson(Person):
 而`__mro__` 为 `(<class '__main__.D'>, <class '__main__.A'>, <class '__main__.B'>, <class '__main__.C'>, <class '__main__.Base'>, <class 'object'>)` 那么就调用从A以后的类的`__init__()`
 
 不过重点不在这里，重点是super(cls,cls)和super(cls,object)的区别
+使用super(cls,cls)必须显示的传入self参数，即super(cls,cls).func(self,...)。总之其就是一个定位方法，别的作用我暂且不知。
+### 一个示例
+```python
+class A:
 
+    def say(self):
+
+        print("I am A")
+
+  
+
+class B(A):
+
+    def say(self):
+
+    #    super(B, B).say(self)
+
+        super().say()
+
+  
+
+class C(A):
+
+    def say(self):
+
+        print("I am C")
+
+class D(B, C):
+
+    def say(self):
+
+        super().say()
+
+D().say()
+```
+上述的这段代码怎么修改D输出都是`I am C`，这是因为在B中super().say()相当于super(B,self).say()，而根据上述内容这是一个实例方法，其中self是D的实例，查看D的mro可以知道C在B的后面，所以根据super的作用，则会调用继承关系中B后面类的say方法，即C的say 方法，所以会得到匪夷所思的结果，将代码修改成注释的那样就可以解决这个问题，希望可以帮助理解。
 ## dataclass
 
 ```python

@@ -1,4 +1,4 @@
-# pyplot
+# pyplot学习笔记
 
 
 # matplotlib.pyplot学习

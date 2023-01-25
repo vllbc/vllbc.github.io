@@ -1,6 +1,4 @@
-# asyncio
-
-
+# python协程理解
 
 
 ```python
@@ -8,7 +6,7 @@ import threading
 import time
 ```
 
-### **多线程例子**
+## 多线程例子
 
 
 ```python
@@ -42,7 +40,7 @@ if __name__ == "__main__":
     time2 :0.037929
 
 
-## **yield**
+## yield
 
 
 ```python
@@ -70,7 +68,7 @@ for i in fib(100):
     89
 
 
-## **协程**
+## 协程
 
 **GEN_CREATED 创建完成，等待执行**
 **GEN_RUNNING 解释器正在执行**
@@ -162,7 +160,7 @@ inspect.getgeneratorstate(g) #关闭了
 
 
 
-## **预激协程**
+## 预激协程
 
 
 ```python
@@ -221,7 +219,7 @@ value
 
 
 
-## **yield from用法**
+## yield from用法
 
 
 ```python
@@ -275,7 +273,7 @@ for i in c2:
     c
 
 
-## **转移控制权**
+## 转移控制权
 
 
 ```python
@@ -294,7 +292,7 @@ def corout(func):
         return g
     return wapper
 
-
+# 子生成器
 def generator():
     l = []
     while True:
@@ -303,19 +301,49 @@ def generator():
             break
         l.append(i)
     return sorted(l)
+# 委托生成器
 @corout
 def generator2():
     while True:
         
         l = yield from generator()
         print("排序后的列表",l)
-        print("--
+        print("-----------------")
+
+# 客户端
+if __name__ == "__main__":
+    fake = Faker().country_code
+    nest_country = [[fake() for i in range(3)] for j in range(3)]
+    for country in nest_country:
+        print('国家代号列表：', country)
+        c = generator2()
+        for i in country:
+            c.send(i)
+        c.send("CLOSE")
+    
+```
+
+    国家代号列表： ['AM', 'ZA', 'BG']
+    排序后的列表 ['AM', 'BG', 'ZA']
+    -----------------
     国家代号列表： ['UG', 'BE', 'SI']
     排序后的列表 ['BE', 'SI', 'UG']
-    --
+    -----------------
+    国家代号列表： ['SC', 'KI', 'KI']
+    排序后的列表 ['KI', 'KI', 'SC']
+    -----------------
 
-
-## **asyncio模块**
+yield显然不只是用来减小循环次数的，引用一下《流畅的python》中关于yield from 的意义：
+- 子生成器产出的值都直接传给委派生成器的调用方（即客户端代码）。
+- 使用 send() 方法发给委派生成器的值都直接传给子生成器。如果发送的值是 None，那么会调用子生成器的 __next__() 方法。如果发送的值不是 None，那么会调用子生成器的 send() 方法。如果调用的方法抛出 StopIteration 异常，那么委派生成器恢复运行。任何其他异常都会向上冒泡，传给委派生成器。
+- 生成器退出时，生成器（或子生成器）中的 return expr 表达式会触发 StopIteration(expr) 异常抛出。
+- yield from 表达式的值是子生成器终止时传给 StopIteration异常的第一个参数。
+为什么yield可以转移控制权，可以看一下这一段伪代码：
+![](image/Pasted%20image%2020230125201438.png)
+![](image/Pasted%20image%2020230125202328.png)
+![](image/Pasted%20image%2020230125202421.png)
+注意这里的6是委托生成器向子生成器发送_s，而_s是调用方向委托生成器发送的，发送后得到结果_y，并在下一个循环yield即抛出给调用方。
+## asyncio模块
 
 
 ```python
@@ -326,7 +354,7 @@ def one():
     start = time.time()
     @asyncio.coroutine #1
     def do_something(): #2
-        print("start ")
+        print("start ------")
         time.sleep(0.1) #3
         print("doing something")
     loop = asyncio.get_event_loop() #4
@@ -338,7 +366,7 @@ def one():
 one()
 ```
 
-    start 
+    start ------
     doing something
     消耗时间:0.1012
 
@@ -368,7 +396,7 @@ def two():
     start = time.time()
     @asyncio.coroutine
     def do_something():
-        print("start ")
+        print("start ------")
         time.sleep(0.1)
         print("doing something")
     loop = asyncio.get_event_loop()
@@ -386,7 +414,7 @@ two()
 
     task是不是Task的示例？ True
     task state PENDING
-    start 
+    start ------
     doing something
     take state FINISHED
     消耗时间:0.1013
@@ -400,7 +428,7 @@ two()
 
 **4、将任务注入事件循环，阻塞运行**
 
-## **async / await** 
+## async / await
 
 
 ```python
@@ -521,6 +549,153 @@ four()
 
 **-> 程序全部结束**
 
-## **异步编程**
+### await的理解
+从上文中也可以看到await其实是从yield from中转变过来的，当在代码中看到await时，可以知道当前协程要去运行await后面的任务，此时控制权回到了event loop手中，去执行其它的任务，当前面的任务完成了以后，则转去执行前面await后面的代码。注意当await直接跟一个coroutline时，此时相当于去yield from，会卡在那里，并不会实现真正的异步，所以要先将coroutline变为task或者future就可以直接await。
+## 异步编程
 
+### 一个买土豆的例子
+```python
+import asyncio
 
+import random
+
+  
+  
+
+# potato类
+
+class Potato:
+
+    # 生成土豆
+
+    @classmethod
+
+    def make(cls, num, *args, **kws):
+
+        potatos = []
+
+        for i in range(num):
+
+            potatos.append(cls.__new__(cls, *args, **kws))
+
+        return potatos
+
+all_potatos = Potato.make(5)
+
+  
+
+## 这是一个异步生成器，可以用async for迭代，nums为想买的数量。
+
+async def take_photos(nums):
+
+    count = 0
+
+    while True:
+
+        # 如果没有土豆了，挂起当前任务请求生成土豆任务。
+
+        if len(all_potatos) == 0:
+
+            await askfor_photos()
+
+        else:
+
+            photo = all_potatos.pop()
+			# 如果有土豆将土豆抛出去
+            yield photo
+
+            count += 1
+
+            if count == nums :
+
+                break
+
+  
+  
+
+async def askfor_photos():
+
+    await asyncio.sleep(2)
+
+    all_potatos.append(Potato.make(5))
+
+  
+
+async def buy_photos():
+
+    bucket = []
+
+    async for p in take_photos(50):
+
+        bucket.append(p)
+
+        print(f"Go photo {id(p)}")
+
+  
+
+loop = asyncio.get_event_loop()
+
+loop.run_until_complete(buy_photos())
+```
+### requests例子
+
+```python
+import asyncio
+
+import requests
+
+import time
+
+# 相当于委托生成器
+async def result(url):
+
+    res = await request_url(url)
+
+    print(url, res)
+
+# 相当于子生成器
+async def request_url(url):
+
+    res = requests.get(url)
+
+    print(url)
+
+    await asyncio.sleep(2)
+
+    print("execute_time:", time.time() - start)
+
+    return res
+
+  
+  
+
+url_list = ["https://www.csdn.net/",
+
+            "https://vllbc.top/",
+
+            "https://www.baidu.com/",
+
+            ]
+
+  
+# 以下相当于调用方
+start = time.time()
+
+print(f"start_time:{start}\n")
+
+  
+
+task = [result(url) for url in url_list]
+
+loop = asyncio.get_event_loop()
+
+loop.run_until_complete(asyncio.wait(task))
+
+  
+
+endtime = time.time() - start
+
+print("\nendtime:", time.time())
+
+print("all_execute_time:", endtime)
+```

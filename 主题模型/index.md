@@ -257,10 +257,10 @@ $$
 $$
 \begin{aligned}
 X^{\prime} &=U^{\prime} \Sigma^{\prime} V^{\prime \mathrm{T}} \\\\
-X^{\prime} &=[P(w, d)]_{M \times N} \\\\
-U^{\prime} &=[P(w \mid z)]_{M \times K} \\\\
-\Sigma^{\prime} &=[P(z)]_{K \times K} \\\\
-V^{\prime} &=[P(d \mid z)]_{N \times K}
+X^{\prime} &=[P(w, d)]\_{M \times N} \\\\
+U^{\prime} &=[P(w \mid z)]\_{M \times K} \\\\
+\Sigma^{\prime} &=[P(z)]\_{K \times K} \\\\
+V^{\prime} &=[P(d \mid z)]\_{N \times K}
 \end{aligned}
 $$
 

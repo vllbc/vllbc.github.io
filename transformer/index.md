@@ -84,8 +84,63 @@ softmax分值决定着在这个位置，每个词的表达程度（关注度）�
 上述就是多头自注意机制的内容，我认为还仅是一部分矩阵，下面尝试着将它们放到一个图上可视化如下。
 
 ![](image/Pasted%20image%2020220803003932.png)
+#### 代码
+下面实现一下多头注意力机制，在原论文中，实现的方法如下：
+![](image/Pasted%20image%2020221114122851.png)
+也就是对每个W进行多头的设置，即为原维度/head，然后拼接后，再经过$hd_v\times d_{model}$的转换又得到原来的维度，代码的实现不太一样，代码是W还是$d_{model}\times d_{model}$的矩阵然后得到q,k,v之后再进行截断，实现如下。
+```python
+class MultiHeadedAttention(nn.Module):
 
+    def __init__(self, h, d_model, dropout=0.1) -> None:
 
+        # h为head，这里为8，d_model为embedding的维度，这里为512
+
+        super().__init__()
+
+        assert d_model % h == 0
+
+        self.d_k = d_model // h # 64
+
+        self.h = h
+
+        self.Q_Linear = nn.Linear(d_model, d_model)
+
+        self.K_Linear = nn.Linear(d_model, d_model)
+
+        self.V_Linear = nn.Linear(d_model, d_model)
+
+        self.res_Linear = nn.Linear(d_model, d_model)
+
+        self.attn = None
+
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, query, key, value, mask=None):
+
+        if mask is not None:
+
+            mask = mask.unsqueeze(1)
+
+        batch_size = query.size(0)
+
+        query = self.Q_Linear(query).view(batch_size, -1, self.h, self.d_k) # (batch_size, seq_len, h, d_k)即(batch_size, seq_len, 8, 64)
+
+        query = query.transpose(1, 2) # (batch_size, h, seq_len, d_k)即(batch_size, 8, seq_len, 64)
+
+        key = self.K_Linear(key).view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
+
+        value = self.V_Linear(value).view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
+
+        x, self.attn = attention(query, key, value, mask=mask, dropout=self.dropout) # x为(batch_size, h, seq_len, d_k)
+
+        # attn为(batch_size, h, seq_len1, seq_len2)
+
+        x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.h * self.d_k)
+
+        # (batch_size, h, seq_len, d_k) -> (batch_size, seq_len, h, d_k) -> (batch_size, seq_len, h * d_k) = (batch_size, seq_len, 512)
+
+        return self.res_Linear(x)
+```
 ### Masked self-attention
 
 在训练的时候，主要是消除后面的信息对预测的影响，因为decoder输入的是整个句子，也就是我们所谓的参考答案，而实际预测的时候就是预测后面的token，用不到后面的token，如果不mask掉，当前的token将看到“未来”，这不是我们想要的，因此必须要mask掉。

@@ -255,7 +255,7 @@ $$
 直观地说，朴素贝叶斯期望某些词作为类指示符。例如，对于情感分类标记 awesome、 brilliant、 great 将有更高的概率给定正面类别然后负面类别。 类似地，给定负类比正类 ，标记awful, boring, bad的概率更高。
 
 ![](image/Pasted%20image%2020220726202626.png)
-在实践中，一般都是取log，单调性不变，变为$\log(x, y=k) = \log P(y=k) \sum \log P(x_i|y=k)$
+在实践中，一般都是取log，单调性不变，变为$\log(x, y=k) = \log P(y=k) + \sum \log P(x_i|y=k)$
 
 
 ## 补充：贝叶斯估计

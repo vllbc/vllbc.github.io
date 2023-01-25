@@ -1,4 +1,4 @@
-# thread
+# 理解python线程
 
 
 
