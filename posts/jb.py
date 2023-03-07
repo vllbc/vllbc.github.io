@@ -11,9 +11,13 @@ for file in files[:]:
     with open(file, 'r', encoding='utf-8') as f:
         flag = 0
         content = f.read()
-        temp = re.findall(r'---\ntitle: .*\ndate: .*\nlastmod: .*\ncategories: .*\ntags: .*\nauthor: "vllbc"\nmathjax: true\nmarkup: pdc\n*?\n---', content)
-        if temp == []:
-            content = '---\ntitle: .*\ndate: .*\nlastmod: .*\ncategories: .*\ntags: .*\nauthor: "vllbc"\nmathjax: true\nmarkup: pdc\n---\n' + content   # 要确保没有format
+        if not re.findall(r'markup: pdc\nweight: \d+', content):
+            temp = re.findall(r'---\ntitle: .*\ndate: .*\nlastmod: .*\ncategories: .*\ntags: .*\nauthor: "vllbc"\nmathjax: true\nmarkup: pdc\n*?\n---', content)
+            if not temp:
+                content = '---\ntitle: .*\ndate: .*\nlastmod: .*\ncategories: .*\ntags: .*\nauthor: "vllbc"\nmathjax: true\nmarkup: pdc\n---\n' + content   # 要确保没有format
+                print(file)
+        else:
+            print(file)
         
         cdate = tranf(file.stat().st_ctime)
         year = cdate.split('-')[0]
@@ -30,5 +34,5 @@ for file in files[:]:
         title = str(file).split('\\')[-2]
         content = re.sub(r'title: .*', f'title: "{title}"', content)
 
-    with open(file, 'w', encoding='utf-8') as f:
-        f.write(content)
+    # with open(file, 'w', encoding='utf-8') as f:
+    #     f.write(content)
