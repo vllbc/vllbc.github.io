@@ -2,6 +2,7 @@
 
 
 
+
 ## PMI
 点互信息
 对于两个单词之间的PMI来说，可以这样计算：
@@ -83,6 +84,3 @@ def calculateMI(dtm_ham_train, dtm_spam_train):
 
 ## PPMI
 ![](image/Pasted%20image%2020221106002950.png)
-
-
-

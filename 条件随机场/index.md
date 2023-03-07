@@ -1,6 +1,7 @@
 # 条件随机场
 
 
+
 # CRF
 
 ## 概率图模型与无向图
@@ -294,7 +295,7 @@ $$
 直到 $i=n$ 时终止。这时求得非规范化概率的最大值为
 
 $$
-\operatorname{max}\_y(w \cdot F(y, x))=\max_{1 \leqslant j \leqslant m} \delta_n(j)
+\operatorname{max}_y(w \cdot F(y, x))=\max_{1 \leqslant j \leqslant m} \delta_n(j)
 $$
 
 及最优路径的终点
@@ -367,6 +368,3 @@ $$
 
 ## 总结
 ![](image/Pasted%20image%2020220904001447.png)
-
-
-

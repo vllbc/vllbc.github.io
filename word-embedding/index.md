@@ -1,6 +1,7 @@
 # Word Embedding
 
 
+
 # 词嵌入
 
 ## 介绍
@@ -306,19 +307,19 @@ $$
 
 $$
 \begin{aligned}
-\frac{\partial}{\partial {v}\_{c}} \log \sum_{i=1}^{|V|} \exp \left({u}\_{i}^{T} {v}\_{c}\right) &=\frac{1}{\sum_{i=1}^{|V|} \exp \left({u}\_{i}^{T} {v}\_{c}\right)} \cdot \frac{\partial}{\partial {v}\_{c}} \sum_{x=1}^{|V|} \exp \left({u}\_{x}^{T} {v}\_{c}\right) \\\\
-&=\frac{1}{A} \cdot \sum_{x=1}^{|V|} \frac{\partial}{\partial {v}\_{c}} \exp \left({u}\_{x}^{T} {v}\_{c}\right) \\\\
-&=\frac{1}{A} \cdot \sum_{x=1}^{|V|} \exp \left({u}\_{x}^{T} {v}\_{c}\right) \frac{\partial}{\partial {v}\_{c}} {u}\_{x}^{T} {v}\_{c} \\\\
-&=\frac{1}{\sum_{i=1}^{|V|} \exp \left({u}\_{i}^{T} {v}\_{c}\right)} \sum_{x=1}^{|V|} \exp \left({u}\_{x}^{T} {v}\_{c}\right) {u}\_{x} \\\\
-&=\sum_{x=1}^{|V|} \frac{\exp \left({u}\_{x}^{T} {v}\_{c}\right)}{\sum_{i=1}^{|V|} \exp \left({u}\_{i}^{T} {v}\_{c}\right)} {u}\_{x} \\\\
-&=\sum_{x=1}^{|V|} P\left(w_{x} \mid w_{c}\right) {u}\_{x}
+\frac{\partial}{\partial {v}_{c}} \log \sum_{i=1}^{|V|} \exp \left({u}_{i}^{T} {v}_{c}\right) &=\frac{1}{\sum_{i=1}^{|V|} \exp \left({u}_{i}^{T} {v}_{c}\right)} \cdot \frac{\partial}{\partial {v}_{c}} \sum_{x=1}^{|V|} \exp \left({u}_{x}^{T} {v}_{c}\right) \\\\
+&=\frac{1}{A} \cdot \sum_{x=1}^{|V|} \frac{\partial}{\partial {v}_{c}} \exp \left({u}_{x}^{T} {v}_{c}\right) \\\\
+&=\frac{1}{A} \cdot \sum_{x=1}^{|V|} \exp \left({u}_{x}^{T} {v}_{c}\right) \frac{\partial}{\partial {v}_{c}} {u}_{x}^{T} {v}_{c} \\\\
+&=\frac{1}{\sum_{i=1}^{|V|} \exp \left({u}_{i}^{T} {v}_{c}\right)} \sum_{x=1}^{|V|} \exp \left({u}_{x}^{T} {v}_{c}\right) {u}_{x} \\\\
+&=\sum_{x=1}^{|V|} \frac{\exp \left({u}_{x}^{T} {v}_{c}\right)}{\sum_{i=1}^{|V|} \exp \left({u}_{i}^{T} {v}_{c}\right)} {u}_{x} \\\\
+&=\sum_{x=1}^{|V|} P\left(w_{x} \mid w_{c}\right) {u}_{x}
 \end{aligned}
 $$
 
 综上所述
 
 $$
-\frac{\partial \log P\left(w_{o} \mid w_{c}\right)}{\partial {v}\_{c}}={u}\_{o}-\sum_{j \in V} P\left(w_{j} \mid w_{c}\right) {u}\_{j}
+\frac{\partial \log P\left(w_{o} \mid w_{c}\right)}{\partial {v}_{c}}={u}_{o}-\sum_{j \in V} P\left(w_{j} \mid w_{c}\right) {u}_{j}
 $$
 
 通过上面计算得到梯度后，我们可以使用随机梯度下降来不断迭代模型参数$v_c$。其它模型参数$u_o$的迭代方式同理可得。最终，对于词典中任一索引为i的词，我们均得到该词作为中心词和背景词的两组词向量$v_i$和$u_i$
@@ -345,7 +346,7 @@ $$
 我们可以使用 $\sigma(x)=\frac{1}{1+\exp (-x)}$ 函数来表达中心词 $w_{c}$ 和背景词 $w_{o}$ 同时出现在训练数据 窗口的概率:
 
 $$
-P\left(D=1 \mid w_{o}, w_{c}\right)=\sigma\left({u}\_{o}^{T}, {v}\_{c}\right)
+P\left(D=1 \mid w_{o}, w_{c}\right)=\sigma\left({u}_{o}^{T}, {v}_{c}\right)
 $$
 
 那么，中心词 $w_{c}$ 生成背景词 $w_{o}$ 的对数概率可以近似为
@@ -358,14 +359,14 @@ $$
 假设噪声词 $w_{k}$ 在词典中的索引为 $i_{k}$ ，上式可改写为
 
 $$
-\log P\left(w_{o} \mid w_{c}\right)=\log \frac{1}{1+\exp \left(-{u}\_{o}^{T} {v}\_{c}\right)}+\sum_{k=1, w_{k} \sim P(w)}^{K} \log \left[1-\frac{1}{1+\exp \left(-{u}\_{i_{k}}^{T} {v}\_{c}\right)}\right]
+\log P\left(w_{o} \mid w_{c}\right)=\log \frac{1}{1+\exp \left(-{u}_{o}^{T} {v}_{c}\right)}+\sum_{k=1, w_{k} \sim P(w)}^{K} \log \left[1-\frac{1}{1+\exp \left(-{u}_{i_{k}}^{T} {v}_{c}\right)}\right]
 $$
 
 因此，有关中心词 $w_{c}$ 生成背景词 $w_{o}$ 的损失函数是($1-\sigma(x) = \sigma(-x)$):
 
 $$
 \begin{aligned}
--\log P\left(w_{o} \mid w_{c}\right)=-\log \frac{1}{1+\exp \left(-{u}\_{o}^{T} {v}\_{c}\right)}-\sum_{k=1, w_{k} \sim P(w)}^{K} \log \frac{1}{1+\exp \left({u}\_{i_{k}}^{T} {v}\_{c}\right)}  \\\\
+-\log P\left(w_{o} \mid w_{c}\right)=-\log \frac{1}{1+\exp \left(-{u}_{o}^{T} {v}_{c}\right)}-\sum_{k=1, w_{k} \sim P(w)}^{K} \log \frac{1}{1+\exp \left({u}_{i_{k}}^{T} {v}_{c}\right)}  \\\\
 = -\log \sigma(u_o^Tv_c) - \sum_{k=1, w_k\sim P(w)} ^ K \log\sigma (-u_{ik}^Tv_c) 
 \end{aligned}
 $$
@@ -397,10 +398,10 @@ PPMI是基于计数的方法表达词向量，而word2vec是基于推理的方�
 
 ![png](pic/softmax.png)
 
-设 $L(w)$ 为从二叉树根节点到代表词 $w$ 的叶子节点的路径上的节点数，并设 $n(w, i)$ 为该路径上第 $i$ 个节点，该节点的向量为 ${u}\_{n(w, j)}$ 。以上图为例， $L\left(w_{3}\right)=4$ 。那么，跳字模型和连续词袋模型所需 要计算的任意词 $w_{i}$ 生成词 $w$ 的概率为:
+设 $L(w)$ 为从二叉树根节点到代表词 $w$ 的叶子节点的路径上的节点数，并设 $n(w, i)$ 为该路径上第 $i$ 个节点，该节点的向量为 ${u}_{n(w, j)}$ 。以上图为例， $L\left(w_{3}\right)=4$ 。那么，跳字模型和连续词袋模型所需 要计算的任意词 $w_{i}$ 生成词 $w$ 的概率为:
 
 $$
-P\left(w \mid w_{i}\right)=\prod_{j=1}^{L(w)-1} \sigma\left(\left[n(w, j+1)=l e f t_{-} \operatorname{child}(n(w, j))\right] \cdot {u}\_{n(w, j)}^{T} {v}\_{i}\right)
+P\left(w \mid w_{i}\right)=\prod_{j=1}^{L(w)-1} \sigma\left(\left[n(w, j+1)=l e f t_{-} \operatorname{child}(n(w, j))\right] \cdot {u}_{n(w, j)}^{T} {v}_{i}\right)
 $$
 
 其中，如果 $x$ 为真， $[x]=1$ ；反之 $[x]=-1$
@@ -413,7 +414,7 @@ $$
 上面公式可能比较抽象，下面举个具体的例子，计算 $w_{i}$ 生成 $w_{3}$ 的概率，由于在二叉树中由根到 $w_{3}$ 的路径需要向左、向右、再向左地遍历，所以得到
 
 $$
-P\left(w_{3} \mid w_{i}\right)=\sigma\left({u}\_{n\left(w_{3}, 1\right)}^{T} {v}\_{i}\right) \cdot \sigma\left(-{u}\_{n\left(w_{3}, 2\right)}^{T} {v}\_{i}\right) \cdot \sigma\left({u}\_{n\left(w_{3}, 3\right)}^{T} {v}\_{i}\right)
+P\left(w_{3} \mid w_{i}\right)=\sigma\left({u}_{n\left(w_{3}, 1\right)}^{T} {v}_{i}\right) \cdot \sigma\left(-{u}_{n\left(w_{3}, 2\right)}^{T} {v}_{i}\right) \cdot \sigma\left({u}_{n\left(w_{3}, 3\right)}^{T} {v}_{i}\right)
 $$
 
 由此，我们就可以使用随机梯度下降在跳字模型和连续词袋模型中不断迭代计算词典中所有词向量 ${v}$
@@ -688,7 +689,3 @@ $$
 >[https://wmathor.com/index.php/archives/1430/](https://wmathor.com/index.php/archives/1430/)
 >[https://zhuanlan.zhihu.com/p/27234078](https://zhuanlan.zhihu.com/p/27234078)\
 >Rong X . word2vec Parameter Learning Explained[J]. Computer Science, 2014.
-
-
-
-

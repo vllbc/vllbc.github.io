@@ -1,6 +1,7 @@
 # 牛顿插值
 
 
+
 # 牛顿插值
 
 ## 差商
@@ -81,6 +82,3 @@ plt.xlabel('x')
 plt.ylabel('y')
 plt.show()
 ```
-
-
-

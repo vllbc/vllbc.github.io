@@ -3,6 +3,7 @@
 
 
 
+
 <table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
@@ -669,9 +670,3 @@ pd.crosstab(data['native-country'], data['salary'],
     </tr>
   </tbody>
 </table>
-
-
-
-
-
-

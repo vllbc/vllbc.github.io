@@ -1,6 +1,7 @@
 # flip
 
 
+
 矩阵的反转，可以按照各个维度很好理解。
 例子：
 ```python3
@@ -17,7 +18,3 @@ np.flip(cs_matrix, 1)
 ```
 变成了：
 ![](image/Pasted%20image%2020221108231329.png)
-
-
-
-

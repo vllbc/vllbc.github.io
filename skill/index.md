@@ -1,4 +1,5 @@
-# python小技巧
+# skill
+
 
 
 ## **两个数的交换**
@@ -1844,5 +1845,3 @@ some_dict[5] = "Python"
 "Python"
 ```
 因为Python将 `5` 和 `5.0` 识别为 `some_dict` 的同一个键, 所以已有值 "JavaScript" 就被 "Python" 覆盖了.
-
-

@@ -1,6 +1,7 @@
 # 交替打印字符串
 
 
+
 # 交替打印字符串
 
 [https://leetcode-cn.com/problems/fizz-buzz-multithreaded/](https://leetcode-cn.com/problems/fizz-buzz-multithreaded/)
@@ -58,5 +59,3 @@ class FizzBuzz:
 ```
 
 思路一摸一样就是利用了锁的阻塞机制
-
-

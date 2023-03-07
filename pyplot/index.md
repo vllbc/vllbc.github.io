@@ -1,4 +1,5 @@
-# pyplot学习笔记
+# pyplot
+
 
 
 # matplotlib.pyplot学习
@@ -299,5 +300,3 @@ matplotlib.pyplot.pie(x, explode=None, labels=None, colors=None, autopct=None, p
 **frame** ：布尔类型，默认值：False。如果是 True，绘制带有表的轴框架。
 
 **rotatelabels** ：布尔类型，默认为 False。如果为 True，旋转每个 label 到指定的角度。
-
-

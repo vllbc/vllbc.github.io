@@ -1,6 +1,7 @@
 # LDA
 
 
+
 # 线性判别分析LDA(Linear Discriminant Analysis)
 线性判别分析，也就是LDA（与主题模型中的LDA区分开），现在常常用于数据的降维中，但从它的名字中可以看出来它也是一个分类的算法，而且属于硬分类，也就是结果不是概率，是具体的类别，一起学习一下吧。
 
@@ -79,7 +80,7 @@ $$
 现在的问题就是这些都是矩阵，不能像上面那样直接优化，需要替换优化目标。
 
 $$
-\underbrace{arg\;max}\_W\;\;J(W) = \frac{\prod\limits_{diag}W^TS_bW}{\prod\limits_{diag}W^TS_wW}
+\underbrace{arg\;max}_W\;\;J(W) = \frac{\prod\limits_{diag}W^TS_bW}{\prod\limits_{diag}W^TS_wW}
 $$
 其中 $\prod_{diag}A$为A的主对角线元素的乘积,W为$n \times d$的矩阵，n为原来的维度，d为映射到超平面的维度，则最终的目标就变成了：
 
@@ -151,9 +152,3 @@ eig_pairs = sorted(eig_pairs, key=lambda k: k[0], reverse=True)
 #     print('eigenvalue {0:}: {1:.2%}'.format(i + 1, (j[0] / eigv_sum).real)) # 根据百分比显示特征值，从而选取最大的n个特征值
 W = np.hstack((eig_pairs[0][1].reshape(X_train.shape[1], 1), eig_pairs[1][1].reshape(X_train.shape[1], 1)))
 ```
-
-
-
-
-
-

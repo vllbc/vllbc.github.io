@@ -1,6 +1,7 @@
 # TfidfTransformer
 
 
+
 **TfidfTransformer()**
 **输入：词频TF**
 **输出：词频逆反文档频率TF-IDF**（即词频TF与逆反文档频率IDF的乘积，IDF的标准计算公式为 ：idf=log[n/(1+df)]，其中n为文档总数，df为含有所计算单词的文档数量，df越小，idf值越大，也就是说出现频率越小的单词意义越大）
@@ -22,5 +23,3 @@ tfidf = TfidfTransformer().fit_transform(cv.fit_transform(corpus))
 **输出：该文档的词频逆反文档频率TF-IDF**
 
 **TfidfVectorizer()**.fit_transform(corpus) = **TfidfTransformer()**.fit_transform(**CountVectorizer()**.fit_transform(corpus))
-
-

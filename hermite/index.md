@@ -1,6 +1,7 @@
 # Hermite
 
 
+
 # Hermite插值法
 
 ## 公式
@@ -58,5 +59,3 @@ plt.title('Hermite Interpolation')
 plt.show()
 
 ```
-
-

@@ -2,6 +2,7 @@
 
 
 
+
 ## 通过sklearn模块实现
 
 ```python
@@ -169,5 +170,3 @@ def gaussian_kernel(X, y):
 
     return np.exp(-np.linalg.norm(X - y, axis=1)**2 / 2)
 ```
-
-

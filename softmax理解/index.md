@@ -1,6 +1,7 @@
 # softmax理解
 
 
+
 # Softmax理解
 
 主要记录了在使用softmax这个函数中遇到的一些问题，比较基础，但确实困扰了一段时间。
@@ -85,6 +86,3 @@ $$
 ## 参考
 
 > https://zhuanlan.zhihu.com/p/105722023
-
-
-

@@ -1,6 +1,7 @@
 # 预训练模型
 
 
+
 # 预训练模型
 
 ## 概述
@@ -51,6 +52,3 @@ Transformer 可以用于编码，也可以用于解码。所谓解码就是根�
 > [https://www.zhihu.com/question/327642286](https://www.zhihu.com/question/327642286)
 >
 > [https://zhuanlan.zhihu.com/p/115014536](https://zhuanlan.zhihu.com/p/115014536)
-
-
-

@@ -1,6 +1,7 @@
 # Logistic回归
 
 
+
 # Logistic回归
 ## 线性回归
 线性回归表达式：
@@ -138,6 +139,3 @@ class LogisticRegression:
         y_predict = self.sigmoid(np.dot(X,self.weights)+self.bias)
         return np.array(y_predict)
 ```
-
-
-

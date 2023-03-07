@@ -1,6 +1,7 @@
 # 单隐层多分类网络
 
 
+
 # 单隐层多分类神经网络（numpy实现）
 使用Numpy实现，并且使用命令行的形式设定参数。
 
@@ -777,5 +778,3 @@ def train(X_tr: np.ndarray, y_tr: np.ndarray,
 ```
 
 记录下来主要是学习这种思想，神经网络就是不同的组件一点一点拼接起来的，这点在复现transformer的时候深有感受，因此以后复现论文的话要按照这样的思路来，比如linear、sigmoid，都实现了forward和backword，这样的思想就不会显得特别复杂。特此记录。
-
-

@@ -1,6 +1,7 @@
 # 两两交换链表中的节点
 
 
+
 # 两两交换链表中的节点
 
 ## 题目：
@@ -28,7 +29,3 @@ class Solution: #假设为[1,2,3,4]
         newnode.next = head #[2,1,4,3]
         return newnode
 ```
-
-
-
-

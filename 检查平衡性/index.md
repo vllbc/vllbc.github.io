@@ -1,6 +1,7 @@
 # 检查平衡性
 
 
+
 # 检查平衡性
 
 ## 题目：
@@ -35,7 +36,3 @@ class Solution:
             return 0
         return 1 + max(self.maxdepth(root.right),self.maxdepth(root.left))  
 ```
-
-
-
-

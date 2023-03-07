@@ -1,6 +1,7 @@
 # others
 
 
+
 # 一些我常用的学习的网站和书籍
 
 ## 编程前的准备
@@ -124,7 +125,3 @@ PYTHON网上的教程很多，优秀的博客也有很多，像廖雪峰的博�
 [https://scikit-learn.org/stable/modules/classes.html#module-sklearn.datasets](https://scikit-learn.org/stable/modules/classes.html#module-sklearn.datasets) ：SKLEARN的API查询网站。
 
 [https://vllbc.top/](https://vllbc.top/) ：我的个人网站。
-
-
-
-

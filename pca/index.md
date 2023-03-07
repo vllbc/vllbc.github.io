@@ -1,6 +1,7 @@
 # PCA
 
 
+
 # 主成分分析(PCA)
 
 主成分分析（Principal components analysis，以下简称PCA）是最重要的降维方法之一。在数据压缩消除冗余和数据噪音消除等领域都有广泛的应用。注意的是PCA属于无监督学习。
@@ -118,8 +119,8 @@ $$
 $$
 \begin{align}S&=\frac{1}{N}\sum\limits_{i=1}^N(x_i-\overline{x})(x_i-\overline{x})^T\nonumber\\\\
 &=\frac{1}{N}(x_1-\overline{x},x_2-\overline{x},\cdots,x_N-\overline{x})(x_1-\overline{x},x_2-\overline{x},\cdots,x_N-\overline{x})^T\nonumber\\\\
-&=\frac{1}{N}(X^T-\frac{1}{N}X^T\mathbb{I}\_{N1}\mathbb{I}\_{N1}^T)(X^T-\frac{1}{N}X^T\mathbb{I}\_{N1}\mathbb{I}\_{N1}^T)^T\nonumber\\\\
-&=\frac{1}{N}X^T(E_N-\frac{1}{N}\mathbb{I}\_{N1}\mathbb{I}\_{1N})(E_N-\frac{1}{N}\mathbb{I}\_{N1}\mathbb{I}\_{1N})^TX\nonumber\\\\
+&=\frac{1}{N}(X^T-\frac{1}{N}X^T\mathbb{I}_{N1}\mathbb{I}_{N1}^T)(X^T-\frac{1}{N}X^T\mathbb{I}_{N1}\mathbb{I}_{N1}^T)^T\nonumber\\\\
+&=\frac{1}{N}X^T(E_N-\frac{1}{N}\mathbb{I}_{N1}\mathbb{I}_{1N})(E_N-\frac{1}{N}\mathbb{I}_{N1}\mathbb{I}_{1N})^TX\nonumber\\\\
 &=\frac{1}{N}X^TH_NH_N^TX\nonumber\\\\
 &=\frac{1}{N}X^TH_NH_NX=\frac{1}{N}X^THX
 \end{align}
@@ -216,7 +217,3 @@ pca(np.array([[1, 2, 5], [3, 4, 6], [5, 6, 9], [3, 2 ,5]]))
 > [https://zhuanlan.zhihu.com/p/77151308](https://zhuanlan.zhihu.com/p/77151308)
 >
 > [https://www.cnblogs.com/pinard/p/6239403.html](https://www.cnblogs.com/pinard/p/6239403.html)
-
-
-
-

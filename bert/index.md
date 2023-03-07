@@ -1,6 +1,7 @@
 # BERT
 
 
+
 # Bert
 BERT 的模型架构非常简单，你已经知道它是如何工作的：它只是 Transformer 的编码器。新的是训练目标和 BERT 用于下游任务的方式。
 
@@ -91,5 +92,3 @@ Apdater-Bert的想法是将task-specific layer放在预训练模型中间，也�
 那这个字最后的 word Embedding，就是上面三种 Embedding 的加和。
 
 如此得到的 word Embedding，和concat后的特征：[1,0,0,0,1,0,0,1,0]，再过维度为 [4+3+2,768] = [9, 768] 的全连接层，得到的向量其实就是一样的。
-
-

@@ -1,4 +1,5 @@
-# 经典GAN
+# GAN
+
 
 ## 简介
 生成对抗网络（Generative Adversarial Network，简称GAN）是无监督学习的一种方法，通过让两个神经网络相互博弈的方式进行学习。
@@ -36,5 +37,3 @@ $$
 J^{(G)} = -\frac{1}{2}E_z\log D(G(z))
 $$
 即“以假乱真”。
-
-

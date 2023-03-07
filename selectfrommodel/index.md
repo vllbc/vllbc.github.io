@@ -1,6 +1,7 @@
 # SelectFromModel
 
 
+
 # Sklearn.feature_selection.SelectFromModel
 
 ```python
@@ -52,7 +53,3 @@ threshold_：float
 	将X缩小为选定的特征。
 
 ```
-
-
-
-

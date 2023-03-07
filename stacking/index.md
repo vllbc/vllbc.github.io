@@ -1,6 +1,7 @@
 # Stacking
 
 
+
 # Stacking
 
 ## 思想简介
@@ -20,5 +21,3 @@
 ## 伪代码
 
 ![](image/Pasted%20image%2020220826211308.png)
-
-

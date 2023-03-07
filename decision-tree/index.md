@@ -3,6 +3,7 @@
 
 
 
+
 ```python
 import numpy as np
 import matplotlib.pyplot as plt
@@ -53,7 +54,3 @@ classifier.score(X_test,y_test)
 
 
     0.91
-
-
-
-

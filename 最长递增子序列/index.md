@@ -1,6 +1,7 @@
 # 最长递增子序列
 
 
+
 # 最长递增子序列
 
 ## 题目：
@@ -23,7 +24,3 @@ class Solution:
                     dp[i] = max(dp[i],dp[j]+1)
         return max(dp)
 ```
-
-
-
-

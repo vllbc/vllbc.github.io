@@ -1,6 +1,7 @@
 # 树回归
 
 
+
 参考：[https://cuijiahua.com/blog/2017/12/ml_13_regtree_1.html](https://cuijiahua.com/blog/2017/12/ml_13_regtree_1.html)
 
 ## 1、ID3算法的弊端
@@ -40,7 +41,7 @@ $$
 $$
 \begin{gathered}
 R_{1}(j, s)=\left\\{x \mid x^{(j)} \leq s\right\\\}, R_{2}(j, s)=\left\\{x \mid x^{(j)}>s\right\\\} \\\\
-\hat{c}\_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
+\hat{c}_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
 x \in R_{m}, m=1,2
 \end{gathered}
 $$
@@ -48,12 +49,7 @@ $$
 继续对两个子区域调用上述步骤，将输入空间划分为 $M$ 个区域R1,R2,..,Rm，生成决策树。
 
 $$
-f(x)=\sum_{m=1}^{M} \hat{c}\_{m} I\left(x \epsilon R_{m}\right)
+f(x)=\sum_{m=1}^{M} \hat{c}_{m} I\left(x \epsilon R_{m}\right)
 $$
 
 当输入空间划分确定时，可以用平方误差来表示回归树对于训练数据的预测方法，用平方误差最小 的准则求解每个单元上的最优输出值。
-
-
-
-
-

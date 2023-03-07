@@ -1,6 +1,7 @@
 # 优劣解距离法Topsis
 
 
+
 # 优劣解距离法Topsis
 
 ## 步骤
@@ -149,6 +150,3 @@ Stand_S = Stand_S[inx]
 print(Stand_S)
 
 ```
-
-
-

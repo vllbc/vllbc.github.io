@@ -1,6 +1,7 @@
 # as_strided
 
 
+
 调用为`np.lib.stride_tricks.as_strided()`
 可以分割一个数组为不同的shape块，有个问题就是什么是strides呢？可以看个例子：
 ```python
@@ -80,5 +81,3 @@ def sliding_stack_np(v, k):
 ```
 
 因为原向量是1维的，所以转换后的strides为[4,4]。希望可以帮助理解。
-
-

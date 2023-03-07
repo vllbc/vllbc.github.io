@@ -3,6 +3,7 @@
 
 
 
+
 ​	
 
 ```python
@@ -32,13 +33,3 @@ plt.show()
 ```
 
 ![png](output1.png)
-
-
-
-
-
-
-
-
-
-

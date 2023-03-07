@@ -1,6 +1,7 @@
 # 字符串的排列
 
 
+
 # 字符串的排列
 
 ## 题目：
@@ -32,7 +33,3 @@ class Solution(object):
             right += 1
         return False
 ```
-
-
-
-

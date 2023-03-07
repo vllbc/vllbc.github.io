@@ -2,6 +2,7 @@
 
 
 
+
 ## 条件概率
 
 $P(B|A) = \frac{P(AB)}{P(A)}$
@@ -100,11 +101,11 @@ $$
 
 $$
 \begin{aligned}
-\hat{y} &= \arg \maxP(y|X) \\\\
+\hat{y} &= \arg \max(y|X) \\\\
 & = \arg \max\frac{P(X,y)}{P(X)}  \\\\ 
 & = \arg \max\frac{P(y)P(X|y)}{P(X)} \\\\
-& = \arg \maxP(y) P(X|y) \\\\
-& = \arg \maxP(y)P(x_1,x_2,\dots x_p| y)
+& = \arg \max(y) P(X|y) \\\\
+& = \arg \max(y)P(x_1,x_2,\dots x_p| y)
 \end{aligned}
 $$
 
@@ -113,7 +114,7 @@ $$
 即最终的式子就是
 
 $$
-\hat{y} = \arg \maxP(y)\prod_{j=1}^p P(x_j|y)
+\hat{y} = \arg \max(y)\prod_{j=1}^p P(x_j|y)
 $$
 
 这就是朴素贝叶斯的主要推导。
@@ -148,7 +149,7 @@ $$
 贝叶斯判定准则：为最小化总体条件风险，只需在每个样本上选择那个能使条件风险$R(c\mid x)$最小的类别标记，即：
 
 $$
-h^{*}(x) = \underbrace{\arg \min }\_{c\in \gamma} R(c\mid x)
+h^{*}(x) = \underbrace{\arg \min }_{c\in \gamma} R(c\mid x)
 $$
 
 此时，$h^* (x)$称为贝叶斯最优分类器，与之对应的总体风险$R(h^* )$称为贝叶斯风险。$1-R(h*)$反映了分类器所能达到的最好性能。
@@ -162,7 +163,7 @@ $$
 于是此时的最优分类器变为了
 
 $$
-h^* (x) = \arg \min(1-P(c\mid x)) = \arg \maxP(c\mid x)
+h^* (x) = \arg \min(1-P(c\mid x)) = \arg \max(c\mid x)
 $$
 
 这就是后验概率最大化的含义。
@@ -275,6 +276,3 @@ $$
 ![](image/Pasted%20image%2020221012113741.png)
 ![](image/Pasted%20image%2020221012113749.png)
 ![](image/Pasted%20image%2020221012113755.png)
-
-
-

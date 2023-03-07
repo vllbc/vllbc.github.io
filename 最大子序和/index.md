@@ -1,6 +1,7 @@
 # 最大子序和
 
 
+
 # 最大子序和
 
 [https://leetcode-cn.com/problems/maximum-subarray/](https://leetcode-cn.com/problems/maximum-subarray/)
@@ -30,5 +31,3 @@ class Solution:
 ```
 
 最后巧妙地利用了替换的思想，将每次相加的值和当前比较，并将当前替换为较大的那个值，最后求整个列表的最大值。
-
-

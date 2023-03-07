@@ -1,6 +1,7 @@
 # 可获得的最大点数
 
 
+
 # 可获得的最大点数
 
 ## 题目：
@@ -28,7 +29,3 @@ class Solution:
             minSum = min(minSum, s)
         return sum(cardPoints) - minSum
 ```
-
-
-
-

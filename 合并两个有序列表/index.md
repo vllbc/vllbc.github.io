@@ -1,6 +1,7 @@
 # 合并两个有序列表
 
 
+
 # 合并两个有序列表
 
 ## 题目：
@@ -32,7 +33,3 @@ class Solution:
             l2.next = self.mergeTwoLists(l1,l2.next)
             return l2
 ```
-
-
-
-

@@ -1,6 +1,7 @@
 # HMM
 
 
+
 # 隐马尔科夫模型
 
 ## 介绍
@@ -466,5 +467,3 @@ viterbi(['红', '白', '红'], [0, 1, 2], π, A, B)
 > [https://www.52nlp.cn/hmm-learn-best-practices-one-introduction](https://www.52nlp.cn/hmm-learn-best-practices-one-introduction)
 > 
 > [https://www.cnblogs.com/pinard/p/6945257.html](https://www.cnblogs.com/pinard/p/6945257.html)
-
-

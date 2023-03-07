@@ -1,6 +1,7 @@
 # 对称二叉树
 
 
+
 # 对称二叉树
 
 ## 题目：
@@ -38,7 +39,3 @@ class Solution:
                 d.append((left.right,right.left))
         return True
 ```
-
-
-
-

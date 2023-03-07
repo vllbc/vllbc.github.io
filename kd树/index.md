@@ -1,6 +1,7 @@
 # kd树
 
 
+
 # kd树
 
 knn算法就是用kd树实现的
@@ -130,6 +131,3 @@ Nearest Point of [1, 5]: [2, 3]
 ## 参考
 
 >[https://zhuanlan.zhihu.com/p/499241064#:~:text=kd%E6%A0%91%E7%94%A8%E4%BA%8E%E5%AF%B9k%E7%BB%B4,%E7%9A%84%E6%97%B6%E5%80%99%E9%9D%9E%E5%B8%B8%E8%80%97%E6%97%B6%E3%80%82](https://zhuanlan.zhihu.com/p/499241064#:~:text=kd%E6%A0%91%E7%94%A8%E4%BA%8E%E5%AF%B9k%E7%BB%B4,%E7%9A%84%E6%97%B6%E5%80%99%E9%9D%9E%E5%B8%B8%E8%80%97%E6%97%B6%E3%80%82)
-
-
-

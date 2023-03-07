@@ -1,6 +1,7 @@
 # one_test
 
 
+
 # 用命令行实现博客自动更新，类似于网站后端
 
 需要用到的库有`os`标准库
@@ -256,7 +257,3 @@ if  __name__ == '__main__':
     ex = Example()
     sys.exit(app.exec_())
 ```
-
-
-
-

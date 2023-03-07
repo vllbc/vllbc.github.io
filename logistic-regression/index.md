@@ -1,6 +1,7 @@
 # Logistic Regression
 
 
+
 ## 导入包
 
 
@@ -147,7 +148,3 @@ model.score(X_test,Y_test)
 
 
     0.7933333333333333
-
-
-
-

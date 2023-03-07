@@ -1,6 +1,7 @@
 # 至少有k个重复字符的最长字串
 
 
+
 # 至少有k个重复字符的最长字串
 
 ## 题目：
@@ -23,7 +24,3 @@ class Solution(object):
                 return max(self.longestSubstring(t, k) for t in s.split(c))
         return len(s)
 ```
-
-
-
-

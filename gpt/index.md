@@ -1,6 +1,7 @@
 # GPT
 
 
+
 # GPT
 
 ## 预训练(从左到右的 Transformer 语言模型)
@@ -20,7 +21,3 @@ L = L_{xent} + \lambda \cdot L_{task}.
 $$
 
 ![](image/Pasted%20image%2020221111180612.png)
-
-
-
-

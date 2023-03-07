@@ -1,6 +1,7 @@
 # Attention
 
 
+
 # Seq2Seq中的Attention
 
 ## 缺陷
@@ -148,5 +149,3 @@ class Seq2SeqAttentionDecoder(AttentionDecoder):
 
 # Self-attention
 移步transformer。
-
-

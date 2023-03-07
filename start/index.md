@@ -1,6 +1,7 @@
 # start
 
 
+
 # 开始！
 
 用`import torch`导入`pytorch`库
@@ -300,9 +301,3 @@ b=a.numpy()#a为张量
 a = np.arange.randn()
 b = torch.from_numpy(a)#a为array
 ```
-
-
-
-
-
-

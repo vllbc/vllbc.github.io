@@ -1,6 +1,7 @@
 # 变更性别
 
 
+
 # [变更性别](https://leetcode-cn.com/problems/swap-salary/)
 
 [https://leetcode-cn.com/problems/swap-salary/](https://leetcode-cn.com/problems/swap-salary/)
@@ -18,7 +19,3 @@ THEN 'f'
 ELSE 'm'
 END;
 ```
-
-
-
-

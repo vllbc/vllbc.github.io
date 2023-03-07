@@ -1,6 +1,7 @@
 # 最长回文子串
 
 
+
 # 最长回文子串
 
 ## 题目：
@@ -61,7 +62,3 @@ class Solution:
                         start = i
         return s[start:start + max_len]
 ```
-
-
-
-

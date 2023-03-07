@@ -1,6 +1,7 @@
 # 按序打印
 
 
+
 # 按序打印
 
 [https://leetcode-cn.com/problems/print-in-order/](https://leetcode-cn.com/problems/print-in-order/)
@@ -33,7 +34,3 @@
             # printThird() outputs "third". Do not change or remove this line.
             printThird()
 ```
-
-
-
-

@@ -1,6 +1,7 @@
 # apply_along_axis
 
 
+
 类似于pandas的apply，就是在某一维上进行定义的函数操作
 
 ````python3
@@ -23,5 +24,3 @@ array([ 4.,  5.,  6.])
 array([ 2.,  5.,  8.])
 
 ```
-
-

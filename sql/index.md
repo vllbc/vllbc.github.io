@@ -1,6 +1,7 @@
 # sql
 
 
+
 # **sql学习**
 
 > 1. 连接数据库 mysql -u root -p 输入密码即可
@@ -66,7 +67,3 @@
 附：
 
 sql各连接![avatar](sqllj.jpg)
-
-
-
-

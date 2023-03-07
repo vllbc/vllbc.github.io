@@ -1,6 +1,7 @@
 # GBDT
 
 
+
 # 梯度提升决策树(GBDT)
 
 GBDT**(Gradient Boosting Decision Tree)**是一种迭代的[决策树](https://so.csdn.net/so/search?q=决策树&spm=1001.2101.3001.7020)算法，由多棵决策树组成，所有树的结论累加起来作为最终答案。
@@ -17,8 +18,8 @@ $$
 
 $$
 \begin{gathered}
-R_{1}(j, s)=\left\\{x \mid x^{(j)} \leq s\right\\\}, R_{2}(j, s)=\left\\{x \mid x^{(j)}>s\right\\\} \\\\
-\hat{c}\_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
+R_{1}(j, s)=\{x \mid x^{(j)} \leq s\}, R_{2}(j, s)=\{x \mid x^{(j)}>s\} \\\\
+\hat{c}_{m}=\frac{1}{N_{m}} \sum_{x_{i} \in R_{m}(j, s)} y_{i} \\\\
 x \in R_{m}, m=1,2
 \end{gathered}
 $$
@@ -26,7 +27,7 @@ $$
 继续对两个子区域调用上述步骤，将输入空间划分为 $M$ 个区域R1,R2,..,Rm，生成决策树。
 
 $$
-f(x)=\sum_{m=1}^{M} \hat{c}\_{m} I\left(x \epsilon R_{m}\right)
+f(x)=\sum_{m=1}^{M} \hat{c}_{m} I\left(x \epsilon R_{m}\right)
 $$
 
 当输入空间划分确定时，可以用平方误差来表示回归树对于训练数据的预测方法，用平方误差最小 的准则求解每个单元上的最优输出值。
@@ -111,13 +112,13 @@ $$
 (c) 对叶子区域 $j=1,2, . . J$ 计算最佳拟合值
 
 $$
-\Upsilon_{j m}=\underbrace{\arg \min}\_{\Upsilon} \sum_{x_{i} \in R_{j m}} L\left(y_{i}, f_{m-1}\left(x_{i}\right)+\Upsilon\right)
+\Upsilon_{j m}=\underbrace{\arg \min}_{\Upsilon} \sum_{x_{i} \in R_{j m}} L\left(y_{i}, f_{m-1}\left(x_{i}\right)+\Upsilon\right)
 $$
 
 也可以理解为：
 
 $$
-\Upsilon_{jm} = \underbrace{\arg \min}\_{\Upsilon} \sum_{x_i \in R_{jm}} L(r_{im}, \Upsilon)
+\Upsilon_{jm} = \underbrace{\arg \min}_{\Upsilon} \sum_{x_i \in R_{jm}} L(r_{im}, \Upsilon)
 $$
 
 
@@ -297,5 +298,3 @@ class GBDT:
 
 >[https://blog.csdn.net/zpalyq110/article/details/79527653](https://blog.csdn.net/zpalyq110/article/details/79527653)
 >[https://zhuanlan.zhihu.com/p/280222403](https://zhuanlan.zhihu.com/p/280222403)
-
-

@@ -1,6 +1,7 @@
 # RFE
 
 
+
 ## sklearn.feature_selection.RFE
 RFE（Recursive feature elimination）：递归特征消除，用来对特征进行重要性评级。主要用于特征选择
 RFE阶段
@@ -31,5 +32,3 @@ print("Optimal number of features:",rfecv.n_features_)
 print(rfecv.support_)
 print("Selecting features:",list(X.columns[rfecv.support_]))
 ```
-
-

@@ -1,4 +1,5 @@
-# SVM
+# SVM_sklearn
+
 
 
 
@@ -113,7 +114,3 @@ plt.show()
 
 
 ![png](output_9_0.png)
-
-
-
-

@@ -1,6 +1,7 @@
 # seq2seq
 
 
+
 # Seq2Seq
 
 （本文只介绍最原始的seq2seq，带有注意力在attention文章中）
@@ -356,5 +357,3 @@ if __name__ == '__main__':
     print('upp ->', translate('upp'))
 
 ```
-
-

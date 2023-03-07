@@ -1,6 +1,7 @@
 # 决策树
 
 
+
 参考：[https://cuijiahua.com/blog/2017/11/ml_2_decision_tree_1.html](https://cuijiahua.com/blog/2017/11/ml_2_decision_tree_1.html)
 
 《机器学习》周志华
@@ -376,7 +377,3 @@ print(createTree(dataSet[:, :-1], dataSet[:, -1], labels))
 ```
 {'有自己的房子': {'0': {'有工作': {'0': 'no', '1': 'yes'}}, '1': 'yes'}}
 ```
-
-
-
-

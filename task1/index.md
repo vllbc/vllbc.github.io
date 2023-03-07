@@ -1,6 +1,7 @@
 # task1
 
 
+
 # **pandas实践1**
 
 **在读取数据之前，我修改了表格里面的表头，以便程序的编写。** 
@@ -89,7 +90,3 @@ res['密码'] = res['账号']
 res['专业'] = data['class']
 res.to_excel("result.xlsx", index=False,encoding='utf-8')
 ```
-
-
-
-

@@ -1,6 +1,7 @@
 # 文本相似度
 
 
+
 # Tf-Idf
 参考：[https://www.jb51.net/article/142132.htm](https://www.jb51.net/article/142132.htm)
 
@@ -60,5 +61,3 @@ print(dictionary.token2id)
 11、通过token2id得到特征数
 12、稀疏矩阵相似度，从而建立索引
 13、得到最终相似度结果
-
-

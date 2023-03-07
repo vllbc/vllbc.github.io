@@ -3,6 +3,7 @@
 
 
 
+
 ```python
 import pandas as pd
 import numpy as np
@@ -136,7 +137,3 @@ regressor.fit(X_train,Y_train)
 
 
     LinearRegression()
-
-
-
-

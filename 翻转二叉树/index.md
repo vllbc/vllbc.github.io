@@ -1,6 +1,7 @@
 # 翻转二叉树
 
 
+
 # 翻转二叉树
 
 开始学习二叉树了
@@ -30,7 +31,3 @@ class Solution:
         self.invertTree(root.right)
         return root
 ```
-
-
-
-

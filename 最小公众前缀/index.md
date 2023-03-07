@@ -1,6 +1,7 @@
 # 最小公众前缀
 
 
+
 # 最小公众前缀
 
 leetcode上的简单题，[最小公众前缀](https://leetcode-cn.com/problems/longest-common-prefix/)
@@ -59,5 +60,3 @@ def longestCommonPrefix3(strs):
 ```
 
 如上！
-
-

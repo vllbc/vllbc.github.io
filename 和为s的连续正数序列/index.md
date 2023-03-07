@@ -1,6 +1,7 @@
 # 和为s的连续正数序列
 
 
+
 # 和为s的连续正数序列
 
 ## 题目:
@@ -29,7 +30,3 @@ class Solution:
                 left += 1
         return res
 ```
-
-
-
-

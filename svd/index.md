@@ -1,6 +1,7 @@
 # SVD
 
 
+
 # SVD奇异值分解
 
 参考：[https://www.cnblogs.com/pinard/p/6251584.html](https://www.cnblogs.com/pinard/p/6251584.html)
@@ -44,7 +45,3 @@ $$
 后得到$n\times n$的方阵$A^TA$,然后进行特征值分解，$(A^TA)v_i=\lambda_iv_i$ 将$A^TA$的所有特征向量张成一个$n\times n$的矩阵V，就是SVD公式里面的V矩阵了。
 
 特征值和奇异值满足以下关系$\sigma_i = \sqrt{\lambda_i}$，意思就是我们可以通过求$A^TA$的特征值取平方根来求奇异值。
-
-
-
-

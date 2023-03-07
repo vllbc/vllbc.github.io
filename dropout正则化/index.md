@@ -1,6 +1,7 @@
 # Dropout正则化
 
 
+
 # Dropout
 
 在标准dropout正则化中，通过按保留（未丢弃）的节点的分数进行归一化来消除每一层的偏差。换言之，每个中间激活值h以保留概率概率p由随机变量替换
@@ -45,7 +46,3 @@ def dropout_layer(X,dropout):
     return mask * X/(dropout)
 
 ```
-
-
-
-

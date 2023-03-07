@@ -2,6 +2,7 @@
 
 
 
+
 # pd.melt
 ## 用法
 直观的看就是将宽数据转化为长数据。转化为variable-value这样的形式。
@@ -116,5 +117,3 @@ pd.melt(df, id_vars=[('A', 'D')], value_vars=[('B', 'E')])
 '''
 
 ```
-
-

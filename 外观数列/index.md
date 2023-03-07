@@ -1,6 +1,7 @@
 # 外观数列
 
 
+
 # 外观数列
 
 [https://leetcode-cn.com/problems/count-and-say/](https://leetcode-cn.com/problems/count-and-say/)
@@ -28,5 +29,3 @@ print(Solution().countAndSay(3))
 思路：
 
 ​	递归，将上一层计算出来的东西作为迭代对象。
-
-

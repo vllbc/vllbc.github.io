@@ -1,6 +1,7 @@
 # 移除元素
 
 
+
 # 移除元素
 
 还是以前刷过的题 [https://leetcode-cn.com/problems/remove-element/](https://leetcode-cn.com/problems/remove-element/)
@@ -23,7 +24,3 @@ class Solution:
             nums.remove(val)
         return len(nums)
 ```
-
-
-
-

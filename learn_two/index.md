@@ -3,6 +3,7 @@
 
 
 
+
 ```python
 import pandas as pd
 import numpy as np
@@ -2170,7 +2171,3 @@ df.head()
 <p>5 rows × 22 columns</p>
 
 </div>
-
-
-
-

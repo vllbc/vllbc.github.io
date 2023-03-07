@@ -1,6 +1,7 @@
 # 打印零和奇偶数
 
 
+
 # 打印零和奇偶数
 
 多线程问题，利用线程锁可以轻松解决
@@ -40,7 +41,3 @@ class ZeroEvenOdd:
                 printNumber(i)
                 self.zerolock.release()
 ```
-
-
-
-

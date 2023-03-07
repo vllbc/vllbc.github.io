@@ -1,6 +1,7 @@
 # regression
 
 
+
 # 一个线性回归的神经网络模型
 
 ```python
@@ -131,7 +132,3 @@ net(arrays)
 
 
     tensor([[21.3448]], grad_fn=<AddmmBackward>)
-
-
-
-

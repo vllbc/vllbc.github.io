@@ -1,6 +1,7 @@
 # Transformer
 
 
+
 # Transformer
 
 ## 背景
@@ -167,7 +168,71 @@ class MultiHeadedAttention(nn.Module):
 ![](image/Pasted%20image%2020220924001925.png)
 
 后面还有padding mask，所有的self attention都要用这个，因为pad的位置没有任何意义。
+实践一下加深理解：
+首先我们来定义模型：
+```python
+# 词典数为10， 词向量维度为8
+embedding = nn.Embedding(10, 8)
+# 定义Transformer，注意一定要改成eval模型，否则每次输出结果不一样
+transformer = nn.Transformer(d_model=8, batch_first=True).eval()
 
+```
+接下来定义我们的src和tgt：
+```python
+# Encoder的输入
+src = torch.LongTensor([[0, 1, 2, 3, 4]])
+# Decoder的输入
+tgt = torch.LongTensor([[4, 3, 2, 1, 0]])
+
+```
+然后我们将`[4]`送给Transformer进行预测，模拟推理时的第一步：
+```python
+transformer(embedding(src), embedding(tgt[:, :1]),
+            # 这个就是用来生成阶梯式的mask的
+            tgt_mask=nn.Transformer.generate_square_subsequent_mask(1))
+
+```
+
+```python
+tensor([[[ 1.4053, -0.4680,  0.8110,  0.1218,  0.9668, -1.4539, -1.4427,
+           0.0598]]], grad_fn=<NativeLayerNormBackward0>)
+
+```
+然后我们将`[4, 3]`送给Transformer，模拟推理时的第二步：
+```python
+transformer(embedding(src), embedding(tgt[:, :2]), tgt_mask=nn.Transformer.generate_square_subsequent_mask(2))
+
+```
+
+```python
+tensor([[[ 1.4053, -0.4680,  0.8110,  0.1218,  0.9668, -1.4539, -1.4427,
+           0.0598],
+         [ 1.2726, -0.3516,  0.6584,  0.3297,  1.1161, -1.4204, -1.5652,
+          -0.0396]]], grad_fn=<NativeLayerNormBackward0>)
+
+```
+出的第一个向量和上面那个一模一样。
+
+最后我们再将tgt一次性送给transformer，模拟训练过程：
+```python
+transformer(embedding(src), embedding(tgt), tgt_mask=nn.Transformer.generate_square_subsequent_mask(5))
+
+```
+
+```python
+tensor([[[ 1.4053, -0.4680,  0.8110,  0.1218,  0.9668, -1.4539, -1.4427,
+           0.0598],
+         [ 1.2726, -0.3516,  0.6584,  0.3297,  1.1161, -1.4204, -1.5652,
+          -0.0396],
+         [ 1.4799, -0.3575,  0.8310,  0.1642,  0.8811, -1.3140, -1.5643,
+          -0.1204],
+         [ 1.4359, -0.6524,  0.8377,  0.1742,  1.0521, -1.3222, -1.3799,
+          -0.1454],
+         [ 1.3465, -0.3771,  0.9107,  0.1636,  0.8627, -1.5061, -1.4732,
+           0.0729]]], grad_fn=<NativeLayerNormBackward0>)
+
+```
+可以看到使用mask后就可以保证前面的结果都是不变的，不然如果没有mask则计算attention时因为计算注意力变化所以结果都会变化，这就是Mask self-attention的意义。
 到这里self-attention就介绍完了
 
 ### 代码
@@ -352,10 +417,9 @@ $$
 PE_{pos,2i} = sin(\frac{pos}{10000^{\frac{2i}{d_{model}}}})
 $$
 
+
 $$
-
 PE_{pos,2i+1} = cos(\frac{pos}{10000^{\frac{2i}{d_{model}}}})
-
 $$
 ![](image/Pasted%20image%2020220810230806.png)
 可以看到，每个词的维度都是512维，假设句子长度为10，则位置编码的计算如上图所示。
@@ -570,7 +634,7 @@ class LabelSmoothing(nn.Module): # 标签平滑损失函数
 ```
 
 ## 预测
-	预测过程与一般seq2seq不同的是，t时刻是将1到t-1时刻所有的预测结果作为序列进行预测，而seq2seq只是使用前一时刻的输出作为当前时刻的输入，这里困扰了我很久，实现了transformer代码后对比李沐老师的代码才理解。
+**预测过程与一般seq2seq不同的是，t时刻是将1到t-1时刻所有的预测结果作为序列进行预测，而seq2seq只是使用前一时刻的输出作为当前时刻的输入，这里困扰了我很久，实现了transformer代码后对比李沐老师的代码才理解。**
 
 其中seq2seq:
 ![](image/Pasted%20image%2020220926004931.png)
@@ -602,5 +666,3 @@ Transformer在两个地方进行了权重共享：
 因此，Embedding层和FC层权重共享，Embedding层中和向量 x 最接近的那一行对应的词，会获得更大的预测概率。实际上，Decoder中的**Embedding层和FC层有点像互为逆过程**。
 
 通过这样的权重共享可以减少参数的数量，加快收敛。
-
-

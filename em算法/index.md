@@ -1,6 +1,7 @@
 # EM算法
 
 
+
 # EM算法
 ## 引入
 
@@ -292,22 +293,22 @@ Q\left(\theta, \theta^{(i)}\right) &=E\left[\log P(y, \gamma \mid \theta) \mid y
 \end{aligned}
 $$
 
-这里需要计算 $E\left(\gamma_{j k} \mid y, \theta\right)$, 记为 $\hat{\gamma}\_{j k}$ 。
+这里需要计算 $E\left(\gamma_{j k} \mid y, \theta\right)$, 记为 $\hat{\gamma}_{j k}$ 。
 
 $$
 \begin{aligned}
-\hat{\gamma}\_{j k} &=E\left(\gamma_{j k} \mid y, \theta\right)=P\left(\gamma_{j k}=1 \mid y, \theta\right) \\\\
+\hat{\gamma}_{j k} &=E\left(\gamma_{j k} \mid y, \theta\right)=P\left(\gamma_{j k}=1 \mid y, \theta\right) \\\\
 &=\frac{P\left(\gamma_{j k}=1, y_j \mid \theta\right)}{\sum_{k=1}^K P\left(\gamma_{j k}=1, y_j \mid \theta\right)} \\\\
 &=\frac{P\left(y_j \mid \gamma_{j k}=1, \theta\right) P\left(\gamma_{j k}=1 \mid \theta\right)}{\sum_{k=1}^K P\left(y_j \mid \gamma_{j k}=1, \theta\right) P\left(\gamma_{j k}=1 \mid \theta\right)} \\\\
 &=\frac{\alpha_k \phi\left(y_j \mid \theta_k\right)}{\sum_{k=1}^K \alpha_k \phi\left(y_j \mid \theta_k\right)}, \quad j=1,2, \cdots, N ; \quad k=1,2, \cdots, K
 \end{aligned}
 $$
 
-$\hat{\gamma}\_{j k}$ 是在当前模型参数下第 $j$ 个观测数据来自第 $k$ 个分模型的概率, 称为分模型 $k$ 对 观测数据 $y_j$ 的响应度。
-将 $\hat{\gamma}\_{j k}=E \gamma_{j k}$ 及 $n_k=\sum_{j=1}^N E \gamma_{j k}$ 代入, 即得
+$\hat{\gamma}_{j k}$ 是在当前模型参数下第 $j$ 个观测数据来自第 $k$ 个分模型的概率, 称为分模型 $k$ 对 观测数据 $y_j$ 的响应度。
+将 $\hat{\gamma}_{j k}=E \gamma_{j k}$ 及 $n_k=\sum_{j=1}^N E \gamma_{j k}$ 代入, 即得
 
 $$
-Q\left(\theta, \theta^{(i)}\right)=\sum_{k=1}^K\left\\{n_k \log \alpha_k+\sum_{j=1}^N \hat{\gamma}\_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\\}
+Q\left(\theta, \theta^{(i)}\right)=\sum_{k=1}^K\left\\{n_k \log \alpha_k+\sum_{j=1}^N \hat{\gamma}_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\\}
 $$
 
 3. 确定 EM 算法的 $M$ 步
@@ -318,13 +319,13 @@ $$
 $$
 
 
-用 $\hat{\mu}\_k, \hat{\sigma}\_k^2$ 及 $\hat{\alpha}\_k, k=1,2, \cdots, K$, 表示 $\theta^{(i+1)}$ 的各参数。求 $\hat{\mu}\_k, \hat{\sigma}\_k^2$ 只需分别对 $\mu_k, \sigma_k^2$ 求偏导数并令其为 0 , 即可得到; 求 $\hat{\alpha}\_k$ 是在 $\sum_{k=1}^K \alpha_k=1$ 条件 下求偏导数并令其为 0 得到的。结果如下:
+用 $\hat{\mu}_k, \hat{\sigma}_k^2$ 及 $\hat{\alpha}_k, k=1,2, \cdots, K$, 表示 $\theta^{(i+1)}$ 的各参数。求 $\hat{\mu}_k, \hat{\sigma}_k^2$ 只需分别对 $\mu_k, \sigma_k^2$ 求偏导数并令其为 0 , 即可得到; 求 $\hat{\alpha}_k$ 是在 $\sum_{k=1}^K \alpha_k=1$ 条件 下求偏导数并令其为 0 得到的。结果如下:
 
 $$
 \begin{gathered}
-\hat{\mu}\_k=\frac{\sum_{j=1}^N \hat{\gamma}\_{j k} y_j}{\sum_{j=1}^N \hat{\gamma}\_{j k}}, \quad k=1,2, \cdots, K \\\\
-\hat{\sigma}\_k^2=\frac{\sum_{j=1}^N \hat{\gamma}\_{j k}\left(y_j-\mu_k\right)^2}{\sum_{j=1}^N \hat{\gamma}\_{j k}}, \quad k=1,2, \cdots, K \\\\
-\hat{\alpha}\_k=\frac{n_k}{N}=\frac{\sum_{j=1}^N \hat{\gamma}\_{j k}}{N}, \quad k=1,2, \cdots, K
+\hat{\mu}_k=\frac{\sum_{j=1}^N \hat{\gamma}_{j k} y_j}{\sum_{j=1}^N \hat{\gamma}_{j k}}, \quad k=1,2, \cdots, K \\\\
+\hat{\sigma}_k^2=\frac{\sum_{j=1}^N \hat{\gamma}_{j k}\left(y_j-\mu_k\right)^2}{\sum_{j=1}^N \hat{\gamma}_{j k}}, \quad k=1,2, \cdots, K \\\\
+\hat{\alpha}_k=\frac{n_k}{N}=\frac{\sum_{j=1}^N \hat{\gamma}_{j k}}{N}, \quad k=1,2, \cdots, K
 \end{gathered}
 $$
 
@@ -339,22 +340,22 @@ $$
 (2) $\mathrm{E}$ 步: 依据当前模型参数, 计算分模型 $k$ 对观测数据 $y_j$ 的响应度
 
 $$
-\hat{\gamma}\_{j k}=\frac{\alpha_k \phi\left(y_j \mid \theta_k\right)}{\sum_{k=1}^K \alpha_k \phi\left(y_j \mid \theta_k\right)}, \quad j=1,2, \cdots, N ; \quad k=1,2, \cdots, K
+\hat{\gamma}_{j k}=\frac{\alpha_k \phi\left(y_j \mid \theta_k\right)}{\sum_{k=1}^K \alpha_k \phi\left(y_j \mid \theta_k\right)}, \quad j=1,2, \cdots, N ; \quad k=1,2, \cdots, K
 $$
 
 (3) $\mathrm{M}$ 步：计算新一轮迭代的模型参数
 
 $$
-\hat{\mu}\_k=\frac{\sum_{j=1}^N \hat{\gamma}\_{j k} y_j}{\sum_{j=1}^N \hat{\gamma}\_{j k}}, \quad k=1,2, \cdots, K
+\hat{\mu}_k=\frac{\sum_{j=1}^N \hat{\gamma}_{j k} y_j}{\sum_{j=1}^N \hat{\gamma}_{j k}}, \quad k=1,2, \cdots, K
 $$
 
 
 $$
-\hat{\sigma}\_k^2=\frac{\sum_{j=1}^N \hat{\gamma}\_{jk}(y_j-\mu_k)^2}{\sum_{j=1}^N \hat{\gamma}\_{jk}}, \quad k= 1,2,\dots, K
+\hat{\sigma}_k^2=\frac{\sum_{j=1}^N \hat{\gamma}_{jk}(y_j-\mu_k)^2}{\sum_{j=1}^N \hat{\gamma}_{jk}}, \quad k= 1,2,\dots, K
 $$
 
 $$
-\hat{\alpha}\_k = \frac{\sum_{j=1}^N \hat{\gamma}\_{jk}}{N} ,\quad k=1,2,\dots, K
+\hat{\alpha}_k = \frac{\sum_{j=1}^N \hat{\gamma}_{jk}}{N} ,\quad k=1,2,\dots, K
 $$
 
 
@@ -363,5 +364,3 @@ $$
 ## 总结
 
 总之来说em算法作为数据挖掘十大算法之一，应用范围十分广泛，它不能看作是一个具体的模型，常常用于模型的求解，比如HMM的学习参数问题等等，是必须要学会的算法之一。
-
-

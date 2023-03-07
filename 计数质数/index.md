@@ -1,6 +1,7 @@
 # 计数质数
 
 
+
 # 计数质数
 
 [https://leetcode-cn.com/problems/count-primes/](https://leetcode-cn.com/problems/count-primes/)
@@ -52,5 +53,3 @@ class Solution:
 假设一个数 i 为质数时，那么此时大于 i 且是 i 的倍数的数一定不是质数，例如 2i，3i...。那么我们将这些不是质数的数进行标记。
 
 这里需要注意，标记应该从 i * i 开始，而不是 2 * i 开始。因为对于每个数 i 来说，枚举是从小到大的，此时前面数字的倍数都已经进行了标记。对于 i 而言，2∗i 也肯定会被在枚举数字 2 时进行标记，[2, i) 区间的数同理。
-
-
