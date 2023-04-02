@@ -9,14 +9,11 @@
 ​	[https://leetcode-cn.com/problems/merge-intervals/](https://leetcode-cn.com/problems/merge-intervals/)
 
 ## 思路：
-
 ​		一开始思路想的是，根据每一个区间的left排序后，然后比较每一个数，再向前更新，然后写了半天，一直WA，感觉这个思路不太行了
 
 ## 代码：
 
 ​	先贴上错误的代码：
-
-			
 
 ```python
 class Solution:
