@@ -72,7 +72,7 @@ $$
 $$
 
 即正规方程。具体的推导看下图
-![png](灰色预测模型.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/%E7%81%B0%E8%89%B2%E9%A2%84%E6%B5%8B%E6%A8%A1%E5%9E%8B.png)
 
 ### 3.预测
 相应的白化模型为

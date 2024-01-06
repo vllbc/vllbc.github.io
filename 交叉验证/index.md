@@ -32,4 +32,4 @@ plt.plot(range(1,31),k_scores)
 plt.show()
 ```
 
-![png](output1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output1.png)

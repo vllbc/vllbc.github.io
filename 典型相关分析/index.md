@@ -64,11 +64,11 @@ $$
 
 不想敲公式了，直接截图吧
 
-![png](CCA.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/CCA.png)
 
 ### 特征分解
 
-![png](CCA特征分解.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/CCA%E7%89%B9%E5%BE%81%E5%88%86%E8%A7%A3.png)
 
 ## CCA算法流程
 

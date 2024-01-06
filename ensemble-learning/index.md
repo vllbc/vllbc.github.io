@@ -26,7 +26,7 @@ bagging的名称来源于 （ Bootstrap Aggregating ），意思是自助抽样�
 因此Bagging使用的抽样方法是Bootstrap方法，即自助法，本质上就是一个有放回的随机抽样问题。
 每一个样本在每一次抽的时候有同样的概率$\frac{1}{N}$被抽中。没被抽中的概率为$1-\frac{1}{N}$，一共抽了N次，即$1-(\frac{1}{N})^N$当N趋于无穷时，由高等数学学的极限的求解可以算出来是$\frac{1}{e}$，大概为36.8%，这些留下来的1/3的样本可以作为验证集，这样的方式叫做包外估计(out of bag estimate)
 
-![jpg](bagging.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/bagging.jpg)
 
 
 
@@ -35,7 +35,7 @@ Boosting与Bagging的区别就是取样方式不同，Bagging采用均匀取样�
 
 
 
-![jpg](boosting.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/boosting.jpg)
 
 ## 一个故事
 一个故事用于理解，来源：[https://www.joinquant.com/view/community/detail/adfb5ce37f0b39e348aae32e8412c68c](https://www.joinquant.com/view/community/detail/adfb5ce37f0b39e348aae32e8412c68c)

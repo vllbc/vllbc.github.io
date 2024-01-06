@@ -34,7 +34,7 @@
 
 14. **[.]等价于\\\\.**
 
-![](image/Pasted%20image%2020220726114527.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220726114527.png)
 
 ## 零宽度断言（前后预查）
 

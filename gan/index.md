@@ -23,12 +23,12 @@ $\min_G \max_D V(D, G)=\mathbb{E}_{\boldsymbol{x} \sim p_{\text {data }}(\boldsy
 生成器就是要以假乱真，使判别器判生成的样本为1，即最大化$D(G(z))$，就是最小化价值函数。
 
 这里的价值函数与交叉熵类似。真实样本为正例，生成样本为负例，一般都是最小化损失函数，因此需要做一下变形：
-![](image/Pasted%20image%2020221122121322.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221122121322.png)
 
 这个很好理解，与交叉熵一样。
 
 上面是判别器的优化，下面是生成器的优化：
-![](image/Pasted%20image%2020221122151349.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221122151349.png)
 
 
 总的来说，生成器得损失函数就是

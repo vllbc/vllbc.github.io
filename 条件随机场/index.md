@@ -354,17 +354,17 @@ $$
 
 ### 实例
 
-![](image/Pasted%20image%2020220903225846.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220903225846.png)
 
-![](image/Pasted%20image%2020220903225857.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220903225857.png)
 
 这里使用维特比算法求解
 
-![](image/Pasted%20image%2020220903225959.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220903225959.png)
 
 
 ## 参数学习问题
 
 
 ## 总结
-![](image/Pasted%20image%2020220904001447.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220904001447.png)

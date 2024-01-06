@@ -22,12 +22,12 @@ $$
 ## 评价指标
 语言模型的常用评价指标是困惑度（perplexity）：在一个测试数据上的perplexity越低，说明建模的效果越好。perplexity计算公式如下：
 
-![](image/Pasted%20image%2020220911175532.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220911175532.png)
 
 简单来说，困惑度就是刻画一个语言模型预测一个语言样本的能力，其实际上就是计算每一个词得到的概率倒数的几何平均，即模型预测下一个词的平均可选择数量。
 
 在实际应用中通常使用log的形式，即：
-![](image/Pasted%20image%2020220911180211.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220911180211.png)
 
 
 ## 统计语言模型
@@ -52,10 +52,10 @@ $$
 #### Add one
 
  拉普拉斯平滑，即强制让所有的n-gram至少出现一次，只需要在分子和分母上分别做加法即可。这个方法的弊端是，大部分n-gram都是没有出现过的，很容易为他们分配过多的概率空间。
-![](image/Pasted%20image%2020220912012843.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220912012843.png)
 #### Add-K
 在Add-one的基础上做了一点小改动，原本是加一，现在加上一个小于1的常数K K。但是缺点是这个常数仍然需要人工确定，对于不同的语料库K可能不同。
-![](image/Pasted%20image%2020220912012914.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220912012914.png)
 k取1时与add one 相同
 
 

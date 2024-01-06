@@ -2,7 +2,7 @@
 
 
 
-![](image/Pasted%20image%2020221108230222.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108230222.png)
 
 很简单，就是统计x中的数出现次数，返回结果的最大长度就是x中的最大值+1，idx为对应的数，值为出现的次数，没有出现的为0。
 ```python3

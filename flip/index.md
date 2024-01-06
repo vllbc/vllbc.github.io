@@ -9,12 +9,12 @@ cs_matrix = np.array([[ 4,  3,  2,  1,  0], [ 8,  7,  6,  5,  1], [11, 1
 np.flip(cs_matrix, 0)
 ```
 
-![](image/Pasted%20image%2020221108231234.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108231234.png)
 变成了：
-![](image/Pasted%20image%2020221108231249.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108231249.png)
 
 ```python3
 np.flip(cs_matrix, 1)
 ```
 变成了：
-![](image/Pasted%20image%2020221108231329.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108231329.png)

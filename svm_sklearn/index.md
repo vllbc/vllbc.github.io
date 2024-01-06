@@ -89,7 +89,7 @@ plt.show()
 ```
 
 
-![png](output_8_0.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_8_0.png)
 
 
 
@@ -113,4 +113,4 @@ plt.show()
 ```
 
 
-![png](output_9_0.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_9_0.png)

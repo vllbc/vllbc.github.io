@@ -70,7 +70,7 @@ print("y=" + str(train_set_y[:,index]) + ", it's a " + classes[np.squeeze(train_
 
 
 
-![png](output_6_1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_6_1.png)
 
 
 
@@ -86,7 +86,7 @@ print("y=" + str(train_set_y[:,index]) + ", it's a " + classes[np.squeeze(train_
 
 
 
-![png](output_7_1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_7_1.png)
 
 
 ### 1.2 数据变换
@@ -630,7 +630,7 @@ plt.show()
 ```
 
 
-![png](output_34_0.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_34_0.png)
 
 
 可以看到在每次的迭代过程中，成本值都在降低，说明模型参数正在被学习。
@@ -681,4 +681,6 @@ plt.show()
 
 
 
-![png](output_36_1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_36_1.png)
+
+

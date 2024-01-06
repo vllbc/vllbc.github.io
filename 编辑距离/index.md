@@ -30,11 +30,11 @@ $dp[i][j]$表示S1.substr(i)和S2.substr(j)的编辑距离。
 1.确定最后一步：
 令，S1的长度为len1，S2的长度为len2
 $dp[len1][len2]$有三种方式可以实现，一种是S1.substr(len1-1)插入一个字符使之等于S2（$dp[len1][len2-1] + 1$），一种是S2.substr(len2)删除一个字符使之等于S1（$dp[len1-1][len2] + 1$），另一种是替换最后一个字符使S1和S2相等（$dp[len1-1][len2-1] + 1$）
-![](image/Pasted%20image%2020220829234524.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220829234524.png)
 
 2. 确定转移方程:
 
-![](image/Pasted%20image%2020220829234535.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220829234535.png)
 
 3.确定边界和初始状态  
 我们设定Dp二维数组大小是（Len+1） * （Len2+1），第0行代表 S1为空串，第0列代表S2为空串。  

@@ -38,34 +38,34 @@ $$
 - **偏差**: 描述模型输出结果的期望与样本真实结果的差距。
 - **方差**: 描述模型对于给定值的输出稳定性。
 
-![jpg](pic/方差与偏差.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/%E6%96%B9%E5%B7%AE%E4%B8%8E%E5%81%8F%E5%B7%AE.jpg)
 
 就像打靶一样，偏差描述了我们的射击总体是否偏离了我们的目标，而方差描述了射击准不准。接下来让我们通过各种情况下 **训练集** 和 **交叉验证集** 的 **误差** 曲线来直观地理解 高偏差 与 高方差 的意义。
 
 对于 **多项式回归**，当次数选取较低时，我们的 训练集误差 和 交叉验证集误差 都会很大；当次数选择刚好时，训练集误差 和 交叉验证集误差 都很小；当次数过大时会产生过拟合，虽然 训练集误差 很小，但 交叉验证集误差 会很大（ 关系图如下 ）
 
-![jpg](pic/交叉验证集误差.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/%E4%BA%A4%E5%8F%89%E9%AA%8C%E8%AF%81%E9%9B%86%E8%AF%AF%E5%B7%AE.jpg)
 
 对于 **正则化** 参数，使用同样的分析方法，当参数比较小时容易产生过拟合现象，也就是高方差问题。而参数比较大时容易产生欠拟合现象，也就是高偏差问题。
 
 偏差和方差与数据噪声之和就是模型的泛化能力
-![](image/Pasted%20image%2020220727175339.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220727175339.png)
 
 模型的期望预测（这里x指所有的样本，期望预测为该模型的所有预测结果的期望。也可以表示有多个模型同时对x一个样本进行预测，期望预测为所有模型预测的期望）：
-![](image/Pasted%20image%2020220827155720.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827155720.png)
 
 **样本数相同的不同训练集产生的方差（可以理解为测试集预测结果与训练集输出期望之间的方差，也可以直接理解为一个模型中所有的预测与预测期望之间的平方差）**：
-![](image/Pasted%20image%2020220827155751.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827155751.png)
 
 **噪声（这里的噪声为人工标注的错误。）**：
-![](image/Pasted%20image%2020220827155818.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827155818.png)
 
 期望输出与真实标记的差别称为偏差(也有两种理解，一种是多模型的预测期望与真实值之间的偏差，还有一种就直接是单模型的预测输出（因为单模型的预测期望就是它的输出了）与真实值之间的平方差就可以记为偏差的平方，其实这里应理解为多模型的情况
 
-![](image/Pasted%20image%2020220827155925.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827155925.png)
 
 泛化误差也就是期望风险。
-![](image/Pasted%20image%2020220827153608.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827153608.png)
 
 ### 参考
 

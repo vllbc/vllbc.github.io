@@ -54,7 +54,7 @@ $$
 **直接前驱**：当前关键字**左侧指针 所指子树中“最右下”的元素**
 
 删除 B-树中的关键字 `G` ，`G` 的前一个孩子结点 `y` 为 `[D、E、F]` ，包含 3个关键字，满足情况一，关键字 `G` 的直接前驱为关键 `F` ，删除 `F` ，然后将 `G` 替换为 `F` .
-![](image/Pasted%20image%2020221004231036.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231036.png)
 
 2).y 所包含的关键字少于 t 个关键字，则检查结点 x 中关键字 k 的后一个孩子结点 z 包含的关键字的个数，如果 z 包含的关键字的个数至少为 t 个，则在 z 中找到关键字 k 的直接后继 K0 ,然后删除 K0 ，并将关键 k 替换为 K0 .
 
@@ -62,14 +62,14 @@ $$
 
 删除 B-树中的关键字 `C` , `y` 中包含的关键字的个数为 2 个，小于 `t = 3` ,结点 `[C、G、L]` 中的 关键字 `C` 的后一个孩子 z 为 `[D、E、F]` 包含 3 个关键字，关键字 `C` 的直接后继为 `D` ，删除 `D` ，然后将 `C` 替换为 `D` .
 
-![](image/Pasted%20image%2020221004231308.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231308.png)
 
 3). 如果 y 和 z 都只包含 t -1 个关键字，合并关键字 k 和所有 z 中的关键字到 结点 y 中，结点 x 将失去关键字 k 和孩子结点 z，y 此时包含 2t -1 个关键字，释放结点 z 的空间并递归地从结点 y 中删除关键字 k.
-![](image/Pasted%20image%2020221004231344.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231344.png)
 
 删除关键字 `C` , 结点 y 包含 2 个关键字 ，结点 z 包含 2 个关键字，均等于 `t - 1 = 2` 个， 合并关键字 `C` 和结点 z 中的所有关键字到结点 `y` 当中：
 
-![](image/Pasted%20image%2020221004231353.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231353.png)
 
 之后直接删除C即可。
 
@@ -77,21 +77,21 @@ $$
 
 首先我们得确认什么是当前内部结点 x ，什么是 `x.c(i)` ,如下图所示， P 现在不是根结点，而是完整 B-树的一个子树的根结点：
 
-![](image/Pasted%20image%2020221004231700.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231700.png)
 
 1). `x.c(i)` 仅包含 t - 1 个关键字且 `x.c(i)` 的一个兄弟结点包含至少 t 个关键字，则将 x 的某一个关键字下移到 `x.c(i)` 中，将 `x.c(i)` 的相邻的左兄弟或右兄弟结点中的一个关键字上移到 x 当中，将该兄弟结点中相应的孩子指针移到 `x.c(i)` 中，使得 `x.c(i)` 增加一个额外的关键字。
 
-![](image/Pasted%20image%2020221004231939.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231939.png)
 
 我们以删除结点 `[A、B]` 中的结点 `B` 为例，上图中 `x.c(i)` 包含 2 个关键字，即 t - 1 个关键字， `x.c(i)` 的一个兄弟结点 `[H、J、K]` 包含 3 个关键字（满足至少 t 个关键字的要求），则将兄弟结点 `[H、J、K]` 中的关键字 `H` 向上移动到 `x` 中， 将 x 中的关键字 `C` 下移到 `x.c(i)` 中；删除关键字 `B` .
-![](image/Pasted%20image%2020221004232005.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004232005.png)
 
 2).如果 `x.c(i)` 及 `x.c(i)` 的所有相邻兄弟都只包含 t - 1 个关键字，则将 `x.c(i)` 与 一个兄弟合并，即将 x 的一个关键字移动至新合并的结点，使之成为该结点的中间关键字，将合并后的结点作为新的 x 结点 .
 
-![](image/Pasted%20image%2020221004231700.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004231700.png)
 
 以此图为例：
 
 上面的图标明了相应的 x 及 `x.c(i)` ，我们以删除关键字 `D` 为例，此时当前内部结点 x 不包含关键字 `D` , 确定是第三种情况，我们可以确认关键 `D` 一定在结点 x 的第一个孩子结点所在的子树中，结点 x 的第一个孩子结点所在子树的跟结点为 `x.c(i) 即 [C、L]` . 其中 `结点 [C、L]` 及其相邻的兄弟结点 `[T、W]` 都只包含 2 个结点（即 `t - 1`) ，则将 `[C、L]` 与 `[T、W]` 合并，并将结点 x 当中仅有的关键字 `P` 合并到新结点中；然后将合并后的结点作为新的 x 结点，递归删除关键字 `D` ，发现D 此时在叶子结点 y 中，直接删除，就是 **1.** 的情况。
 
-![](image/Pasted%20image%2020221004233211.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221004233211.png)

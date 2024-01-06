@@ -8,11 +8,11 @@ Boosting算法的工作机制是首先从训练集用初始权重训练出一个
 
 ## Adaboost
 
-![](image/Pasted%20image%2020221108142733.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108142733.png)
 
 先看一下adaboost的算法流程
 
-![](image/Pasted%20image%2020221108142835.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108142835.png)
 
 将初始化样本的权重为$\frac{1}{m}$，那么这个样本权重到底怎么用呢，主要是用于在构建弱分类器时计算弱学习器在训练集上的误差时使用，也就是计算误差：
 
@@ -71,4 +71,4 @@ $$
 
 ## 总结
 总是要写个总结的，adaboost一种boosting方法，就是不断迭代调整权重，最后将每一步的结果加权求和，可以说是一种典型的boosting的方法。
-![](image/Pasted%20image%2020221108163011.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108163011.png)

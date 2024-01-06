@@ -33,19 +33,19 @@ $$
 
 首先来看BM25中相关性得分的一般形式：
 
-![](image/Pasted%20image%2020220817131807.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220817131807.png)
 
-![](image/Pasted%20image%2020220817131811.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220817131811.png)
 
 其中$k_1, k_2, b$为调节因子，根据经验设置，一般$k_1=2,b=0.75$ ，$f_i$为$q_i$在文档d中出现的频率，$qf_i$为$q_i$在Query中出现的频率，dl为文档d的长度，avgdl为所有文档的平均长度，绝大部分情况下$q_i$在Query中只会出现一次，因此
 $qf_i=1$，所以可以简化为：
-![](image/Pasted%20image%2020220817132154.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220817132154.png)
 
 从K的定义中可以看到，参数b的作用是调整文档长度对相关性影响的大小。b越大，文档长度的对相关性得分的影响越大，反之越小。而文档的相对长度越长，K值将越大，则相关性得分会越小。这可以理解为，当文档较长时，包含qi的机会越大，因此，同等fi的情况下，长文档与qi的相关性应该比短文档与qi的相关性弱。
 
 综上，BM25算法的相关性得分公式可总结为：
 
-![](image/Pasted%20image%2020220817132305.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220817132305.png)
 
 从BM25的公式可以看到，通过使用不同的语素分析方法、语素权重判定方法，以及语素与文档的相关性判定方法，我们可以衍生出不同的搜索相关性得分计算方法，这就为我们设计算法提供了较大的灵活性。
 

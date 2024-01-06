@@ -153,7 +153,7 @@ $$
 
 
 如果f是凹函数则相反
-![](image/Pasted%20image%2020220902094235.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220902094235.png)
 
 这个图可以比较清晰的看出这个结论。
 
@@ -227,7 +227,7 @@ $$
 这等价于 EM算法的一次迭代, 即求 $Q$ 函数及其极大化。EM算法是通过 不断求解下界的极大化逼近求解对数似然函数极大化的算法。
 下图给出 EM算法的直观解释。注意两个曲线的交点就是在$\theta^{(i)}$
 
-![](image/Pasted%20image%2020220902095312.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220902095312.png)
 这里其实就是相当于推导为什么最大化Q函数对应的参数就是当前迭代的最佳参数。
 
 ## 高斯混合模型

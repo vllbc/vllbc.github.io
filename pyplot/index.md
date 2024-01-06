@@ -18,7 +18,7 @@ plt.show()
 
 maker可用的符号如下：
 
-![avatar](pic_1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/pic_1.png)
 
 
 
@@ -32,8 +32,8 @@ fmt = '[marker][line][color]'
 
 ## 线类型
 
-![avatar](pic_4.png)
-
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/pic_4.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/pic_2.png)
 线的类型可以使用 **linestyle** 参数来定义，简写为 **ls**。
 
 ### 线的宽度
@@ -42,7 +42,7 @@ fmt = '[marker][line][color]'
 
 ## 颜色类型
 
-![avatar](pic_3.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/pic_3.png)
 
 ### 线的颜色
 

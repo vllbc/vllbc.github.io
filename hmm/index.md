@@ -174,7 +174,7 @@ $$
 前向算法, 步骤 (1) 初始化前向概率, 是初始时刻的状态 $i_1=q_i$ 和观测 $o_1$ 的 联合概率。步骤 (2) 是前向概率的递推公式, 计算到时刻 $t+1$ 部分观测序列为 $o_1, o_2, \cdots, o_t, o_{t+1}$ 且在时刻 $t+1$ 处于状态 $q_i$ 的前向概率, 如图 $10.1$ 所示。在式 (10.16) 的方括弧里, 既然 $\alpha_t(j)$ 是到时刻 $t$ 观测到 $o_1, o_2, \cdots, o_t$ 并在时刻 $t$ 处于状态 $q_j$ 的前向概率, 那么乘积 $\alpha_t(j) a_{j i}$ 就是到时刻 $t$ 观测到 $o_1, o_2, \cdots, o_t$ 并在时刻 $t$ 处于 状态 $q_j$ 而在时刻 $t+1$ 到达状态 $q_i$ 的联合概率。对这个乘积在时刻 $t$ 的所有可能的
 #### 统计学习方法中前向算法的例子
 
-![](image/Pasted%20image%2020220831195049.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220831195049.png)
 ### 后向算法
 给定隐马尔可夫模型 $\lambda$, 定义在时刻 $t$ 状态为 $q_i$ 的条件下, 从 $t+1$ 到 $T$ 的部分观测序列为 $o_{t+1}, o_{t+2}, \cdots, o_T$ 的概率为后向概率, 记作
 
@@ -391,9 +391,9 @@ $$
 
 看一个例子就很容易理解了
 
-![](image/Pasted%20image%2020220831204603.png)
-![](image/Pasted%20image%2020220831204613.png)
-![](image/Pasted%20image%2020220831204619.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220831204603.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220831204613.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220831204619.png)
 #### 代码
 ```python
 def viterbi(obs, states, start_p, trans_p, emit_p):

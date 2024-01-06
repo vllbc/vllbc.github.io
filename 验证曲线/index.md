@@ -63,7 +63,7 @@ plt.show()
 
 
 ​    
-![png](output_5_0.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/output_5_0.png)
 ​    
 
 

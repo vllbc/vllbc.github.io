@@ -5,9 +5,9 @@
 # Hermite插值法
 
 ## 公式
-![png](Hermite公式1.png)
-![png](Hermite公式2.png)
-![png](Hermite公式3.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Hermite%E5%85%AC%E5%BC%8F1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Hermite%E5%85%AC%E5%BC%8F2.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Hermite%E5%85%AC%E5%BC%8F3.png)
 
 ## 代码
 ```python

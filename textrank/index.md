@@ -16,13 +16,13 @@
 
 **（2）链接质量**：如果一个网页被一个越高权值的网页链接，也能表明这个网页越重要，即一个PR值很高的网页链接到一个其他网页，那么被链接到的网页的PR值会相应地因此而提高。
 
-![png](pic/PageRank.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/PageRank.png)
 
 ## TextRank算法
 
 **TextRank算法的基本思想**是将文档看作一个词的网络，该网络中的链接表示词与词之间的语义关系。
 
-![png](pic/TextRank.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/TextRank.png)
 
 
 

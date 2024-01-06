@@ -30,7 +30,7 @@ Transformer 可以用于编码，也可以用于解码。所谓解码就是根�
 
 总体来讲，预训练模型发展趋势：第一，模型越来越大。比如 Transformer 的层数变化，从12层的 Base 模型到24层的 Large 模型。导致模型的参数越来越大，比如 GPT 110 M，到 GPT-2 是1.5 Billion，图灵是 17 Billion，而 GPT-3 达到了惊人的 175 Billion。一般而言模型大了，其能力也会越来越强，但是训练代价确实非常大。第二，预训练方法也在不断增加，从自回归 LM，到自动编码的各种方法，以及各种多任务训练等。第三，还有从语言、多语言到多模态不断演进。最后就是模型压缩，使之能在实际应用中经济的使用，比如在手机端。这就涉及到知识蒸馏和 teacher-student models，把大模型作为 teacher，让一个小模型作为 student 来学习，接近大模型的能力，但是模型的参数减少很多。
 
-![png](pic/PTMs.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/PTMs.jpg)
 
 每个观点都可以看一下参考文章。
 

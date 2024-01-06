@@ -53,7 +53,7 @@ checkout可以切换分支，也可以head分离，但是分支的位置不变�
 `git reset --hard  xxxxxx`  xxxxxx为版本号 即为git log显示的每一个版本号 一般为前六位
 
 reset的参数有三种，其作用如下：
-![](image/Pasted%20image%2020220830163125.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830163125.png)
 
 最危险但最常用的就是hard。
 
@@ -90,7 +90,7 @@ reset的参数有三种，其作用如下：
 这几天系统学习了一下git的底层内容，通透了很多，记录一些。贴一下原博客：[https://www.lzane.com/tech/git-internal/](https://www.lzane.com/tech/git-internal/)
 首先看一个图
 
-![](image/Pasted%20image%2020221113190157.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221113190157.png)
 首先要明确有四种object，第一种是记录文件内容，第二种是记录目录结构，第三种是记录提交信息，第四种是记录tag信息，第四种无关紧要。
 
 从下面开始看，最下面记录的文件内容，注意只记录文件内容，不包括文件名等其它内容。是一个blob类型的节点，将文件的内容信息经过SHA1哈希算法得到对应的哈希值作为这个object在Git仓库中的唯一身份证。

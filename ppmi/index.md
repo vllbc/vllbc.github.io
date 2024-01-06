@@ -16,14 +16,14 @@ $$
 ### 定义
 正式地，两个离散随机变量 X 和 Y 的互信息可以定义为：
 其中 p(x,y) 是 X 和 Y 的联合概率分布函数，而p(x)和p(y)分别是 X 和 Y 的边缘概率分布函数。
-![](image/Pasted%20image%2020221105213425.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221105213425.png)
 
 在结果上互信息与信息增益是一样的，下面是详细的推导。
 ![img](https://img-blog.csdnimg.cn/2019072320171787.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2FzaWFsZWVfYmlyZA==,size_16,color_FFFFFF,t_70)
 
 应用到文本特征选择：
 
-![](image/Pasted%20image%2020221106104620.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221106104620.png)
 U、C都是二值随机变量，当文档包含词项t时，U的取值为1，否则0；当文档属于类别c时，C的取值1，否则0。简单的理解就是对于文本来说，每一个token就是它的特征，取值只有有或者没有，也就是0或者1，互信息常用于文本特征的选择，也就
 是选择有价值的token。在贝叶斯文本分类中用到了，特此记录。
 
@@ -83,4 +83,4 @@ def calculateMI(dtm_ham_train, dtm_spam_train):
 ```
 
 ## PPMI
-![](image/Pasted%20image%2020221106002950.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221106002950.png)

@@ -40,4 +40,6 @@ $$
 
 为了判断产生规则的实际价值，即使用规则后商品出现的次数是否高于商品单独出现的评率，提升度和衡量购买X对购买Y的概率的提升作用。如下公式可见，如果X和Y相互独立那么提升度为1，提升度越大，说明X->Y的关联性越强
 
-![](image/Pasted%20image%2020221107221749.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221107221749.png)
+
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230610195057.png)

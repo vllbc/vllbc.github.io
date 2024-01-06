@@ -3,7 +3,7 @@
 ---
 title: "检索式问答系统"
 date: 2022-08-25
-lastmod: 2023-03-22
+lastmod: 2023-03-24
 categories: ['信息检索', '问答系统']
 tags: ['信息检索', '问答系统', '检索式问答系统']
 author: "vllbc"

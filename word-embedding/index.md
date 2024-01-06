@@ -79,7 +79,7 @@ $$
 
 先来张经典的图片
 
-![jpg](pic/NNLM.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/NNLM.jpg)
 
 这就是大名鼎鼎的神经网络语言模型（其它的语言模型详见本博客语言模型部分）
 
@@ -234,8 +234,8 @@ Word2Vec 是一个模型，其参数是词向量。这些参数针对某个目�
 以Skip-grams模型为例，首先清楚几个概念，中心词、背景词（上下文词）、负采样词。中心词就是我们的输入，因为skip-grams相当于在一句话中扣去一个词，然后用这个词预测这句话的其余词。形式上给人的感觉就是一对多，这里的一句话其实不是一句话，是我们设定的窗口大小，比如一句话"I miss xwh very much"，
 设置中心词为xwh，窗口大小为1，那么背景词就是"miss"和"very"。那么对于我们的模型来说，miss和very就是正例，就是我们的预测值(sigmoid后)的值接近于1的，而其余的词就是负例，就是使其值接近于0的。所以负采样就是从这些负例中随机抽取一些负例，不然每次都要计算单词表中所有单词的sigmoid值，这个计算量很大，而使用负采样就大大缩小了计算量。
 
-![png](pic/window1.png)
-![png](pic/window2.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/window1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/window2.png)
 
 ##### 目标函数：负似然对数
 
@@ -255,6 +255,7 @@ $$
 
 - $v_w$当w是中心词
 - $u_w$当w时背景词
+因为word2vec是一个专门训练词向量的神经网络，输入为onehot向量，经过第一层W的计算得到隐藏层，就相当于查表，数值为中心词的词向量，然后再与第二层的W计算得到输出，输出的维度和输入的维度相同，因此输出层的结果在计算上就是$u_c^Tv_w$。即输入层对应的中心词的词向量*输出层对应背景词的词向量，再经过softmax就是对应背景词的概率。
 
 训练完毕后，我们只使用$v_w$，即只使用从输入层到隐藏层的权重。
 
@@ -330,7 +331,7 @@ $$
 
 但是为什么我们必须在每一步都考虑词汇表中的所有上下文向量呢？例如，假设在当前步骤中，我们考虑的不是所有单词的上下文向量，而是当前目标和几个随机选择的单词。
 
-![png](pic/negative_sampling-min.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/negative_sampling-min.png)
 
 以跳字模型为例讨论负采样。词典 $V$ 的大小之所以会在目标函数中出现，是因为中心词 $w_{c}$ 生成背景词 $w_{o}$ 的概率 $P\left(w_{o} \mid w_{c}\right)$ 使用了 softmax，而 softmax 考虑到了背景词可能是词 典中任一词，并体现在了 softmax 的分母上
 我们不妨换个角度，假设中心词 $w_{c}$ 生成背景词 $w_{o}$ 由以下两个互相独立的联合事件组成来近 似
@@ -374,7 +375,7 @@ $$
 #### 与PPMI的关系
 在引入负采样方法后，也就是变成了Skip-Gram with Negative Sample，简称为SGNS。回顾一下他的目标函数：
 
-![](image/Pasted%20image%2020220830151507.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830151507.png)
 
 对于word2vec来说，训练完成以后，每一个token都会有两个向量，一个是作为中心词的，一个是作为上下文词的。假设存在一个矩阵$W=V_{word}*V_{context}$。
 
@@ -382,21 +383,21 @@ word2vec也可以理解成是对矩阵W的矩阵分解。那么，问题就变�
 
 论文`NIPS-2014-neural-word-embedding-as-implicit-matrix-factorization-Paper`中有将SGNS的目标函数，一步步的变换，变成下面的形式（具体见论文）
 
-![](image/Pasted%20image%2020220830151740.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830151740.png)
 
 上面的公式，左边的部分就是PMI，PMI是dense matrix，对模型优化带来很多困难，所以一般会用sparse matrix PPMI（positive PMI）来替代它。
 
-![](image/Pasted%20image%2020220830151833.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830151833.png)
 
 至此我们找到了矩阵M，即
-![](image/Pasted%20image%2020220830152021.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830152021.png)
 
 PPMI是基于计数的方法表达词向量，而word2vec是基于推理的方法表达词向量。后面介绍的Glove将基于计数的方法和基于推理的方法结合了起来。
 #### 层序softmax
 
 层序softmax利用了二叉树，树的每个节点代表了词典V中的每个词。每个词$w_i$对应词向量$v_i$。
 
-![png](pic/softmax.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/softmax.png)
 
 设 $L(w)$ 为从二叉树根节点到代表词 $w$ 的叶子节点的路径上的节点数，并设 $n(w, i)$ 为该路径上第 $i$ 个节点，该节点的向量为 ${u}_{n(w, j)}$ 。以上图为例， $L\left(w_{3}\right)=4$ 。那么，跳字模型和连续词袋模型所需 要计算的任意词 $w_{i}$ 生成词 $w$ 的概率为:
 

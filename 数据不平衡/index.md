@@ -23,11 +23,11 @@
 
 随机的删除一些多数类样本，使少数类样本和多数类样本数量达到均衡。
 
-![](image/Pasted%20image%2020230308105852.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308105852.png)
 
 ### 原型生成
 PG 算法主要是在原有样本的基础上生成新的样本来实现样本均衡，对多数类样本生成新的样本去替代原样本，使得样本数目减少, 具体做法如下：
-![](image/Pasted%20image%2020230308110307.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308110307.png)
 
 ### 原型选择
 

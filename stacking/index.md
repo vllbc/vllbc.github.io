@@ -7,7 +7,7 @@
 ## 思想简介
 简单得理解，就是对于多个学习器，分别对结果进行预测，然后将预测的结果作为特征，再对结果进行预测。
 上一张经典的图：
-![](image/Pasted%20image%2020221018191932.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221018191932.png)
 以这个5折stacking为例：
 
 - 首先将所有数据集生成测试集和训练集（假如训练集为10000,测试集为2500行），那么上层会进行5折交叉检验，使用训练集中的8000条作为训练集，剩余2000行作为验证集（橙色）。
@@ -20,4 +20,4 @@
 
 ## 伪代码
 
-![](image/Pasted%20image%2020220826211308.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220826211308.png)

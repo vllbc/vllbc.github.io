@@ -23,9 +23,9 @@ $$
 
 ## 差分
 
-![jpg](差分.jpg)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/%E5%B7%AE%E5%88%86.jpg)
 
-![png](差商与差分.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/%E5%B7%AE%E5%95%86%E4%B8%8E%E5%B7%AE%E5%88%86.png)
 
 ## 优缺点
 

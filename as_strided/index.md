@@ -32,11 +32,11 @@ numpy.lib.stride_tricks.as_strided(x, shape=None, strides=None, subok=False, wri
 x就是我们要分割的矩阵，可以当做是一个蓝图，shape，strides都是新矩阵的属性，也就是说这个函数按照给定的shape和strides来划分x，返回一个新的矩阵。
 
 对于X：
-![](image/Pasted%20image%2020221108224524.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108224524.png)
 
 如果卷积核的大小是2x2，stride为1，那么就需要把矩阵X转换为包含如下4个小矩阵的新矩阵A：
 
-![](image/Pasted%20image%2020221108224542.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108224542.png)
 
 很明显A的维度为(2,2,2,2)。
 
@@ -48,7 +48,7 @@ A = as_strided(X, shape=(2,2,2,2), strides)
 
 下面确定strides，从图中可以确定最低维的为4，因为所有数据都在X上，所以A的各个维度的跨度都要根据X来确定，而不是A中，以1和4为例子，在X中的距离为12字节，所以现在可以确定后两维：（?,?,12,4）。
 再看更高维度:
-![](image/Pasted%20image%2020221108225558.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108225558.png)
 从X中可以看到，第二维的距离为4。
 第一维也不多说，是12。
 最后可以strides =（12，4，12，4）。
@@ -56,7 +56,7 @@ A = as_strided(X, shape=(2,2,2,2), strides)
 这就是整个分析的过程，可以方便卷积操作，不是嘛。
 
 再看一个例子就结束了，估计以后会忘，记录下来。
-![](image/Pasted%20image%2020221108225856.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221108225856.png)
 
 意思就是将一个向量拓展成这样的形式，用循环的方法很容易实现：
 ```python3

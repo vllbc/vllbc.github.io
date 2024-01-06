@@ -8,7 +8,7 @@
 
 ## 拉格朗日插值法
 
-![png](1.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/1.png)
 对于这几个点，想找到一根穿过他们的曲线。
 我们可以合理地假设，这根曲线是一个二次多项式
 

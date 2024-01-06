@@ -19,7 +19,7 @@ $$
 $$
 E[h^{'}] = (1-p)*0 + p *\frac{h}{p} = h
 $$
-![](image/Pasted%20image%2020220830153314.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830153314.png)
 
 **注意**：正则项（Dropout）只在训练过程中使用，因为其会影响模型参数的更新  
 所以在推理过程中，丢弃法直接返回输入。

@@ -175,7 +175,7 @@ $$
 P\left(Y=c_{k}\right)=\frac{\sum_{i=1}^{N} I\left(y_{i}=c_{k}\right)}{N}, \quad k=1,2, \cdots, K
 $$
 
-设第 $j$ 个特征 $x^{(j)}$ 可能取值的集合为 $\left\\{a_{j 1}, a_{j 2}, \cdots, a_{j S_{j}}\right\\\}$, 条件概率 $P\left(X^{(j)}=a_{j l} \mid Y=\right.$ $c_{k}$ ) 的极大似然估计是
+设第 $j$ 个特征 $x^{(j)}$ 可能取值的集合为 $\left\{a_{j 1}, a_{j 2}, \cdots, a_{j S_{j}}\right\}$, 条件概率 $P\left(X^{(j)}=a_{j l} \mid Y=\right.$ $c_{k}$ ) 的极大似然估计是
 
 $$
 \begin{aligned}
@@ -241,7 +241,7 @@ P(x_i|y=k) = \frac{N(x_i, y=k)}{\sum_{t=1}^{|V|}N(x_t,y=k)}
 $$
 
 但是有个问题就是有可能会出现$N(x_i, y=k)=0$的情况
-![](image/Pasted%20image%2020220726202224.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220726202224.png)
 
 这时就需要拉普拉斯平滑，即在所有的计数中都加入一个新的参数$\delta$，
 
@@ -255,7 +255,7 @@ $$
 
 直观地说，朴素贝叶斯期望某些词作为类指示符。例如，对于情感分类标记 awesome、 brilliant、 great 将有更高的概率给定正面类别然后负面类别。 类似地，给定负类比正类 ，标记awful, boring, bad的概率更高。
 
-![](image/Pasted%20image%2020220726202626.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220726202626.png)
 在实践中，一般都是取log，单调性不变，变为$\log(x, y=k) = \log P(y=k) + \sum \log P(x_i|y=k)$
 
 
@@ -271,8 +271,8 @@ $$
 
 贝叶斯估计是在MAP上做进一步拓展，不直接估计参数的值，而是允许参数服从一定的概率密度分布，先求出$\theta$的后验分布$p(\theta \mid x)$，然后求出$\theta$的期望值。
 
-![](image/Pasted%20image%2020221012113733.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221012113733.png)
 
-![](image/Pasted%20image%2020221012113741.png)
-![](image/Pasted%20image%2020221012113749.png)
-![](image/Pasted%20image%2020221012113755.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221012113741.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221012113749.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221012113755.png)

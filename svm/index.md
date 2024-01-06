@@ -69,7 +69,7 @@ $$
 所以，可以映射到任何一个维度上。
 
 ### 核函数类别
-![](image/Pasted%20image%2020220802000231.png)其实常用的就那几个，高斯核函数最为常用。
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220802000231.png)其实常用的就那几个，高斯核函数最为常用。
 
 ### 参考
 >[https://www.cnblogs.com/damin1909/p/12955240.html](https://www.cnblogs.com/damin1909/p/12955240.html)
@@ -78,7 +78,7 @@ $$
 ## 线性可分支持向量机
 
 ### 线性可分
-![](image/Pasted%20image%2020220827233624.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827233624.png)
 
 在二维空间上，两类点被一条直线完全分开叫做线性可分。
 
@@ -87,7 +87,7 @@ $$
 以最大间隔把两类样本分开的超平面，也称之为最大间隔超平面。
 
 ### 支持向量
-![](image/Pasted%20image%2020220827233700.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827233700.png)
 样本中距离超平面最近的一些点，这些点叫做支持向量。
 
 ### 最优化问题
@@ -110,35 +110,35 @@ $$
 $$
 如图所示，根据支持向量的定义我们知道，支持向量到超平面的距离为 d，其他点到超平面的距离大于 d。
 
-![](image/Pasted%20image%2020220827234112.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827234112.png)
 
 于是我们有这样的一个公式：
 
-![](image/Pasted%20image%2020220827234141.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827234141.png)
 
 之后得到:
 
-![](image/Pasted%20image%2020220827234154.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827234154.png)
 
 分母都是正数，因此可以令它为1。
-![](image/Pasted%20image%2020220827235615.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827235615.png)
 
 合并得：
-![](image/Pasted%20image%2020220827235627.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827235627.png)
 
 至此我们就可以得到最大间隔超平面的上下两个超平面：
 
-![](image/Pasted%20image%2020220827235656.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827235656.png)
 
 每个支持向量到超平面的距离可以写为：
-![](image/Pasted%20image%2020220827235715.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827235715.png)
 
 所以我们得到：
-![](image/Pasted%20image%2020220827235827.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827235827.png)
 
 最大化这个距离：
 
-![](image/Pasted%20image%2020220827235837.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827235837.png)
 
 这里乘上 2 倍也是为了后面推导，对目标函数没有影响。刚刚我们得到支持向量$y(w^Tx+b) = 1$，所以我们得到：
 
@@ -154,7 +154,7 @@ $$
 
 所以得到的最优化问题是：
 
-![](image/Pasted%20image%2020220828000128.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828000128.png)
 
 ### 对偶问题
 
@@ -165,7 +165,7 @@ $$
 
 $$
 \begin{aligned}
-&\minf(x) \\\\
+&\min f(x) \\\\
 & s.t. g(x) = 0
 \end{aligned}
 $$
@@ -177,13 +177,13 @@ L(x, \lambda) = f(x) + \lambda g(x)
 $$
 其中 λ 称为Lagrange乘数。Lagrange乘数法将原本的约束优化问题转换成等价的无约束优化问题
 计算 L 对 x 与 λ 的偏导数并设为零，可得最优解的必要条件：
-![](image/Pasted%20image%2020220828151556.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828151556.png)
 
 接下来是不等式约束：
 
 $$
 \begin{aligned}
-& \minf(x) \\\\
+& \min f(x) \\
 & s.t. g(x) \leq 0 
 \end{aligned}
 $$
@@ -201,19 +201,19 @@ $$
 因此，不论是内部解或边界解， $\lambda g(x)=0$ 恒成立
 
 整合上述两种情况，最佳解的必要条件包括Lagrangian函数的定常方程式、原始可行性、对偶可行性，以及互补松弛性：
-![](image/Pasted%20image%2020220828153456.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828153456.png)
 
 这就是KKT条件。
 
 上面结果可推广至多个约束等式与约束不等式的情况。考虑标准约束优化问题(或称非线性规划)：
-![](image/Pasted%20image%2020220828153544.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828153544.png)
 
 定义Lagrangian 函数
 
-![](image/Pasted%20image%2020220828153556.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828153556.png)
 
 则KKT条件为
-![](image/Pasted%20image%2020220828153608.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828153608.png)
 
 
 
@@ -221,7 +221,7 @@ $$
 
 已知svm优化的主要问题：
 
-![](image/Pasted%20image%2020220828000902.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828000902.png)
 
 那么求解线性可分的 SVM 的步骤为：
 
@@ -229,38 +229,38 @@ $$
 
 构造拉格朗日函数：
 
-![](image/Pasted%20image%2020220828000939.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828000939.png)
 
 **步骤2：**
 
 利用强对偶性转化：
 
-![](image/Pasted%20image%2020220828001013.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001013.png)
 
 现对参数 w 和 b 求偏导数：
 
-![](image/Pasted%20image%2020220828001025.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001025.png)
 
 具体步骤：
-![](image/Pasted%20image%2020220828001050.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001050.png)
 
 在前面的步骤中即为：
 
-![](image/Pasted%20image%2020220828001120.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001120.png)
 
 我们将这个结果带回到函数中可得：
 
-![](image/Pasted%20image%2020220828001143.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001143.png)
 
 也就是说：
 
-![](image/Pasted%20image%2020220828001152.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001152.png)
 
 **步骤3：**
-![](image/Pasted%20image%2020220828001208.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001208.png)
 
 由上述过程需要满足KKT条件（$\alpha$就是本文中的$\lambda$）：
-![](image/Pasted%20image%2020220828002201.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828002201.png)
 
 易得，当$\lambda_i$大于0，则必有$y_if(x_i)=1$,所对应的样本点是一个支持向量，即位于最大间隔边界上。
 
@@ -271,7 +271,7 @@ SMO(Sequential Minimal Optimization)，序列最小优化算法，其核心思�
 我们刚说了 SMO 算法每次只优化一个参数，但我们的优化目标有约束条件，没法一次只变动一个参数。所以我们选择了一次选择两个参数。具体步骤为：
 
 1. 选择两个需要更新的参数$\lambda _i$和$\lambda_j$，固定其他参数。于是我们有以下约束：
-![](image/Pasted%20image%2020220828001631.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828001631.png)
 
 其中$c = -\sum_{k\neq i, j}\lambda_ky_k$， 因此可以得出$\lambda_j = \frac{c-\lambda_iy_i}{y_j}$，这样就相当于把目标问题转化成了仅有一个约束条件的最优化问题，仅有的约束是$\lambda_i>0$
 
@@ -283,7 +283,7 @@ SMO(Sequential Minimal Optimization)，序列最小优化算法，其核心思�
 
 我们求偏导数时得到：
 
-![](image/Pasted%20image%2020220828002003.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828002003.png)
 
 由上式可求得 w。
 
@@ -293,14 +293,14 @@ SMO(Sequential Minimal Optimization)，序列最小优化算法，其核心思�
 
 为了更具鲁棒性，我们可以求得支持向量的均值：
 
-![](image/Pasted%20image%2020220828002938.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828002938.png)
 
 **步骤5：**
 w 和 b 都求出来了，我们就能构造出最大分割超平面：$w^Tx+b=0$
 
 分类决策函数：$f(x) = sign(w^Tx+b)$
 
-![](image/Pasted%20image%2020220828003127.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828003127.png)
 
 将新样本点导入到决策函数中既可得到样本的分类。
 
@@ -311,12 +311,12 @@ w 和 b 都求出来了，我们就能构造出最大分割超平面：$w^Tx+b=0
 ### 软间隔
 在实际应用中，完全线性可分的样本是很少的，如果遇到了不能够完全线性可分的样本，我们应该怎么办？比如下面这个：
 
-![](image/Pasted%20image%2020220828105535.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828105535.png)
 
   
 于是我们就有了软间隔，相比于硬间隔的苛刻条件，我们允许个别样本点出现在间隔带里面，即允许出现分类错误的样本：
 
-![](image/Pasted%20image%2020220828105552.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828105552.png)
 
 我们允许部分样本点不满足约束条件：
 
@@ -357,37 +357,37 @@ $$
 
 
 为了度量这个间隔软到何种程度，我们为每个样本引入一个松弛变量$\xi_i$，令$\xi_i \geq 0$，且$1-y_i(w^Tx_i+b)-\xi_i\leq 0$，如下图：
-![](image/Pasted%20image%2020220828111154.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828111154.png)
 
 ### 优化目标与求解
 优化目标：
 
-![](image/Pasted%20image%2020220828112312.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828112312.png)
 
 **步骤1：**
 
 构造拉格朗日函数：
-![](image/Pasted%20image%2020220828112251.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828112251.png)
 
 **步骤2：**
 分别求导，得出以下关系：
 
-![](image/Pasted%20image%2020220828112422.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828112422.png)
 
 将这些关系带入拉格朗日函数中，得到：
 
-![](image/Pasted%20image%2020220828112445.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828112445.png)
 
 则：
 
-![](image/Pasted%20image%2020220828112459.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828112459.png)
 
 我们可以看到这个和硬间隔的一样，只是多了个约束条件。
 
 然后使用SMO算法求$\lambda^* $
 
 #### 软间隔KKT条件
-![](image/Pasted%20image%2020220828113029.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828113029.png)
 其中$\alpha$对应本文的$\lambda$，$\mu$对应本文的$\mu$
 
 因此由第三个式子得必有$\lambda_i =0$或者$y_if(x_i) - 1+\xi_i \geq 0$
@@ -397,10 +397,10 @@ $\lambda_i > 0$，则样本为支持向量。
 若$\lambda_i=C$,则有$\mu_i=0$，此时若$\xi_i\leq 1$，则样本落在最大间隔内部。若$\xi_i>1$则样本被错误分类。
 
 再看一下下面这图就理解了。
-![](image/Pasted%20image%2020220828111154.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828111154.png)
 **步骤3：**
 
-![](image/Pasted%20image%2020220828112623.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828112623.png)
 
 然后我们通过上面两个式子求出 w 和 b，最终求得超平面
 
@@ -414,11 +414,11 @@ $\lambda_i > 0$，则样本为支持向量。
 
 但我们可能会碰到的一种情况是样本点不是线性可分的，比如：
 
-![](image/Pasted%20image%2020220828135755.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828135755.png)
 
 这种情况的解决方法就是：将二维线性不可分样本映射到高维空间中，让样本点在高维空间线性可分，比如：
 
-![](image/Pasted%20image%2020220828135803.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828135803.png)
 
 对于在有限维度向量空间中线性不可分的样本，我们将其映射到更高维度的向量空间里，再通过间隔最大化的方式，学习得到支持向量机，就是非线性 SVM。
 
@@ -426,7 +426,7 @@ $\lambda_i > 0$，则样本为支持向量。
 
 对于非线性 SVM 的对偶问题就变成了：
 
-![](image/Pasted%20image%2020220828143014.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220828143014.png)
 
 区别就在于优化目标中的内积。
 

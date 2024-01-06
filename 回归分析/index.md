@@ -47,7 +47,7 @@ $\mu_i$为无法观测的且满足一定关系的扰动项
 
 一般使用怀特检验
 
-![png](异方差.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/%E5%BC%82%E6%96%B9%E5%B7%AE.png)
 
 ## 怎么解决异方差
 

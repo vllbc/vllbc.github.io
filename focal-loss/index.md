@@ -6,13 +6,13 @@ Focal Loss主要是为了解决类别不平衡的问题，Focal Loss可以运用
 
 ### 原始Loss
 原始的二分类：
-![](image/Pasted%20image%2020230308111706.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308111706.png)
 
 其中
-![](image/Pasted%20image%2020230308111722.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308111722.png)
 
 所以：
-![](image/Pasted%20image%2020230308111730.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308111730.png)
 
 
 很容易理解，因为CE就是softmax在二分类的形式，实际运算中只关注对应标签的概率，对于二分类，如果是负样本的话，预测概率小于0.5则说明预测正确，则对应的实际的概率应该为1-p。最大化概率，就是最大化Log概率，也就是最小化-log概率。
@@ -27,7 +27,7 @@ Focal Loss主要是为了解决类别不平衡的问题，Focal Loss可以运用
 ### gamma参数
 
 在模型训练的时候，我们更希望关注难分类的样本，因此focal loss在原始loss上增加了一项，对整体进行了衰减：
-![](image/Pasted%20image%2020230308112408.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308112408.png)
 
 对于公式中的参数$\gamma$，一般会选择2，对于易分类的样本，即$p_t>0.5$的样本，$1-p_t$则会小于0.5，则loss会衰减的更多，最终的损失就变的很小。而对于难分类的样本，loss会衰减的比较小，通过这种衰减的对比，则变相增加了模型对于难分类样本的权重。
 
@@ -36,13 +36,13 @@ Focal Loss主要是为了解决类别不平衡的问题，Focal Loss可以运用
 对于二分类任务，负样本的数量远远多于正样本，导致模型更多关注在负样本上，忽略正样本。因此在使用交叉熵损失的时候通常会增加一个平衡参数用来调节正负样本的比重。
 
 所以会增加一个平衡参数来调节正负样本的比重。
-![](image/Pasted%20image%2020230308113243.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308113243.png)
 
-![](image/Pasted%20image%2020230308113248.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308113248.png)
 
 其实这就是balanced cross entropy，可以将它引入focal loss
 
-![](image/Pasted%20image%2020230308113319.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230308113319.png)
 
 在式子中，$\gamma$占据了主导地位，因此其实不用太在意$\alpha$的数值。
 

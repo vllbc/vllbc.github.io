@@ -37,8 +37,7 @@ $$
 
 
 其中U是一个$m\times n$的矩阵，$\sum$是一个$m\times n$的矩阵，除了主对角线上的元素全为0，主对角线上的每个元素成为奇异值，V是一个$n\times n$的矩阵，U和V都是酉矩阵。
-
-![png](SVD.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/SVD.png)
 
 先得到$m\times m$的方阵$AA^T$,然后进行特征值分解，$(AA^T)u_i=\lambda_iu_i$ 将$AA^T$的所有特征向量张成一个$m\times m$的矩阵U，就是SVD公式里面的U矩阵了。
 

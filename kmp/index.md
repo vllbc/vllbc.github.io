@@ -2,12 +2,12 @@
 
 KMP是字符串匹配问题的算法。"字符串A是否为字符串B的子串?如果是的话出现在B的哪些位置?"该问题就是字符串匹配问题，字符串A称为**模式串**，字符串B称为**主串**。
 
-![](image/Pasted%20image%2020230323164415.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230323164415.png)
 
  ## BF算法
  BF算法就是暴力匹配，即对主串从头开始慢慢移动模式串，直到找到相匹配的位置。
  代码很简单暴力：
- ![](image/Pasted%20image%2020230329124001.png)
+ ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230329124001.png)
  
 假设n为主串长度，m为模式串长度。
 
@@ -25,36 +25,36 @@ KMP 算法的不同之处在于，它会花费空间来记录一些信息。目�
 next数组实质上就是找出**模式串中前后字符重复出现的个数**，为了能够跳跃不可能匹配的步骤。
 next数组的定义为：next[i]表示模式串A[0]至A[i]这个字串，使得前k个字符等于后k个字符的最大值，特别的k不能取i+i,因为字串一共才i+1个字符，自己跟自己相等毫无意义。
 
-![](image/Pasted%20image%2020230401114922.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401114922.png)
 
  如何确定在移动过程中需要跳过多少步呢？下图更直观的体现了跳跃的过程：
- ![](image/Pasted%20image%2020230401151718.png)
+ ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401151718.png)
  也就是跳到模式串中的后缀相同字符串开始。因为这时可以确定前面的字符串肯定无法匹配了，**过的趟数=匹配上字符串中间字符长度-重复字符串长度**
-![](image/Pasted%20image%2020230401152738.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401152738.png)
 
 在实际代码编写中，移动的实际上是模式串的匹配位置。前面展示的只是理解减小匹配次数这一过程。**实际上跳动就是模式串比较指针的移动。模式串向右移动也就是比较指针向左移动，移动的距离就是跳过的趟数** 移动后的指针为：$j=j-(j-next[j-1]) =next[j-1]$
 其中原来的j为匹配成功的字符串长度，也就是匹配失败的指针位置。next[j-1]就是匹配成功的字符串的最长相同前后缀数，也就是要跳转到的指针的下标。（下标从0开始的，如果下标从1开始则在原来基础上+1就是要跳转到的位置，这也是为什么书上要+1）。
 
 即下图所示。
-![](image/Pasted%20image%2020230401152842.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401152842.png)
 
 然后再用移动后的指针和主串的上一轮匹配错误的位置相比，这时已经保证了前面的字符已经匹配了，即**当前指针前面的子串**已经和**上一轮匹配成功的子串的最长后缀**相同了。
 
 因此可以看到，Kmp算法的核心就是构造Next数组。
 最简单的方法就是根据定义暴力构造**时间复杂度为O(m2法)**：：
-![](image/Pasted%20image%2020230401153343.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401153343.png)
 
 第二种构建方案，是一种递推的方式进行构建，**时间复杂度为O(n+m)**:  
 考虑：如果next[0], next[1], ... next[x-1]均已知，那么如何求出 next[x] ？我们已经知道next[x-1],标记next[x-1]=temp,则可以讨论A[temp]和A[x]的值，分2种情况讨论：
 第一种情况：A[temp]等于A[x]，也就是说在前一个next结果上又多了一个字符串相同的长度，因此next[x]为next[x-1]+1
 
-![](image/Pasted%20image%2020230401153508.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401153508.png)
 这种情况说明了x-1时最长前缀的后一位和x位置的字符相同，则说明了前缀和后缀都增加了相同的1位，next[x] = next[x-1] + 1。
 （这里给一下我自己的理解，因为next中保存的是前后缀最大相同的长度，因此通常代表着最大相同前缀的后一位）
 
 第二种情况：当A[temp]和A[x]不相等的时候，我们需要缩小temp,把temp变成next[temp-1]，直到A[temp]=A[x]为止。A[now]=A[x]时，就可以直接向右扩展了。
 
-![](image/Pasted%20image%2020230401154053.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230401154053.png)
 如何理解这张图，当发现A[temp] != A[x]的时候，就一直缩小temp，也就是temp = next[temp-1]，也就是找原来的最长前缀中对应的next[temp-1]，因为前缀中的相同前后缀最大长度（图中为2）肯定也与后缀中的相同前后缀最大长度（图中为2）相同，也说明了前缀中的前缀（图中为0和1上的A和B）等于后缀中的后缀（图中为10和11上的A和B），此时还是原来的思路temp为前缀中的前缀的下一位，判断是否与后缀中的后缀的下一位相同（就是当前的A[x]），如果相同就是第一种情况，next[x] = temp + 1，如果一直没找到则设为0，说明没有。
 
 学到这不得不感叹kmp三位大佬的恐怖。。

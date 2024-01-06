@@ -24,7 +24,7 @@ for file in files[:]:
             
         mdate = tranf(file.stat().st_mtime)
         content = re.sub(r'lastmod: .*', 'lastmod: ' + mdate, content)
-        
+        print(file)
         tags = re.findall(r'.*posts\\(.*)(\\.*)?\\.*\.md', str(file))[0][0].split('\\')
         content = re.sub(r'categories: .*', 'categories: ' + str(tags[:-1]), content)
         content = re.sub(r'tags: .*', 'tags: ' + str(tags), content)

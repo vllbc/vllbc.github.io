@@ -11,6 +11,6 @@
 label smoothing可以解决上述问题，这是一种正则化策略，主要是通过soft one-hot来加入噪声，减少了真实样本标签的类别在计算损失函数时的权重，最终起到抑制过拟合的效果。
 
 增加label smoothing后真实的概率分布有如下改变：
-![](image/Pasted%20image%2020220905214056.png)
-![](image/Pasted%20image%2020220905214100.png)
-![](image/Pasted%20image%2020220905214114.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220905214056.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220905214100.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220905214114.png)

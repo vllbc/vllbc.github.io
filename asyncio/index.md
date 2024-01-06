@@ -340,9 +340,9 @@ yield显然不只是用来减小循环次数的，引用一下《流畅的python
 - 生成器退出时，生成器（或子生成器）中的 return expr 表达式会触发 StopIteration(expr) 异常抛出。
 - yield from 表达式的值是子生成器终止时传给 StopIteration异常的第一个参数。
 为什么yield可以转移控制权，可以看一下这一段伪代码：
-![](image/Pasted%20image%2020230125201438.png)
-![](image/Pasted%20image%2020230125202328.png)
-![](image/Pasted%20image%2020230125202421.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230125201438.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230125202328.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230125202421.png)
 注意这里的6是委托生成器向子生成器发送_s，而_s是调用方向委托生成器发送的，发送后得到结果_y，并在下一个循环yield即抛出给调用方。
 ## asyncio模块
 

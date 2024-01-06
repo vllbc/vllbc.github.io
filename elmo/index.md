@@ -11,7 +11,7 @@ ElMo与CoVe很类似，不过它不是基于机器翻译模型，而是语言模
 ## 模型训练(char-CNN 之上的前向和后向 LSTM-LMs)
 该模型非常简单，它由两层 LSTM 语言模型组成：前向和后向。使用这两种模型是为了使每个标记都可以具有两个上下文：左和右。
 
-![](image/Pasted%20image%2020220823235149.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220823235149.png)
 
 同样有趣的是作者如何获得初始单词表示（然后将其馈送到 LSTM）。让我们回想一下，在标准词嵌入层中，对于词汇表中的每个词，我们训练一个唯一的向量。在这种情况下，
 - 词嵌入不知道它们所包含的字符（例如，它们不知道单词**represent**, **represents**, **represented**, 和 **representation**在书面上是接近的）
@@ -22,7 +22,7 @@ ElMo与CoVe很类似，不过它不是基于机器翻译模型，而是语言模
 
 训练模型后，我们可以使用它来获取单词表示。为此，对于每个单词，我们结合来自前向和后向 LSTM 的相应层的表示。通过连接这些前向和后向向量，我们构建了一个“知道”左右上下文的单词表示。
 
-![](image/Pasted%20image%2020220823235430.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220823235430.png)
 
 总体而言，ELMo 表示具有三层：
 
@@ -30,7 +30,7 @@ ElMo与CoVe很类似，不过它不是基于机器翻译模型，而是语言模
 - 第 1 层- 来自前向和后向 LSTM 的第 1 层的连接表示；
 - 第 2 层- 来自前向和后向 LSTM 的第 2 层的连接表示；
 
-![](image/Pasted%20image%2020220823235538.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220823235538.png)
 
 这些层中的每一层都对不同类型的信息进行编码：第 0 层 - 仅单词级别，第 1 层和第 2 层 - 上下文中的单词。比较第 1 层和第 2 层，第 2 层可能包含更多高级信息：这些表示来自相应 LM 的更高层。
 

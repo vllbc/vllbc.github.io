@@ -139,8 +139,8 @@ $$
 实例可以看参考里面。
 
 ## 与梯度下降算法的关系
-![](image/Pasted%20image%2020221101191852.png)
-![](image/Pasted%20image%2020221101191829.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221101191852.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221101191829.png)
 
 ## 代码
 

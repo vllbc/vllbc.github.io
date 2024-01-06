@@ -4,14 +4,14 @@
 
 # 梯度下降法
 ## 简介
-![](image/Pasted%20image%2020220827142620.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827142620.png)
 
 ## 批度梯度下降
 其实就是一次将整个数据集进行梯度下降的迭代
-![](image/Pasted%20image%2020220827142641.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827142641.png)
 ## 随机梯度下降
 就是对样本进行循环，每循环一个样本就更新一次参数，但是不容易收敛
-![](image/Pasted%20image%2020220827142647.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220827142647.png)
 
 ## 小批量梯度下降
 大多数用于深度学习的梯度下降算法介于以上两者之间，**使用一个以上而又不是全部的训练样本**。传统上，这些会被称为小批量(mini-batch)或小批量随机(mini-batch stochastic)方法，现在通常将它们简单地成为随机(stochastic)方法。对于**深度学习**模型而言，人们所说的“**随机梯度下降, SGD**”，其实就是基于**小批量（mini-batch）的随机梯度下降**。

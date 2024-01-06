@@ -39,7 +39,7 @@
 
 **矩阵分解的主要过程，就是先 分解 协同过滤生成的共现矩阵，生成用户和物品的隐向量，再通过用户和物品隐向量间的相似性进行推荐。**
 
-![](image/Pasted%20image%2020221103125319.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221103125319.png)
 
 其实和主题模型中LSA很像，学过LSA就很容易理解。
 
@@ -51,7 +51,7 @@
 SVD不多说，但它的主要问题很明显，SVD要求原始矩阵是稠密的，但很显然共现矩阵并不稠密，而且无法进行正则化，容易过拟合，因此可以用梯度下降来计算分解矩阵。
 
 梯度下降的最基本的模型是：
-![](image/Pasted%20image%2020221103132109.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221103132109.png)
 
 
 
@@ -61,14 +61,14 @@ SVD不多说，但它的主要问题很明显，SVD要求原始矩阵是稠密�
 
 ### 基于表示学习的模型
 结构如下:
-![](image/Pasted%20image%2020221103142640.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221103142640.png)
 
 用户和物品分别通过神经网络生成各自的Embedding向量，即表示向量。将其作为中间产物，然后再通过内积等交互函数得到匹配分数，进行排序推荐。
 DSSM就是一个基于表示学习的模型。
 ### 基于匹配方法学习的模型
 基于匹配方法学习的深度推荐模型结构如下：
 
-![](image/Pasted%20image%2020221103143818.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221103143818.png)
 
 也就是文本匹配中的基于交互型的。
 是一个端到端的模型。

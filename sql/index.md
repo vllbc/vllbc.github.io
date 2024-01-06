@@ -66,4 +66,4 @@
 
 附：
 
-sql各连接![avatar](sqllj.jpg)
+sql各连接![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/sqllj.jpg)

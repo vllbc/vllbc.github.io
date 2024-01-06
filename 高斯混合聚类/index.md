@@ -58,7 +58,7 @@ $$
 
 得到参数后，再进行新的一轮迭代，计算$\gamma$值，如此反复。
 算法收敛后，就可以对样本进行聚类，根据$\lambda_j= \underbrace{\arg \max}_{i\in {1,2, \dots ,k}} \gamma_{jk}$可以得到每个样本的簇标记。具体的流程如下：
-![](image/Pasted%20image%2020221107214541.png)
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221107214541.png)
 
 ## 总结
 
