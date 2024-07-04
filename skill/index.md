@@ -1,7 +1,5 @@
 # skill
 
-
-
 ## **两个数的交换**
 
 
@@ -915,7 +913,6 @@ class SubPerson(Person):
 看到super(SubPerson, SubPerson)感到很疑惑，于是搜索资料大致搞明白了
 
 通俗说默认的super(SubPerson,self) (直接写super()也可) 返回的是一个类的实例
-
 > 为了委托给之前定义的setter方法，需要将控制权传递给之前定义的name属性的 `__set__()` 方法。 不过，获取这个方法的唯一途径是使用类变量而不是实例变量来访问它。 这也是为什么我们要使用 `super(SubPerson, SubPerson)` 的原因。
 
 从书中这句话可以看出 super(cls,cls)返回的是一个类 不是一个实例，super()的参数的作用就是用于定位位置
@@ -1845,3 +1842,6 @@ some_dict[5] = "Python"
 "Python"
 ```
 因为Python将 `5` 和 `5.0` 识别为 `some_dict` 的同一个键, 所以已有值 "JavaScript" 就被 "Python" 覆盖了.
+
+
+

@@ -52,14 +52,8 @@ $qf_i=1$，所以可以简化为：
 ## 代码
 ```python
 import math
-
 import jieba
-
-  
-
 import re
-
-  
 
 text = '''
 
@@ -89,17 +83,17 @@ class BM25(object):
 
     def __init__(self, docs):
 
-        self.D = len(docs)
+        self.D = len(docs) # doc个数
 
-        self.avgdl = sum([len(doc)+0.0 for doc in docs]) / self.D
+        self.avgdl = sum([len(doc)+0.0 for doc in docs]) / self.D # 每篇平均长度
 
         self.docs = docs
 
         self.f = []  # 列表的每一个元素是一个dict，dict存储着一个文档中每个词的出现次数
 
-        self.df = {} # 存储每个词及出现了该词的文档数量
+        self.df = {} # 存储每个词及出现了该词的文档数量(count)
 
-        self.idf = {} # 存储每个词的idf值
+        self.idf = {} # 存储每个词的idf值，当作权重
 
         self.k1 = 1.5
 
@@ -117,7 +111,7 @@ class BM25(object):
 
             for word in doc:
 
-                tmp[word] = tmp.get(word, 0) + 1  # 存储每个文档中每个词的出现次数
+                tmp[word] = tmp.get(word, 0) + 1  # 存储每个文档中每个词的出现次数（也可以用defaultdict)
 
             self.f.append(tmp) # idx为索引，f[idx]为一个dict，dict存储着第idx+1个文档中每个词的出现次数,idx代表第几个文档。
 
@@ -167,9 +161,9 @@ class BM25(object):
 
 def get_sentences(doc):
 
-    line_break = re.compile('[\r\n]')
+    line_break = re.compile('[\r\n]') # 以换行符分割
 
-    delimiter = re.compile('[，。？！；]')
+    delimiter = re.compile('[，。？！；]') # 以中文标点符号分割
 
     sentences = []
 
@@ -199,6 +193,8 @@ if __name__ == '__main__':
 
     sents = get_sentences(text)
 
+    print(sents)
+
     doc = []
 
     for sent in sents:
@@ -207,13 +203,15 @@ if __name__ == '__main__':
 
         doc.append(words)
 
-    print(doc)
+    # print(doc)
 
     s = BM25(doc)
 
-    print(s.f)
+    # print(s.f)
 
-    print(s.idf)
+    # print(s.df)
+
+    # print(s.idf)
 
     print(s.simall(['自然语言', '计算机科学', '领域', '人工智能', '领域']))
 ```

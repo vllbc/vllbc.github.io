@@ -9,7 +9,7 @@
 - I like NLP.
 - I enjoy flying.
 
-则共现矩阵如下
+则共现矩阵如下(窗口大小为1)
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220921131631.png)
 例如：“I like”出现在第1，2句话中，一共出现2次，所以=2。   
 对称的窗口指的是，“like I”也是2次

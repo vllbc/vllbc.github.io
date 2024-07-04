@@ -1,4 +1,4 @@
-# vscode配置latex
+# typst笔记
 
 
 

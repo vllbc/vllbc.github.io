@@ -1,7 +1,5 @@
 # 三数之和
 
-
-
 # 三数之和
 
 ## 题目：
@@ -10,40 +8,62 @@
 
 ## 思路：
 
-​	第一眼看就想到了用双指针，思路有点类似二分查找？
+​	第一眼看就想到了用双指针，注意重复数值的处理问题，算是一个滑动窗口问题
 
 ## 代码：
 
-​	
-
 ```python
 class Solution:
-    def threeSum(self, nums: List[int]) -> List[List[int]]:
-        n=len(nums)
-        res=[]
-        if(not nums or n<3):
-            return []
-        nums.sort()
-        res=[]
-        for i in range(n):
-            if(nums[i] > 0):
-                return res
-            if(i > 0 and nums[i]==nums[i-1]):
-                continue
-            L=i+1
-            R=n-1
-            while(L<R):
-                if(nums[i]+nums[L]+nums[R]==0):
-                    res.append([nums[i],nums[L],nums[R]])
-                    while(L<R and nums[L]==nums[L+1]):
-                        L=L+1
-                    while(L<R and nums[R]==nums[R-1]):
-                        R=R-1
-                    L=L+1
-                    R=R-1
-                elif(nums[i]+nums[L]+nums[R]>0):
-                    R=R-1
-                else:
-                    L=L+1
-        return res
+
+    def threeSum(self, nums: List[int]) -> List[List[int]]:
+
+        res = []
+
+        if len(nums) < 3:
+
+            return []
+
+        nums.sort()
+
+        for i, num in enumerate(nums):
+
+            if num > 0:
+
+                return res
+
+            if i > 0 and nums[i] == nums[i-1]:
+
+                continue
+
+            left, right = i+1, len(nums) - 1
+
+            while left < right:
+
+                temp = nums[i] + nums[left] + nums[right]
+
+                if temp == 0:
+
+                    res.append([nums[i], nums[left], nums[right]])
+
+                    while left < right and nums[right-1] == nums[right]:
+
+                        right -= 1
+
+                    while left < right and nums[left+1] == nums[left]:
+
+                        left += 1
+
+                    left += 1
+
+                    right -= 1
+
+                if temp > 0:
+
+                    right -=1
+
+                if temp < 0:
+
+                    left += 1
+
+        return res
 ```

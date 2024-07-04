@@ -4,6 +4,9 @@
 
 ## 常用命令
 ### diff
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240213213553.png)
+
+
 `git diff`：当工作区有改动，临时区为空，diff的对比是“工作区”与最后一次commit提交的仓库的共同文件”；当工作区有改动，临时区不为空，diff对比的是“工作区”与“暂存区”的共同文件”。
 `git diff --cached`：显示暂存区与最后一次commit的改动。
 `git diff` <分支1> <分支2> 显示两个分支最后一次commit的改动。
@@ -17,6 +20,8 @@
  也可以git add 特定文件，将文件加入暂存区。
 
 ### commit
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240213213418.png)
+
 `git commit -m "提交说明"` 提交到工作区
 
 `git commit --amend` 修改上次的提交记录
@@ -43,6 +48,8 @@
 
 
 ### checkout
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240213213618.png)
+
 `git checkout` 回退版本即head分离 但master不变
 checkout可以切换分支，也可以head分离，但是分支的位置不变，但后面的reset和revert都会改变分支
 
@@ -55,13 +62,13 @@ checkout可以切换分支，也可以head分离，但是分支的位置不变�
 reset的参数有三种，其作用如下：
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220830163125.png)
 
-最危险但最常用的就是hard。
+最危险但最常用的就是hard。soft也常用来修改某个提交，只修改提交，之后再进行提交即可达到修改的目的。
 
 ### revert
-`git revert`命令用于撤消对仓库提交历史的更改。其他“撤消”命令，例如 git checkout 和 git reset，将HEAD和分支引用指针移动到指定的提交。git revert也需要一个指定的提交，但是，它并不会将 ref 指针移动到这个提交。revert 操作将采用反转指定的提交的更改，并创建一个新的“还原提交”。然后更新 ref 指针以指向新的还原提交，使其成为分支的HEAD。
+`git revert`命令用于撤消对仓库提交历史的更改。其他“撤消”命令，例如 git checkout 和 git reset，将HEAD和分支引用指针移动到指定的提交。git revert也需要一个指定的提交，但是，它并不会将 ref 指针移动到这个提交。revert 操作将采用反转指定的提交的更改，并创建一个新的“还原提交”。然后更新 ref 指针以指向新的还原提交，使其成为分支的HEAD。(创建一个新的commit结点)
 
 ### merge
- `git merge` 比如在master分支里 执行git merge xxx 将xxx分支合并到master中，一般项目开发，一人一个分支，最后提交的时候合并再提交。不过更推荐用git rebase方法，这样合并后的分支更加直观
+ `git merge` 比如在master分支里 执行git merge xxx 将xxx分支合并到master中，一般项目开发，一人一个分支，最后提交的时候合并再提交。不过更推荐用git rebase方法，这样合并后的分支更加直观。一般是进行三方合并。
 
 ### branch
 最常用的就是创建和删除分支
@@ -71,13 +78,16 @@ reset的参数有三种，其作用如下：
 
 ### cherry-pick
 当需要另一个分支的所有改动时，用`git merge`，但当需要部分改动时候，要用`git cherry-pick xxx`   xxx为哈希值或者分支名，指定为分支名时候，将分支的最新改动合并过来
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240213213806.png)
+
 
 ### rebase
 当不知道提交的哈希值时，可以用`git rebase -i HEAD~x` 来可视化管理，可以调整提交的顺序，可以删除不想要的提交，或合并提交
-
+这是线性化的自动的 [cherry-pick](https://marklodato.github.io/visual-git-guide/index-zh-cn.html#cherry-pick)
 `git rebase xx1 xx2`将xx2分支上的提交记录放到xx1后面
 
-
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240213213834.png)
+此外活用`git rebase -i` ,进行可视化的操作。
 ### fetch
 `git fetch`获取远程仓库的数据，不会改变你本地仓库的状态，不会更新你的master,也没有更改你的本地磁盘文件，可以理解为单纯的下载操作。而`git pull`相当于`git fetch + git merge`即抓取后合并
 
@@ -91,7 +101,7 @@ reset的参数有三种，其作用如下：
 首先看一个图
 
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221113190157.png)
-首先要明确有四种object，第一种是记录文件内容，第二种是记录目录结构，第三种是记录提交信息，第四种是记录tag信息，第四种无关紧要。
+首先要明确有四种object，第一种是记录**文件内容**，第二种是记录**目录结构**，第三种是记录**提交信息**，第四种是记录tag信息，第四种无关紧要。
 
 从下面开始看，最下面记录的文件内容，注意只记录文件内容，不包括文件名等其它内容。是一个blob类型的节点，将文件的内容信息经过SHA1哈希算法得到对应的哈希值作为这个object在Git仓库中的唯一身份证。
 
@@ -104,3 +114,7 @@ reset的参数有三种，其作用如下：
 仓库有三个分区：工作目录、index索引区域、Git仓库。
 
 当文件被修改后，只是工作目录发生了改变，其余两个是没有任何变化的。当运行`git add xxx`命令后，即将xxx文件加入了索引区域，此时新建了一个blob object，并且将原来指向xxx指向了新建的blob Object，记住索引索引的是add的所有文件，这时运行`git commit`，会生成一个tree object，然后创建commit object，将分支等信息指向新的commit。注意每次commit都是储存的全新的文件快照而不是变更部分。
+
+## 参考
+[图解Git (marklodato.github.io)](https://marklodato.github.io/visual-git-guide/index-zh-cn.html#reset)
+[这才是真正的Git——Git内部原理 - LZANE | 李泽帆（靓仔）](https://www.lzane.com/tech/git-internal/)

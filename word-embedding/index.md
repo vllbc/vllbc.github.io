@@ -521,6 +521,7 @@ if __name__ == '__main__':
 这是没有任何训练技巧的版本，使用Linear的话要注意输入是独热编码的形式，而且设置bias=False，因为需要的只是权重矩阵，不需要偏置。下面是引入了负采样的技巧的版本，直接使用了nn.Embedding。
 ##### 复杂
 
+引入了负采样
 ```python
 import logging
 import pickle

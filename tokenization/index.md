@@ -27,7 +27,7 @@ BPE 确保最常见的词在token列表中表示为单个token，而罕见的词
 
 ### 算法过程
 1.  准备语料库，确定期望的 subword 词表大小等参数
-2. 通常在每个单词末尾添加后缀 </w>，统计每个单词出现的频率，例如，low 的频率为 5，那么我们将其改写为 "l o w </ w>”：5
+2. 通常在每个单词末尾添加后缀 </w>，统计每个单词出现的频率，例如，low 的频率为 5，那么我们将其改写为 "l o w </w>”：5
 3. 将语料库中所有单词拆分为单个字符，用所有单个字符建立最初的词典，并统计每个字符的频率，本阶段的 subword 的粒度是字符
 4. **挑出频次最高的符号对** ，比如说 `t` 和 `h` 组成的 `th`，将新字符加入词表，然后将语料中所有该字符对融合（merge），即所有 `t` 和 `h` 都变为 `th`。
 5. 重复上述操作，直到**词表中单词数达到设定量** 或**下一个最高频数为 1** ，如果已经打到设定量，其余的词汇直接丢弃
@@ -301,6 +301,7 @@ class WordpieceTokenizer(object):
 		return output_tokens
 ```
 
+
 ## Unigram Language Model
 与WordPiece一样，Unigram Language Model(ULM)同样使用语言模型来挑选子词。不同之处在于，BPE和WordPiece算法的词表大小都是从小到大变化，属于增量法。而Unigram Language Model则是减量法,即先初始化一个大词表，根据评估准则不断丢弃词表，直到满足限定条件。ULM算法考虑了句子的不同分词可能，因而能够输出带概率的多个子词分段。
 
@@ -311,3 +312,83 @@ class WordpieceTokenizer(object):
 5.  重复步骤2到4，直到词表大小减少到设定范围。
 
 可以看出，ULM会保留那些以较高频率出现在很多句子的分词结果中的子词，因为这些子词如果被丢弃，其损失会很大。
+### 代码
+```python
+def encode_word(word, model):
+
+    # word初步分词，model中为-log值
+
+    best_segmentations = [{"start": 0, "score": 1}] + [
+
+        {"start": None, "score": None} for _ in range(len(word))
+
+    ]
+
+    for start_idx in range(len(word)):
+
+        # This should be properly filled by the previous steps of the loop
+
+        best_score_at_start = best_segmentations[start_idx]["score"]
+
+        for end_idx in range(start_idx + 1, len(word) + 1):
+
+            token = word[start_idx:end_idx]
+
+            if token in model and best_score_at_start is not None:
+
+                score = model[token] + best_score_at_start # 加上start，即前缀对应的损失，log中相加等于原来概率相乘
+
+                # If we have found a better segmentation ending at end_idx, we update
+
+                if (
+
+                    best_segmentations[end_idx]["score"] is None
+
+                    or best_segmentations[end_idx]["score"] > score # score即loss。越小越好
+
+                ):
+
+                    best_segmentations[end_idx] = {"start": start_idx, "score": score}
+
+                print(token)
+
+                print(best_segmentations[end_idx]["score"], score)
+
+                print(best_segmentations)
+
+    segmentation = best_segmentations[-1]
+
+    if segmentation["score"] is None:
+
+        # We did not find a tokenization of the word -> unknown
+
+        return ["<unk>"], None
+
+    # 从后向前的最佳路径，即维特比算法
+
+    score = segmentation["score"]
+
+    start = segmentation["start"]
+
+    end = len(word)
+
+    tokens = []
+
+    while start != 0:
+
+        tokens.insert(0, word[start:end])
+
+        next_start = best_segmentations[start]["start"]
+
+        end = start
+
+        start = next_start
+
+    tokens.insert(0, word[start:end])
+
+    return tokens, score
+```
+
+
+
+[Unigram tokenization - Hugging Face NLP 课程](https://huggingface.co/learn/nlp-course/chapter6/7?fw=pt)

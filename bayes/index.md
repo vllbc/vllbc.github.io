@@ -25,7 +25,7 @@ $$
 ## 全概率公式
 
 $$
-P(A) = \sum_{i=1}^n P(B_i)P(A\lvert B_i)
+P(A) = \sum_{i=1}^n P(B_i)P(A\lvert B_i) = \sum_{i=1}^n P(AB_i)
 $$
 
 特例为:

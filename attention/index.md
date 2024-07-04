@@ -148,4 +148,4 @@ class Seq2SeqAttentionDecoder(AttentionDecoder):
 到此seq2seq中的attention就介绍完毕了，其实还有很多细节，以后遇到了会持续补充。
 
 # Self-attention
-移步transformer。
+移步transformer。[Transformer](Transformer.md)
