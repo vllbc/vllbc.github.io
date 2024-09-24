@@ -35,7 +35,7 @@ f_{q}\left(x_{m},m\right)=\left(W_{q}x_{m}\right)e^{im\theta}=q_{m}e^{im\theta} 
 
 将二维推广，有：
 
-$$\boldsymbol{R}_{\Theta,m}^{d}=\underbrace{\left(\begin{array}{ccccccc}{\cos m\theta_{0}}&{-\sin m\theta_{0}}&{0}&{0}&{\cdots}&{0}&{0}\\{\sin m\theta_{0}}&{\cos m\theta_{0}}&{0}&{0}&{\cdots}&{0}&{0}\\{0}&{0}&{\cos m\theta_{1}}&{-\sin m\theta_{1}}&{\cdots}&{0}&{0}\\{0}&{0}&{\sin m\theta_{1}}&{\cos m\theta_{1}}&{\cdots}&{0}&{0}\\{\vdots}&{\vdots}&{\vdots}&{\vdots}&{\ddots}&{\vdots}&{\vdots}\\{0}&{0}&{0}&{0}&{\cdots}&{\cos m\theta_{d/2-1}}&{-\sin m\theta_{d/2-1}}\\{0}&{0}&{0}&{0}&{0}&{\cdots}&{\sin m\theta_{d/2-1}}&{\cos m\theta_{d/2-1}}\end{array}\right)}_{{\boldsymbol{W}_{m}\}\}$$
+$$\boldsymbol{R}_{\Theta,m}^{d}=\underbrace{\left(\begin{array}{ccccccc}{\cos m\theta_{0}}&{-\sin m\theta_{0}}&{0}&{0}&{\cdots}&{0}&{0}\\{\sin m\theta_{0}}&{\cos m\theta_{0}}&{0}&{0}&{\cdots}&{0}&{0}\\{0}&{0}&{\cos m\theta_{1}}&{-\sin m\theta_{1}}&{\cdots}&{0}&{0}\\{0}&{0}&{\sin m\theta_{1}}&{\cos m\theta_{1}}&{\cdots}&{0}&{0}\\{\vdots}&{\vdots}&{\vdots}&{\vdots}&{\ddots}&{\vdots}&{\vdots}\\{0}&{0}&{0}&{0}&{\cdots}&{\cos m\theta_{d/2-1}}&{-\sin m\theta_{d/2-1}}\\{0}&{0}&{0}&{0}&{0}&{\cdots}&{\sin m\theta_{d/2-1}}&{\cos m\theta_{d/2-1}}\end{array}\right)}$$
 
 则计算旋转编码，即有：
 
