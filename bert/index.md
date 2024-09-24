@@ -44,81 +44,251 @@ MLM 仍然是语言建模：目标是根据文本的某些部分预测句子/文
 
 注意一些细节，在代码实现的时候，注意特殊的标记如\[SEP\]\[CLS\] 等不要替换， 还有\[PAD\]
 
-下面是simcse中的代码实现
+
+
+
+![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221111180735.png)
+
+## 数据集构建代码
 ```python
-def mask_tokens(
+class BERTDataset(Dataset):
 
-            self, inputs: torch.Tensor, special_tokens_mask: Optional[torch.Tensor] = None
+    def __init__(self, corpus_path, vocab, seq_len, encoding="utf-8", corpus_lines=None, on_memory=True):
 
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self.vocab = vocab
 
-            """
+        self.seq_len = seq_len
 
-            用于生成mlm_input_ids和mlm_label
+  
 
-            Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
+        self.on_memory = on_memory
 
-            """
+        self.corpus_lines = corpus_lines
 
-            inputs = inputs.clone() # 一会将input进行mlm处理
+        self.corpus_path = corpus_path
 
-            labels = inputs.clone()
+        self.encoding = encoding
 
-            # We sample a few tokens in each sequence for MLM training (with probability `self.mlm_probability`)
+  
 
-            probability_matrix = torch.full(labels.shape, self.mlm_probability)
+        with open(corpus_path, "r", encoding=encoding) as f:
 
-            # 先构造special_tokens_mask，即特殊标记避免进行mask
+            if self.corpus_lines is None and not on_memory:
 
-            if special_tokens_mask is None:
+                for _ in tqdm.tqdm(f, desc="Loading Dataset", total=corpus_lines):
 
-                special_tokens_mask = [
+                    self.corpus_lines += 1
 
-                    self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
+  
 
-                ]
+            if on_memory:
 
-                special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+                self.lines = [line[:-1].split("\t")
+
+                              for line in tqdm.tqdm(f, desc="Loading Dataset", total=corpus_lines)] # 一行有两个句子，分隔符是\t
+
+                self.corpus_lines = len(self.lines)
+
+  
+
+        if not on_memory:
+
+            self.file = open(corpus_path, "r", encoding=encoding)
+
+            self.random_file = open(corpus_path, "r", encoding=encoding)
+
+  
+
+            for _ in range(random.randint(self.corpus_lines if self.corpus_lines < 1000 else 1000)):
+
+                self.random_file.__next__()
+
+  
+
+    def __len__(self):
+
+        return self.corpus_lines
+
+  
+
+    def __getitem__(self, item):
+
+        t1, t2, is_next_label = self.random_sent(item) # is_next_label: 1 or 0，1代表t2是相邻句子，0代表不是相邻句子
+
+        t1_random, t1_label = self.random_word(t1) # mlm任务
+
+        t2_random, t2_label = self.random_word(t2)
+
+  
+
+        # [CLS] tag = SOS tag, [SEP] tag = EOS tag
+
+        t1 = [self.vocab.sos_index] + t1_random + [self.vocab.eos_index]
+
+        t2 = t2_random + [self.vocab.eos_index]
+
+  
+
+        t1_label = [self.vocab.pad_index] + t1_label + [self.vocab.pad_index]
+
+        t2_label = t2_label + [self.vocab.pad_index]
+
+  
+
+        segment_label = ([1 for _ in range(len(t1))] + [2 for _ in range(len(t2))])[:self.seq_len]
+
+        bert_input = (t1 + t2)[:self.seq_len] # 截断
+
+        bert_label = (t1_label + t2_label)[:self.seq_len]
+
+  
+
+        padding = [self.vocab.pad_index for _ in range(self.seq_len - len(bert_input))] #pad
+
+        bert_input.extend(padding), bert_label.extend(padding), segment_label.extend(padding)
+
+  
+
+        output = {"bert_input": bert_input,
+
+                  "bert_label": bert_label,
+
+                  "segment_label": segment_label,
+
+                  "is_next": is_next_label}
+
+  
+
+        return {key: torch.tensor(value) for key, value in output.items()}
+
+  
+
+    def random_word(self, sentence): # 对sent token进行mask并返回mask后的label
+
+        tokens = sentence.split()
+
+        output_label = []
+
+  
+
+        for i, token in enumerate(tokens):
+
+            prob = random.random()
+
+            if prob < 0.15:
+
+                prob /= 0.15
+
+  
+
+                # 80% randomly change token to mask token
+
+                if prob < 0.8:
+
+                    tokens[i] = self.vocab.mask_index
+
+  
+
+                # 10% randomly change token to random token
+
+                elif prob < 0.9:
+
+                    tokens[i] = random.randrange(len(self.vocab))
+
+  
+
+                # 10% randomly change token to current token
+
+                else:
+
+                    tokens[i] = self.vocab.stoi.get(token, self.vocab.unk_index)
+
+  
+
+                output_label.append(self.vocab.stoi.get(token, self.vocab.unk_index)) # 被mask掉的token作为label
+
+  
 
             else:
 
-                special_tokens_mask = special_tokens_mask.bool()
+                tokens[i] = self.vocab.stoi.get(token, self.vocab.unk_index)
+
+                output_label.append(0) # label为0，这样计算loss时不用考虑，因为可以设置nn.NLLLoss(ignore_index=0)
 
   
 
-            probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-
-            masked_indices = torch.bernoulli(probability_matrix).bool()
-
-            labels[~masked_indices] = -100  # We only compute loss on masked tokens
+        return tokens, output_label
 
   
 
-            # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+    def random_sent(self, index): # 根据idx选择某对句子并随机返回相邻或不相邻的句子。
 
-            indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
-
-            inputs[indices_replaced] = self.tokenizer.convert_tokens_to_ids(self.tokenizer.mask_token)
+        t1, t2 = self.get_corpus_line(index)
 
   
 
-            # 10% of the time, we replace masked input tokens with random word
+        # output_text, label(isNotNext:0, isNext:1)
 
-            indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+        if random.random() > 0.5:
 
-            random_words = torch.randint(len(self.tokenizer), labels.shape, dtype=torch.long)
+            return t1, t2, 1
 
-            inputs[indices_random] = random_words[indices_random]
+        else:
+
+            return t1, self.get_random_line(), 0
 
   
 
-            # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+    def get_corpus_line(self, item): # 通过item idx选择某对句子
 
-            return inputs, labels
+        if self.on_memory:
+
+            return self.lines[item][0], self.lines[item][1]
+
+        else:
+
+            line = self.file.__next__()
+
+            if line is None:
+
+                self.file.close()
+
+                self.file = open(self.corpus_path, "r", encoding=self.encoding)
+
+                line = self.file.__next__()
+
+  
+
+            t1, t2 = line[:-1].split("\t")
+
+            return t1, t2
+
+  
+
+    def get_random_line(self): # 随机选一行
+
+        if self.on_memory:
+
+            return self.lines[random.randrange(len(self.lines))][1]
+
+  
+
+        line = self.file.__next__()
+
+        if line is None:
+
+            self.file.close()
+
+            self.file = open(self.corpus_path, "r", encoding=self.encoding)
+
+            for _ in range(random.randint(self.corpus_lines if self.corpus_lines < 1000 else 1000)):
+
+                self.random_file.__next__()
+
+            line = self.random_file.__next__()
+
+        return line[:-1].split("\t")[1]
 ```
-![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020221111180735.png)
-
-
 ## 微调
 
 ### 分类

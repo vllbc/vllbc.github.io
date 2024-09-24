@@ -1843,5 +1843,17 @@ some_dict[5] = "Python"
 ```
 因为Python将 `5` 和 `5.0` 识别为 `some_dict` 的同一个键, 所以已有值 "JavaScript" 就被 "Python" 覆盖了.
 
+## 类__init__参数快速赋给self
 
+```python
+def __init__(self, x=1) -> None:
+
+        super().__init__()
+
+        self.__dict__.update(locals())
+
+        pass
+```
+
+即可，此时不需要`self.x=x`也可以直接使用`self.x`
 

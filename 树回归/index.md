@@ -53,3 +53,7 @@ f(x)=\sum_{m=1}^{M} \hat{c}_{m} I\left(x \epsilon R_{m}\right)
 $$
 
 当输入空间划分确定时，可以用平方误差来表示回归树对于训练数据的预测方法，用平方误差最小 的准则求解每个单元上的最优输出值。
+
+## 实例
+
+[【机器学习】回归决策树-CSDN博客](https://blog.csdn.net/qq_46092061/article/details/118826347)

@@ -667,3 +667,82 @@ Transformer在两个地方进行了权重共享：
 因此，Embedding层和FC层权重共享，Embedding层中和向量 x 最接近的那一行对应的词，会获得更大的预测概率。实际上，Decoder中的**Embedding层和FC层有点像互为逆过程**。
 
 通过这样的权重共享可以减少参数的数量，加快收敛。
+
+### 为什么除以根号d
+论文中的解释是：向量的[点积](https://zhida.zhihu.com/search?q=%E7%82%B9%E7%A7%AF&zhida_source=entity&is_preview=1)结果会很大，将 softmax 函数 push 到梯度很小的区域，scaled 会缓解这种现象。
+
+$$\frac{\partial\mathbf{y}}{\partial\mathbf{x}}=\mathrm{diag}(\mathbf{y})-\mathbf{y}\mathbf{y}^T$$
+当$\mathbf{y} =$softmax$( \mathbf{x} )$时，$\mathbf{y}$对$\mathbf{x}$的梯度为：
+这是一个jacobi矩阵$^{+}$,表示y的每一个元素对x每一个元素的导数是什么。
+展开：
+$$\frac{\partial\mathbf{y}}{\partial\mathbf{x}}=\begin{bmatrix}y_1&0&\cdots&0\\0&y_2&\cdots&0\\\vdots&\vdots&\ddots&\vdots\\0&0&\cdots&y_d\end{bmatrix}-\begin{bmatrix}y_1^2&y_1y_2&\cdots&y_1y_d\\y_2y_1&y_2^2&\cdots&y_2y_d\\\vdots&\vdots&\ddots&\vdots\\y_dy_1&y_dy_2&\cdots&y_d^2\end{bmatrix}$$
+根据前面的讨论，当输入 $\mathbf{x}$ 的某一个元素较大时，softmax 会把大部分概率分布$^{+}$分配给最大的元
+素，假设我们的输入数量级很大，那么就将产生一个接近 one-hot 的向量
+$$\mathbf{y}\approx[1,0,\cdots,0]^\top $$
+此时上面的矩阵变为如下形式
+$$\frac{\partial\mathbf{y}}{\partial\mathbf{x}}\approx\begin{bmatrix}1&0&\cdots&0\\0&0&\cdots&0\\\vdots&\vdots&\ddots&\vdots\\0&0&\cdots&0\end{bmatrix}-\begin{bmatrix}1&0&\cdots&0\\0&0&\cdots&0\\\vdots&\vdots&\ddots&\vdots\\0&0&\cdots&0\end{bmatrix}=\mathbf{0}$$
+也就是所有的梯度都接近0
+除以$\sqrt{ d }$后就使x的分布更加平缓，从而防止梯度消失。
+```python
+from scipy.special import softmax
+
+import numpy as np
+
+  
+
+def test_gradient(dim, time_steps=50, scale=1.0):
+
+    # Assume components of the query and keys are drawn from N(0, 1) independently
+
+    q = np.random.randn(dim)
+
+    ks = np.random.randn(time_steps, dim)
+
+    x = np.sum(q * ks, axis=1) / scale  # x.shape = (time_steps,)
+
+    y = softmax(x)
+
+    grad = np.diag(y) - np.outer(y, y)# softmax gradient(dy/dx)
+
+    return np.max(np.abs(grad))  # the maximum component of gradients
+
+  
+  
+
+NUMBER_OF_EXPERIMENTS = 5
+
+  
+
+# results of 5 random runs without scaling
+
+print([test_gradient(100) for _ in range(NUMBER_OF_EXPERIMENTS)])
+
+print([test_gradient(1000) for _ in range(NUMBER_OF_EXPERIMENTS)])
+
+  
+
+# results of 5 random runs with scaling
+
+print([test_gradient(100, scale=np.sqrt(100)) for _ in range(NUMBER_OF_EXPERIMENTS)])
+
+print([test_gradient(1000, scale=np.sqrt(1000)) for _ in range(NUMBER_OF_EXPERIMENTS)])
+```
+输出可看到下面的梯度比上面的梯度更大。
+
+这时又有一个问题，为什么多分类的softmax+交叉熵不需要除以东西呢？这是因为交叉熵中有一个log，log_softmax的梯度和刚才算出来的不同，就算输入的某一个x过大也不会梯度消失。所以就又可以推断出softmax+MSE会导致梯度消失，因为MSE中没有Log，这是为什么分类任务不使用MSE损失函数的原因之一。
+### 为什么 Transformer 需要进行 Multi-head Attention
+实验证明多头是必要的，8/16个头都可以取得更好的效果，但是超过16个反而效果不好。每个头关注的信息不同，但是头之间的差异随着层数增加而减少。并且不是所有头都有用，有工作尝试剪枝，可以得到更好的表现。
+
+论文中提到模型分为多个头，形成多个子空间，每个头关注不同方面的信息。
+
+那为什么每个头的维度要降呢?
+[一言蔽之](https://zhida.zhihu.com/search?q=%E4%B8%80%E8%A8%80%E8%94%BD%E4%B9%8B&zhida_source=entity&is_preview=1)的话，大概是：在**不增加时间复杂度**的情况下，同时，借鉴[CNN](https://zhida.zhihu.com/search?q=CNN&zhida_source=entity&is_preview=1)多核的思想，在更低的维度，在**多个独立的[特征空间](https://zhida.zhihu.com/search?q=%E7%89%B9%E5%BE%81%E7%A9%BA%E9%97%B4&zhida_source=entity&is_preview=1)**，**更容易**学习到更丰富的特征信息。
+### 为什么 Transformer 的 Embedding 最后要乘dmodel
+具体的原因是，如果使用 Xavier 初始化，Embedding 的方差为 1/d_model，当d_model非常大时，矩阵中的每一个值都会减小。通过乘一个 dmodel 可以将方差恢复到1。
+
+因为Position Encoding是通过三角函数算出来的，值域为[-1, 1]。所以当加上 Position Encoding 时，需要放大 [embedding](https://zhida.zhihu.com/search?q=embedding&zhida_source=entity&is_preview=1) 的数值，否则规模不一致相加后会丢失信息。
+
+因为 Bert 使用的是学习式的Embedding，所以 Bert 这里就不需要放大。
+# 参考
+
+[Bert/Transformer 被忽视的细节（或许可以用来做面试题） - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/559495068)

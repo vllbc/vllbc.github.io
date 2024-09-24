@@ -58,7 +58,8 @@ $$
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220912012914.png)
 k取1时与add one 相同
 
-
+### Kneser-Ney Smoothing
+这是目前ngram模型效果最好的平滑方法。
 ## 神经网络语言模型
 
 具体可以看本博客有关神经网络语言模型的内容，NNLM是第一个出现的神经网络语言模型。

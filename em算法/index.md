@@ -279,7 +279,7 @@ $$
 那么, 完全数据的对数似然函数为
 
 $$
-\log P(y, \gamma \mid \theta)=\sum_{k=1}^K\left\\{n_k \log \alpha_k+\sum_{j=1}^N \gamma_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\\}
+\log P(y, \gamma \mid \theta)=\sum_{k=1}^K\left\\{n_k \log \alpha_k+\sum_{j=1}^N \gamma_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\}
 $$
 
 
@@ -288,8 +288,8 @@ $$
 $$
 \begin{aligned}
 Q\left(\theta, \theta^{(i)}\right) &=E\left[\log P(y, \gamma \mid \theta) \mid y, \theta^{(i)}\right] \\\\
-&=E\left\\{\sum_{k=1}^K\left\\{n_k \log \alpha_k+\sum_{j=1}^N \gamma_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\\}\right\\\} \\\\
-&=\sum_{k=1}^K\left\\{\sum_{j=1}^N\left(E \gamma_{j k}\right) \log \alpha_k+\sum_{j=1}^N\left(E \gamma_{j k}\right)\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right\\\}
+&=E\left{\sum_{k=1}^K\left{n_k \log \alpha_k+\sum_{j=1}^N \gamma_{j k}\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right}\right} \\\\
+&=\sum_{k=1}^K\left\\{\sum_{j=1}^N\left(E \gamma_{j k}\right) \log \alpha_k+\sum_{j=1}^N\left(E \gamma_{j k}\right)\left[\log \left(\frac{1}{\sqrt{2 \pi}}\right)-\log \sigma_k-\frac{1}{2 \sigma_k^2}\left(y_j-\mu_k\right)^2\right]\right}
 \end{aligned}
 $$
 

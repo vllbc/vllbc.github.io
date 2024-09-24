@@ -186,7 +186,7 @@ wordpiece 词表的构造与BPE很相似，都是选择两个子词合并成新�
 假设把相邻位置的x和y两个子词进行合并，合并后产生的子词记为z，此时句子S似然值的变化可表示为：
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020230306230911.png)
 从上面的公式，很容易发现，似然值的变化就是两个子词之间的互信息。简而言之，WordPiece每次选择合并的两个子词，他们具有最大的互信息值，也就是两子词在语言模型上具有较强的关联性，它们经常在语料中以相邻方式同时出现。
-
+与BPE相似，通过以上方式构建词表。
 ### 编码
 1. 从第一个位置开始，由于是最长匹配，结束位置需要从最右端依次递减，所以遍历的第一个子词 是其本身 unaffable，该子词不在词汇表中
 2. 结束位置左移一位得到子词 unaffabl，同样不在词汇表中
@@ -305,7 +305,7 @@ class WordpieceTokenizer(object):
 ## Unigram Language Model
 与WordPiece一样，Unigram Language Model(ULM)同样使用语言模型来挑选子词。不同之处在于，BPE和WordPiece算法的词表大小都是从小到大变化，属于增量法。而Unigram Language Model则是减量法,即先初始化一个大词表，根据评估准则不断丢弃词表，直到满足限定条件。ULM算法考虑了句子的不同分词可能，因而能够输出带概率的多个子词分段。
 
-1.  初始时，建立一个足够大的词表。一般，可用语料中的所有字符加上常见的子字符串初始化词表，也可以通过BPE算法初始化。
+1.  初始时，建立一个足够大的词表(使用一些算法)。一般，可用语料中的所有字符加上常见的子字符串初始化词表，也可以通过BPE算法初始化。
 2.  针对当前词表，用EM算法求解每个子词在语料上的概率。
 3.  对于每个子词，计算当该子词被从词表中移除时，总的loss降低了多少，记为该子词的loss。
 4.  将子词按照loss大小进行排序，丢弃一定比例loss最小的子词(比如20%)，保留下来的子词生成新的词表。这里需要注意的是，单字符不能被丢弃，这是为了避免OOV情况。
@@ -313,6 +313,9 @@ class WordpieceTokenizer(object):
 
 可以看出，ULM会保留那些以较高频率出现在很多句子的分词结果中的子词，因为这些子词如果被丢弃，其损失会很大。
 ### 代码
+
+#### encode代码
+
 ```python
 def encode_word(word, model):
 
@@ -389,6 +392,33 @@ def encode_word(word, model):
     return tokens, score
 ```
 
+#### 计算Loss
+```python
+def compute_loss(model):
+    loss = 0
+    for word, freq in word_freqs.items():
+        _, word_loss = encode_word(word, model)
+        loss += freq * word_loss
+    return loss
+```
+
+#### 计算score(用于删除token)
+```python
+import copy
 
 
+def compute_scores(model):
+    scores = {}
+    model_loss = compute_loss(model)
+    for token, score in model.items():
+        # We always keep tokens of length 1
+        if len(token) == 1:
+            continue
+        model_without_token = copy.deepcopy(model)
+        _ = model_without_token.pop(token)
+        scores[token] = compute_loss(model_without_token) - model_loss
+    return scores
+```
+
+### 参考
 [Unigram tokenization - Hugging Face NLP 课程](https://huggingface.co/learn/nlp-course/chapter6/7?fw=pt)

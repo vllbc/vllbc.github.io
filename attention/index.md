@@ -149,3 +149,105 @@ class Seq2SeqAttentionDecoder(AttentionDecoder):
 
 # Self-attention
 移步transformer。[Transformer](Transformer.md)
+
+# KV cache
+[KV cache](LLM/KV%20cache.md)
+# MQA
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240916123443.png)
+
+标准的mha中，KV heads的数量和Query heads的数量相同，每一个q head对应一个独立的kv head，但这样的开销比较大。
+**MQA (Multi Queries Attention): MQA比较极端，只保留一个KV Head，多个Query Heads共享相同的KV Head**。这相当于不同Head的Attention差异，全部都放在了Query上，需要模型仅从不同的Query Heads上就能够关注到输入hidden states不同方面的信息。这样做的好处是，极大地降低了KV Cache的需求，但是会导致模型效果有所下降。（层内共享）
+# GQA
+如上图所示，GQA就是在MHA和MQA之间做了一个平衡。对query heads进行分组，分成几组就对应多少个kv heads，然后每一组内的query Heads共享相同的KV head。
+GQA可以在减少计算量和KV Cache同时确保模型效果不受到大的影响。
+# online attention
+### 3-pass 
+$\mathsf{NO}$TATIONS
+
+$\{m_i\}{:}\max_{j=1}^i\left\{x_j\right\}$, with initial value $m_0=-\infty.$
+$\{d_i\}{:}\sum_{j=1}^ie^{x_j-m_N}$, with initial value $d_0=0,d_N$ is the denominator of safe softmax.
+$\{a_i\}{:\text{ the final softmax value}}.$
+
+BODY
+$\textbf{for }i\leftarrow 1, N\textbf{ do}$
+$$m_i\leftarrow\max\left(m_{i-1},x_i\right)$$
+$\mathbf{end}$
+
+$\textbf{for }i\leftarrow 1, N\textbf{ do}$
+$$d_i\leftarrow d_{i-1}+e^{x_i-m_N}$$
+$\mathbf{end}$
+
+$\textbf{for }i\leftarrow 1, N\textbf{ do}$
+$$a_i\leftarrow\frac{e^{x_i-m_N}}{d_N}$$
+$\mathbf{end}$
+
+这是3step计算attention的方法，每一步都需要上一步的结果才可以继续计算。这样的话由于sram中没有足够的存储空间，因此需要多次访存。
+### online attention
+$$\begin{aligned}
+d_i^{\prime}& =\sum_{j=1}^ie^{x_j-m_i} \\
+&= \left(\sum_{j=1}^{i-1} e^{x_j-m_i}\right)+e^{x_i-m_i} \\
+&= \left(\sum_{j=1}^{i-1} e^{x_j-m_{i-1}}\right)e^{m_{i-1}-m_i}+e^{x_i-m_i} \\
+&= d_{i-1}' e^{m_{i-1}-m_i}+e^{x_i-m_i}
+\end{aligned}$$
+找到迭代式之后就可以从3step降到2step
+$$\begin{aligned}&\mathbf{for~}i\leftarrow1,N\textbf{ do}\\&&&m_i&&\leftarrow&\max\left(m_{i-1},x_i\right)\\&&&d_i^{\prime}&&\leftarrow&d_{i-1}^{\prime}e^{m_{i-1}-m_i}+e^{x_i-m_i}\\&\mathbf{end}\\&\mathbf{for~}i\leftarrow1,N\textbf{ do}\\&&&a_i\leftarrow&&\frac{e^{x_i-m_N}}{d_N^{\prime}}\\&\mathbf{end}\end{aligned}$$
+好像FLOPs计算量并没有减少，甚至还略有增加，因为现在每次都需要计算额外的scale
+
+> x值，也就是pre-softmax logits，由于需要O(N^2)的显存无法放在SRAM中。因此：  
+> 1. 要么提前计算好x，保存在全局显存中，需要O(N^2)的显存，容易爆显存。  
+> 2. 要么在算法中online计算，每次循环中去load一部分Q，K到片上内存，计算得到x。
+
+Attention优化的目标就是避开第一种情况，尽可能节省显存，否则，LLM根本无法处理类似100K以上这种long context的情况。而对于第二种情况，我们不需要保存中间矩阵x，节省了显存，但是计算没有节省，并且增加了HBM IO Accesses（需要不断地load Q, K）。此时，2-pass算法相对于3-pass算法，可以减少一次整体的load Q, K以及减少一次对 xi 的online recompute，因为在2-pass的第一个pass中， xi 是被两次计算共享的。类似online-softmax这种算法，对应到Attention中的应用，就是Memory Efficient Attention（注意不是FlashAttention）。
+# flash attention
+safe softmax并没有1-pass算法，那么Attention会不会有呢？有！这就是FlashAttention！
+
+在使用online attention的情况下，从头开始计算attention score的过程如下：
+$\operatorname{NOTATIONS}$
+
+$Q[k,:]:$the $k$-th row vector of $Q$ matrix.
+$\begin{aligned}O[k,:]:\mathrm{~the~}k\text{-th row of output }O\mathrm{~matrix.}\\\mathbf{V}[i,i]:\mathrm{~the~}k\text{-th row of output }O\mathrm{~matrix.}\end{aligned}$
+$V[i,:]{:\text{ the }i\text{-th row of }V\text{ matrix}}.$
+$\{\boldsymbol{o}_i\}{:}\sum_{j=1}^ia_jV[j,:]$, a row vector storing partial aggregation result $A[k,:i]\times V[:i,:]$
+BODY
+
+$\textbf{for }i\leftarrow 1, N\textbf{ do}$
+$$\begin{aligned}x_i&\leftarrow\quad Q[k,:]\:K^T[:,i]\\m_i&\leftarrow\quad\max\left(m_{i-1},x_i\right)\\d_i'&\leftarrow\quad d_{i-1}'e^{m_{i-1}-m_i}+e^{x_i-m_i}\end{aligned}$$
+$\mathbf{end}$
+
+$\textbf{for }i\leftarrow 1, N\textbf{ do}$
+$$\begin{aligned}&a_i\:\leftarrow\:\frac{e^{x_i-m_N}}{d_N^{\prime}}\\&o_i\:\leftarrow\:o_{i-1}+a_i\:V[i,:\:]\end{aligned}$$
+$\mathbf{end}$
+$$O[k,:]\leftarrow\boldsymbol{o}_N$$
+
+
+优化思路和online attention一样，将$o_{i}$的计算简化以便于可以写成迭代式。
+
+原来的$o_{i}$使用以下方式计算，依赖于全局的$m_{N}$和$d_{N}$。
+$$\boldsymbol{o}_i:=\sum_{j=1}^i\left(\frac{e^{x_j-m_N}}{d_N^{\prime}}V[j,:]\right)$$
+将其改写成如下形式：
+$$\boldsymbol{o}_i^{\prime}:=\left(\sum_{j=1}^i\frac{e^{x_j-m_i}}{d_i^{\prime}}V[j,:]\right)$$
+这样按照上面的方式拓展下去，可以找到一个循环迭代式。
+
+$$\begin{aligned}
+\mathbf{o}_i^{\prime}& =\sum_{j=1}^i\frac{e^{x_j-m_i}}{d'}V[j,:] \\
+&= \left(\sum_{j=1}^{i-1}\frac{e^{x_j-m_i}}{d_i^{\prime}}V[j,:] \right)+\frac{e^{x_i-m_i}}{d_i^{\prime}}V[i,:] \\
+&= \left(\sum_{j=1}^{i-1}\frac{e^{x_j-m_{i-1}}}{d_{i-1}^{\prime}}\frac{e^{x_j-m_i}}{e^{x_j-m_{i-1}}}\frac{d_{i-1}^{\prime}}{d_i^{\prime}}V[j,:]\right)+\frac{e^{x_i-m_i}}{d_i^{\prime}}V[i,:] \\
+&= \left(\sum_{j=1}^{i-1}\frac{e^{x_j-m_{i-1}}}{d_{i-1}^{\prime}}V[j,.]\right)\frac{d_{i-1}^{\prime}}{d_i^{\prime}}e^{m_{i-1}-m_i}+\frac{e^{x_i-m_i}}{d_i^{\prime}}V[i,.] \\
+&= \boldsymbol{o}_{i-1}'\frac{d_{i-1}'e^{m_{i-1}-m_i}}{d_i'}+\frac{e^{x_i-m_i}}{d_i'}V[i,:]
+\end{aligned}$$
+
+这样就找到了$o_{i}$的递推表达式。
+
+之后对Q,K进行tiling后计算，得到如下：
+$$\begin{aligned}&\textbf{for }i\leftarrow1,\#\text{tiles do}\\&&&\boldsymbol{x}_i\quad\leftarrow\quad Q[k;\cdot] K^T[\cdot,(i-1) b; i b]\\&&&m_i^{(\mathrm{local})}=\begin{array}{c}\overset{b}{\operatorname*{max}}\left(\boldsymbol{x}_i[j]\right)\\\end{array}\\&&&m_i \leftarrow \max\left(m_{i-1},m_i^{(\mathrm{local})}\right)\\&&&a_i^{\prime} \leftarrow d_{i-1}^{\prime}e^{m_{i-1}-m_i}+\sum_{j=1}^be^{\boldsymbol{x}_i[j]-m_i}\\&&&\boldsymbol{o}_i^{\prime} \leftarrow \boldsymbol{o}_{i-1}^{\prime}\frac{d_{i-1}^{\prime}e^{m_{i-1}-m_i}}{d_i^{\prime}}+\sum_{j=1}^b\frac{e^{\boldsymbol{x}_i[j]-m_i}}{d_i^{\prime}}V[(i-1) b+j,:]\\&\text{end}\\&&&O[k,:]\leftarrow\boldsymbol{o}_{N/b}^{\prime}\end{aligned}$$
+对于tiles，示意图如下：
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240916201336.png)
+
+可以理解成滑动窗口，$K^{T}$从左向右滑动（按列读取），$V$从上向下滑动（按行读取）。也可以直接理解成分块矩阵，具体为什么这么做，参考：[Cuda 编程之 Tiling - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/342103911)
+# 参考
+
+[[KV Cache优化]🔥MQA/GQA/YOCO/CLA/MLKV笔记: 层内和层间KV Cache共享 - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/697311739)
+
+[Transformers KV Caching Explained | by João Lages | Medium](https://medium.com/@joaolages/kv-caching-explained-276520203249)
+
+From Online Softmax to FlashAttention. [https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf](https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf)
