@@ -264,77 +264,75 @@ $$\begin{aligned}q_{m}e^{im\theta}=\left(q_{m}^{(1)}+iq_{m}^{(2)}\right)*(\cos(m
 
 ## 另一种实现
 
-另一种实现利用了下面这个式子：
+另一种实现(transformers)利用了下面这个式子：
 
 $$
 \begin{bmatrix}q_0\\q_1\\q_2\\q_3\\\vdots\\q_{d-2}\\q_{d-1}\end{bmatrix}\otimes\begin{bmatrix}\cos m\theta_0\\\cos m\theta_0\\\cos m\theta_1\\\cos m\theta_1\\\vdots\\\cos m\theta_{d/2-1}\\\cos m\theta_{d/2-1}\end{bmatrix}+\begin{bmatrix}-q_1\\q_0\\-q_3\\q_2\\\vdots\\-q_{d-1}\\q_{d-2}\end{bmatrix}\otimes\begin{bmatrix}\sin m\theta_0\\\sin m\theta_0\\\sin m\theta_1\\\sin m\theta_1\\\vdots\\\sin m\theta_{d/2-1}\\\sin m\theta_{d/2-1}\end{bmatrix}
 $$
 
 ```python
-def sinusoidal_position_embedding(batch_size, nums_head, max_len, output_dim, device):
-    # (max_len, 1)
-    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(-1)
- 
-    # (output_dim//2)
-    # 即公式里的i, i的范围是 [0,d/2]
-    ids = torch.arange(0, output_dim // 2, dtype=torch.float)  
-    theta = torch.pow(10000, -2 * ids / output_dim)
- 
-    # (max_len, output_dim//2)
-    # 即公式里的：pos / (10000^(2i/d))
-    embeddings = position * theta 
- 
-    # (max_len, output_dim//2, 2)
-    embeddings = torch.stack([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
- 
-    # (bs, head, max_len, output_dim//2, 2)
-    # 在bs维度重复，其他维度都是1不重复
-    embeddings = embeddings.repeat((batch_size, nums_head, *([1] * len(embeddings.shape))))  
- 
-    # (bs, head, max_len, output_dim)
-    # reshape后就是：偶数sin, 奇数cos了
-    embeddings = torch.reshape(embeddings, (batch_size, nums_head, max_len, output_dim))
-    embeddings = embeddings.to(device)
-    return embeddings
+class LlamaRotaryEmbedding(torch.nn.Module):
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import math
- 
- 
-def RoPE(q, k):
-    # q,k: (bs, head, max_len, output_dim)
-    batch_size = q.shape[0]
-    nums_head = q.shape[1]
-    max_len = q.shape[2]
-    output_dim = q.shape[-1]
- 
-    # (bs, head, max_len, output_dim)
-    pos_emb = sinusoidal_position_embedding(batch_size, nums_head, max_len, output_dim, q.device)
- 
- 
-    # cos_pos,sin_pos: (bs, head, max_len, output_dim)
-    # 看rope公式可知，相邻cos，sin之间是相同的，所以复制一遍。如(1,2,3)变成(1,1,2,2,3,3)
-    cos_pos = pos_emb[...,  1::2].repeat_interleave(2, dim=-1)  # 将奇数列信息抽取出来也就是cos 拿出来并复制
-    sin_pos = pos_emb[..., ::2].repeat_interleave(2, dim=-1)  # 将偶数列信息抽取出来也就是sin 拿出来并复制
- 
-    # q,k: (bs, head, max_len, output_dim)
-    q2 = torch.stack([-q[..., 1::2], q[..., ::2]], dim=-1)
-    q2 = q2.reshape(q.shape)  # reshape后就是正负交替了
- 
-    # 更新qw, *对应位置相乘
-    q = q * cos_pos + q2 * sin_pos
- 
-    k2 = torch.stack([-k[..., 1::2], k[..., ::2]], dim=-1)
-    k2 = k2.reshape(k.shape)
-    # 更新kw, *对应位置相乘
-    k = k * cos_pos + k2 * sin_pos
- 
-    return q, k
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+        self.register_buffer("inv_freq", inv_freq)
+        # Build here to make `torch.jit.trace` work.
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device,
+        dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation
+        # in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        dtype = torch.get_default_dtype()
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
+        
+    def forward(self, x, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        # This `if` block is unlikely to be run after we build sin/cos in `__init__`.
+        # Keep the logic here just in case.
+        if seq_len > self.max_seq_len_cached:
+            self.max_seq_len_cached = seq_len
+            t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+            freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+            # Different from paper, but it uses a different permutation
+            # in order to obtain the same calculation
+            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype),
+            persistent=False)
+            self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype),
+            persistent=False)
+    
+        return (
+        self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+        self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+        )
+    def rotate_half(x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
+        # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
+        cos = cos.squeeze(1).squeeze(0) # [seq_len, dim]
+        sin = sin.squeeze(1).squeeze(0) # [seq_len, dim]
+        cos = cos[position_ids].unsqueeze(1) # [bs, 1, seq_len, dim]
+        sin = sin[position_ids].unsqueeze(1) # [bs, 1, seq_len, dim]
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+        return q_embed, k_embed
+
 ```
 
 相对于llama的版本比较容易理解。
+
+# Long-term decay of RoPE
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240927140052.png)
+公式不看了，结论就是RoPE有长距离衰减的特性，相对距离越远的token之间的关注度也会降低，表现为attention score减小，这是个很好的特性。”This property coincides with the intuition that a pair of tokens with a long relative distance should have less connection.“
 # 参考
 [一文通透位置编码：从标准位置编码、旋转位置编码RoPE到ALiBi、LLaMA 2 Long(含NTK-aware简介)-CSDN博客](https://blog.csdn.net/v_JULY_v/article/details/134085503)
 

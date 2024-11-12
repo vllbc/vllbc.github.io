@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>frequency_penalty&amp;presence_penalty - vllbc02</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:title" content="frequency_penalty&amp;presence_penalty" />
+<meta property="og:description" content="LLM解码时采用的自回归采样，其过程如下： 小模型使用前缀作为输入，将输出结果处理&#43;归一化成概率分布后，采样生成下一个token。 将生成的to" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" /><meta property="og:image" content="https://blog.vllbc.top/logo.png" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-09-05T00:00:00+00:00" />
+<meta property="article:modified_time" content="2024-09-05T00:00:00+00:00" /><meta property="og:site_name" content="vllbc02" />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://blog.vllbc.top/logo.png" /><meta name="twitter:title" content="frequency_penalty&amp;presence_penalty"/>
+<meta name="twitter:description" content="LLM解码时采用的自回归采样，其过程如下： 小模型使用前缀作为输入，将输出结果处理&#43;归一化成概率分布后，采样生成下一个token。 将生成的to"/>
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02"><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" /><link rel="prev" href="https://blog.vllbc.top/rwkv/" /><link rel="next" href="https://blog.vllbc.top/llama%E7%B3%BB%E5%88%97/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.1.1/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.1.1/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "frequency_penalty\u0026presence_penalty",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/generate%E7%9B%B8%E5%85%B3\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "LLM","wordcount":  2607 ,
+        "url": "https:\/\/blog.vllbc.top\/generate%E7%9B%B8%E5%85%B3\/","datePublished": "2024-09-05T00:00:00+00:00","dateModified": "2024-09-05T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script type="text/javascript">(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><div class="toc" id="toc-auto">
+            <h2 class="toc-title">目录</h2>
+            <div class="toc-content" id="toc-content-auto"></div>
+        </div><article class="page single"><h1 class="single-title animate__animated animate__flipInX">frequency_penalty&presence_penalty</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="https://blog.vllbc.top" title="Author" target="_blank" rel="noopener noreffer author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Categories</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2024-09-05">2024-09-05</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 2607 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 6 分钟&nbsp;<span id="/generate%E7%9B%B8%E5%85%B3/" class="leancloud_visitors" data-flag-title="frequency_penalty&amp;presence_penalty">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="details toc" id="toc-static"  data-kept="">
+                <div class="details-summary toc-title">
+                    <span>目录</span>
+                    <span><i class="details-icon fas fa-angle-right" aria-hidden="true"></i></span>
+                </div>
+                <div class="details-content toc-content" id="toc-content-static"></div>
+            </div><div class="content" id="content"><p>LLM解码时采用的自回归采样，其过程如下：</p>
+<ol type="1">
+<li>小模型使用前缀作为输入，将输出结果处理+归一化成<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=%E6%A6%82%E7%8E%87%E5%88%86%E5%B8%83&amp;zhida_source=entity">概率分布</a>后，采样生成下一个token。</li>
+<li>将生成的token和前缀拼接成新的前缀，重复执行1，直到生成EOS或者达到最大token数目。</li>
+</ol>
+<p>将模型输出logits的转换成概率，有几种常用的采样方法，包括argmax、<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=top-k&amp;zhida_source=entity">top-k</a>和top-n等
+# 贪心搜索
+直接选择概率最高的单词。这种方法简单高效，但是可能会导致生成的文本过于单调和重复
+# 随机采样
+按照概率分布随机选择一个单词。这种方法可以增加生成的多样性，但是可能会导致生成的文本不连贯和无意义。
+# beam search 维护一个大小为 k
+的候选序列集合，每一步从每个候选序列的概率分布中选择概率最高的 k
+个单词，然后保留总概率最高的 k
+个候选序列。这种方法可以平衡生成的质量和多样性，但是可能会导致生成的文本过于保守和不自然。
+# top-k <img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240927155937.png"
+alt="image.png" /></p>
+<p>选取前k个token，然后再重新生成概率分布，再进行抽样
+它可以与其他解码策略结合使用，例如温度调节（Temperature
+Scaling）、重复惩罚（Repetition Penalty）、长度惩罚（Length
+Penalty）等，来进一步优化生成的效果。 代码:</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> labml_nn.sampling <span class="im">import</span> Sampler</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Top-k Sampler</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> TopKSampler(Sampler):</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>    <span class="co"># k is the number of tokens to pick</span></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>    <span class="co"># sampler is the sampler to use for the top-k tokens</span></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    <span class="co"># sampler can be any sampler that takes a logits tensor as input and returns a token tensor; e.g. `TemperatureSampler`.</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, k: <span class="bu">int</span>, sampler: Sampler):</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.k <span class="op">=</span> k</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.sampler <span class="op">=</span> sampler</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Sample from logits</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__call__</span>(<span class="va">self</span>, logits: torch.Tensor):</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>        <span class="co"># New logits filled with −∞; i.e. zero probability</span></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>        zeros <span class="op">=</span> logits.new_ones(logits.shape) <span class="op">*</span> <span class="bu">float</span>(<span class="st">&#39;-inf&#39;</span>)</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Pick the largest k logits and their indices</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>        values, indices <span class="op">=</span> torch.topk(logits, <span class="va">self</span>.k, dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Set the values of the top-k selected indices to actual logits.</span></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Logits of other tokens remain −∞</span></span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>        zeros.scatter_(<span class="op">-</span><span class="dv">1</span>, indices, values)</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Sample from the top-k logits with the specified sampler.</span></span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.sampler(zeros)</span></code></pre></div>
+<h1 id="top-p">top-p</h1>
+<p>top-k 有一个缺陷，那就是“k
+值取多少是最优的？”非常难确定。于是出现了动态设置 token
+候选列表大小策略——即核采样（Nucleus Sampling）。 <img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240927160929.png"
+alt="image.png" /></p>
+<p>top-p 采样的思路是，在每一步，只从累积概率超过某个阈值 p
+的最小单词集合中进行随机采样，而不考虑其他低概率的单词。这种方法也被称为<strong>核采样</strong>（nucleus
+sampling），因为它只关注概率分布的核心部分，而忽略了尾部部分。例如，如果
+p=0.9，那么我们只从累积概率达到 0.9
+的最小单词集合中选择一个单词，而不考虑其他累积概率小于 0.9
+的单词。这样可以避免采样到一些不合适或不相关的单词，同时也可以保留一些有趣或有创意的单词。</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> torch <span class="im">import</span> nn</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> labml_nn.sampling <span class="im">import</span> Sampler</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> NucleusSampler(Sampler):</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="co">    ## Nucleus Sampler</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, p: <span class="bu">float</span>, sampler: Sampler):</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="co">        :param p: is the sum of probabilities of tokens to pick $p$</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="co">        :param sampler: is the sampler to use for the selected tokens</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.p <span class="op">=</span> p</span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.sampler <span class="op">=</span> sampler</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Softmax to compute $P(x_i | x_{1:i-1})$ from the logits</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.softmax <span class="op">=</span> nn.Softmax(dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__call__</span>(<span class="va">self</span>, logits: torch.Tensor):</span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a><span class="co">        Sample from logits with Nucleus Sampling</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Get probabilities $P(x_i | x_{1:i-1})$</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>        probs <span class="op">=</span> <span class="va">self</span>.softmax(logits)</span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Sort probabilities in descending order</span></span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        sorted_probs, indices <span class="op">=</span> torch.sort(probs, dim<span class="op">=-</span><span class="dv">1</span>, descending<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Get the cumulative sum of probabilities in the sorted order</span></span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>        cum_sum_probs <span class="op">=</span> torch.cumsum(sorted_probs, dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Find the cumulative sums less than $p$.</span></span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>        nucleus <span class="op">=</span> cum_sum_probs <span class="op">&lt;</span> <span class="va">self</span>.p</span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Prepend ones so that we add one token after the minimum number</span></span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>        <span class="co"># of tokens with cumulative probability less that $p$.</span></span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>        nucleus <span class="op">=</span> torch.cat([nucleus.new_ones(nucleus.shape[:<span class="op">-</span><span class="dv">1</span>] <span class="op">+</span> (<span class="dv">1</span>,)), nucleus[..., :<span class="op">-</span><span class="dv">1</span>]], dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Get log probabilities and mask out the non-nucleus</span></span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>        sorted_log_probs <span class="op">=</span> torch.log(sorted_probs)</span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>        sorted_log_probs[<span class="op">~</span>nucleus] <span class="op">=</span> <span class="bu">float</span>(<span class="st">&#39;-inf&#39;</span>)</span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Sample from the sampler</span></span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>        sampled_sorted_indexes <span class="op">=</span> <span class="va">self</span>.sampler(sorted_log_probs)</span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Get the actual indexes</span></span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a>        res <span class="op">=</span> indices.gather(<span class="op">-</span><span class="dv">1</span>, sampled_sorted_indexes.unsqueeze(<span class="op">-</span><span class="dv">1</span>))</span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>        <span class="co">#</span></span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> res.squeeze(<span class="op">-</span><span class="dv">1</span>)</span></code></pre></div>
+<h1 id="temperature采样">Temperature采样</h1>
+<p>详见<a
+href="../../Deep%20Learning/训练trick/温度超参数.md">温度超参数</a></p>
+<h1 id="speculative-decoding">speculative decoding</h1>
+<p><a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=%E5%A4%A7%E5%9E%8B%E8%AF%AD%E8%A8%80%E6%A8%A1%E5%9E%8B&amp;zhida_source=entity">大型语言模型</a>（LLM）的推理通常需要使用<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=%E8%87%AA%E5%9B%9E%E5%BD%92%E9%87%87%E6%A0%B7&amp;zhida_source=entity">自回归采样</a>。它们的推理过程相当缓慢，需要逐个token地进行<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=%E4%B8%B2%E8%A1%8C%E8%A7%A3%E7%A0%81&amp;zhida_source=entity">串行解码</a>。因此，大型模型的推理过程往往受制于访存速度，生成每个标记都需要将所有参数从<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=%E5%AD%98%E5%82%A8%E5%8D%95%E5%85%83&amp;zhida_source=entity">存储单元</a>传输到计算单元，因此内存访问带宽成为严重的瓶颈。</p>
+<p>为了解决推理速度慢的问题，已经进行了许多针对推理的工程优化，例如改进的计算核心实现、<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=%E5%A4%9A%E5%8D%A1%E5%B9%B6%E8%A1%8C%E8%AE%A1%E7%AE%97&amp;zhida_source=entity">多卡并行计算</a>、批处理策略等等。然而，这些方法并没有从根本上解决LLM解码过程是受制于访存带宽的问题。</p>
+<p>投机采样是一种可以从根本上解码计算访存比的方法，保证和使用原始模型的<strong>采样分布完全相同</strong>。它使用两个模型：一个是原始目标模型，另一个是比原始模型小得多的近似模型。近似模型用于进行自回归串行采样，而大型模型则用于评估采样结果。解码过程中，某些token的解码相对容易，某些token的解码则很困难。因此，简单的token生成可以交给小型模型处理，而困难的token则交给大型模型处理。这里的小型模型可以采用与原始模型相同的结构，但参数更少，或者干脆使用<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=n-gram%E6%A8%A1%E5%9E%8B&amp;zhida_source=entity">n-gram模型</a>。小型模型不仅计算量较小，更重要的是减少了内存访问的需求。
+## 采样过程 投机采样过程如下：</p>
+<ol type="1">
+<li>用小模型Mq做自回归采样连续生成 γ 个tokens。</li>
+<li>把生成的γ个tokens和前缀拼接一起送进大模Mp执行一次<a
+href="https://zhida.zhihu.com/search?content_id=232876036&amp;content_type=Article&amp;match_order=1&amp;q=forwards&amp;zhida_source=entity">forwards</a>。</li>
+<li>使用大、小模型logits结果做比对，如果发现某个token小模型生成的不好，重新采样这个token。重复步骤1。</li>
+<li>如果小模型生成结果都满意，则用大模型采样下一个token。重复步骤1。</li>
+</ol>
+<p>第2步，将γ个tokens和前缀拼成一起作为大模型输入，和自回归相比，尽管计算量一样，但是γ个tokens可以同时参与计算，<strong>计算访存比显著提升</strong>。</p>
+<p>第3步，如何评价一个token生成的不好？如果q(x) &gt;
+p(x)（p，q表示在大小模型采样概率，也就是logits归一化后的概率分布）则以一定1-p(x)/q(x)为概率拒绝这个token的生成，从一个新的概率分布p’(x)
+= norm(max(0, p(x) − q(x)))中重新采样一个token。 ## 例子 <img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240927161759.png"
+alt="image.png" />
+例如，在第一行中，近似模型生成了5个token，目标模型使用这5个token和前缀拼接后的句子”[START]
+japan’s bechmark
+bond”作为输入，通过一次推理执行来验证小模型的生成效果。这里，最后一个token
+”bond“被目标模型拒绝，重新采样生成”n“。这样中间的四个tokens，”japan”
+“’s”
+“benchmark”都是小模型生成的。以此类推，由于用大模型对输入序列并行地执行，大模型只forward了9次，就生成了37个tokens。尽管总的大模型的计算量不变，但是大模型推理一个1个token和5个token延迟类似，这还是比大模型一个一个蹦词的速度要快很多。
+# 惩罚参数
+频率惩罚参数修改概率分布，以生成模型在训练过程中不常见的词。这鼓励模型生成新颖或不太常见的词。它的工作原理是缩放模型在训练过程中常见词的对数概率，从而降低模型生成这些常见词的可能性。</p>
+<p>而存在惩罚参数修改概率分布，以使输入提示中出现的词不太可能出现在输出中。这鼓励模型生成输入中没有的词。它的工作原理是缩放输入中存在词的对数概率，使模型不太可能生成输入中已经存在的单词。</p>
+<p>简单地说，<strong>频率惩罚控制模型输出用词的新颖性</strong>，而<strong>存在惩罚控制模型谈论新主题的可能性</strong>。
+# 参考 <a
+href="https://blog.csdn.net/jarodyv/article/details/129062982">ChatGPT模型中的惩罚机制_frequency
+penalty-CSDN博客</a></p>
+<p><a
+href="https://zhuanlan.zhihu.com/p/651359908#:~:text=%E5%85%88%E7%A7%91%E6%99%AE%E4%B8%80%E4%B8%8BLLM%E8%A7%A3%E7%A0%81%E6%97%B6%E9%87%87%E7%94%A8%E7%9A%84%E8%87%AA%E5%9B%9E%E5%BD%92%E9%87%87%E6%A0%B7%EF%BC%8C%E5%85%B6%E8%BF%87%E7%A8%8B%E5%A6%82%E4%B8%8B%EF%BC%9A1.%E5%B0%8F%E6%A8%A1%E5%9E%8B%E4%BD%BF%E7%94%A8%E5%89%8D%E7%BC%80%E4%BD%9C%E4%B8%BA%E8%BE%93%E5%85%A5%EF%BC%8C%E5%B0%86%E8%BE%93%E5%87%BA%E7%BB%93%E6%9E%9C%E5%A4%84%E7%90%86+%E5%BD%92%E4%B8%80%E5%8C%96%E6%88%90%E6%A6%82%E7%8E%87%E5%88%86%E5%B8%83%E5%90%8E%EF%BC%8C%E9%87%87%E6%A0%B7%E7%94%9F%E6%88%90%E4%B8%8B%E4%B8%80%E4%B8%AAtoken%E3%80%82">大模型推理妙招—投机采样（Speculative
+Decoding） - 知乎 (zhihu.com)</a></p>
+<p><a
+href="https://www.zhihu.com/tardis/zm/art/647813179?source_id=1005">大模型文本生成——解码策略（Top-k
+&amp; Top-p &amp; Temperature） (zhihu.com)</a></p>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2024-09-05</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/generate%E7%9B%B8%E5%85%B3/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 Twitter" data-sharer="twitter" data-url="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" data-title="frequency_penalty&amp;presence_penalty" data-hashtags="LLM"><i class="fab fa-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" data-hashtag="LLM"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" data-title="frequency_penalty&amp;presence_penalty"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" data-title="frequency_penalty&amp;presence_penalty"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@7.3.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/generate%E7%9B%B8%E5%85%B3/" data-title="frequency_penalty&amp;presence_penalty"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/rwkv/" class="prev" rel="prev" title="rwkv"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>rwkv</a>
+            <a href="/llama%E7%B3%BB%E5%88%97/" class="next" rel="next" title="llama系列">llama系列<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article></div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2024</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="https://blog.vllbc.top" target="_blank">vllbc</a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><script type="text/javascript" src="https://cdn.jsdelivr.net/npm/valine@1.5.0/dist/Valine.min.js"></script><script type="text/javascript" src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script type="text/javascript" src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script type="text/javascript" src="/lib/lunr/lunr.stemmer.support.min.js"></script><script type="text/javascript" src="/lib/lunr/lunr.zh.min.js"></script><script type="text/javascript" src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script type="text/javascript" src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script type="text/javascript" src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.1/sharer.min.js"></script><script type="text/javascript">window.config={"code":{"copyTitle":"复制到剪贴板","maxShownLines":50},"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@14.0.0/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script type="text/javascript" src="/js/theme.min.js"></script></body>
+</html>
