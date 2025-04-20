@@ -21,9 +21,6 @@
 {{< bilibili BV1ptXPYREe7 1>}} 
 有多P可以选择集数
 
-### youtube
-{{< youtube embed="GEXa2yrAucM" >}}
-
 ## admonition
 类型有：note、abstract、info、tip、success、question、warning、failure、danger、bug、example、quote。
 {{< admonition type=tip  open=true >}}
