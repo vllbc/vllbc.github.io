@@ -5,7 +5,6 @@
 ## 音乐播放
 ### 播放列表
 夏日口袋专辑：
-
 {{< music auto="https://music.163.com/album?id=73470837&uct2=U2FsdGVkX18gTMY/Tb1+2PmOZr2G/Q7mOdM/mANJ8xY=" >}}
 
 
