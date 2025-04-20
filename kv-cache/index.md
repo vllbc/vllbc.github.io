@@ -95,17 +95,6 @@ class Attention(nn.Module):
             cache_v (torch.Tensor): Cached values for attention.
 
         """
-        # ColumnParallelLinear是一个在大规模并行训练中使用的术语，特别是在训练大型的深度学习模型，
-        # 如Transformer模型时。在模型并行训练中，一个大型的矩阵（例如神经网络的权重矩阵）会被分割成不同的列，
-        # 并分散到不同的计算设备（如GPU）上。
-        #
-        # 在ColumnParallelLinear的情况下，每个计算设备存储权重矩阵的一部分列，而不是整个矩阵。
-        # 每个设备计算它自己的前向传播部分，并将结果发送给其他设备以进行进一步的处理或合并结果。
-        # 对于反向传播和梯度计算，每个设备计算其自己列的梯度，并可能需要与其他设备交换信息以更新权重。
-        #
-        # 这种方式可以显著减少每个设备上的内存需求，并允许训练更大的模型，因为模型的不同部分可以分布在多个设备上。
-        # ColumnParallelLinear和RowParallelLinear（另一种将权重矩阵按行划分的方法）是实现模型并行的两种常见策略。
-     
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         model_parallel_size = fs_init.get_model_parallel_world_size()

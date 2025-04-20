@@ -17,6 +17,11 @@ LLM解码时采用的自回归采样，其过程如下：
 
 选取前k个token，然后再重新生成概率分布，再进行抽样
 它可以与其他解码策略结合使用，例如温度调节（Temperature Scaling）、重复惩罚（Repetition Penalty）、长度惩罚（Length Penalty）等，来进一步优化生成的效果。
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250310142802.png)
+
+
+
+
 代码:
 ```python
 import torch
@@ -140,3 +145,5 @@ class NucleusSampler(Sampler):
 [大模型推理妙招—投机采样（Speculative Decoding） - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/651359908#:~:text=%E5%85%88%E7%A7%91%E6%99%AE%E4%B8%80%E4%B8%8BLLM%E8%A7%A3%E7%A0%81%E6%97%B6%E9%87%87%E7%94%A8%E7%9A%84%E8%87%AA%E5%9B%9E%E5%BD%92%E9%87%87%E6%A0%B7%EF%BC%8C%E5%85%B6%E8%BF%87%E7%A8%8B%E5%A6%82%E4%B8%8B%EF%BC%9A1.%E5%B0%8F%E6%A8%A1%E5%9E%8B%E4%BD%BF%E7%94%A8%E5%89%8D%E7%BC%80%E4%BD%9C%E4%B8%BA%E8%BE%93%E5%85%A5%EF%BC%8C%E5%B0%86%E8%BE%93%E5%87%BA%E7%BB%93%E6%9E%9C%E5%A4%84%E7%90%86+%E5%BD%92%E4%B8%80%E5%8C%96%E6%88%90%E6%A6%82%E7%8E%87%E5%88%86%E5%B8%83%E5%90%8E%EF%BC%8C%E9%87%87%E6%A0%B7%E7%94%9F%E6%88%90%E4%B8%8B%E4%B8%80%E4%B8%AAtoken%E3%80%82)
 
 [大模型文本生成——解码策略（Top-k & Top-p & Temperature） (zhihu.com)](https://www.zhihu.com/tardis/zm/art/647813179?source_id=1005)
+
+https://zhuanlan.zhihu.com/p/667025336

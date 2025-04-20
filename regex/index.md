@@ -1,9 +1,5 @@
 # regex
 
-
-
-
-
 # 正则表达式
 
 1. **`[abcd]`匹配中括号里的所有字符**
@@ -65,15 +61,6 @@
 ## Matching a decimal numbers
 
 **来源:[https://regexone.com/problem/matching_decimal_numbers](https://regexone.com/problem/matching_decimal_numbers)**
-
-| **Task**  | **Text**       | ****                                                         |
-| --- | -- |  |
-| **Match** | **3.14529**    | **![To be completed](https://regexone.com/cs/images/task_default.png)** |
-| **Match** | **-255.34**    | **![To be completed](https://regexone.com/cs/images/task_default.png)** |
-| **Match** | **128**        | **![To be completed](https://regexone.com/cs/images/task_default.png)** |
-| **Match** | **1.9e10**     | **![To be completed](https://regexone.com/cs/images/task_default.png)** |
-| **Match** | **123,340.00** | **![To be completed](https://regexone.com/cs/images/task_default.png)** |
-| **Skip**  | **720p**       |                                                              |
 
 **意思就是要匹配Match的还要避开Skip的**
 

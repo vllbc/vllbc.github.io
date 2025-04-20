@@ -1,9 +1,5 @@
 # SVM_sklearn
 
-
-
-
-
 ```python
 import numpy as np
 import pandas as pd

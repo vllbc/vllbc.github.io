@@ -231,8 +231,8 @@ Word2Vec 是一个模型，其参数是词向量。这些参数针对某个目�
 
 #### 推导
 
-以Skip-grams模型为例，首先清楚几个概念，中心词、背景词（上下文词）、负采样词。中心词就是我们的输入，因为skip-grams相当于在一句话中扣去一个词，然后用这个词预测这句话的其余词。形式上给人的感觉就是一对多，这里的一句话其实不是一句话，是我们设定的窗口大小，比如一句话"I miss xwh very much"，
-设置中心词为xwh，窗口大小为1，那么背景词就是"miss"和"very"。那么对于我们的模型来说，miss和very就是正例，就是我们的预测值(sigmoid后)的值接近于1的，而其余的词就是负例，就是使其值接近于0的。所以负采样就是从这些负例中随机抽取一些负例，不然每次都要计算单词表中所有单词的sigmoid值，这个计算量很大，而使用负采样就大大缩小了计算量。
+以Skip-grams模型为例，首先清楚几个概念，中心词、背景词（上下文词）、负采样词。中心词就是我们的输入，因为skip-grams相当于在一句话中扣去一个词，然后用这个词预测这句话的其余词。形式上给人的感觉就是一对多，这里的一句话其实不是一句话，是我们设定的窗口大小，比如一句话"I miss you very much"，
+设置中心词为you，窗口大小为1，那么背景词就是"miss"和"very"。那么对于我们的模型来说，miss和very就是正例，就是我们的预测值(sigmoid后)的值接近于1的，而其余的词就是负例，就是使其值接近于0的。所以负采样就是从这些负例中随机抽取一些负例，不然每次都要计算单词表中所有单词的sigmoid值，这个计算量很大，而使用负采样就大大缩小了计算量。
 
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/window1.png)
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/window2.png)
@@ -279,10 +279,10 @@ $$
 
 其中$J_{t,j}(\theta) = -logP(w_{t+j}|w_t, \theta)$
 
-以"I miss xwh very much"这句话为例子，中心词为"xwh"，其中一个背景词为miss，则损失项为
+以"I miss you very much"这句话为例子，中心词为"you"，其中一个背景词为miss，则损失项为
 
 $$
-J_{t,j}(\theta) = -logP(miss|xwh) = -log\frac{exp(u_{miss}^Tv_{xwh})}{\sum_{o\in V}exp(u_o^Tv_{xwh})} = \\\\-u_{miss}^Tv_{xwh}+log\sum_{o\in V} exp(u_o^Tv_{xwh})
+J_{t,j}(\theta) = -logP(miss|you) = -log\frac{exp(u_{miss}^Tv_{you})}{\sum_{o\in V}exp(u_o^Tv_{you})} = \\\\-u_{miss}^Tv_{you}+log\sum_{o\in V} exp(u_o^Tv_{you})
 $$
 
 这是中心词对应其中一个背景词的损失函数，如果要求总的损失，则将所有背景词的损失相加，然后将所有样本的损失求平均，就是上面的Loss。其实这就是交叉熵损失函数，是个多分类问题，预测的target相当于miss对应的数字，也就是序列值，具体的pytorch代码为

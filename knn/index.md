@@ -2,67 +2,40 @@
 
 
 
-## 导入包
+# KNN
 
+参考：[https://cuijiahua.com/blog/2017/11/ml_1_knn.html](https://cuijiahua.com/blog/2017/11/ml_1_knn.html)
 
-```python
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
-import plotly.graph_objects as go
-```
+《统计学习方法》李航（kd树）
 
-## 导入数据
+## 简介
 
+k近邻法(k-nearest neighbor, k-NN)是1967年由Cover T和Hart P提出的一种基本分类与回归方法。它的工作原理是：存在一个样本数据集合，也称作为训练样本集，并且样本集中每个数据都存在标签，即我们知道样本集中每一个数据与所属分类的对应关系。输入没有标签的新数据后，将新的数据的每个特征与样本集中数据对应的特征进行比较，然后算法提取样本最相似数据(最近邻)的分类标签。一般来说，我们只选择样本数据集中前k个最相似的数据，这就是k-近邻算法中k的出处，通常k是不大于20的整数。最后，选择k个最相似数据中出现次数最多的分类，作为新数据的分类。
 
-```python
-data = pd.read_csv("./datasets/Social_Network_Ads.csv")
-X = data.iloc[:,[2,3]].values
-Y = data.iloc[:,4].values
-# scatter = go.Scatter(x=X[:,0],y=X[:,1],mode='markers',marker={'color':Y})
-# fig = go.Figure(scatter)
-# fig.show()
-```
+## 步骤
 
+k-近邻算法步骤如下：
 
-```python
-X_train,X_test,Y_train,Y_test = train_test_split(X,Y,test_size=0.25,random_state=0)
-```
+1. 计算已知类别数据集中的点与当前点之间的距离；
+2. 按照距离递增次序排序；
+3. 选取与当前点距离最小的k个点；
+4. 确定前k个点所在类别的出现频率；
+5. 返回前k个点所出现频率最高的类别作为当前点的预测分类。
 
-## 标准化
+## 总结
 
+**优点**
 
-```python
-from sklearn.preprocessing import StandardScaler
-sca = StandardScaler()
-X_train = sca.fit_transform(X_train)
-X_test = sca.transform(X_test)
-```
+- 简单好用，容易理解，精度高，理论成熟，既可以用来做分类也可以用来做回归；
+- 可用于数值型数据和离散型数据；
+- 训练时间复杂度为O(n)；无数据输入假定；
+- 对异常值不敏感
 
-## 训练模型
+**缺点**
 
-
-```python
-from sklearn.neighbors import KNeighborsClassifier
-model = KNeighborsClassifier(n_neighbors=5,p=2)
-model.fit(X_train,Y_train)
-```
-
-
-
-
-    KNeighborsClassifier()
-
-
-
-## 模型得分
-
-
-```python
-model.score(X_test,Y_test)
-```
-
-
-
-
-    0.93
+- 计算复杂性高；空间复杂性高；
+- 样本不平衡问题（即有些类别的样本数量很多，而其它样本的数量很少）；
+- 一般数值很大的时候不用这个，计算量太大。但是单个样本又不能太少，否则容易发生误分。
+- 最大的缺点是无法给出数据的内在含义。
+- 关于algorithm参数kd_tree的原理，可以查看《统计学方法 李航》书中的讲解；
+- 关于距离度量的方法还有切比雪夫距离、马氏距离、巴氏距离等；
