@@ -4,18 +4,21 @@
 
 ## 音乐播放
 ### 播放列表
+夏日口袋专辑：
 
-{{< music "https://music.163.com/#/playlist?id=60198" >}}
+{{< music auto="https://music.163.com/album?id=73470837&uct2=U2FsdGVkX18gTMY/Tb1+2PmOZr2G/Q7mOdM/mANJ8xY=" >}}
 
 
 ### 播放单曲
 
-{{< music server="netease" type="song" id="1868553" >}}
+最爱的一首（我是紬厨）：
+{{< music netease song 1311346841 >}}
+
 
 
 ## 视频播放
 ### bilibili
-{{< bilibili BV1144y167iZ 1>}} 
+{{< bilibili BV1ptXPYREe7 1>}} 
 有多P可以选择集数
 
 ### youtube
@@ -47,7 +50,9 @@ main()
 
 ##  mapbox
 ### 默认样式
-{{< mapbox lng=121.485 lat=31.233 zoom=12 >}}
+
+{{< mapbox 121.485 31.233 12 >}}
+
 
 ### 自定义样式
 
