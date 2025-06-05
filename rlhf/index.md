@@ -1,4 +1,4 @@
-# PPO
+# RLHF
 
 基础部分看猛猿大佬的[人人都能看懂的RL-PPO理论知识](https://zhuanlan.zhihu.com/p/7461863937)即可，通俗易懂，我写不出来比这个更好的了。本文是各RL算法笔记。
 
@@ -88,13 +88,16 @@ def get_advantages_and_returns(values: torch.Tensor, rewards: torch.Tensor,）
 
 此时我们就完成了experience的采集过程。
 # GRPO (trl库)
+
 ## 重要参数
-- ==num_generations==: **Number of generations to sample. The effective batch size (num_processes * per_device_batch_size * gradient_accumulation_steps) must be evenly divisible by this value.**
-- ==generation_batch_size==: **Batch size to use for generation. If `None`, it defaults to the effective training batch size: `per_device_train_batch_size * num_processes * steps_per_generation`.**
-- ==steps_per_generation==:Number of optimization steps per generation. If `None`, it defaults to gradient_accumulation_steps.
-- ==num_iterations==: Number of iterations per batch (denoted as μ in the algorithm).
-- ==per_device_train_batch_size==:
-- ==num_processes(world_size)==:
+
+- num_generations: **Number of generations to sample. The effective batch size (num_processes * per_device_batch_size * gradient_accumulation_steps) must be evenly divisible by this value.**
+- generation_batch_size: **Batch size to use for generation. If `None`, it defaults to the effective training batch size: `per_device_train_batch_size * num_processes * steps_per_generation`.**
+- steps_per_generation:Number of optimization steps per generation. If `None`, it defaults to gradient_accumulation_steps.
+- num_iterations: Number of iterations per batch (denoted as μ in the algorithm).
+- per_device_train_batch_size
+- num_processes(world_size)
+
 trl库的重要参数比较少。其中根据官方文档，generation_batch_size = `per_device_train_batch_size * num_processes * steps_per_generation
 gradient_accumulation_steps一般就是steps_per_generation(对应verl中的mini_batch_size / n_gpus / ppo_micro_batch_size_per_gpu)，可以理解为per_device_train_bs(对应verl中的ppo_micro_batch_size_per_gpu)是使用梯度累计后的bs，乘gpu数，再乘梯度累计的steps就是总的batch_size（对应verl中的train_batch_size * rollout.n）。所以注意，总的batch_size(generation_batch_size) 是已经rollout采样后的bs，除以num_generations才是针对prompts的bs（verl中的train_batch_size）。
 下面是_get_train_sampler方法的注释，对每一个prompt重复num_generations是该方法实现的。
@@ -298,7 +301,8 @@ if self.loss_type == "grpo":
 
 
 ## 学习路线
+
 [如何理解Q值和V值](https://zhuanlan.zhihu.com/p/109498587)
-https://zhuanlan.zhihu.com/p/14569025663
+(https://zhuanlan.zhihu.com/p/14569025663)
 
 
