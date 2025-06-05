@@ -20,6 +20,8 @@
 - 对MCTS的看法：
 	- 文本的生成搜索空间指数级增长，为应对，给节点设扩展上限，却容易让模型陷入局部最优解困境。
 	- MCTS往往要结合一个精确的PRM来用才能发挥最大效果，但PRM又有上述的问题，陷入一个死循环。
+
+
 ## 参考
 https://zhuanlan.zhihu.com/p/27278317894
 rStar-Math: Small LLMs Can Master Math Reasoning with Self-Evolved Deep Thinking
