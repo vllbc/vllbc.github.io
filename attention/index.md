@@ -148,10 +148,8 @@ class Seq2SeqAttentionDecoder(AttentionDecoder):
 到此seq2seq中的attention就介绍完毕了，其实还有很多细节，以后遇到了会持续补充。
 
 # Self-attention
-移步transformer。[Transformer](Transformer.md)
+移步transformer。[Transformer](../basic/Transformer.md)
 
-# KV cache
-[KV cache](LLM/KV%20cache.md)
 # MQA
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20240916123443.png)
 
@@ -198,6 +196,7 @@ $$\begin{aligned}&\mathbf{for~}i\leftarrow1,N\textbf{ do}\\&&&m_i&&\leftarrow&\m
 > 2. 要么在算法中online计算，每次循环中去load一部分Q，K到片上内存，计算得到x。
 
 Attention优化的目标就是避开第一种情况，尽可能节省显存，否则，LLM根本无法处理类似100K以上这种long context的情况。而对于第二种情况，我们不需要保存中间矩阵x，节省了显存，但是计算没有节省，并且增加了HBM IO Accesses（需要不断地load Q, K）。此时，2-pass算法相对于3-pass算法，可以减少一次整体的load Q, K以及减少一次对 xi 的online recompute，因为在2-pass的第一个pass中， xi 是被两次计算共享的。类似online-softmax这种算法，对应到Attention中的应用，就是Memory Efficient Attention（注意不是FlashAttention）。
+
 # flash attention
 safe softmax并没有1-pass算法，那么Attention会不会有呢？有！这就是FlashAttention！
 

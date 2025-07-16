@@ -1,22 +1,5 @@
 # Adam算法
 
-
-
-
-# Adam算法
-
-## 背景
-作为机器学习的初学者必然会接触梯度下降算法以及SGD，基本上形式如下：
-
-$$
-\theta_t = \theta_{t-1} - \alpha \;g(\theta)
-$$
-其中$\alpha$为学习率，$g(\theta)$为梯度。
-
-简单来说，Adam = Momentum + Adaptive Learning Rate
-
-Momentum实际上就用过去梯度的[moving average](https://www.zhihu.com/search?q=moving+average&search_source=Entity&hybrid_search_source=Entity&hybrid_search_extra=%7B%22sourceType%22%3A%22answer%22%2C%22sourceId%22%3A2576604040%7D)来更新参数。
-
 ## moment(矩)
 矩在数学中的定义，一阶矩(first moment)就是样本的均值(mean), 二阶矩就是方差（variance）。
 ## 滑动平均
@@ -30,39 +13,6 @@ $$
 
 上式中， $\beta \in[0,1) ， \beta=0$ 相当于没有使用滑动平均。
 这也是RMSProp和Adam等算法里使用的最重要的思想。通过滑动平均来降低梯度的波动值。
-
-
-
-## SGD-Momentum
-带动量的随机梯度下降方法
-
-它的思路就是计算前面梯度的该变量，每次迭代会考虑前面的计算结果。这样如果在某个维度上波动厉害的特征，会由于“momentum”的影响，而抵消波动的方向（因为波动剧烈的维度每次更新的方向是相反的，momentum能抵消这种波动）。使得梯度下降更加的平滑，得到更快的收敛效率。而后续提出的Adagrad，RMSProp以及结合两者优点的Adam算法都考虑了这种“momentum”的思想。
-
-前面求梯度的过程省略了，后面可以这样写：
-
-
-$$
-\begin{align}
-& v_t = \beta v_{t-1} + (1-\beta)g_t \\\\
-& \theta = \theta - \alpha v_t
-\end{align}
-$$
-
-其中$\alpha$为学习率，一般的$\beta$为0.9。v就是动量。
-
-所以，SGD + Momentum可以理解为，利用历史权重梯度矩阵 $W_{i} l(i<t)$ 和当前权重梯度矩 阵 $W_{t} l$ 的加权平均和，来更新权重矩阵 $W$ 。由于 $\beta \in(0,1)$ ，所以随着 $t$ 的增大和 $i$ 的减 小， $\beta^{t-i}$ 会减小，历史权重梯度矩阵 $W_{i} l(i<t)$ 会逐渐减小。通俗来讲，会逐渐遗忘越旧的权重梯度矩阵。
-
-## AdaGrad算法
-![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220731171907.png)
-AdaGrad直接暴力累加平方梯度，这种做法的缺点就是累加的和会持续增长，会导致学习率变小最终变得无穷小，最后将无法获得额外信息。
-
-## RMSProp算法
-![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220731172027.png)
-RMSProp和Adagrad算法的最大区别就是在于更新累积梯度值 r 的时候RMSProp考虑加入了一个权重系数 ρ 。
-它使用了一个梯度平方的滑动平均。其主要思路就是考虑历史的梯度，对于离得近的梯度重点考虑，而距离比较远的梯度则逐渐忽略。注意图中的是内积。
-
-
-
 ## Adam
 下面看最经典的伪代码：
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220731173408.png)

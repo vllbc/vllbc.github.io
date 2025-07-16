@@ -1,0 +1,3 @@
+# entropy(reasoning)
+
+

@@ -87,6 +87,16 @@ def get_advantages_and_returns(values: torch.Tensor, rewards: torch.Tensor,）
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250604170049.png)
 
 此时我们就完成了experience的采集过程。
+
+## Clip 的一些细节
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250710005943.png)
+
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250710005949.png)
+
+上面这张图是很经典的一张图，来分析什么情况下 clip 项计算梯度。
+
 # GRPO (trl库)
 
 ## 重要参数
@@ -297,6 +307,8 @@ if self.loss_type == "grpo":
 # REINFORCE++
 
 # ReMax
+
+
 
 
 

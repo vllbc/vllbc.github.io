@@ -12,7 +12,7 @@
 ## 数学表示
 一个语言模型通常构建字符串s的概率分布p(s)，这里p(s)反应字符串s作为一个句子出现的概率。
 
-对于一个由m个基元（可以是字、词或者短语）构成的句子$s=w_1,w_2, \dots w_m$，其概率计算公式可以表示为(乘法公式，详见[bayes](../Machine%20Learning/分类算法/bayes.md))：
+对于一个由m个基元（可以是字、词或者短语）构成的句子$s=w_1,w_2, \dots w_m$，其概率计算公式可以表示为(乘法公式，详见[bayes](../../../Machine%20Learning/分类算法/bayes.md))：
 
 $$
 p(s) = p(w_1)p(w_2\mid w_1)p(w_3\mid w_1, w_2)\cdots p(w_m\mid w_1w_2\dots w_{m-1})= \prod_{i=1}^mp(w_i\mid w_1\cdots,w_{i-1})

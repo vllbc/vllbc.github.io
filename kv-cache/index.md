@@ -211,6 +211,59 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 ```
+## prefill和decode分离
 
+在传统的 LLM 推理框架中，Prefill 和 Decode 阶段通常由同一块 GPU 执行。推理引擎的调度器会根据显存使用情况及请求队列状态，在 Prefill 和 Decode 之间切换，完成整个推理过程。
+
+而在 Prefill-Decode 分离式架构（以下简称 PD 分离式架构）中，这两个阶段被拆分到不同的 GPU 实例上独立运行。如下图所示，这是 DistServe 提供的一张架构图：
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250612111155.png)
+在大模型推理中，常用以下两项指标评估性能：
+
+- TTFT（Time-To-First-Token）：首 token 的生成时间，主要衡量 Prefill 阶段性能。
+- TPOT（Time-Per-Output-Token）：生成每个 token 的时间，主要衡量 Decode 阶段性能。
+
+当 Prefill 和 Decode 在同一块 GPU 上运行时，由于两阶段的计算特性差异（Prefill 是计算密集型，而 Decode 是存储密集型），资源争抢会导致 TTFT 和 TPOT 之间的权衡。例如：
+
+- 若优先处理 Prefill 阶段以降低 TTFT，Decode 阶段的性能（TPOT）可能下降。
+- 若尽量提升 TPOT，则会增加 Prefill 请求的等待时间，导致 TTFT 上升。
+
+PD 分离式架构的提出正是为了打破这一矛盾。通过将 Prefill 和 Decode 分离运行，可以针对不同阶段的特性独立优化资源分配，从而在降低首 token 延迟的同时提高整体吞吐量。
+
+在 PD 分离架构中，Prefill 和 Decode 阶段的资源需求不同，分别体现为：
+
+- Prefill 阶段：计算密集型（compute-bound）。在流量较大或用户提示长度较长时，Prefill 的计算压力更大。完成 KV Cache 的生成后，Prefill 阶段本身无需继续保留这些缓存。
+- Decode 阶段：存储密集型（memory-bound）。由于逐 token 生成的特性，Decode 阶段需频繁访问 KV Cache，因此需要尽可能多地保留缓存数据以保障推理效率。
+
+Batching 策略对两阶段的性能影响显著，但趋势相反：
+
+- Prefill 阶段：吞吐量随 batch size 增加逐渐趋于平稳。这是因为 Prefill 的计算受限特性（compute-bound），当 batch 中的总 token 数超过某个阈值时，计算资源成为瓶颈。
+- Decode 阶段：吞吐量随 batch size 增加显著提升。由于 Decode 阶段的存储受限特性（memory-bound），增大 batch size 可提高计算效率，从而显著增加吞吐量。
+
+## Chunked prefills
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250613205549.png)
+
+
+# 常见问题
+
+## 128k token输入需要多少显存存kv cache?
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250707225022.png)
+
+超参数如上，如果我们采用int8精度，也就是每个参数占据一个字节，每个token占据的kv cache大小就是
+
+2 * K * H * L = 2 (k 和 v) * 8 (n kv heads) * 128 (seq length) * 80 (n layers) * 1 (byte)= 160kB
+
+（这里的 2 是因为每个 token 需要存储k和v）
+
+那么128k的kv cache就是：
+
+162e3 * 128 * 1024 = 21.2GB
+
+  
+
+需要注意的是llama3使用的是gqa，所以N为64，K为8.
 # 参考
 [LLM---llama2结构和源码解读 - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/679640407)
+[# LLM推理优化 - Chunked prefills](https://zhuanlan.zhihu.com/p/14689463165)
+[# 图解大模型计算加速系列：分离式推理架构1，从DistServe谈起](https://zhuanlan.zhihu.com/p/706761664)
+

@@ -69,6 +69,7 @@ reset的参数有三种，其作用如下：
 
 ### merge
  `git merge` 比如在master分支里 执行git merge xxx 将xxx分支合并到master中，一般项目开发，一人一个分支，最后提交的时候合并再提交。不过更推荐用git rebase方法，这样合并后的分支更加直观。一般是进行三方合并。
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250609130322.png)
 
 ### branch
 最常用的就是创建和删除分支
@@ -94,6 +95,14 @@ reset的参数有三种，其作用如下：
 ### reflog
 `git reflog` 查看操作记录，这个操作可以撤销不小心用`git reset`回退版本的操作
 
+### stash
+它会保存当前工作进度，会把暂存区和工作区的改动保存到一个未完结变更的堆栈中；执行完这个命令后，在运行 `git status` 命令，就会发现当前是一个干净的工作区，没有任何改动。
+
+> 1. `git stash` 是本地的，不会上传到服务器上；
+> 2. 可以通过使用`git stash save 'message...'`可以添加一些注释。
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250607104713.png)
+
 
 ## 底层内容
 
@@ -115,6 +124,26 @@ reset的参数有三种，其作用如下：
 
 当文件被修改后，只是工作目录发生了改变，其余两个是没有任何变化的。当运行`git add xxx`命令后，即将xxx文件加入了索引区域，此时新建了一个blob object，并且将原来指向xxx指向了新建的blob Object，记住索引索引的是add的所有文件，这时运行`git commit`，会生成一个tree object，然后创建commit object，将分支等信息指向新的commit。注意每次commit都是储存的全新的文件快照而不是变更部分。
 
+## 合并策略
+
+### Fast-forward(没有分叉)
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250609132758.png)
+
+### Recursive(最常用最重要)
+
+Recursive是Git分支合并策略中最重要也是最常用的策略，是Git在合并两个有分叉的分支时的默认行为。其算法可以简单描述为：递归寻找路径最短的唯一共同祖先节点，然后以其为base节点进行递归三向合并。
+
+那怎么保证Git能够找到正确的合并base节点，尽可能的减少冲突呢？答案就是，Git在寻找路径最短的共同祖先节点时，如果满足条件的祖先节点不唯一，那么Git会继续递归往下寻找直至唯一。不唯一的多个祖先节点做一个临时的三向合并节点。
+
+Recursive策略已经被大量的场景证明它是一个尽量减少冲突的合并策略，我们可以看到有趣的一点是，对于两个合并分支的中间节点（如上图节点4，5），只参与了base的计算，而最终真正被三向合并拿来做合并的节点，只包括末端以及base节点。
+
+需要注意Git只是使用这些策略尽量的去帮你减少冲突，如果冲突不可避免，那Git就会提示冲突，需要手工解决。（也就是真正意义上的冲突）。
+### Ours & Theirs
+### Octopus
 ## 参考
+
 [图解Git (marklodato.github.io)](https://marklodato.github.io/visual-git-guide/index-zh-cn.html#reset)
+
 [这才是真正的Git——Git内部原理 - LZANE | 李泽帆（靓仔）](https://www.lzane.com/tech/git-internal/)
+
+[这才是真正的Git——分支合并 - LZANE \| 李泽帆（靓仔）](https://www.lzane.com/tech/git-merge/)

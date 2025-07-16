@@ -8,7 +8,7 @@ $$
 ## 背景
 先从word2vec开始说起，word2vec可以看作是一个[预训练模型](预训练模型.md)，但是它有个问题就是它没有办法解决一词多义的问题，比如说bank这个词语，有银行的意思，但在某些语义下，它也有河岸的意思，但对于word2vec来说，它区别不了这两种含义，因为它们尽管上下文环境中出现的单词不同，但是在用[语言模型](语言模型.md)训练的时候，不论什么上下文的句子经过word2vec，都是预测相同的单词bank，而同一个单词占的是同一行的参数空间，这导致两种不同的上下文信息都会编码到相同的[word embedding](Word%20Embedding.md)空间里去。
 
-而[ELMo](ELMo.md)就解决了这个问题，它使用了双向的[LSTM](../Deep%20Learning/循环神经网络系列/LSTM.md)，具体的可以看[ELMo](ELMo.md),总之使用[RNN](../Deep%20Learning/循环神经网络系列/RNN.md)作为特征提取器，解决了多义词的问题，但现在来看，[RNN](../Deep%20Learning/循环神经网络系列/RNN.md)的特征提取的能力是远不如本文的Transformer的，为什么要介绍这些东西呢，这就是原因，Transformer出现后，取代了[RNN](../Deep%20Learning/循环神经网络系列/RNN.md)和[CNN](../Deep%20Learning/卷积神经网络系列/CNN.md)的地位，成为了最流行的特征提取器，大火的[GPT](GPT.md)和[BERT](BERT.md)都与Transformer离不开关系。拿bank为例，[RNN](../Deep%20Learning/循环神经网络系列/RNN.md)在读取整个句子之前不会理解bank的含义，也就是[RNN](../Deep%20Learning/循环神经网络系列/RNN.md)的并行能力比较差，而在Transformer中，token之间会互相交互，也就是所谓的自注意力机制，直观地说，Transformer 的编码器可以被认为是一系列推理步骤（层）。在每一步中，token都会互相看着对方（这是我们需要注意的地方——self-[attention](Attention.md)），交换信息并尝试在整个句子的上下文中更好地理解对方。这发生在几个层（例如，6 个）中。
+而[ELMo](ELMo.md)就解决了这个问题，它使用了双向的[LSTM](../../../Deep%20Learning/循环神经网络系列/LSTM.md)，具体的可以看[ELMo](ELMo.md),总之使用[RNN](../../../Deep%20Learning/循环神经网络系列/RNN.md)作为特征提取器，解决了多义词的问题，但现在来看，[RNN](../../../Deep%20Learning/循环神经网络系列/RNN.md)的特征提取的能力是远不如本文的Transformer的，为什么要介绍这些东西呢，这就是原因，Transformer出现后，取代了[RNN](../../../Deep%20Learning/循环神经网络系列/RNN.md)和[CNN](../Deep%20Learning/卷积神经网络系列/CNN.md)的地位，成为了最流行的特征提取器，大火的[GPT](GPT.md)和[BERT](BERT.md)都与Transformer离不开关系。拿bank为例，[RNN](../../../Deep%20Learning/循环神经网络系列/RNN.md)在读取整个句子之前不会理解bank的含义，也就是[RNN](../../../Deep%20Learning/循环神经网络系列/RNN.md)的并行能力比较差，而在Transformer中，token之间会互相交互，也就是所谓的自注意力机制，直观地说，Transformer 的编码器可以被认为是一系列推理步骤（层）。在每一步中，token都会互相看着对方（这是我们需要注意的地方——self-[attention](Attention.md)），交换信息并尝试在整个句子的上下文中更好地理解对方。这发生在几个层（例如，6 个）中。
 
 在每个解码器层中，前缀标记也通过自注意力机制相互交互。
 
@@ -359,7 +359,7 @@ class PositionwiseFeedForward(nn.Module):
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220810225344.png)
 这里的scale和bias都是可以训练的参数。
 
-注意[Layer Norm](../Deep%20Learning/网络正则化/Layer%20Norm.md)与[Batch Norm](../Deep%20Learning/网络正则化/Batch%20Norm.md)是不同的，这里引用一下沐神的视频：
+注意[Layer Norm](../../../Deep%20Learning/网络正则化/Layer%20Norm.md)与[Batch Norm](../../../Deep%20Learning/网络正则化/Batch%20Norm.md)是不同的，这里引用一下沐神的视频：
 
 ![](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020220810225706.png)
 
@@ -463,7 +463,7 @@ class PositionalEncoding(nn.Module):
 
 对于输入序列一般我们都要进行padding补齐，也就是说设定一个统一长度N，在较短的序列后面填充0到长度为N。对于那些补零的数据来说，我们的attention机制不应该把注意力放在这些位置上，所以我们需要进行一些处理。具体的做法是，把这些位置的值加上一个非常大的负数(负无穷)，这样经过softmax后，这些位置的权重就会接近0。Transformer的padding mask实际上是一个张量，每个值都是一个Boolean，值为false的地方就是要进行处理的地方。
 
-### label smoothing([标签平滑](../Deep%20Learning/训练trick/标签平滑.md))
+### label smoothing([标签平滑](../../../Deep%20Learning/训练trick/标签平滑.md))
 神经网络会促使自身往正确标签和错误标签差值最大的方向学习，在训练数据较少，不足以表征所有的样本特征的情况下，会导致网络过拟合。
 
 label smoothing可以解决上述问题，这是一种正则化策略，主要是通过soft one-hot来加入噪声，减少了真实样本标签的类别在计算损失函数时的权重，最终起到抑制过拟合的效果。

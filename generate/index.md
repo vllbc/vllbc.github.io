@@ -1,6 +1,6 @@
 # generate
 
-理论部分在这：[generate相关](../../NLP/LLM/generate相关.md)
+理论部分在这：[generate相关](../../LLM/basic/generate相关.md)
 ## generate参数
 ```python
     def generate(

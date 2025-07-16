@@ -1,6 +1,6 @@
 # frequency_penalty&presence_penalty
 
-LLM解码时采用的自回归采样，其过程如下：
+wLLM解码时采用的自回归采样，其过程如下：
 
 1. 小模型使用前缀作为输入，将输出结果处理+归一化成[概率分布](https://zhida.zhihu.com/search?content_id=232876036&content_type=Article&match_order=1&q=%E6%A6%82%E7%8E%87%E5%88%86%E5%B8%83&zhida_source=entity)后，采样生成下一个token。
 2. 将生成的token和前缀拼接成新的前缀，重复执行1，直到生成EOS或者达到最大token数目。
@@ -110,7 +110,7 @@ class NucleusSampler(Sampler):
 ```
 
 # Temperature采样 
-详见[温度超参数](../../Deep%20Learning/训练trick/温度超参数.md)
+详见[温度超参数](../../../Deep%20Learning/训练trick/温度超参数.md)
 
 # speculative decoding
 

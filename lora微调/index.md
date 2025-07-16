@@ -22,6 +22,16 @@ BA是零矩阵，对模型效果没有影响。训练过程中冻结$\mathcal{W}
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250310160820.png)
 
 实际上，r是一个超参，训练时可任意设定，$\Delta$W真正的秩未必等于r。如果r恰好等于$\Delta$W的秩，甚至大于$\Delta$的秩(例如等于预训练权重矩阵$W_{0}$的秩),利用学到的B和A可以完全重建$\Delta$W,这时，LoRA的效果近似于全量微调。如果r小于$\Delta$W的秩，BA就是$\Delta$W的一个低秩近似，利用矩阵B和A可以恢复矩阵$\Delta W$中的部分信息。
+
+还有一个超参数为lora_alpha:
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250622170902.png)
+
+## 降低了哪部分显存需求
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250622174439.png)
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250622181549.png)
+
 ## 代码
 ```python
 class LoraModel(torch.nn.Module):
@@ -210,3 +220,5 @@ class Linear(nn.Linear, LoraLayer):
 ```
 ## 参考
 https://snailcoder.github.io/2023/08/06/parameter-efficient-llm-fine-tuning-lora.html
+
+[# 当红炸子鸡 LoRA，是当代微调 LLMs 的正确姿势？](https://zhuanlan.zhihu.com/p/618894919)
