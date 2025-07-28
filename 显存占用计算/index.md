@@ -72,12 +72,9 @@ $$m_{act}=L\cdot seq\cdot bs\cdot h\cdot(34+\frac{5\cdot n_{heads}\cdot seq}h)$$
 一个经验法则是：推理时的峰值显存大致是模型参数显存的 1.5 - 2.5 倍（尤其在处理长序列或大批次时）。更精确的估计需要结合具体模型和输入
 
 - 输入/输出的 Token 存储：需要显存存储输入的 Token 嵌入（embedding）和生成的输出 Token。
-    
-- 中间激活值（Intermediate Activations）：前向传播过程中每一层的输出（如 Attention 的 Key/Value 缓存、FFN 的中间结果等）。
-    
 - Key-Value 缓存（KV Cache）：自回归生成时，为避免重复计算历史 Token 的 Key/Value，需缓存这些中间结果（显存占用与输入+输出长度成正比）
 
-关于 kv cache 占用显存的计算，详见 [KV cache](../basic/KV%20cache.md)
+关于 kv cache 占用显存的计算，详见 [KV cache](../inference/KV%20cache.md)
 ## 参考
 
 - [The Ultra-Scale Playbook - a Hugging Face Space by nanotron](https://huggingface.co/spaces/nanotron/ultrascale-playbook?section=memory_for_activations)

@@ -251,17 +251,24 @@ Batching 策略对两阶段的性能影响显著，但趋势相反：
 
 超参数如上，如果我们采用int8精度，也就是每个参数占据一个字节，每个token占据的kv cache大小就是
 
-2 * K * H * L = 2 (k 和 v) * 8 (n kv heads) * 128 (seq length) * 80 (n layers) * 1 (byte)= 160kB
+2 * K * H * L = 2 (k 和 v) * 8 (n kv heads) * 128 (d_qkv) * 80 (n layers) * 1 (byte)= 160kB
 
 （这里的 2 是因为每个 token 需要存储k和v）
 
 那么128k的kv cache就是：
 
 162e3 * 128 * 1024 = 21.2GB
+需要注意的是 llama 3 使用的是 gqa，所以 N 为 64，K 为 8.
 
-  
+套公式就是 （使用 bf 16 即 2 bytes）：
 
-需要注意的是llama3使用的是gqa，所以N为64，K为8.
+$$
+b(s+n)h*l*2*2
+$$
+
+其中 b 为 batch_size，s 为输入序列长度，n 为输出序列长度，h 为 k 或者 v 的总维度，不同的 attention 改变的是这个东西来降低显存。
+
+
 # 参考
 [LLM---llama2结构和源码解读 - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/679640407)
 [# LLM推理优化 - Chunked prefills](https://zhuanlan.zhihu.com/p/14689463165)

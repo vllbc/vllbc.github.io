@@ -1,8 +1,6 @@
 # LAN-AND-ACT：Improving Planning of Agents for Long-Horizon Tasks
 
-好的，作为大模型领域的学术专家，非常荣幸能与您一同深入探讨这篇富有洞见的论文《PLAN-AND-ACT: Improving Planning of Agents for Long-Horizon Tasks》。这篇论文聚焦于提升大型语言模型（LLM）在执行复杂、长远任务时的规划能力，这是一个在构建真正自主 AI 智能体（Agent）过程中的核心挑战。
 
-首先，我将为您呈现对这篇论文的整体深度解读。
 
 ### 论文深度解读
 
@@ -14,9 +12,13 @@
 
 > 正如论文中所强调的：“这种分离允许每个组件专注于其核心任务。PLANNER 可以在不陷入实现细节的情况下进行高层战略推理，而 EXECUTOR 则可以专注于将抽象计划转化为具体行动。”
 
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250727220711.png)
+
 然而，仅仅提出框架是不够的，训练这样专业的 PLANNER 和 EXECUTOR 需要大量高质量的、带有详细规划和行动标注的数据。在现实世界中，这类数据极其稀缺且标注成本高昂。这正是本文第二个，也是更具创新性的贡献所在：**一个可扩展的合成数据生成流水线**。这个流水线（如下图所示，源自论文图 3）巧妙地解决了“鸡生蛋，蛋生鸡”的困境，分为三个精巧的阶段：
 
-![Synthetic Data Generation Pipeline](https://storage.googleapis.com/static.aurelle.ai/static/images/plan-and-act-figure-3.png)
+
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250728103656.png)
 
 1.  **行动轨迹生成（Action Trajectory Generation）**：首先，利用一个强大的“教师 LLM”（如 GPT-4 o），在真实或模拟环境（如 WebArena）中执行任务，收集成功的“行动轨迹”（即一系列成功的底层操作序列）。
 2.  **接地规划生成（Grounded Plan Generation）**：接着，让另一个“教师 LLM”扮演“事后诸葛亮”的角色，对上一步收集到的成功行动轨迹进行“逆向工程”。它会分析这些具体的行动序列，反推出一个合乎逻辑的高层计划，并将每个计划步骤与具体的行动序列进行关联。这一步至关重要，因为它确保了生成的计划是**“接地的”（Grounded）**，即与真实世界的可行操作紧密相连，而非凭空想象。

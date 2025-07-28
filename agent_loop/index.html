@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>agent_loop - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/agent_loop/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="agent_loop">
+  <meta property="og:description" content="Verl 最近实现了 agent loop 功能，也就是多轮工具调用 RL ，弥补了 verl 中 vllm 无法使用多轮 rollout 的不足。整体流程大致如下（来自 https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/imgs/Multi-Turn_Rollout_Workflow.png）
+image.png 在官方实现中（目前在 verl/experimental/agent_loop 目录下），核心代码在 agent_loop.py中，single_turn_agent_loop.py和tool_agent_loop对应两种agent_loop，tool_parser.py定义了hermes工具解析类。所以重点就是在agent_loop.py中，各个类的协作流程如下图：">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-07-24T00:00:00+00:00">
+    <meta property="article:modified_time" content="2025-07-24T00:00:00+00:00">
+    <meta property="article:tag" content="Coding">
+    <meta property="article:tag" content="Verl">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="agent_loop">
+  <meta name="twitter:description" content="Verl 最近实现了 agent loop 功能，也就是多轮工具调用 RL ，弥补了 verl 中 vllm 无法使用多轮 rollout 的不足。整体流程大致如下（来自 https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/imgs/Multi-Turn_Rollout_Workflow.png）
+image.png 在官方实现中（目前在 verl/experimental/agent_loop 目录下），核心代码在 agent_loop.py中，single_turn_agent_loop.py和tool_agent_loop对应两种agent_loop，tool_parser.py定义了hermes工具解析类。所以重点就是在agent_loop.py中，各个类的协作流程如下图：">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/agent_loop/" /><link rel="prev" href="https://blog.vllbc.top/data_parallel/" /><link rel="next" href="https://blog.vllbc.top/routinea-structural-planning-framework-for-llm-agent-system-in-enterprise/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "agent_loop",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/agent_loop\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "coding, verl","wordcount":  4683 ,
+        "url": "https:\/\/blog.vllbc.top\/agent_loop\/","datePublished": "2025-07-24T00:00:00+00:00","dateModified": "2025-07-24T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">agent_loop</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-24">2025-07-24</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 4683 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 10 分钟&nbsp;<span id="/agent_loop/" class="leancloud_visitors" data-flag-title="agent_loop">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>Verl 最近实现了 agent loop 功能，也就是多轮工具调用 RL ，弥补了 verl
+中 vllm 无法使用多轮 rollout 的不足。整体流程大致如下（来自
+https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/imgs/Multi-Turn_Rollout_Workflow.png）</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250724162847.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>在官方实现中（目前在 verl/experimental/agent_loop
+目录下），核心代码在
+agent_loop.py中，single_turn_agent_loop.py和tool_agent_loop对应两种agent_loop，tool_parser.py定义了hermes工具解析类。所以重点就是在agent_loop.py中，各个类的协作流程如下图：</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250724163542.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>verl官网图如下（<a
+href="https://verl.readthedocs.io/en/latest/advance/agent_loop.html">Agent
+Loop — verl documentation</a>）： <img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250728203426.png"
+alt="image.png" /></p>
+<p>按照上面的流程图进行逐步讲解。</p>
+<h2 id="agentloopmanager">AgentLoopManager</h2>
+<p>AgentLoopManager是入口处，在ray_trainer.py中由actor_rollout_wg初始化：</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">self</span>.config.actor_rollout_ref.rollout.mode <span class="op">==</span> <span class="st">&quot;async&quot;</span>:</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>            <span class="im">from</span> verl.experimental.agent_loop <span class="im">import</span> AgentLoopManager</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.async_rollout_mode <span class="op">=</span> <span class="va">True</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.async_rollout_manager <span class="op">=</span> AgentLoopManager(</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>                config<span class="op">=</span><span class="va">self</span>.config,</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>                worker_group<span class="op">=</span><span class="va">self</span>.actor_rollout_wg,</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>            )</span></code></pre></div>
+<p>AgentLoopManager需要先启动多个推理引擎服务器，数量为dp_size（world_size/tp_size）。代码：</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> AgentLoopManager:</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Agent loop manager that manages a group of agent loop workers.&quot;&quot;&quot;</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, config: DictConfig, worker_group: RayWorkerGroup):</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Initialize agent loop manager.</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="co">        Args:</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="co">            config (DictConfig): trainer config.</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="co">            worker_group (RayWorkerGroup): ActorRolloutRef worker group.</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.config <span class="op">=</span> config</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.worker_group <span class="op">=</span> worker_group</span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._initialize_llm_servers()</span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._init_agent_loop_workers()</span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> _initialize_llm_servers(<span class="va">self</span>):</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 这里也对应了一开始图中的最下面的部分</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>         <span class="va">self</span>.rollout_tp_size <span class="op">=</span> <span class="va">self</span>.config.actor_rollout_ref.rollout.tensor_model_parallel_size</span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.rollout_dp_size <span class="op">=</span> <span class="va">self</span>.worker_group.world_size <span class="op">//</span> <span class="va">self</span>.rollout_tp_size</span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>        ...</span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>        unready_dp_ranks <span class="op">=</span> <span class="bu">set</span>(<span class="bu">range</span>(<span class="va">self</span>.rollout_dp_size))</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>        <span class="cf">while</span> <span class="bu">len</span>(unready_dp_ranks) <span class="op">&gt;</span> <span class="dv">0</span>:</span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>            servers <span class="op">=</span> {</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>                rollout_dp_rank: server_class.options(</span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>                    <span class="co"># make sure AsyncvLLMServer colocates with its corresponding workers</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>                    scheduling_strategy<span class="op">=</span>ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(</span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>                        node_id<span class="op">=</span>workers_info[rollout_dp_rank <span class="op">*</span> <span class="va">self</span>.rollout_tp_size],</span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>                        soft<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>                    ),</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>                    name<span class="op">=</span><span class="ss">f&quot;async_llm_server_</span><span class="sc">{</span>rollout_dp_rank<span class="sc">}</span><span class="ss">&quot;</span>,</span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>                ).remote(<span class="va">self</span>.config, <span class="va">self</span>.rollout_dp_size, rollout_dp_rank, <span class="va">self</span>.worker_group.name_prefix)</span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>                <span class="cf">for</span> rollout_dp_rank <span class="kw">in</span> unready_dp_ranks</span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>            }</span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> rollout_dp_rank, server <span class="kw">in</span> servers.items():</span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>                <span class="cf">try</span>:</span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>                    address <span class="op">=</span> ray.get(server.get_server_address.remote())</span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>                    <span class="va">self</span>.server_addresses[rollout_dp_rank] <span class="op">=</span> address</span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>                    <span class="va">self</span>.async_llm_servers[rollout_dp_rank] <span class="op">=</span> server</span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>                    unready_dp_ranks.remove(rollout_dp_rank)</span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>                <span class="cf">except</span> <span class="pp">Exception</span>:</span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>                    ray.kill(server)</span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>                    <span class="bu">print</span>(<span class="ss">f&quot;rollout server </span><span class="sc">{</span>rollout_dp_rank<span class="sc">}</span><span class="ss"> failed, maybe address already in use, restarting...&quot;</span>)</span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>        <span class="co"># All server instances are ready, init AsyncLLM engine.</span></span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>        ray.get([server.init_engine.remote() <span class="cf">for</span> server <span class="kw">in</span> <span class="va">self</span>.async_llm_servers])</span></code></pre></div>
+<p>AgentLoopManager负责管理多个AgentLoopWorker，个数由参数<code>rollout.agent.num_workers</code>确定。然后将prompt切分成num_worker个，让各个worker分别进行推理，这部分的代码如下：</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co">## 初始化各个worker</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a> <span class="kw">def</span> _init_agent_loop_workers(<span class="va">self</span>):</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.agent_loop_workers <span class="op">=</span> []</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="va">self</span>.config.actor_rollout_ref.rollout.agent.num_workers):</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.agent_loop_workers.append(</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>                AgentLoopWorker.options(</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>                    name<span class="op">=</span><span class="ss">f&quot;agent_loop_worker_</span><span class="sc">{</span>i<span class="sc">}</span><span class="ss">&quot;</span>,</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>                ).remote(<span class="va">self</span>.config, <span class="va">self</span>.async_llm_servers)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>...</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a><span class="co">## 根据worker的数量切分prompts，推理后再合并起来</span></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>  <span class="kw">def</span> generate_sequences(<span class="va">self</span>, prompts: DataProto) <span class="op">-&gt;</span> DataProto:</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">self</span>.config.actor_rollout_ref.rollout.free_cache_engine:</span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.wake_up()</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>        chunkes <span class="op">=</span> prompts.chunk(<span class="bu">len</span>(<span class="va">self</span>.agent_loop_workers))</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>        outputs <span class="op">=</span> ray.get(</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>            [</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>                worker.generate_sequences.remote(chunk)</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>                <span class="cf">for</span> worker, chunk <span class="kw">in</span> <span class="bu">zip</span>(<span class="va">self</span>.agent_loop_workers, chunkes, strict<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>            ]</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> DataProto.concat(outputs)</span></code></pre></div>
+<p>从初始化也说明了，我们在RayPPOTrainer中init_workers方法里面初始化好AgentLoopManager，同时也初始化好了推理服务器和各个workers。
+## AsyncLLMServerManager</p>
+<p>在上面的代码中，可以看到我们在创建各个worker的时候传入了初始化好的servers，需要一个类来对这些server进行管理，即<code>AsyncLLMServerManager</code>类。具体的作用就是针对不同的request，来选择哪一个server进行推理，使用LRU算法来进行管理，具体如下：</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a> <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, config: DictConfig, server_handles: <span class="bu">list</span>[ray.actor.ActorHandle], max_cache_size: <span class="bu">int</span> <span class="op">=</span> <span class="dv">10000</span>):</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Initialize the AsyncLLMServerManager.</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="co">        Args:</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="co">            config (DictConfig): YAML config.</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="co">            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="co">            max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.config <span class="op">=</span> config</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.server_handles <span class="op">=</span> server_handles</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>        random.shuffle(<span class="va">self</span>.server_handles)</span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Least requests load balancing</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.weighted_serveres <span class="op">=</span> [[<span class="dv">0</span>, (<span class="bu">hash</span>(server), server)] <span class="cf">for</span> server <span class="kw">in</span> server_handles]</span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>        heapq.heapify(<span class="va">self</span>.weighted_serveres)</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>        <span class="co"># LRU cache to map request_id to server</span></span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.request_id_to_server <span class="op">=</span> LRUCache(maxsize<span class="op">=</span>max_cache_size)</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> _choose_server(<span class="va">self</span>, request_id: <span class="bu">str</span>) <span class="op">-&gt;</span> ray.actor.ActorHandle:</span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>        <span class="co"># </span><span class="al">TODO</span><span class="co">: implement server pressure awareness load balancing</span></span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> request_id <span class="kw">in</span> <span class="va">self</span>.request_id_to_server:</span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> <span class="va">self</span>.request_id_to_server[request_id]</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a>        server <span class="op">=</span> <span class="va">self</span>.weighted_serveres[<span class="dv">0</span>][<span class="dv">1</span>][<span class="dv">1</span>]</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.weighted_serveres[<span class="dv">0</span>][<span class="dv">0</span>] <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a>        heapq.heapreplace(<span class="va">self</span>.weighted_serveres, <span class="va">self</span>.weighted_serveres[<span class="dv">0</span>])</span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.request_id_to_server[request_id] <span class="op">=</span> server</span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> server</span></code></pre></div>
+<p>具体做法解释如下： 1.
+建立了一个最小堆<code>self.weighted_serveres</code>，列表中的每个元素结构是 [0,
+(hash(server), server)]，即 [请求计数, (服务器哈希,
+服务器句柄)]。heapq.heapify(self.weighted_serveres) 将这个列表转换成一个最小堆，堆的排序依据是每个元素的第一个值，也就是 请求计数。因此，请求数最少的服务器始终位于堆的顶部（self.weighted_serveres[0]）。
+2. 创建了一个 self.request_id_to_server，这是一个 LRU (Least Recently
+Used) 缓存。这个缓存用于存储 request_id 到 server 句柄的映射。 3.
+首先检查request_id是否在映射中，如果在的话直接返回对应的服务器句柄，否则需要给它分配一个全新的server，也就是请求计数最少的那个server，然后再更新堆和映射。</p>
+<p>这样做的目的是为了各个服务器之间的负载均衡。</p>
+<p>实际的生成就是由这个类进行的，即</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>    <span class="at">@rollout_trace_op</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> generate(</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>,</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>        request_id,</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>        <span class="op">*</span>,</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>        prompt_ids: <span class="bu">list</span>[<span class="bu">int</span>],</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>        sampling_params: <span class="bu">dict</span>[<span class="bu">str</span>, Any],</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>    ) <span class="op">-&gt;</span> <span class="bu">list</span>[<span class="bu">int</span>]:</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Generate tokens from prompt ids.</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a><span class="co">        Args:</span></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a><span class="co">            request_id (str): request id for sticky session.</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="co">            prompt_ids (List[int]): List of prompt token ids.</span></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a><span class="co">            sampling_params (Dict[str, Any]): Sampling parameters for the chat completion.</span></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a><span class="co">        Returns:</span></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a><span class="co">            List[int]: List of generated token ids.</span></span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a>        server <span class="op">=</span> <span class="va">self</span>._choose_server(request_id)</span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> <span class="cf">await</span> server.generate.remote(</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a>            request_id<span class="op">=</span>request_id,</span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a>            prompt_ids<span class="op">=</span>prompt_ids,</span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a>            sampling_params<span class="op">=</span>sampling_params,</span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> output</span></code></pre></div>
+<p>先选择合适的server，再利用该server的generate方法来进行推理。具体的类和方法在workers/rollout下。</p>
+<h2 id="agentloopworker">AgentLoopWorker</h2>
+<p>现在回到AgentLoopWorker中，前面已经提到了，我们用AgentLoopManager管理多个Worker，每一个Worker都可以用所有创建的server进行推理，接下来就看worker的generate_sequcences方法做了什么：</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a> <span class="cf">async</span> <span class="kw">def</span> generate_sequences(<span class="va">self</span>, batch: DataProto) <span class="op">-&gt;</span> DataProto:</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Generate sequences from agent loop.</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="co">        Args:</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="co">            batch (DataProto): Input batch.</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="co">        Returns:</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="co">            DataProto: Output batch.</span></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="co">            - prompts: [bsz, prompt_length], prompt token ids from dataset.</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a><span class="co">            - responses: [bsz, response_length], output token ids include response tokens</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a><span class="co">              from LLM generation and observation tokens from tool_calls.</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a><span class="co">            - response_mask: [bsz, response_length], 1 for LLM generated tokens, 0 for observation/padding tokens.</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a><span class="co">            - input_ids: [bsz, prompt_length + response_length], whole sequence token ids, including prompt tokens</span></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a><span class="co">              and response tokens.</span></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a><span class="co">            - attention_mask: [bsz, prompt_length + response_length], 0 for padding tokens, 1 for other tokens.</span></span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a><span class="co">            - position_ids: [bsz, prompt_length + response_length], incremental position ids.</span></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a><span class="co">            For multi-turn conversations:</span></span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a><span class="co">            responses:     |&lt;- LLM generation -&gt;|&lt;- tool_calls -&gt;|&lt;- LLM generation -&gt;|&lt;- padding -&gt;|</span></span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="co">            response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|</span></span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a>        config <span class="op">=</span> <span class="va">self</span>.config.actor_rollout_ref.rollout</span>
+<span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a>        sampling_params <span class="op">=</span> <span class="bu">dict</span>(</span>
+<span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a>            temperature<span class="op">=</span>config.temperature,</span>
+<span id="cb6-25"><a href="#cb6-25" aria-hidden="true" tabindex="-1"></a>            top_p<span class="op">=</span>config.top_p,</span>
+<span id="cb6-26"><a href="#cb6-26" aria-hidden="true" tabindex="-1"></a>            repetition_penalty<span class="op">=</span><span class="fl">1.0</span>,</span>
+<span id="cb6-27"><a href="#cb6-27" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb6-28"><a href="#cb6-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-29"><a href="#cb6-29" aria-hidden="true" tabindex="-1"></a>        <span class="co"># override sampling params for validation</span></span>
+<span id="cb6-30"><a href="#cb6-30" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> batch.meta_info.get(<span class="st">&quot;validate&quot;</span>, <span class="va">False</span>):</span>
+<span id="cb6-31"><a href="#cb6-31" aria-hidden="true" tabindex="-1"></a>            sampling_params[<span class="st">&quot;top_p&quot;</span>] <span class="op">=</span> config.val_kwargs.top_p</span>
+<span id="cb6-32"><a href="#cb6-32" aria-hidden="true" tabindex="-1"></a>            sampling_params[<span class="st">&quot;temperature&quot;</span>] <span class="op">=</span> config.val_kwargs.temperature</span>
+<span id="cb6-33"><a href="#cb6-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-34"><a href="#cb6-34" aria-hidden="true" tabindex="-1"></a>        <span class="co"># by default, we assume it&#39;s a single turn agent</span></span>
+<span id="cb6-35"><a href="#cb6-35" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="st">&quot;agent_name&quot;</span> <span class="kw">not</span> <span class="kw">in</span> batch.non_tensor_batch:</span>
+<span id="cb6-36"><a href="#cb6-36" aria-hidden="true" tabindex="-1"></a>            batch.non_tensor_batch[<span class="st">&quot;agent_name&quot;</span>] <span class="op">=</span> np.array([<span class="st">&quot;single_turn_agent&quot;</span>] <span class="op">*</span> <span class="bu">len</span>(batch), dtype<span class="op">=</span><span class="bu">object</span>)</span>
+<span id="cb6-37"><a href="#cb6-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-38"><a href="#cb6-38" aria-hidden="true" tabindex="-1"></a>        tasks <span class="op">=</span> []</span>
+<span id="cb6-39"><a href="#cb6-39" aria-hidden="true" tabindex="-1"></a>        agent_names <span class="op">=</span> batch.non_tensor_batch[<span class="st">&quot;agent_name&quot;</span>]</span>
+<span id="cb6-40"><a href="#cb6-40" aria-hidden="true" tabindex="-1"></a>        raw_prompts <span class="op">=</span> batch.non_tensor_batch[<span class="st">&quot;raw_prompt&quot;</span>]</span>
+<span id="cb6-41"><a href="#cb6-41" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="st">&quot;index&quot;</span> <span class="kw">in</span> batch.non_tensor_batch:</span>
+<span id="cb6-42"><a href="#cb6-42" aria-hidden="true" tabindex="-1"></a>            index <span class="op">=</span> batch.non_tensor_batch[<span class="st">&quot;index&quot;</span>]</span>
+<span id="cb6-43"><a href="#cb6-43" aria-hidden="true" tabindex="-1"></a>        <span class="cf">else</span>:</span>
+<span id="cb6-44"><a href="#cb6-44" aria-hidden="true" tabindex="-1"></a>            index <span class="op">=</span> np.arange(<span class="bu">len</span>(raw_prompts))</span>
+<span id="cb6-45"><a href="#cb6-45" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-46"><a href="#cb6-46" aria-hidden="true" tabindex="-1"></a>        trajectory_info <span class="op">=</span> <span class="cf">await</span> get_trajectory_info(</span>
+<span id="cb6-47"><a href="#cb6-47" aria-hidden="true" tabindex="-1"></a>            batch.meta_info.get(<span class="st">&quot;global_steps&quot;</span>, <span class="op">-</span><span class="dv">1</span>), index, batch.meta_info.get(<span class="st">&quot;validate&quot;</span>, <span class="va">False</span>)</span>
+<span id="cb6-48"><a href="#cb6-48" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb6-49"><a href="#cb6-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-50"><a href="#cb6-50" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> agent_name, messages, trajectory <span class="kw">in</span> <span class="bu">zip</span>(agent_names, raw_prompts, trajectory_info, strict<span class="op">=</span><span class="va">True</span>):</span>
+<span id="cb6-51"><a href="#cb6-51" aria-hidden="true" tabindex="-1"></a>            tasks.append(</span>
+<span id="cb6-52"><a href="#cb6-52" aria-hidden="true" tabindex="-1"></a>                asyncio.create_task(<span class="va">self</span>._run_agent_loop(agent_name, messages.tolist(), sampling_params, trajectory))</span>
+<span id="cb6-53"><a href="#cb6-53" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb6-54"><a href="#cb6-54" aria-hidden="true" tabindex="-1"></a>        outputs <span class="op">=</span> <span class="cf">await</span> asyncio.gather(<span class="op">*</span>tasks)</span>
+<span id="cb6-55"><a href="#cb6-55" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-56"><a href="#cb6-56" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> <span class="va">self</span>._postprocess(outputs)</span>
+<span id="cb6-57"><a href="#cb6-57" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> output</span></code></pre></div>
+<p>根据注释的信息，输入为batch数据，输出为推理后的prompt、response、mask等。这里需要先判断使用的agent_loop的类型，前面提到这里实现了single_turn和tool两种agent_loop，此外用户可以根据<code>AgentLoopBase</code>抽象类来自定义agent_loop（init_class和run两个方法）。
+这里先是有一个判断，如果数据集中没有agent_name字段，则默认就是single_turn类型，因此如果你想使用agent_loop，必须在数据预处理的时候加入agent_name字段为tool_agent。这里创建了一个叫trajectory_info的变量，目的是为了rollout_trace，来区分保存到文件中的各个prompt生成的response。接下来进入到_run_agent_loop方法中：</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> _run_agent_loop(</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>,</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>        agent_name: <span class="bu">str</span>,</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>        messages: <span class="bu">list</span>[<span class="bu">dict</span>[<span class="bu">str</span>, Any]],</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>        sampling_params: <span class="bu">dict</span>[<span class="bu">str</span>, Any],</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>        trajectory: <span class="bu">dict</span>[<span class="bu">str</span>, Any],</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>    ) <span class="op">-&gt;</span> AgentLoopOutput:</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">with</span> rollout_trace_attr(</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>            step<span class="op">=</span>trajectory[<span class="st">&quot;step&quot;</span>],</span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>            sample_index<span class="op">=</span>trajectory[<span class="st">&quot;sample_index&quot;</span>],</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>            rollout_n<span class="op">=</span>trajectory[<span class="st">&quot;rollout_n&quot;</span>],</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>            validate<span class="op">=</span>trajectory[<span class="st">&quot;validate&quot;</span>],</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>            name<span class="op">=</span><span class="st">&quot;agent_loop&quot;</span>,</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>        ):</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>            <span class="cf">assert</span> agent_name <span class="kw">in</span> _agent_loop_registry, (</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>                <span class="ss">f&quot;Agent loop </span><span class="sc">{</span>agent_name<span class="sc">}</span><span class="ss"> not registered, registered agent loops: </span><span class="sc">{</span>_agent_loop_registry<span class="sc">.</span>keys()<span class="sc">}</span><span class="ss">&quot;</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>            agent_loop_config <span class="op">=</span> _agent_loop_registry[agent_name]</span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>            agent_loop <span class="op">=</span> hydra.utils.instantiate(</span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a>                config<span class="op">=</span>agent_loop_config,</span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a>                trainer_config<span class="op">=</span>_DummyConfig(config<span class="op">=</span><span class="va">self</span>.config),</span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a>                server_manager<span class="op">=</span><span class="va">self</span>.server_manager,</span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>                tokenizer<span class="op">=</span><span class="va">self</span>.tokenizer,</span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true" tabindex="-1"></a>            output <span class="op">=</span> <span class="cf">await</span> agent_loop.run(messages, sampling_params)</span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> output</span></code></pre></div>
+<p>对于定义的不同的agent_loop，需要用register装饰器进行注册（设计模式中的工厂模式），register装饰器如下：</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> register(agent_name: <span class="bu">str</span>):</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Register agent loop class.&quot;&quot;&quot;</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> decorator(subclass: <span class="bu">type</span>[AgentLoopBase]) <span class="op">-&gt;</span> <span class="bu">type</span>[AgentLoopBase]:</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>        fqdn <span class="op">=</span> <span class="ss">f&quot;</span><span class="sc">{</span>subclass<span class="sc">.</span>__module__<span class="sc">}</span><span class="ss">.</span><span class="sc">{</span>subclass<span class="sc">.</span><span class="va">__qualname__</span><span class="sc">}</span><span class="ss">&quot;</span></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>        _agent_loop_registry[agent_name] <span class="op">=</span> {<span class="st">&quot;_target_&quot;</span>: fqdn}</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> subclass</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> decorator</span></code></pre></div>
+<p>对于装饰的类，将这个信息存入一个名为 _agent_loop_registry 的全局字典中。
+- 键 (Key)：在装饰器中提供的 agent_name 字符串 (e.g., “my_agent”)。</p>
+<ul>
+<li>值 (Value)：一个特殊格式的字典 {“<em>target</em>”:
+“类的完整路径”}。</li>
+</ul>
+<p>这里我们注册了两个agent_name，然后利用hydra进行初始化，本文重点介绍tool_agent_loop，接下来转到ToolAgentLoop这个类中。</p>
+<h2 id="toolagentloop">ToolAgentLoop</h2>
+<p>首先看初始化：</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="at">@register</span>(<span class="st">&quot;tool_agent&quot;</span>)</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> ToolAgentLoop(AgentLoopBase):</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    <span class="at">@classmethod</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> init_class(cls, config, tokenizer, <span class="op">**</span>kwargs):</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> cls._class_initialized:</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>        cls._class_initialized <span class="op">=</span> <span class="va">True</span></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="st">&quot;Performing class-level ToolAgentLoop initialization&quot;</span>)</span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Initialize tools from config file</span></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>        cls.tokenizer <span class="op">=</span> tokenizer</span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>        cls.max_user_turns <span class="op">=</span> config.actor_rollout_ref.rollout.multi_turn.max_user_turns</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>        cls.max_assistant_turns <span class="op">=</span> config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns</span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>        cls.max_parallel_calls <span class="op">=</span> config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls</span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a>        cls.max_tool_response_length <span class="op">=</span> config.actor_rollout_ref.rollout.multi_turn.max_tool_response_length</span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a>        cls.tool_response_truncate_side <span class="op">=</span> config.actor_rollout_ref.rollout.multi_turn.tool_response_truncate_side</span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a>        tool_config_path <span class="op">=</span> config.actor_rollout_ref.rollout.multi_turn.tool_config_path</span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a>        tool_list <span class="op">=</span> initialize_tools_from_config(tool_config_path) <span class="cf">if</span> tool_config_path <span class="cf">else</span> []</span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a>        cls.tools <span class="op">=</span> {tool.name: tool <span class="cf">for</span> tool <span class="kw">in</span> tool_list}</span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a>        cls.tool_schemas <span class="op">=</span> [tool.tool_schema.model_dump(exclude_unset<span class="op">=</span><span class="va">True</span>, exclude_none<span class="op">=</span><span class="va">True</span>) <span class="cf">for</span> tool <span class="kw">in</span> tool_list]</span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a>        cls.tool_parser <span class="op">=</span> ToolParser.get_tool_parser(config.actor_rollout_ref.rollout.multi_turn.<span class="bu">format</span>, cls.tokenizer)</span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&quot;Initialized tools: </span><span class="sc">{</span>cls<span class="sc">.</span>tools<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-25"><a href="#cb9-25" aria-hidden="true" tabindex="-1"></a>        cls.prompt_length <span class="op">=</span> config.actor_rollout_ref.rollout.prompt_length</span>
+<span id="cb9-26"><a href="#cb9-26" aria-hidden="true" tabindex="-1"></a>        cls.response_length <span class="op">=</span> config.actor_rollout_ref.rollout.response_length</span>
+<span id="cb9-27"><a href="#cb9-27" aria-hidden="true" tabindex="-1"></a>        cls.system_prompt <span class="op">=</span> tokenizer.apply_chat_template([{}], add_generation_prompt<span class="op">=</span><span class="va">False</span>, tokenize<span class="op">=</span><span class="va">True</span>)</span></code></pre></div>
+<p>关于工具的初始化，来自于sglang团队，详细可以看博客：<a
+href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/release_log/verl-multiturn-rollout-Release_ZH.md">Awesome-ML-SYS-Tutorial/rlhf/verl/multi-turn/release_log/verl-multiturn-rollout-Release_ZH.md
+at main · zhaochenyang20/Awesome-ML-SYS-Tutorial · GitHub</a></p>
+<p>简单来说就是将工具的信息定义在一个yaml文件中，将文件路径传入到actor_rollout_ref.rollout.multi_turn.tool_config_path参数，然后获取tool_schemas用于后续传入到chat_template中，此外在tool_parser.py中定义了tool_parser。</p>
+<p>这里还有一个值得注意的是system_prompt，这是因为进行chat_template的时候如果没有role为system的会自动加上，而在后面对工具返回结果进行单独chat_template的时候需要将自动添加的system
+prompt给删除，所以这里预存了一个system_prompt。</p>
+<p>下面我们来看最核心的多轮rollout代码：</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="at">@rollout_trace_op</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> run(<span class="va">self</span>, messages: <span class="bu">list</span>[<span class="bu">dict</span>[<span class="bu">str</span>, Any]], sampling_params: <span class="bu">dict</span>[<span class="bu">str</span>, Any]) <span class="op">-&gt;</span> AgentLoopOutput:</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>        metrics <span class="op">=</span> {}</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>        request_id <span class="op">=</span> uuid4().<span class="bu">hex</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>        prompt_ids <span class="op">=</span> <span class="cf">await</span> <span class="va">self</span>.loop.run_in_executor(</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>            <span class="va">None</span>,</span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>            <span class="kw">lambda</span>: <span class="va">self</span>.tokenizer.apply_chat_template(</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>                messages, tools<span class="op">=</span><span class="va">self</span>.tool_schemas, add_generation_prompt<span class="op">=</span><span class="va">True</span>, tokenize<span class="op">=</span><span class="va">True</span></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>            ),</span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>        response_mask <span class="op">=</span> []</span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>        user_turns, assistant_turns <span class="op">=</span> <span class="dv">0</span>, <span class="dv">0</span></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">while</span> <span class="va">True</span>:</span>
+<span id="cb10-15"><a href="#cb10-15" aria-hidden="true" tabindex="-1"></a>            <span class="cf">with</span> simple_timer(<span class="st">&quot;generate_sequences&quot;</span>, metrics):</span>
+<span id="cb10-16"><a href="#cb10-16" aria-hidden="true" tabindex="-1"></a>                response_ids <span class="op">=</span> <span class="cf">await</span> <span class="va">self</span>.server_manager.generate(</span>
+<span id="cb10-17"><a href="#cb10-17" aria-hidden="true" tabindex="-1"></a>                    request_id<span class="op">=</span>request_id, prompt_ids<span class="op">=</span>prompt_ids, sampling_params<span class="op">=</span>sampling_params</span>
+<span id="cb10-18"><a href="#cb10-18" aria-hidden="true" tabindex="-1"></a>                )</span>
+<span id="cb10-19"><a href="#cb10-19" aria-hidden="true" tabindex="-1"></a>            prompt_ids <span class="op">+=</span> response_ids</span>
+<span id="cb10-20"><a href="#cb10-20" aria-hidden="true" tabindex="-1"></a>            response_mask <span class="op">+=</span> [<span class="dv">1</span>] <span class="op">*</span> <span class="bu">len</span>(response_ids)</span>
+<span id="cb10-21"><a href="#cb10-21" aria-hidden="true" tabindex="-1"></a>            assistant_turns <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb10-22"><a href="#cb10-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-23"><a href="#cb10-23" aria-hidden="true" tabindex="-1"></a>            <span class="co"># reach max response length</span></span>
+<span id="cb10-24"><a href="#cb10-24" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="bu">len</span>(response_mask) <span class="op">&gt;=</span> <span class="va">self</span>.response_length:</span>
+<span id="cb10-25"><a href="#cb10-25" aria-hidden="true" tabindex="-1"></a>                <span class="cf">break</span></span>
+<span id="cb10-26"><a href="#cb10-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-27"><a href="#cb10-27" aria-hidden="true" tabindex="-1"></a>            <span class="co"># reach max assistant turns</span></span>
+<span id="cb10-28"><a href="#cb10-28" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="va">self</span>.max_assistant_turns <span class="kw">and</span> assistant_turns <span class="op">&gt;=</span> <span class="va">self</span>.max_assistant_turns:</span>
+<span id="cb10-29"><a href="#cb10-29" aria-hidden="true" tabindex="-1"></a>                <span class="cf">break</span></span>
+<span id="cb10-30"><a href="#cb10-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-31"><a href="#cb10-31" aria-hidden="true" tabindex="-1"></a>            <span class="co"># reach max user turns</span></span>
+<span id="cb10-32"><a href="#cb10-32" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="va">self</span>.max_user_turns <span class="kw">and</span> user_turns <span class="op">&gt;=</span> <span class="va">self</span>.max_user_turns:</span>
+<span id="cb10-33"><a href="#cb10-33" aria-hidden="true" tabindex="-1"></a>                <span class="cf">break</span></span>
+<span id="cb10-34"><a href="#cb10-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-35"><a href="#cb10-35" aria-hidden="true" tabindex="-1"></a>            <span class="co"># no tool calls</span></span>
+<span id="cb10-36"><a href="#cb10-36" aria-hidden="true" tabindex="-1"></a>            _, tool_calls <span class="op">=</span> <span class="cf">await</span> <span class="va">self</span>.tool_parser.extract_tool_calls(response_ids)</span>
+<span id="cb10-37"><a href="#cb10-37" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="kw">not</span> tool_calls:</span>
+<span id="cb10-38"><a href="#cb10-38" aria-hidden="true" tabindex="-1"></a>                <span class="cf">break</span></span>
+<span id="cb10-39"><a href="#cb10-39" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-40"><a href="#cb10-40" aria-hidden="true" tabindex="-1"></a>            <span class="co"># call tools</span></span>
+<span id="cb10-41"><a href="#cb10-41" aria-hidden="true" tabindex="-1"></a>            tasks <span class="op">=</span> []</span>
+<span id="cb10-42"><a href="#cb10-42" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> tool_call <span class="kw">in</span> tool_calls[: <span class="va">self</span>.max_parallel_calls]:</span>
+<span id="cb10-43"><a href="#cb10-43" aria-hidden="true" tabindex="-1"></a>                tasks.append(<span class="va">self</span>._call_tool(tool_call))</span>
+<span id="cb10-44"><a href="#cb10-44" aria-hidden="true" tabindex="-1"></a>            <span class="cf">with</span> simple_timer(<span class="st">&quot;tool_calls&quot;</span>, metrics):</span>
+<span id="cb10-45"><a href="#cb10-45" aria-hidden="true" tabindex="-1"></a>                tool_responses <span class="op">=</span> <span class="cf">await</span> asyncio.gather(<span class="op">*</span>tasks)</span>
+<span id="cb10-46"><a href="#cb10-46" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="bu">any</span>(<span class="bu">isinstance</span>(item, <span class="pp">Exception</span>) <span class="cf">for</span> item <span class="kw">in</span> tool_responses):</span>
+<span id="cb10-47"><a href="#cb10-47" aria-hidden="true" tabindex="-1"></a>                <span class="cf">break</span></span>
+<span id="cb10-48"><a href="#cb10-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-49"><a href="#cb10-49" aria-hidden="true" tabindex="-1"></a>            <span class="co"># append tool_response_ids</span></span>
+<span id="cb10-50"><a href="#cb10-50" aria-hidden="true" tabindex="-1"></a>            tool_response_ids <span class="op">=</span> <span class="cf">await</span> <span class="va">self</span>.loop.run_in_executor(</span>
+<span id="cb10-51"><a href="#cb10-51" aria-hidden="true" tabindex="-1"></a>                <span class="va">None</span>,</span>
+<span id="cb10-52"><a href="#cb10-52" aria-hidden="true" tabindex="-1"></a>                <span class="kw">lambda</span> messages<span class="op">=</span>tool_responses: <span class="va">self</span>.tokenizer.apply_chat_template(</span>
+<span id="cb10-53"><a href="#cb10-53" aria-hidden="true" tabindex="-1"></a>                    messages, add_generation_prompt<span class="op">=</span><span class="va">True</span>, tokenize<span class="op">=</span><span class="va">True</span></span>
+<span id="cb10-54"><a href="#cb10-54" aria-hidden="true" tabindex="-1"></a>                ),</span>
+<span id="cb10-55"><a href="#cb10-55" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb10-56"><a href="#cb10-56" aria-hidden="true" tabindex="-1"></a>            tool_response_ids <span class="op">=</span> tool_response_ids[<span class="bu">len</span>(<span class="va">self</span>.system_prompt) :]</span>
+<span id="cb10-57"><a href="#cb10-57" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-58"><a href="#cb10-58" aria-hidden="true" tabindex="-1"></a>            <span class="co"># </span><span class="al">NOTE</span><span class="co">: last turn should not be user turn, or the EOS token reward</span></span>
+<span id="cb10-59"><a href="#cb10-59" aria-hidden="true" tabindex="-1"></a>            <span class="co"># can&#39;t be propagated to previous token in GAE.</span></span>
+<span id="cb10-60"><a href="#cb10-60" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="bu">len</span>(response_mask) <span class="op">+</span> <span class="bu">len</span>(tool_response_ids) <span class="op">&gt;=</span> <span class="va">self</span>.response_length:</span>
+<span id="cb10-61"><a href="#cb10-61" aria-hidden="true" tabindex="-1"></a>                <span class="cf">break</span></span>
+<span id="cb10-62"><a href="#cb10-62" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-63"><a href="#cb10-63" aria-hidden="true" tabindex="-1"></a>            prompt_ids <span class="op">+=</span> tool_response_ids</span>
+<span id="cb10-64"><a href="#cb10-64" aria-hidden="true" tabindex="-1"></a>            response_mask <span class="op">+=</span> [<span class="dv">0</span>] <span class="op">*</span> <span class="bu">len</span>(tool_response_ids)</span>
+<span id="cb10-65"><a href="#cb10-65" aria-hidden="true" tabindex="-1"></a>            user_turns <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb10-66"><a href="#cb10-66" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-67"><a href="#cb10-67" aria-hidden="true" tabindex="-1"></a>        response_ids <span class="op">=</span> prompt_ids[<span class="op">-</span><span class="bu">len</span>(response_mask) :]</span>
+<span id="cb10-68"><a href="#cb10-68" aria-hidden="true" tabindex="-1"></a>        prompt_ids <span class="op">=</span> prompt_ids[: <span class="bu">len</span>(prompt_ids) <span class="op">-</span> <span class="bu">len</span>(response_mask)]</span>
+<span id="cb10-69"><a href="#cb10-69" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-70"><a href="#cb10-70" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> AgentLoopOutput(</span>
+<span id="cb10-71"><a href="#cb10-71" aria-hidden="true" tabindex="-1"></a>            prompt_ids<span class="op">=</span>prompt_ids,</span>
+<span id="cb10-72"><a href="#cb10-72" aria-hidden="true" tabindex="-1"></a>            response_ids<span class="op">=</span>response_ids[: <span class="va">self</span>.response_length],</span>
+<span id="cb10-73"><a href="#cb10-73" aria-hidden="true" tabindex="-1"></a>            response_mask<span class="op">=</span>response_mask[: <span class="va">self</span>.response_length],</span>
+<span id="cb10-74"><a href="#cb10-74" aria-hidden="true" tabindex="-1"></a>            num_turns<span class="op">=</span>user_turns <span class="op">+</span> assistant_turns <span class="op">+</span> <span class="dv">1</span>,</span>
+<span id="cb10-75"><a href="#cb10-75" aria-hidden="true" tabindex="-1"></a>            metrics<span class="op">=</span>metrics,</span>
+<span id="cb10-76"><a href="#cb10-76" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb10-77"><a href="#cb10-77" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> output</span>
+<span id="cb10-78"><a href="#cb10-78" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-79"><a href="#cb10-79" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="kw">def</span> _call_tool(<span class="va">self</span>, tool_call: FunctionCall) <span class="op">-&gt;</span> <span class="bu">dict</span>[<span class="bu">str</span>, <span class="bu">str</span>]:</span>
+<span id="cb10-80"><a href="#cb10-80" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Call tool and return tool response.&quot;&quot;&quot;</span></span>
+<span id="cb10-81"><a href="#cb10-81" aria-hidden="true" tabindex="-1"></a>        tool, instance_id <span class="op">=</span> <span class="va">None</span>, <span class="va">None</span></span>
+<span id="cb10-82"><a href="#cb10-82" aria-hidden="true" tabindex="-1"></a>        <span class="cf">try</span>:</span>
+<span id="cb10-83"><a href="#cb10-83" aria-hidden="true" tabindex="-1"></a>            <span class="co"># </span><span class="al">TODO</span><span class="co">: append malformed tool_call to the prompt: invalid function name or arguments</span></span>
+<span id="cb10-84"><a href="#cb10-84" aria-hidden="true" tabindex="-1"></a>            tool_name <span class="op">=</span> tool_call.name</span>
+<span id="cb10-85"><a href="#cb10-85" aria-hidden="true" tabindex="-1"></a>            tool_args <span class="op">=</span> json.loads(tool_call.arguments)</span>
+<span id="cb10-86"><a href="#cb10-86" aria-hidden="true" tabindex="-1"></a>            tool <span class="op">=</span> <span class="va">self</span>.tools[tool_name]</span>
+<span id="cb10-87"><a href="#cb10-87" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-88"><a href="#cb10-88" aria-hidden="true" tabindex="-1"></a>            instance_id <span class="op">=</span> <span class="cf">await</span> tool.create()</span>
+<span id="cb10-89"><a href="#cb10-89" aria-hidden="true" tabindex="-1"></a>            tool_response, _, _ <span class="op">=</span> <span class="cf">await</span> tool.execute(instance_id, tool_args)</span>
+<span id="cb10-90"><a href="#cb10-90" aria-hidden="true" tabindex="-1"></a>        <span class="cf">except</span> <span class="pp">Exception</span> <span class="im">as</span> e:</span>
+<span id="cb10-91"><a href="#cb10-91" aria-hidden="true" tabindex="-1"></a>            logger.exception(<span class="ss">f&quot;Error when executing tool: </span><span class="sc">{</span>e<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb10-92"><a href="#cb10-92" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> e</span>
+<span id="cb10-93"><a href="#cb10-93" aria-hidden="true" tabindex="-1"></a>        <span class="cf">finally</span>:</span>
+<span id="cb10-94"><a href="#cb10-94" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> tool <span class="kw">and</span> instance_id:</span>
+<span id="cb10-95"><a href="#cb10-95" aria-hidden="true" tabindex="-1"></a>                <span class="cf">await</span> tool.release(instance_id)</span>
+<span id="cb10-96"><a href="#cb10-96" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-97"><a href="#cb10-97" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="bu">len</span>(tool_response) <span class="op">&gt;</span> <span class="va">self</span>.max_tool_response_length:</span>
+<span id="cb10-98"><a href="#cb10-98" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="va">self</span>.tool_response_truncate_side <span class="op">==</span> <span class="st">&quot;left&quot;</span>:</span>
+<span id="cb10-99"><a href="#cb10-99" aria-hidden="true" tabindex="-1"></a>                tool_response <span class="op">=</span> tool_response[: <span class="va">self</span>.max_tool_response_length] <span class="op">+</span> <span class="st">&quot;...(truncated)&quot;</span></span>
+<span id="cb10-100"><a href="#cb10-100" aria-hidden="true" tabindex="-1"></a>            <span class="cf">elif</span> <span class="va">self</span>.tool_response_truncate_side <span class="op">==</span> <span class="st">&quot;right&quot;</span>:</span>
+<span id="cb10-101"><a href="#cb10-101" aria-hidden="true" tabindex="-1"></a>                tool_response <span class="op">=</span> <span class="st">&quot;(truncated)...&quot;</span> <span class="op">+</span> tool_response[<span class="op">-</span><span class="va">self</span>.max_tool_response_length :]</span>
+<span id="cb10-102"><a href="#cb10-102" aria-hidden="true" tabindex="-1"></a>            <span class="cf">else</span>:</span>
+<span id="cb10-103"><a href="#cb10-103" aria-hidden="true" tabindex="-1"></a>                length <span class="op">=</span> <span class="va">self</span>.max_tool_response_length <span class="op">//</span> <span class="dv">2</span></span>
+<span id="cb10-104"><a href="#cb10-104" aria-hidden="true" tabindex="-1"></a>                tool_response <span class="op">=</span> tool_response[:length] <span class="op">+</span> <span class="st">&quot;...(truncated)...&quot;</span> <span class="op">+</span> tool_response[<span class="op">-</span>length:]</span>
+<span id="cb10-105"><a href="#cb10-105" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-106"><a href="#cb10-106" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> {</span>
+<span id="cb10-107"><a href="#cb10-107" aria-hidden="true" tabindex="-1"></a>            <span class="st">&quot;role&quot;</span>: <span class="st">&quot;tool&quot;</span>,</span>
+<span id="cb10-108"><a href="#cb10-108" aria-hidden="true" tabindex="-1"></a>            <span class="st">&quot;content&quot;</span>: tool_response,</span>
+<span id="cb10-109"><a href="#cb10-109" aria-hidden="true" tabindex="-1"></a>        }</span></code></pre></div>
+<p>还记得我们这里传入的batch是哪里来的吗？没错，是来自于AgentLoopManager根据num_workers切分的prompt。在run方法一开始，我们为每一个切分后的prompts设定一个request_id，在AsyncLLMServerManager中管理映射。
+接下来对prompt进行chat_template，传入我们前面定义好的tool_schemas，这样system_prompt就会加入对应格式的工具信息。</p>
+<p>之后就进入到了多轮对话中，先是使用ServerManager进行generate，拼接上prompt_ids（为什么直接拼接tokenid详见issue:<a
+href="https://github.com/0russwest0/Agent-R1/issues/30#issuecomment-2826155367">训练途中突然崩了，无论是grpo还是reinforce++，出现nan
+· Issue #30 · 0russwest0/Agent-R1</a>）。</p>
+<p>我们直接跳到工具解析的部分，定义好的tool_parser从response_ids中解析工具调用信息（其实就是正则表达式匹配），如果没有工具调用，则直接结束，否则就调用_call_tool方法调用工具。调用完工具后返回工具调用的结果，然后将其编码，并截断前面的system
+prompt，拼接在prompt_ids后，用于下个循环的推理。注意在训练的时候要将工具返回的结果进行掩码。也就是<code>response_mask += [0] * len(tool_response_ids)</code>。当达到最大循环或者回复长度超出设定的response_length，就结束推理。并按照AgentLoopOutput进行返回。</p>
+<h2 id="返回">返回</h2>
+<p>返回后，我们回到AgentLoopWorker的generate_sequences方法中，可以看到我们将返回的结果都放入了outputs变量中，而在最终输出前，需要进行后处理，也就是_postprocess方法。需要对prompt进行左pad，对response进行右pad，最后整合成DataProto返回。</p>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> generate_sequences(<span class="va">self</span>, prompts: DataProto) <span class="op">-&gt;</span> DataProto:</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>        <span class="co">&quot;&quot;&quot;Split input batch and dispatch to agent loop workers.</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a><span class="co">        Args:</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a><span class="co">            prompts (DataProto): Input batch.</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a><span class="co">        Returns:</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a><span class="co">            DataProto: Output batch.</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a><span class="co">        &quot;&quot;&quot;</span></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">self</span>.config.actor_rollout_ref.rollout.free_cache_engine:</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.wake_up()</span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a>        chunkes <span class="op">=</span> prompts.chunk(<span class="bu">len</span>(<span class="va">self</span>.agent_loop_workers))</span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a>        outputs <span class="op">=</span> ray.get(</span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a>            [</span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true" tabindex="-1"></a>                worker.generate_sequences.remote(chunk)</span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true" tabindex="-1"></a>                <span class="cf">for</span> worker, chunk <span class="kw">in</span> <span class="bu">zip</span>(<span class="va">self</span>.agent_loop_workers, chunkes, strict<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true" tabindex="-1"></a>            ]</span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> DataProto.concat(outputs)</span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">self</span>.config.actor_rollout_ref.rollout.free_cache_engine:</span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.sleep()</span>
+<span id="cb11-22"><a href="#cb11-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-23"><a href="#cb11-23" aria-hidden="true" tabindex="-1"></a>        <span class="co"># calculate performance metrics</span></span>
+<span id="cb11-24"><a href="#cb11-24" aria-hidden="true" tabindex="-1"></a>        metrics <span class="op">=</span> [output.meta_info[<span class="st">&quot;metrics&quot;</span>] <span class="cf">for</span> output <span class="kw">in</span> outputs]  <span class="co"># List[List[Dict[str, str]]]</span></span>
+<span id="cb11-25"><a href="#cb11-25" aria-hidden="true" tabindex="-1"></a>        timing <span class="op">=</span> <span class="va">self</span>._performance_metrics(metrics, output)</span>
+<span id="cb11-26"><a href="#cb11-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-27"><a href="#cb11-27" aria-hidden="true" tabindex="-1"></a>        output.meta_info <span class="op">=</span> {<span class="st">&quot;timing&quot;</span>: timing}</span>
+<span id="cb11-28"><a href="#cb11-28" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> output</span></code></pre></div>
+<p>然后回到AgentLoopWorker的generate_sequences方法中，将各个worker推理的结果concat起来。并将一些metric放入meta_info来logger。</p>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2025-07-24</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/agent_loop/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/agent_loop/" data-title="agent_loop" data-hashtags="coding,verl"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/agent_loop/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/agent_loop/" data-title="agent_loop"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/agent_loop/" data-title="agent_loop"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/agent_loop/" data-title="agent_loop"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/verl/">Verl</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/data_parallel/" class="prev" rel="prev" title="data_parallel"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>data_parallel</a>
+            <a href="/routinea-structural-planning-framework-for-llm-agent-system-in-enterprise/" class="next" rel="next" title="Routine：A Structural Planning Framework for LLM Agent System in Enterprise">Routine：A Structural Planning Framework for LLM Agent System in Enterprise<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2025</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

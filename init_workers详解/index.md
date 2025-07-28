@@ -17,3 +17,6 @@
 - execute_fn
 - func_generator
 
+推荐阅读：[verl 解读 - 源码阅读(part3)](https://zhuanlan.zhihu.com/p/1926337913513292229)
+
+

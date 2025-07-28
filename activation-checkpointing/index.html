@@ -41,7 +41,7 @@
                             "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
                             "width":  3200 ,
                             "height":  2048 
-                        }],"genre": "posts","keywords": "LLM, infra","wordcount":  1209 ,
+                        }],"genre": "posts","keywords": "LLM, infra","wordcount":  4273 ,
         "url": "https:\/\/blog.vllbc.top\/activation-checkpointing\/","datePublished": "2025-07-10T00:00:00+00:00","dateModified": "2025-07-10T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
             "@type": "Organization",
             "name": "xxxx","logo": {
@@ -157,8 +157,8 @@
 <script>hljs.initHighlightingOnLoad();</script><main class="main">
                 <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">Activation checkpointing</h1><div class="post-meta">
             <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Categories</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a>&nbsp;<a href="/categories/infra/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Infra</a></span></div>
-            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-10">2025-07-10</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1209 字&nbsp;
-                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 3 分钟&nbsp;<span id="/activation-checkpointing/" class="leancloud_visitors" data-flag-title="Activation checkpointing">
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-10">2025-07-10</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 4273 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 9 分钟&nbsp;<span id="/activation-checkpointing/" class="leancloud_visitors" data-flag-title="Activation checkpointing">
                         <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
                     </span>&nbsp;</div>
         </div><div class="content" id="content"><h2 id="为什么存储激活值">为什么存储激活值？</h2>
@@ -240,6 +240,87 @@ ReLU}(x)}{dx}=\begin{cases}1&amp;\mathrm{if~}x&gt;0\\0&amp;\mathrm{if~}x&lt;0&am
 \frac{dy}{dx} = \frac{d\tanh (x)}{dx} = 1-\tanh(x)^2 = 1-y^2
 \]</span></p>
 <p>如果想要性能，选择 GELU，想要低显存，使用 ReLU。</p>
+<h2 id="激活值计算">激活值计算</h2>
+<p>根据博客 <a href="https://zhuanlan.zhihu.com/p/624740065">#
+分析transformer模型的参数量、计算量、中间激活、KV cache</a>
+内容来得到激活值的计算公式。</p>
+<blockquote>
+<p>大模型在训练过程中通常采用混合精度训练，中间激活值一般是float16或者bfloat16数据类型的。在分析中间激活的显存占用时，<strong>假设中间激活值是以float16或bfloat16数据格式来保存的，每个元素占了2个bytes。唯一例外的是，dropout操作的mask矩阵，每个元素只占1个bytes</strong>。在下面的分析中，单位是bytes，而不是元素个数。</p>
+</blockquote>
+<p>先分析 self-attention 块的中间激活。Self-attention 块的计算公式如下：
+<span class="math display">\[Q=xW_Q,K=xW_K,V=xW_V\]</span></p>
+<p><span
+class="math display">\[x_{out}=softmax(\frac{QK^T}{\sqrt{h}})\cdot
+V\cdot W_o+x\]</span></p>
+<ol type="1">
+<li>对于 <span class="math inline">\(Q,K,V\)</span>
+,需要保存它们共同的输入 <span class="math inline">\(x\)</span>
+,这就是中间激活。输入 <span class="math inline">\(x\)</span> 的形状为
+<span class="math inline">\([b,s,h]\)</span> ,元素个数为 bsh
+,占用显存大小为 <span class="math inline">\(2*bsh=2bsh\)</span> 。</li>
+<li>对于 <span class="math inline">\(QK^T\)</span>
+矩阵乘法，需要保存中间激活 <span class="math inline">\(Q,K\)</span>
+,两个张量的形状都是 <span class="math inline">\([b,s,h]\)</span> ,占用显
+存大小合计为 <span class="math inline">\(2*2*bsh=4bsh\)</span> 。</li>
+<li>对于 <span class="math inline">\(softmax()\)</span>
+函数，需要保存函数的输入 <span class="math inline">\(QK^T\)</span>
+,占用显存大小为 <span class="math inline">\(2bs^2a\)</span> ,这里的
+<span class="math inline">\(a\)</span> 表示注意力头数。</li>
+</ol>
+<p><span
+class="math display">\[score=softmax(\frac{QK^T}{\sqrt{d_k}})\]</span></p>
+<p><span class="math inline">\(Q\)</span> 的形状为：<span
+class="math inline">\([ b, head\_ num, s, per\_ head\_ hidden\_
+size]\)</span> <span class="math inline">\(K^T\)</span> 的形状为：<span
+class="math inline">\([b,head\_num,per\_head\_hidden\_size,s]\)</span>
+<span class="math inline">\(QK^T\)</span> 的形状为：<span
+class="math inline">\([b,head\_num,s,s]\)</span> ,元素个数为 <span
+class="math inline">\(bs^2a\)</span> ,占用显存大小为 <span
+class="math inline">\(2bs^2a\)</span> 。 4. 计算完 <span
+class="math inline">\(softmax()\)</span> 函数后，会进行 dropout
+操作。需要保存一个 mask 矩阵，mask 矩阵的形状与 <span
+class="math inline">\(QK^T\)</span> 相同，占用显存大小为 <span
+class="math inline">\(bs^2a\)</span> 。 5. 计算在 <span
+class="math inline">\(V\)</span> 上的 attention，即 <span
+class="math inline">\(score\cdot V\)</span>, 需要保存 score ,大小为
+<span class="math inline">\(2bs^2a\)</span> ;以及 <span
+class="math inline">\(V\)</span> ,大小为 <span
+class="math inline">\(2bsh\)</span> 。二者占用显存大小合计为 <span
+class="math inline">\(2bs^2a+2bsh\)</span> 。 6. 计算输出映射以及一个
+dropout 操作。输入映射需要保存其输入，大小为 <span
+class="math inline">\(2bsh\)</span> ;dropout 需要保存 mask 矩阵，大小为
+bsh 。二者占用显存大小合计为 <span class="math inline">\(3bsh\)</span>
+。 因此，将上述中间激活相加得到，self-attention
+块的中间激活占用显存大小为 <span
+class="math inline">\(11bsh+5bs^2a\)</span> 。</p>
+<p>接下来看 MLP 块的中间激活。MLP 块的计算公式如下：</p>
+<p><span
+class="math display">\[x=f_{gelu}(x_{out}W_1)W_2+x_{out}\]</span></p>
+<ol type="1">
+<li>第一个线性层需要保存其输入，占用显存大小为 <span
+class="math inline">\(2bsh\)</span> 。</li>
+<li>激活函数需要保存其输入，占用显存大小为 <span
+class="math inline">\(8bsh\)</span> 。</li>
+<li>第二个线性层需要保存其输入，占用显存大小为 <span
+class="math inline">\(8bsh\)</span> 。</li>
+<li>最后有一个 dropout 操作，需要保存 mask 矩阵，占用显存大小为 bsh 。
+对于 MLP 块，需要保存的中间激活值为 19 bsh 。 另外，self-attention 块和
+MLP 块分别对应了一个 layer normalization。每个 layer norm
+需要保存其输入，大小为 <span class="math inline">\(2bsh\)</span>
+（忽略了均值和方差的2 bs，如果不忽略应当为 2 bsh+4 bs，这里的单位都是
+bytes）。2 个 layer norm 需要保存的中间激活为 <span
+class="math inline">\(4bsh\)</span> 。 综上，每个 transformer
+层需要保存的中间激活占用显存大小为 <span
+class="math inline">\(34bsh+5bs^2a\)</span>。对于 <span
+class="math inline">\(l\)</span> 层 transformer 模型，还有 embedding
+层、最后的输出层。Embedding 层不需要中间激活。总的而言，当隐藏维度 <span
+class="math inline">\(h\)</span> 比较大，层数 <span
+class="math inline">\(l\)</span>
+较深时，这部分的中间激活是很少的，可以忽略。因 此，对于 <span
+class="math inline">\(l\)</span> 层 transformer
+模型，中间激活占用的显存大小可以近似为 <span
+class="math inline">\((34bsh+5bs^2a)*l\)</span></li>
+</ol>
 <h2 id="activation-checkpointing">Activation checkpointing</h2>
 <p>当使用该方法时，我们只需要保存一些关键的激活值，可以舍弃一些激活值从而在反向传播的过程中重新计算，通常有两种策略：</p>
 <p>Full：我们在 Transformer
@@ -249,14 +330,188 @@ ReLU}(x)}{dx}=\begin{cases}1&amp;\mathrm{if~}x&gt;0\\0&amp;\mathrm{if~}x&lt;0&am
 GPT-3（1750 亿参数）模型而言，这意味着在计算成本仅增加
 2.7%的情况下，激活值内存减少了 70%。</p>
 <p>如今，大多数训练框架都使用
-FlashAttention，它通过在向后传递中重新计算注意力得分和矩阵，而不是存储它们，将激活重新计算集成到其优化策略中。因此，大多数使用
-FlashAttention 的人已经在使用选择性重新计算。
-正如您现在所理解的，由于重新计算，激活重新计算略微增加了 FLOPS
-的数量，同时显著降低了内存访问开销。 这种权衡在 GPU
+FlashAttention，它通过在反向传播中重新计算注意力得分和矩阵，而不是存储它们，将激活重新计算集成到其优化策略中。因此，大多数使用
+FlashAttention 的人已经在使用 AC。 由于重新计算，激活重新计算略微增加了
+FLOPS 的数量，同时显著降低了内存访问开销。 这种权衡在 GPU
 等高速内存有限的硬件上特别有利，因为访问内存通常比执行计算慢。尽管涉及额外的操作，但总体效果通常是计算速度更快，内存占用更少。</p>
-<h2 id="参考">参考</h2>
-<p><a href="https://www.determined.ai/blog/act-mem-2">Activation Memory:
-A Deep Dive using PyTorch | Determined AI</a></p>
+<h3 id="full-activation-checkpointing-全量激活值检查点">1. Full
+Activation Checkpointing (全量激活值检查点)</h3>
+<p>这是最经典、最直接的检查点方法。</p>
+<h4 id="工作原理">工作原理：</h4>
+<ol type="1">
+<li><strong>分段</strong>:
+将整个模型的计算图（所有层）在逻辑上划分为若干个<strong>段
+(Segment)</strong>。</li>
+<li><strong>保存</strong>:
+在前向传播时，只保存每个<strong>段</strong>的<strong>输入张量 (Input
+Tensor)</strong>。这些被保存的张量就是“检查点”。段内所有中间层的激活值都会在计算后被立即丢弃，不占用显存。</li>
+<li><strong>重算</strong>:
+在反向传播时，当需要某个段内的激活值来计算梯度时，它会找到该段的检查点（即该段的输入），然后<strong>重新执行该段的前向传播</strong>，以恢复所需要的激活值。一旦这个激活值被使用完毕，它会再次被丢弃。</li>
+</ol>
+<h4 id="图解">图解：</h4>
+<p>假设一个模型有16层，我们每4层设置一个检查点：</p>
+<p><strong>标准训练 (无Checkpointing):</strong>
+<code>[Input] -&gt; L1 -&gt; L2 -&gt; ... -&gt; L16 -&gt; [Output]</code>
+- <strong>前向传播</strong>: 计算并存储 L1 到 L16 的所有激活值。 -
+<strong>内存占用</strong>: 极高。</p>
+<p><strong>Full Activation Checkpointing:</strong>
+<code>[Input] -&gt; [Segment 1: L1-L4] -&gt; [Segment 2: L5-L8] -&gt; [Segment 3: L9-L12] -&gt; [Segment 4: L13-L16] -&gt; [Output]</code>
+- <strong>前向传播</strong>: - 执行 Segment 1 (L1-L4)，<strong>只保存 L5
+的输入（即L4的输出）作为检查点</strong>，丢弃 L1-L3 的激活值。 - 执行
+Segment 2 (L5-L8)，<strong>只保存 L9 的输入作为检查点</strong>，丢弃
+L5-L7 的激活值。 - …以此类推。 - <strong>反向传播</strong>: - 当需要计算
+L12 的梯度时，发现它的激活值没有被保存。 -
+系统加载最近的检查点（L9的输入）。 - <strong>重新计算</strong> L9 -&gt;
+L10 -&gt; L11 -&gt; L12 的前向传播，得到 L12 的激活值。 -
+使用该激活值计算梯度，然后丢弃它。</p>
+<h4 id="优缺点">优缺点：</h4>
+<ul>
+<li><strong>优点</strong>:
+<ul>
+<li><strong>效果显著</strong>:
+可以大幅度降低显存占用，内存占用量与模型的层数基本无关，只与最长的那个段的计算复杂度有关。</li>
+<li><strong>实现简单</strong>: 逻辑清晰，易于在各种框架中实现（例如
+PyTorch 的 <code>torch.utils.checkpoint</code>）。</li>
+</ul></li>
+<li><strong>缺点</strong>:
+<ul>
+<li><strong>计算开销大</strong>: 每个被 checkpoint
+的段（除了最后一个）都会被重新计算一次。如果模型很大，这会带来大约
+30%-50% 甚至更高的训练时间开销。</li>
+</ul></li>
+</ul>
+<hr />
+<h3 id="selective-activation-checkpointing-选择性激活值检查点">2.
+Selective Activation Checkpointing (选择性激活值检查点)</h3>
+<p>这是对全量检查点方法的<strong>智能化升级</strong>，也是目前更受关注的重点。它认识到“全量丢弃、全量重算”的策略过于粗暴和低效。</p>
+<h4 id="核心思想">核心思想：</h4>
+<p>在同一个计算段内，不同的操作（Op）或激活值，其<strong>存储成本</strong>和<strong>重算成本</strong>是不同的。</p>
+<ul>
+<li>有些激活值<strong>占用显存大，但重算很快</strong>（例如 ReLU,
+Dropout 等元素级操作）。</li>
+<li>有些激活值<strong>占用显存小，但重算很慢</strong>（例如 MatMul,
+Convolution 的输出）。</li>
+</ul>
+<p>Selective Checkpointing
+的目标就是：<strong>在每个段内，不再丢弃所有激活值，而是有选择性地保存那些“重算成本高、存储成本低”的激活值，从而在反向传播时，避免代价高昂的重计算。</strong></p>
+<h4 id="工作原理-1">工作原理：</h4>
+<ol type="1">
+<li><strong>成本分析</strong>: 它需要对计算图中的每个操作进行成本分析。
+<ul>
+<li><strong>存储成本</strong>:
+该操作输出的激活值张量占用的显存大小。</li>
+<li><strong>重算成本</strong>: 重新计算出这个激活值所需要的时间（通常用
+FLOPs 衡量）。</li>
+</ul></li>
+<li><strong>智能决策</strong>:
+基于成本分析，算法（通常是动态规划或启发式搜索）会做出决策。对于段内的每一个激活值，它会判断：
+<ul>
+<li>是直接<strong>保存</strong>它更划算？</li>
+<li>还是<strong>丢弃</strong>它，之后再通过重计算恢复更划算？</li>
+</ul></li>
+<li><strong>选择性保存与重算</strong>:
+<ul>
+<li>在前向传播时，除了保存每个段的输入（主检查点）外，还会额外保存段内那些被判定为“值得保存”的<strong>少量关键激活值</strong>。</li>
+<li>在反向传播时，当需要一个激活值时，如果它被保存了，就直接使用。如果没被保存，系统会从<strong>最近的一个检查点（无论是主检查点还是段内保存的次级检查点）</strong>开始重算，而不是必须从段的开头开始。</li>
+</ul></li>
+</ol>
+<h4 id="图解续上例">图解（续上例）：</h4>
+<p>在 Segment 3 (L9-L12) 中：
+<code>L9 (MatMul) -&gt; L10 (LayerNorm) -&gt; L11 (ReLU) -&gt; L12 (MatMul)</code></p>
+<ul>
+<li><strong>Full Checkpointing</strong> 会丢弃 L9, L10, L11
+的所有输出。重算 L12 时需要从 L9 的输入开始，重新执行 MatMul, LayerNorm,
+ReLU。</li>
+<li><strong>Selective Checkpointing</strong> 可能会做出如下决策：
+<ul>
+<li>L9 (MatMul)
+的输出：<strong>重算成本极高</strong>，但存储成本可能相对可控。<strong>决策：保存</strong>。</li>
+<li>L11 (ReLU) 的输出：<strong>占用显存和 L10
+一样大</strong>，但<strong>重算成本极低</strong>（只需对 L10
+的输出再做一次 ReLU）。<strong>决策：丢弃</strong>。</li>
+</ul></li>
+</ul>
+<p>在反向传播时： - 当需要 L11 的激活值时，发现它没被保存。但系统发现
+L10 的激活值（或者 L9 的）被保存了。 - 它只需从 L10 开始重算
+<code>L10 -&gt; L11 (ReLU)</code>，而<strong>无需</strong>重算昂贵的
+<code>L9 (MatMul)</code>。</p>
+<h4 id="优缺点-1">优缺点：</h4>
+<ul>
+<li><strong>优点</strong>:
+<ul>
+<li><strong>最佳平衡</strong>: 在实现与 Full Checkpointing
+几乎相同显存节省效果的同时，显著降低了重计算的开销，从而缩短了训练时间。它在“时间”和“空间”之间找到了一个更优的平衡点。</li>
+<li><strong>高效</strong>: 相比 Full Checkpointing，训练速度更快。</li>
+</ul></li>
+<li><strong>缺点</strong>:
+<ul>
+<li><strong>实现复杂</strong>:
+需要对模型的计算图进行深入分析，并建立准确的成本模型。这通常需要深度学习框架或特定库（如
+DeepSpeed）的底层支持。</li>
+<li><strong>模型依赖</strong>:
+优化的效果依赖于模型结构。对于包含大量昂贵操作的模型，效果会更明显。</li>
+</ul></li>
+</ul>
+<h3 id="总结对比">总结对比</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">特性</th>
+<th style="text-align: left;">Full Activation Checkpointing</th>
+<th style="text-align: left;">Selective Activation Checkpointing</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>核心策略</strong></td>
+<td style="text-align: left;">以时间换空间</td>
+<td style="text-align: left;">在时间和空间之间寻找最优平衡</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>粒度</strong></td>
+<td style="text-align: left;"><strong>粗粒度</strong> (段级别)</td>
+<td style="text-align: left;"><strong>细粒度</strong> (操作级别)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>保存内容</strong></td>
+<td style="text-align: left;">仅保存每个<strong>段</strong>的输入</td>
+<td style="text-align: left;">保存每个段的输入 +
+段内<strong>部分关键</strong>激活值</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>重算方式</strong></td>
+<td
+style="text-align: left;">总是从<strong>段的开头</strong>重算整个段</td>
+<td
+style="text-align: left;">从<strong>最近的可用检查点</strong>开始重算，路径更短</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>计算开销</strong></td>
+<td style="text-align: left;"><strong>高</strong></td>
+<td style="text-align: left;"><strong>较低</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>显存节省</strong></td>
+<td style="text-align: left;"><strong>非常高</strong></td>
+<td style="text-align: left;"><strong>非常高</strong> (与 Full
+类似)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>实现复杂度</strong></td>
+<td style="text-align: left;"><strong>低</strong></td>
+<td style="text-align: left;"><strong>高</strong></td>
+</tr>
+</tbody>
+</table>
+<p>总而言之，<strong>Selective Activation Checkpointing</strong>
+是对传统检查点技术的一次重大优化。它通过更精细化的资源管理，在不牺牲太多内存节省的前提下，大幅减少了因重计算带来的时间惩罚，是目前训练超大规模模型时更为先进和高效的主流技术之一。
+## 参考 <a href="https://www.determined.ai/blog/act-mem-2">Activation
+Memory: A Deep Dive using PyTorch | Determined AI</a></p>
 </div><div class="post-footer" id="post-footer">
     <div class="post-info">
         <div class="post-info-line">
