@@ -18,3 +18,8 @@ MoE 的思想类似于集成学习中的 [Ensemble Learning](../../Machine%20Lea
 2. 在 NLP 任务中，专家越多越好，而视觉任务中存在饱和点。
 3. 增加 MoE 层数也可以增加模型容量，但视觉任务中同样存在饱和点。
 4. 恢复优化器状态（一些统计量）和路由权重归一化可以提高视觉 MoE 模型的性能，对 NLP 任务无效。
+
+## 八股
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250805102709.png)
+

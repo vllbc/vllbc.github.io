@@ -23,9 +23,9 @@
 
 - inputs：tensor 形式的 token_id，通常先准备文本形式的提示词和输入，使用tokenizer转化为对应 id，这里维度通常为 [batch_size, seq_len]
 - generation_config：一个用 GenerationConfig 类创建的对象，存储着模型生成的超参数，可以提前创建该对象并传入 .generate()
-- **logits_processor**：高级功能，logits_processor 可以在每个 step 的输出概率计算完成后，对分数进行进一步的干预，改变输出的概率分布，从而影响生成的结果，例如最常见的，重复惩罚，就是使用 logits_processor 完成的。（不懂的话可以看后面如何具体实现的）
-- **stopping_criteria**：高级功能，允许用户通过 stopping_criteria 自定义生成停止条件（不懂的话可以看后面如何具体实现的）
-- prefix_allowed_tokens_fn：解码策略的一个超参数，用于前缀 token 约束（感觉没必要放在这里）
+- **logits_processor**：高级功能，logits_processor 可以在每个 step 的输出概率计算完成后，对分数进行进一步的干预，改变输出的概率分布，从而影响生成的结果，例如最常见的，重复惩罚，就是使用 logits_processor 完成的。
+- **stopping_criteria**：高级功能，允许用户通过 stopping_criteria 自定义生成停止条件
+- prefix_allowed_tokens_fn：解码策略的一个超参数，用于前缀 token 约束
 - synced_gpus：
 - DeepSpeed ZeRO Stage-3 多GPU时使用（ZeRO-3包括优化器状态+梯度+权重并行优化，而推理阶段只使用权重并行），此时需要将 synced_gpus 设置成 Ture。.
 - 否则，如果一个 GPU 在另一个 GPU 之前完成生成，整个系统就会挂起，因为其余 GPU 尚未从最先完成的 GPU 接收到权重分片。
@@ -35,77 +35,105 @@
 - negative_prompt_ids：负面提示，一些前沿研究会用到，不用管
 - negative_prompt_attention_mask：负面提示的 attention_mask
 - **kwargs
-	- 以上输入都太高大上了，只有 inputs 会每次传入，其他的对于常规输出根本用不到（其实 inputs 也可以不用输入，通过tokenizer()得到model_inputs后，使用**model_inputs方式也可以传入）
-	- 回想一下别人的代码，会看到这里经常传入 temperature=0.7, top_k=20, max_new_tokens=512等参数，都是通过**kwargs传入进来的
+	- 这里经常传入 temperature=0.7, top_k=20, max_new_tokens=512等参数，都是通过**kwargs传入进来的
 	- 其实传入的这些都是输入参数 generation_config 的属性（可以进入对应类中看一下有哪些属性，from transformers.generation.configuration_utils import GenerationConfig），你可以创建该对象并覆盖某些参数，也可以通过参数形式在调用.generate()时传进来
 	- 在后面会将传入的这些参数覆盖掉generation_config中对应的属性
 
-## inputs处理
-```python
-def _prepare_model_inputs(
-    self,
-    inputs: Optional[torch.Tensor] = None,
-    bos_token_id: Optional[torch.Tensor] = None,
-    model_kwargs: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, Optional[str], Dict[str, torch.Tensor]]:
-    """
-    This function extracts the model-specific `inputs` for generation.
-    """
-    # 1.有一些 encoder-decoder 模型的输入有不同的名称，这里首先确认名称
-    if (
-        self.config.is_encoder_decoder
-        and hasattr(self, "encoder")
-        and self.encoder.main_input_name != self.main_input_name
-    ):
-        input_name = self.encoder.main_input_name
-    else:
-        input_name = self.main_input_name
+下面只说明一些关键的地方
+## kwargs -> generation_config
 
-    # 从 model_kwargs 中去掉 input_name: None 的键值对
-    model_kwargs = {k: v for k, v in model_kwargs.items() if v is not None or k != input_name}
-
-    # 2.这里确保 model.generate() 输入参数中的 inputs 和 kwargs 中的 input_name 只输入一个
-    inputs_kwarg = model_kwargs.pop(input_name, None)
-    if inputs_kwarg is not None and inputs is not None:
-        raise ValueError(
-            f"`inputs`: {inputs}` were passed alongside {input_name} which is not allowed. "
-            f"Make sure to either pass {inputs} or {input_name}=..."
-        )
-    elif inputs_kwarg is not None:
-        inputs = inputs_kwarg
-
-    # 3.如果 input_name != inputs_embeds， 这里确保 input_name 和 inputs_embeds 只输入一个
-    if input_name == "input_ids" and "inputs_embeds" in model_kwargs:
-        # 如果是 decoder-only 模型，先看看模型 .forward() 函数的参数中，是否包含 inputs_embeds，如果不包含就弹出异常
-        if not self.config.is_encoder_decoder:
-            has_inputs_embeds_forwarding = "inputs_embeds" in set(
-                inspect.signature(self.prepare_inputs_for_generation).parameters.keys()
-            )
-            if not has_inputs_embeds_forwarding:
-                raise ValueError(
-                    f"You passed `inputs_embeds` to `.generate()`, but the model class {self.__class__.__name__} "
-                    "doesn't have its forwarding implemented. See the GPT2 implementation for an example "
-                    "(https://github.com/huggingface/transformers/pull/21405), and feel free to open a PR with it!"
-                )
-            # In this case, `input_ids` is moved to the `model_kwargs`, so a few automations (like the creation of
-            # the attention mask) can rely on the actual model input.
-            model_kwargs["input_ids"] = self._maybe_initialize_input_ids_for_generation(
-                inputs, bos_token_id, model_kwargs=model_kwargs
-            )
-        else:
-            if inputs is not None:
-                raise ValueError("You passed `inputs_embeds` and `input_ids` to `.generate()`. Please pick one.")
-        inputs, input_name = model_kwargs["inputs_embeds"], "inputs_embeds"
-
-    # 4. 如果 `inputs` 还是 None，尝试用 BOS token 创建 `input_ids`
-    inputs = self._maybe_initialize_input_ids_for_generation(inputs, bos_token_id, model_kwargs)
-    return inputs, input_name, model_kwargs
+就是将kwargs中传入的kwargs的参数变成config。
+```
+generation_config, model_kwargs = self._prepare_generation_config(generation_config, **kwargs)
 
 ```
-若传入了 inputs，就不要在 kwargs 中再次定义 input_ids
-若 inputs 为 None，且 model_kwargs 不包含 input_ids 或 input_ids 也为 None，则创建一个 [batch_size, 1] 大小的tensor，里面的值都为 bos_token_id
+## 准备logit处理器
 
+```python
 
+prepared_logits_processor = self._get_logits_processor(
+    generation_config=generation_config,
+    input_ids_seq_length=input_ids_length,
+    encoder_input_ids=inputs_tensor,
+    prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+    logits_processor=logits_processor,
+    device=inputs_tensor.device,
+    model_kwargs=model_kwargs,
+    negative_prompt_ids=negative_prompt_ids,
+    negative_prompt_attention_mask=negative_prompt_attention_mask,
+)
+
+```
+就是将generation_config中的采样参数封装成logit-processor，还有自己定义的processor
+
+## 准备stopping处理器
+```python
+
+prepared_stopping_criteria = self._get_stopping_criteria(
+    generation_config=generation_config, stopping_criteria=stopping_criteria, tokenizer=tokenizer, **kwargs
+)
+
+```
+
+同理。将一些与停止有关的参数封装成stopping处理器。
+
+## logits warper
+
+- `logits warper` 里面是采样时才需要运行的处理器
+- `logits processor` 是通用的处理器，每种生成模式都需要用到的
+```python
+
+prepared_logits_warper = (
+    self._get_logits_warper(generation_config) if generation_config.do_sample else None
+)
+
+```
+
+## 正式生成
+
+```python
+# 进入模型内部生成下一个token
+outputs = self(
+    **model_inputs,
+    return_dict=True,
+    output_attentions=output_attentions,
+    output_hidden_states=output_hidden_states,
+)
+	
+if synced_gpus and this_peer_finished:
+    continue  # don't waste resources running the code we don't need
+
+# 取出最后一个token，.logits维度为（batch_size, seq_len, vocab_size）
+next_token_logits = outputs.logits[:, -1, :]
+
+# 经过前面的处理器进行分数调整
+next_token_scores = logits_processor(input_ids, next_token_logits)
+if do_sample:
+    next_token_scores = logits_warper(input_ids, next_token_scores)
+
+```
+
+按照是否采样来生成下一个token：
+```python
+if do_sample:
+    probs = nn.functional.softmax(next_token_scores, dim=-1)
+    # torch.multinomial：按照输入probs的每一行（每个batch）作为采样的概率，
+    # 每行不放回的取出num_samples个，随机采样每个batch按输入概率取出一个
+    next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+else:
+	# torch.argmax取出输入next_token_scores中值最大的索引
+    next_tokens = torch.argmax(next_token_scores, dim=-1)
+
+```
+
+最后判断是否可以停止：
+
+```python
+
+unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores)
+this_peer_finished = unfinished_sequences.max() == 0
+
+```
 ## 参考
 https://blog.csdn.net/qq_41496421/article/details/142346738?spm=1001.2014.3001.5502
 https://blog.csdn.net/qq_41496421/article/details/142580960?spm=1001.2014.3001.5501

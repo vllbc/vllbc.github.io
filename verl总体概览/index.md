@@ -5,7 +5,4 @@
 
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250612110255.png)
 
-## PPO流程
 
-![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250613212728.png)
-从图中可以得到的是ppo_mini_batch_size是全局的prompt batch，而ppo_micro_batch_per_gpu是每一个gpu上的prompt+response batch，所以由此可以得到梯度累计的steps为 ppo_mini_batch_size * n // (gpu数) // micro_batch_per_gpu。

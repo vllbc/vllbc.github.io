@@ -41,7 +41,7 @@
                             "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
                             "width":  3200 ,
                             "height":  2048 
-                        }],"genre": "posts","keywords": "coding, verl","wordcount":  1161 ,
+                        }],"genre": "posts","keywords": "coding, verl","wordcount":  1421 ,
         "url": "https:\/\/blog.vllbc.top\/dataproto\/","datePublished": "2025-07-09T00:00:00+00:00","dateModified": "2025-07-09T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
             "@type": "Organization",
             "name": "xxxx","logo": {
@@ -157,7 +157,7 @@
 <script>hljs.initHighlightingOnLoad();</script><main class="main">
                 <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">DataProto</h1><div class="post-meta">
             <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a>&nbsp;<a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a></span></div>
-            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-09">2025-07-09</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1161 字&nbsp;
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-09">2025-07-09</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1421 字&nbsp;
                 <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 3 分钟&nbsp;<span id="/dataproto/" class="leancloud_visitors" data-flag-title="DataProto">
                         <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
                     </span>&nbsp;</div>
@@ -259,7 +259,17 @@ class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a hr
 <span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    torch.distributed.all_gather_object(all_non_tensor_batch, data.non_tensor_batch, group<span class="op">=</span>process_group)</span>
 <span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>    data.non_tensor_batch <span class="op">=</span> {k: np.concatenate([d[k] <span class="cf">for</span> d <span class="kw">in</span> all_non_tensor_batch]) <span class="cf">for</span> k <span class="kw">in</span> data.non_tensor_batch}</span></code></pre></div>
 <p>也就是all_gather操作来收集data，主要用于对tp分组上的数据all_gather，因为tp分组需要相同的输入。
-体现在ShardingManager中，即：</p>
+&gt;vllm + fsdp 训推时，如果每张卡都是一个 DP，事情会简单很多。但 verl
+中有两个功能不满足这一条件，一是 rollout 时让 vllm 开启 TP，二是在 fsdp
+中使用 ulysses（SP）。verl 中数据分发使用的是 dispatch mode
+这一机制，比如 fsdp workers 主要使用 Dispatch.DP_COMPUTE_PROTO这个
+mode，它是在 worker group
+的层次上进行数据分发以及结果收集的。由于这个层次是没有 TP/SP
+概念的，所以它仅在 one GPU one DP 时才是正确的。那么为了正确支持
+TP/SP，就需要对数据做一些前后处理。</p>
+<p>(上文引用自<a
+href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的batch_size</a>)</p>
+<p>体现在ShardingManager中，即：</p>
 <div class="sourceCode" id="cb3"><pre
 class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a> <span class="at">@GPUMemoryLogger</span>(role<span class="op">=</span><span class="st">&quot;fsdp vllm sharding_manager&quot;</span>, logger<span class="op">=</span>logger)</span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> preprocess_data(<span class="va">self</span>, data: DataProto) <span class="op">-&gt;</span> DataProto:</span>
@@ -273,7 +283,7 @@ class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a hr
 <span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>        all_gather_data_proto(data<span class="op">=</span>data, process_group<span class="op">=</span>group)</span>
 <span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> data</span></code></pre></div>
 <p>可见这里获取了tp
-group，然后在group中进行all_gather操作。post_process_data就是再将数据按照tp分组dispatch出去。</p>
+group，然后在group中进行all_gather操作。post_process_data就是再将数据按照tp分组dispatch出去。在fsdp中需要sp，也有类似的操作。</p>
 <div class="sourceCode" id="cb4"><pre
 class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a> <span class="cf">with</span> <span class="va">self</span>.rollout_sharding_manager:</span>
 <span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>            log_gpu_memory_usage(<span class="st">&quot;After entering rollout sharding manager&quot;</span>, logger<span class="op">=</span>logger)</span>

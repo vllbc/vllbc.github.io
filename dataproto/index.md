@@ -91,6 +91,10 @@ def all_gather_data_proto(data: DataProto, process_group):
 ```
 
 也就是all_gather操作来收集data，主要用于对tp分组上的数据all_gather，因为tp分组需要相同的输入。
+>vllm + fsdp 训推时，如果每张卡都是一个 DP，事情会简单很多。但 verl 中有两个功能不满足这一条件，一是 rollout 时让 vllm 开启 TP，二是在 fsdp 中使用 ulysses（SP）。verl 中数据分发使用的是 dispatch mode 这一机制，比如 fsdp workers 主要使用 Dispatch.DP_COMPUTE_PROTO这个 mode，它是在 worker group 的层次上进行数据分发以及结果收集的。由于这个层次是没有 TP/SP 概念的，所以它仅在 one GPU one DP 时才是正确的。那么为了正确支持 TP/SP，就需要对数据做一些前后处理。
+
+(上文引用自[浅入理解verl中的batch_size](https://zhuanlan.zhihu.com/p/1925295185891430869))
+
 体现在ShardingManager中，即：
 
 ```python
@@ -107,7 +111,7 @@ def all_gather_data_proto(data: DataProto, process_group):
         return data
 ```
 
-可见这里获取了tp group，然后在group中进行all_gather操作。post_process_data就是再将数据按照tp分组dispatch出去。
+可见这里获取了tp group，然后在group中进行all_gather操作。post_process_data就是再将数据按照tp分组dispatch出去。在fsdp中需要sp，也有类似的操作。
 ```python
  with self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)

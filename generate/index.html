@@ -43,7 +43,7 @@ def generate( self, inputs: Optional[torch.Tensor] = None, generation_config: Op
                             "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
                             "width":  3200 ,
                             "height":  2048 
-                        }],"genre": "posts","keywords": "coding, LLM","wordcount":  1681 ,
+                        }],"genre": "posts","keywords": "coding, LLM","wordcount":  1586 ,
         "url": "https:\/\/blog.vllbc.top\/generate\/","datePublished": "2025-03-09T00:00:00+00:00","dateModified": "2025-04-20T21:02:19+08:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
             "@type": "Organization",
             "name": "xxxx","logo": {
@@ -159,7 +159,7 @@ def generate( self, inputs: Optional[torch.Tensor] = None, generation_config: Op
 <script>hljs.initHighlightingOnLoad();</script><main class="main">
                 <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">generate</h1><div class="post-meta">
             <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a>&nbsp;<a href="/categories/generate/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Generate</a></span></div>
-            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-03-09">2025-03-09</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1681 字&nbsp;
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-03-09">2025-03-09</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1586 字&nbsp;
                 <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 4 分钟&nbsp;<span id="/generate/" class="leancloud_visitors" data-flag-title="generate">
                         <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
                     </span>&nbsp;</div>
@@ -192,12 +192,11 @@ id，这里维度通常为 [batch_size, seq_len]</li>
 <li><strong>logits_processor</strong>：高级功能，logits_processor
 可以在每个 step
 的输出概率计算完成后，对分数进行进一步的干预，改变输出的概率分布，从而影响生成的结果，例如最常见的，重复惩罚，就是使用
-logits_processor 完成的。（不懂的话可以看后面如何具体实现的）</li>
+logits_processor 完成的。</li>
 <li><strong>stopping_criteria</strong>：高级功能，允许用户通过
-stopping_criteria
-自定义生成停止条件（不懂的话可以看后面如何具体实现的）</li>
+stopping_criteria 自定义生成停止条件</li>
 <li>prefix_allowed_tokens_fn：解码策略的一个超参数，用于前缀 token
-约束（感觉没必要放在这里）</li>
+约束</li>
 <li>synced_gpus：</li>
 <li>DeepSpeed ZeRO Stage-3
 多GPU时使用（ZeRO-3包括优化器状态+梯度+权重并行优化，而推理阶段只使用权重并行），此时需要将
@@ -214,10 +213,7 @@ synced_gpus=True，transformers&lt;4.28
 <li>negative_prompt_attention_mask：负面提示的 attention_mask</li>
 <li>**kwargs
 <ul>
-<li>以上输入都太高大上了，只有 inputs
-会每次传入，其他的对于常规输出根本用不到（其实 inputs
-也可以不用输入，通过tokenizer()得到model_inputs后，使用**model_inputs方式也可以传入）</li>
-<li>回想一下别人的代码，会看到这里经常传入 temperature=0.7, top_k=20,
+<li>这里经常传入 temperature=0.7, top_k=20,
 max_new_tokens=512等参数，都是通过**kwargs传入进来的</li>
 <li>其实传入的这些都是输入参数 generation_config
 的属性（可以进入对应类中看一下有哪些属性，from
@@ -226,70 +222,77 @@ GenerationConfig），你可以创建该对象并覆盖某些参数，也可以�
 <li>在后面会将传入的这些参数覆盖掉generation_config中对应的属性</li>
 </ul></li>
 </ul>
-<h2 id="inputs处理">inputs处理</h2>
-<div class="sourceCode" id="cb2"><pre
-class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _prepare_model_inputs(</span>
-<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="va">self</span>,</span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    inputs: Optional[torch.Tensor] <span class="op">=</span> <span class="va">None</span>,</span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    bos_token_id: Optional[torch.Tensor] <span class="op">=</span> <span class="va">None</span>,</span>
-<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    model_kwargs: Optional[Dict[<span class="bu">str</span>, torch.Tensor]] <span class="op">=</span> <span class="va">None</span>,</span>
-<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> Tuple[torch.Tensor, Optional[<span class="bu">str</span>], Dict[<span class="bu">str</span>, torch.Tensor]]:</span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;</span></span>
-<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="co">    This function extracts the model-specific `inputs` for generation.</span></span>
-<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
-<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 1.有一些 encoder-decoder 模型的输入有不同的名称，这里首先确认名称</span></span>
-<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (</span>
-<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.config.is_encoder_decoder</span>
-<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>        <span class="kw">and</span> <span class="bu">hasattr</span>(<span class="va">self</span>, <span class="st">&quot;encoder&quot;</span>)</span>
-<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>        <span class="kw">and</span> <span class="va">self</span>.encoder.main_input_name <span class="op">!=</span> <span class="va">self</span>.main_input_name</span>
-<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    ):</span>
-<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>        input_name <span class="op">=</span> <span class="va">self</span>.encoder.main_input_name</span>
-<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span>:</span>
-<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>        input_name <span class="op">=</span> <span class="va">self</span>.main_input_name</span>
-<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 从 model_kwargs 中去掉 input_name: None 的键值对</span></span>
-<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>    model_kwargs <span class="op">=</span> {k: v <span class="cf">for</span> k, v <span class="kw">in</span> model_kwargs.items() <span class="cf">if</span> v <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span> <span class="kw">or</span> k <span class="op">!=</span> input_name}</span>
-<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 2.这里确保 model.generate() 输入参数中的 inputs 和 kwargs 中的 input_name 只输入一个</span></span>
-<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>    inputs_kwarg <span class="op">=</span> model_kwargs.pop(input_name, <span class="va">None</span>)</span>
-<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> inputs_kwarg <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span> <span class="kw">and</span> inputs <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
-<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(</span>
-<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;`inputs`: </span><span class="sc">{</span>inputs<span class="sc">}</span><span class="ss">` were passed alongside </span><span class="sc">{</span>input_name<span class="sc">}</span><span class="ss"> which is not allowed. &quot;</span></span>
-<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;Make sure to either pass </span><span class="sc">{</span>inputs<span class="sc">}</span><span class="ss"> or </span><span class="sc">{</span>input_name<span class="sc">}</span><span class="ss">=...&quot;</span></span>
-<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>        )</span>
-<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elif</span> inputs_kwarg <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
-<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>        inputs <span class="op">=</span> inputs_kwarg</span>
-<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 3.如果 input_name != inputs_embeds， 这里确保 input_name 和 inputs_embeds 只输入一个</span></span>
-<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> input_name <span class="op">==</span> <span class="st">&quot;input_ids&quot;</span> <span class="kw">and</span> <span class="st">&quot;inputs_embeds&quot;</span> <span class="kw">in</span> model_kwargs:</span>
-<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 如果是 decoder-only 模型，先看看模型 .forward() 函数的参数中，是否包含 inputs_embeds，如果不包含就弹出异常</span></span>
-<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="kw">not</span> <span class="va">self</span>.config.is_encoder_decoder:</span>
-<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>            has_inputs_embeds_forwarding <span class="op">=</span> <span class="st">&quot;inputs_embeds&quot;</span> <span class="kw">in</span> <span class="bu">set</span>(</span>
-<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>                inspect.signature(<span class="va">self</span>.prepare_inputs_for_generation).parameters.keys()</span>
-<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>            )</span>
-<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> <span class="kw">not</span> has_inputs_embeds_forwarding:</span>
-<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>                <span class="cf">raise</span> <span class="pp">ValueError</span>(</span>
-<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>                    <span class="ss">f&quot;You passed `inputs_embeds` to `.generate()`, but the model class </span><span class="sc">{</span><span class="va">self</span><span class="sc">.</span>__class__<span class="sc">.</span><span class="va">__name__</span><span class="sc">}</span><span class="ss"> &quot;</span></span>
-<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>                    <span class="st">&quot;doesn&#39;t have its forwarding implemented. See the GPT2 implementation for an example &quot;</span></span>
-<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>                    <span class="st">&quot;(https://github.com/huggingface/transformers/pull/21405), and feel free to open a PR with it!&quot;</span></span>
-<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>                )</span>
-<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>            <span class="co"># In this case, `input_ids` is moved to the `model_kwargs`, so a few automations (like the creation of</span></span>
-<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>            <span class="co"># the attention mask) can rely on the actual model input.</span></span>
-<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>            model_kwargs[<span class="st">&quot;input_ids&quot;</span>] <span class="op">=</span> <span class="va">self</span>._maybe_initialize_input_ids_for_generation(</span>
-<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>                inputs, bos_token_id, model_kwargs<span class="op">=</span>model_kwargs</span>
-<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a>            )</span>
-<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a>        <span class="cf">else</span>:</span>
-<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> inputs <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
-<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a>                <span class="cf">raise</span> <span class="pp">ValueError</span>(<span class="st">&quot;You passed `inputs_embeds` and `input_ids` to `.generate()`. Please pick one.&quot;</span>)</span>
-<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>        inputs, input_name <span class="op">=</span> model_kwargs[<span class="st">&quot;inputs_embeds&quot;</span>], <span class="st">&quot;inputs_embeds&quot;</span></span>
-<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 4. 如果 `inputs` 还是 None，尝试用 BOS token 创建 `input_ids`</span></span>
-<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a>    inputs <span class="op">=</span> <span class="va">self</span>._maybe_initialize_input_ids_for_generation(inputs, bos_token_id, model_kwargs)</span>
-<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> inputs, input_name, model_kwargs</span></code></pre></div>
-<p>若传入了 inputs，就不要在 kwargs 中再次定义 input_ids 若 inputs 为
-None，且 model_kwargs 不包含 input_ids 或 input_ids 也为
-None，则创建一个 [batch_size, 1] 大小的tensor，里面的值都为
-bos_token_id</p>
+<p>下面只说明一些关键的地方 ## kwargs -&gt; generation_config</p>
+<p>就是将kwargs中传入的kwargs的参数变成config。</p>
+<pre><code>generation_config, model_kwargs = self._prepare_generation_config(generation_config, **kwargs)
+</code></pre>
+<h2 id="准备logit处理器">准备logit处理器</h2>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>prepared_logits_processor <span class="op">=</span> <span class="va">self</span>._get_logits_processor(</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    generation_config<span class="op">=</span>generation_config,</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    input_ids_seq_length<span class="op">=</span>input_ids_length,</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    encoder_input_ids<span class="op">=</span>inputs_tensor,</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    prefix_allowed_tokens_fn<span class="op">=</span>prefix_allowed_tokens_fn,</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    logits_processor<span class="op">=</span>logits_processor,</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    device<span class="op">=</span>inputs_tensor.device,</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    model_kwargs<span class="op">=</span>model_kwargs,</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    negative_prompt_ids<span class="op">=</span>negative_prompt_ids,</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    negative_prompt_attention_mask<span class="op">=</span>negative_prompt_attention_mask,</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p>就是将generation_config中的采样参数封装成logit-processor，还有自己定义的processor</p>
+<h2 id="准备stopping处理器">准备stopping处理器</h2>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>prepared_stopping_criteria <span class="op">=</span> <span class="va">self</span>._get_stopping_criteria(</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    generation_config<span class="op">=</span>generation_config, stopping_criteria<span class="op">=</span>stopping_criteria, tokenizer<span class="op">=</span>tokenizer, <span class="op">**</span>kwargs</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p>同理。将一些与停止有关的参数封装成stopping处理器。</p>
+<h2 id="logits-warper">logits warper</h2>
+<ul>
+<li><code>logits warper</code> 里面是采样时才需要运行的处理器</li>
+<li><code>logits processor</code> 是通用的处理器，每种生成模式都需要用到的</li>
+</ul>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>prepared_logits_warper <span class="op">=</span> (</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="va">self</span>._get_logits_warper(generation_config) <span class="cf">if</span> generation_config.do_sample <span class="cf">else</span> <span class="va">None</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h2 id="正式生成">正式生成</h2>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 进入模型内部生成下一个token</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>outputs <span class="op">=</span> <span class="va">self</span>(</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">**</span>model_inputs,</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    return_dict<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    output_attentions<span class="op">=</span>output_attentions,</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    output_hidden_states<span class="op">=</span>output_hidden_states,</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> synced_gpus <span class="kw">and</span> this_peer_finished:</span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">continue</span>  <span class="co"># don&#39;t waste resources running the code we don&#39;t need</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a><span class="co"># 取出最后一个token，.logits维度为（batch_size, seq_len, vocab_size）</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>next_token_logits <span class="op">=</span> outputs.logits[:, <span class="op">-</span><span class="dv">1</span>, :]</span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a><span class="co"># 经过前面的处理器进行分数调整</span></span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>next_token_scores <span class="op">=</span> logits_processor(input_ids, next_token_logits)</span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> do_sample:</span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>    next_token_scores <span class="op">=</span> logits_warper(input_ids, next_token_scores)</span></code></pre></div>
+<p>按照是否采样来生成下一个token：</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> do_sample:</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    probs <span class="op">=</span> nn.functional.softmax(next_token_scores, dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    <span class="co"># torch.multinomial：按照输入probs的每一行（每个batch）作为采样的概率，</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 每行不放回的取出num_samples个，随机采样每个batch按输入概率取出一个</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    next_tokens <span class="op">=</span> torch.multinomial(probs, num_samples<span class="op">=</span><span class="dv">1</span>).squeeze(<span class="dv">1</span>)</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a><span class="cf">else</span>:</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>    <span class="co"># torch.argmax取出输入next_token_scores中值最大的索引</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    next_tokens <span class="op">=</span> torch.argmax(next_token_scores, dim<span class="op">=-</span><span class="dv">1</span>)</span></code></pre></div>
+<p>最后判断是否可以停止：</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>unfinished_sequences <span class="op">=</span> unfinished_sequences <span class="op">&amp;</span> <span class="op">~</span>stopping_criteria(input_ids, scores)</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>this_peer_finished <span class="op">=</span> unfinished_sequences.<span class="bu">max</span>() <span class="op">==</span> <span class="dv">0</span></span></code></pre></div>
 <h2 id="参考">参考</h2>
 <p>https://blog.csdn.net/qq_41496421/article/details/142346738?spm=1001.2014.3001.5502
 https://blog.csdn.net/qq_41496421/article/details/142580960?spm=1001.2014.3001.5501</p>

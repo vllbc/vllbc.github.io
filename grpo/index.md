@@ -204,3 +204,84 @@ if self.loss_type == "grpo":
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 ```
 
+# 常见问题
+
+### GRPO 的初始 Loss 为0，整体趋势是从0上升后下降，这正常吗？当 loss 是0的时候，那岂不是没梯度了，还能正常训练吗？
+当我们只执行一个step的时候，这时候 $\pi_{\theta_{\text{old}}}$和 $\pi_\theta$ 是相同的，所以目标函数可以被简化为：
+
+$$
+
+= \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \hat{A}_{i,t} - \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \beta D_{\text{KL}}[\pi_\theta \| \pi_{\text{ref}}]
+$$
+
+易得优势值（归一化的）相加后等于0。因此变成了：
+
+$$
+- \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \beta D_{\text{KL}}[\pi_\theta \| \pi_{\text{ref}}]
+$$
+
+而在训练初期，目标策略和参考策略也是相同的，因此就导致了loss等于0。但这不代表梯度等于0
+
+对GRPO的目标函数求导后，得到：
+
+$$
+\nabla_\theta J_{\text{GRPO}}(\theta) = \frac{1}{G} \sum_{i=1}^G \frac{1}{|o_i|} \sum_{t=1}^{|o_i|} \left[\hat{A}_{i,t} + \beta\left(\frac{\pi_{\text{ref}}(o_{i,t}|q,o_{i,<t})}{\pi_\theta(o_{i,t}|q,o_{i,<t})} - 1\right)\right]\nabla_\theta\log\pi_\theta(o_{i,t}|q,o_{i,<t})
+$$
+
+中括号内的右边部分可以易得为0，这时候就变成了：
+
+因为$\frac{1}{\mid o_{i} \mid} \sum_{t=1}^{\mid o_{i}\mid} \hat{A}_{i,t} = \hat{A}_{i}$
+化简为：
+$$
+\nabla_\theta J_{\text{GRPO}}(\theta) = \frac{1}{G} \sum_{i=1}^G \left[\hat{A}_i \cdot \left(\frac{1}{|o_i|} \sum{t=1}^{|o_i|} \nabla_\theta\log\pi_\theta(o_{i,t}|q,o_{i,<t})\right)\right] \neq 0
+$$
+因此loss为0不代表梯度为0。
+
+
+### 为什么在GRPO训练后的模型会出现更倾向于长文本的回答呢？对于偏差是如何解决的呢？
+
+参考[# GRPO为什么会使得模型的推理变长？](https://www.zhihu.com/question/1912123003191433189)
+
+$$
+  
+
+\mathcal{J}_{\text{GRPO}}(\pi_\theta) = \mathbb{E}_{\mathbf{q}\sim p_Q,\{\mathbf{o}_i\}_{i=1}^G \sim \pi_{\theta_{\text{old}}}(\cdot|\mathbf{q})} \left[\frac{1}{G} \sum_{i=1}^G {\frac{\color{red}{1}}{\color{red}{|\mathbf{o}_i|}}} \sum_{t=1}^{|\mathbf{o}_i|} \left\{\min\left[\frac{\pi_\theta(o_{i,t}|\mathbf{q}, \mathbf{o}_{i,<t})}{\pi_{\theta_{\text{old}}}(o_{i,t}|\mathbf{q}, \mathbf{o}_{i,<t})}\hat{A}_{i,t}, \text{clip}\left(\frac{\pi_\theta(o_{i,t}|\mathbf{q}, \mathbf{o}_{i,<t})}{\pi_{\theta_{\text{old}}}(o_{i,t}|\mathbf{q}, \mathbf{o}_{i,<t})}, 1-\epsilon, 1+\epsilon\right)\hat{A}_{i,t}\right]\right\}\right]
+$$
+
+$$
+\hat{A}_{i,t} = \frac{R(\mathbf{q}, \mathbf{o}_i) - \text{mean}(\{R(\mathbf{q}, \mathbf{o}_1),\ldots,R(\mathbf{q}, \mathbf{o}_G)\})}{\color{red}{\text{std}(\{R(\mathbf{q}, \mathbf{o}_1),\ldots,R(\mathbf{q}, \mathbf{o}_G)\})}},
+$$
+
+- 响应级别长度偏差：对积极的advantage，这种偏差导致较短的响应获得更大的梯度更新，从而使策略倾向于在正确答案中优先选择更简洁的表达。相反，对于消极的advantage，由于较长的响应具有更大的 |oi|，因此它们受到的惩罚较小，这导致策略在错误答案中倾向于选择较长的响应。
+- 问题难度级别偏差：标准差较低的问题（例如，太简单或太困难的问题，结果奖励几乎全为 1 或 0）在策略更新时会被赋予更高的权重。问题级归一化导致不同问题在目标函数中的权重不同，从而在优化过程中产生了难度偏差。
+
+如果是答对的样本，因为模型鼓励正确的样本，短的回复token权重更高，这时候模型会倾向于回复更短
+
+如果是答错的样本，因为模型要避免错误的样本，短的回复token权重更高，这时候模型会避免回复太短，也就是倾向于回复更长。
+
+因此可以看出，在一个step中，样本回答的正确率，会对模型回复的长度倾向有一定的影响。
+
+1. 在step正确率高的情况下，模型的回复可能会倾向于越来越短
+2. 在step正确率低的情况下，模型的回复可能会倾向于越来越长
+
+  
+DAPO的token-loss解决了这个问题。
+
+### PPO 、GRPO、DAPO 的区别是什么? 它们依次进行了那些改动，说出他们的异同？
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250731132607.png)
+- PPO 的 KL 计算是在每个 token 的生成过程中发生的，不断计算当前 token 和 ref_model 的 KL 散度。
+- GRPO 的 KL 计算是在一个回答生成结束后发生的，一次性对句子中的每个 token 计算 KL 散度，并参与最终 loss 的计算；
+- PPO 的 KL 塞到 reward 里（reward shaping）
+- GRPO 的 KL 是独立的损失项。
+- advantage 角度来看，PPO 的 KL 惩罚是 token-level 的
+- GRPO 的 KL 惩罚是 sentence-level（但是也是逐个 token 算 kl 再取 mean）的。
+
+DAPO与GRPO的区别详见[dapo](dapo.md)
+### K1、K2、K3分别是什么以及区别？
+
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250731131801.png)
+
+
+# 参考
+
+[Some simple thoughts on GRPO](https://khazzz1c.notion.site/Some-simple-thoughts-on-GRPO-23fd29780b5880459892eea775682df1)

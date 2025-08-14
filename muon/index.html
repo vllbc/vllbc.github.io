@@ -46,7 +46,7 @@ def newtonschulz5(G, steps=5, eps=1e-7): assert G.ndim == 2 a, b, c = (3.4445, -
                             "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
                             "width":  3200 ,
                             "height":  2048 
-                        }],"genre": "posts","keywords": "优化算法, 优化器, LLM","wordcount":  277 ,
+                        }],"genre": "posts","keywords": "优化算法, 优化器, LLM","wordcount":  1417 ,
         "url": "https:\/\/blog.vllbc.top\/muon\/","datePublished": "2025-07-11T00:00:00+00:00","dateModified": "2025-07-11T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
             "@type": "Organization",
             "name": "xxxx","logo": {
@@ -162,8 +162,8 @@ def newtonschulz5(G, steps=5, eps=1e-7): assert G.ndim == 2 a, b, c = (3.4445, -
 <script>hljs.initHighlightingOnLoad();</script><main class="main">
                 <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">Muon</h1><div class="post-meta">
             <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Categories</a>&nbsp;<a href="/categories/%E4%BC%98%E5%8C%96%E7%AE%97%E6%B3%95/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>优化算法</a>&nbsp;<a href="/categories/%E4%BC%98%E5%8C%96%E5%99%A8/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>优化器</a>&nbsp;<a href="/categories/muon/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Muon</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div>
-            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-11">2025-07-11</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 277 字&nbsp;
-                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 1 分钟&nbsp;<span id="/muon/" class="leancloud_visitors" data-flag-title="Muon">
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-11">2025-07-11</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1417 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 3 分钟&nbsp;<span id="/muon/" class="leancloud_visitors" data-flag-title="Muon">
                         <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
                     </span>&nbsp;</div>
         </div><div class="content" id="content"><p>Muon 算法流程如下图所示：</p>
@@ -215,7 +215,62 @@ Transformer 的神经网络中的 2D
 参数产生的更新通常具有非常高的条件数。也就是说，它们几乎是低秩矩阵，所有神经元的更新仅由几个方向主导。我们推测正交化有效地增加了其他“罕见方向”的规模，这些方向在更新中幅度较小，但对学习仍然很重要。</p>
 </blockquote>
 <h2 id="muon-in-moonlight">Muon in Moonlight</h2>
+<p>来自<a
+href="https://kexue.fm/archives/10739">Muon续集：为什么我们选择尝试Muon？
+- 科学空间|Scientific Spaces</a> ### Weight Decay</p>
+<p>kimi团队研究发现如果不加上权重衰减收敛速度到后面会被adam追上，因此加上了权重衰减：</p>
+<p><span class="math display">\[
+\Delta W =-\eta[msign(M) + \lambda W]
+\]</span></p>
+<p>总的来说，这种做法可以缓解MaxLogit爆炸的问题，因为qk相乘的结果和xq、xk以及Wq和Wk有关，x会经过rmsnorm，所以爆炸的原因来自于W的爆炸，所以权重衰减可以缓解这个问题。</p>
+<h3 id="rms对齐">RMS对齐</h3>
+<p>我理解为这是一种将Adam调好的超参数用到其它优化器的方法。</p>
 <h2 id="qk-clip">QK-clip</h2>
+<p>QK-norm可以很好的压制MaxLogit，但它只适用于MHA、GQA，不适用于MLA的推理阶段。因为推理阶段的Wk被吸收到了Q中。</p>
+<p>这时候就需要返璞归真，既然MaxLogit太大，那就设定一个阈值，当Logit的值超过阈值的时候，就
+直接裁剪到这个阈值。</p>
+<p>这就有了他们最初始的想法（因为Logit是<span
+class="math inline">\(QK^T\)</span>，目的是在<span
+class="math inline">\(QK^T\)</span>上进行裁剪，所以要对各自的参数矩阵裁剪sqrt。）：</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250729212208.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>如果max_logit（在batch上也要找最大）大于阈值并且即将优化的参数是q或者k的线性矩阵参数，就将矩阵参数进行clip，来达到缩放max_logit的目的。</p>
+<p>但后面他们发现这样一刀切很容易伤及无辜，因为多头注意力中，有可能只有1个头出现了max_logit超出阈值，但其它头的参数也会被裁减。</p>
+<blockquote>
+<p>我们知道，不管哪种Attention变体都有多个Head，一开始我们是每一层Attention只监控一个MaxLogit指标，所有Head的Logit是放在一起取Max的，这导致QK-Clip也是所有Head一起Clip的。然而，当我们分别监控每个Head的MaxLogit后发现，实际上每层只有为数不多的Head会出现MaxLogit爆炸，如果所有Head按同一个比例来Clip，那么大部份Head都是被“无辜受累”的了，这就是过度裁剪的含义。</p>
+</blockquote>
+<blockquote>
+<p>简单来说，QK-Clip的操作是乘以一个小于1的数，这个数对于MaxLogit爆炸的Head来说是刚刚好抵消增长趋势，但是对于其他head来说是单纯的缩小（它们没有增长趋势或者增长趋势很弱）。由于长期无端被乘一个小于1的数，那么很容易出现就趋于零的现象，这是“过度裁剪”的表现。</p>
+</blockquote>
+<p>因此还需要监控各个头的max_logit，如果某个头出现了这个问题，那么就单独对这个头的参数矩阵进行裁剪。但这里有一个问题就是，对于<a
+href="../../LLM/Attention/MLA.md">MLA</a>而言，并不是简单的存在Wq和Wk，而是Wqc、Wkc、Wqr、Wkr，而Wkr是所有的head共享的，如果裁剪Wkr也会导致出现无辜头，所以只需要裁剪Wqr。</p>
+<p>所以最终版本如下：</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250730164202.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>将QK-clip应用到Muon优化器就变成了Muon-Clip：</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250730164241.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250731130501.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>对比原生Muon可见改进了蛮多。 <img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250718103437.png"
+alt="image.png" /></p>
 </div><div class="post-footer" id="post-footer">
     <div class="post-info">
         <div class="post-info-line">
