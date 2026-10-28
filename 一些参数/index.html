@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>一些参数 - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="一些参数">
+  <meta property="og:description" content="max_num_batched_tokens、max_num_seqs 以及 gpu_memory_utilization 的协作机制 这三个参数在 vLLM 中共同控制着请求调度和内存分配。让我详细解释它们之间的关系。
+参数定义 1. max_num_batched_tokens 这是单次迭代中可以处理的最大 token 数量。它控制着每个批次的计算预算。 1">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-01-05T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-01-05T00:00:00+00:00">
+    <meta property="article:tag" content="Coding">
+    <meta property="article:tag" content="Vllm">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="一些参数">
+  <meta name="twitter:description" content="max_num_batched_tokens、max_num_seqs 以及 gpu_memory_utilization 的协作机制 这三个参数在 vLLM 中共同控制着请求调度和内存分配。让我详细解释它们之间的关系。
+参数定义 1. max_num_batched_tokens 这是单次迭代中可以处理的最大 token 数量。它控制着每个批次的计算预算。 1">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" /><link rel="prev" href="https://blog.vllbc.top/ai%E9%98%85%E8%AF%BBmegatron/" /><link rel="next" href="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "一些参数",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "coding, vllm","wordcount":  1893 ,
+        "url": "https:\/\/blog.vllbc.top\/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0\/","datePublished": "2026-01-05T00:00:00+00:00","dateModified": "2026-01-05T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">一些参数</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/vllm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Vllm</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2026-01-05">2026-01-05</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1893 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 4 分钟&nbsp;<span id="/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" class="leancloud_visitors" data-flag-title="一些参数">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><h1
+id="max_num_batched_tokensmax_num_seqs-以及-gpu_memory_utilization-的协作机制">max_num_batched_tokens、max_num_seqs
+以及 gpu_memory_utilization 的协作机制</h1>
+<p>这三个参数在 vLLM
+中共同控制着请求调度和内存分配。让我详细解释它们之间的关系。</p>
+<h2 id="参数定义">参数定义</h2>
+<h3 id="max_num_batched_tokens">1. max_num_batched_tokens</h3>
+<p>这是<strong>单次迭代中可以处理的最大 token
+数量</strong>。它控制着每个批次的计算预算。 <a href="#0-0">1</a></p>
+<h3 id="max_num_seqs">2. max_num_seqs</h3>
+<p>这是<strong>单次迭代中可以并发处理的最大请求（序列）数量</strong>。
+<a href="#0-1">2</a></p>
+<h3 id="gpu_memory_utilization">3. gpu_memory_utilization</h3>
+<p>这是<strong>GPU 内存的使用比例</strong>（默认 0.9，即
+90%），用于确定分配给 KV cache 的内存大小。 <a href="#0-2">3</a></p>
+<h2 id="它们如何协作">它们如何协作</h2>
+<h3 id="调度器的约束机制">调度器的约束机制</h3>
+<p>调度器在调度请求时会同时检查这两个约束： <a href="#0-3">4</a></p>
+<p><strong>关键验证逻辑</strong>： - <code>max_num_batched_tokens</code>
+必须 &gt;= <code>max_num_seqs</code> -
+<code>max_num_batched_tokens</code> 不能超过
+<code>max_num_seqs * max_model_len</code> <a href="#0-4">5</a></p>
+<h3 id="kv-cache-内存分配流程">KV Cache 内存分配流程</h3>
+<p><code>gpu_memory_utilization</code> 通过以下流程影响 KV cache：</p>
+<ol type="1">
+<li><p><strong>计算请求内存</strong>： <a href="#0-5">6</a></p></li>
+<li><p><strong>内存分析</strong>：执行一次前向传播来测量激活内存使用 <a
+href="#0-6">7</a></p></li>
+<li><p><strong>计算可用 KV cache 内存</strong>：</p>
+<pre><code>可用 KV cache 内存 = 请求内存 - 模型权重 - 峰值激活内存 - 非 torch 内存 - CUDA graph 内存</code></pre></li>
+<li><p><strong>计算 block 数量</strong>： <a href="#0-7">8</a></p></li>
+</ol>
+<h2 id="实际例子说明">实际例子说明</h2>
+<h3 id="例子-1基本配置场景">例子 1：基本配置场景</h3>
+<p>假设配置： - <code>max_num_batched_tokens = 2048</code> -
+<code>max_num_seqs = 128</code> -
+<code>gpu_memory_utilization = 0.9</code> -
+<code>max_model_len = 4096</code></p>
+<p><strong>调度行为</strong>： - 调度器最多可以同时处理 128 个请求 -
+但单次迭代的总 token 数不能超过 2048 - 例如：可以调度 128
+个请求，每个生成 16 个 token（128 × 16 = 2048） - 或者：调度 64
+个请求，每个处理 32 个 token</p>
+<p><strong>KV Cache 分配</strong>： - 假设 GPU 有 80GB
+内存，<code>gpu_memory_utilization=0.9</code> 意味着可用 72GB -
+扣除模型权重（假设 40GB）和激活内存（假设 8GB）后，剩余 24GB 用于 KV
+cache - 这 24GB 需要支持最多 128 个并发请求的 KV cache 存储</p>
+<h3 id="例子-2chunked-prefill-场景-9">例子 2：Chunked Prefill 场景 <a
+href="#0-8">9</a></h3>
+<p>配置： - <code>max_num_batched_tokens = 8192</code> -
+<code>max_num_seqs = 256</code> -
+<code>gpu_memory_utilization = 0.9</code></p>
+<p><strong>场景</strong>：一个长提示词请求（1000 tokens）+
+多个解码请求</p>
+<p>调度器会： 1. 优先调度所有解码请求（假设 200 个请求，各 1 token = 200
+tokens） 2. 剩余预算：8192 - 200 = 7992 tokens 3.
+可以调度长提示词的部分（如 7992 tokens），或完整调度多个较短的新请求</p>
+<h3 id="例子-3内存不足导致的抢占-10">例子 3：内存不足导致的抢占 <a
+href="#0-9">10</a></h3>
+<p>当 KV cache 空间不足时： - 调度器会抢占最低优先级的请求 - 释放其 KV
+cache blocks - 被抢占的请求重新加入等待队列 -
+<code>num_computed_tokens</code> 重置为 0，需要重新计算</p>
+<h2 id="优化建议">优化建议</h2>
+<h3 id="提高吞吐量">提高吞吐量</h3>
+<ul>
+<li><strong>增加</strong> <code>max_num_batched_tokens</code>（如
+16384）：允许更大的批次</li>
+<li><strong>增加</strong> <code>gpu_memory_utilization</code>（如
+0.95）：提供更多 KV cache 空间</li>
+<li><strong>增加</strong> <code>max_num_seqs</code>（如
+512）：支持更多并发请求</li>
+</ul>
+<h3 id="改善延迟">改善延迟</h3>
+<ul>
+<li><strong>减小</strong> <code>max_num_batched_tokens</code>（如
+2048）：减少 prefill 对 decode 的影响</li>
+<li><strong>减小</strong>
+<code>max_num_seqs</code>：减少竞争，降低抢占频率</li>
+</ul>
+<h3 id="避免-oom">避免 OOM</h3>
+<ul>
+<li><strong>降低</strong>
+<code>gpu_memory_utilization</code>：为系统预留更多内存</li>
+<li><strong>减小</strong> <code>max_num_seqs</code>：减少 KV cache
+需求</li>
+<li><strong>使用</strong> tensor parallelism：在多个 GPU 间分片模型</li>
+</ul>
+<h2 id="notes">Notes</h2>
+<p>这三个参数形成了一个相互制约的系统： -
+<code>max_num_batched_tokens</code> 和 <code>max_num_seqs</code>
+是<strong>调度约束</strong>，限制每次迭代能处理多少工作 -
+<code>gpu_memory_utilization</code> 是<strong>内存约束</strong>，通过 KV
+cache 分配间接限制能同时支持多少请求 - 如果 KV cache 内存不足以支持
+<code>max_num_seqs</code>
+个满长度序列，会发生频繁的抢占，严重影响性能</p>
+<p>合理配置需要根据： 1. 模型大小和 GPU 内存容量 2.
+预期的请求模式（长提示词 vs 短对话） 3. 性能目标（吞吐量 vs 延迟）</p>
+<p>进行平衡调整。</p>
+<h3 id="citations">Citations</h3>
+<p><strong>File:</strong> vllm/config/scheduler.py (L50-55)</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>    max_num_batched_tokens: <span class="bu">int</span> <span class="op">=</span> Field(default<span class="op">=</span>DEFAULT_MAX_NUM_BATCHED_TOKENS, ge<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Maximum number of tokens to be processed in a single iteration.</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="co">    The default value here is mainly for convenience when testing.</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="co">    In real usage, this should be set in `EngineArgs.create_engine_config`.</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span></code></pre></div>
+<p><strong>File:</strong> vllm/config/scheduler.py (L57-62)</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>    max_num_seqs: <span class="bu">int</span> <span class="op">=</span> Field(default<span class="op">=</span>DEFAULT_MAX_NUM_SEQS, ge<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Maximum number of sequences to be processed in a single iteration.</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="co">    The default value here is mainly for convenience when testing.</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="co">    In real usage, this should be set in `EngineArgs.create_engine_config`.</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span></code></pre></div>
+<p><strong>File:</strong> vllm/config/scheduler.py (L265-270)</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">self</span>.max_num_batched_tokens <span class="op">&lt;</span> <span class="va">self</span>.max_num_seqs:</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>            <span class="cf">raise</span> <span class="pp">ValueError</span>(</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>                <span class="ss">f&quot;max_num_batched_tokens (</span><span class="sc">{</span><span class="va">self</span><span class="sc">.</span>max_num_batched_tokens<span class="sc">}</span><span class="ss">) must &quot;</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>                <span class="st">&quot;be greater than or equal to max_num_seqs &quot;</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>                <span class="ss">f&quot;(</span><span class="sc">{</span><span class="va">self</span><span class="sc">.</span>max_num_seqs<span class="sc">}</span><span class="ss">).&quot;</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>            )</span></code></pre></div>
+<p><strong>File:</strong> vllm/config/scheduler.py (L272-278)</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">self</span>.max_num_batched_tokens <span class="op">&gt;</span> <span class="va">self</span>.max_num_seqs <span class="op">*</span> max_model_len:</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>            logger.warning(</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>                <span class="st">&quot;max_num_batched_tokens (</span><span class="sc">%d</span><span class="st">) exceeds max_num_seqs &quot;</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>                <span class="st">&quot;* max_model_len (</span><span class="sc">%d</span><span class="st">). This may lead to unexpected behavior.&quot;</span>,</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>                <span class="va">self</span>.max_num_batched_tokens,</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>                <span class="va">self</span>.max_num_seqs <span class="op">*</span> max_model_len,</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>            )</span></code></pre></div>
+<p><strong>File:</strong> vllm/config/cache.py (L49-56)</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>    gpu_memory_utilization: <span class="bu">float</span> <span class="op">=</span> Field(default<span class="op">=</span><span class="fl">0.9</span>, gt<span class="op">=</span><span class="dv">0</span>, le<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;The fraction of GPU memory to be used for the model executor, which can</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="co">    range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="co">    utilization. If unspecified, will use the default value of 0.9. This is a</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="co">    per-instance limit, and only applies to the current vLLM instance. It does</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="co">    not matter if you have another vLLM instance running on the same GPU. For</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="co">    example, if you have two vLLM instances running on the same GPU, you can</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a><span class="co">    set the GPU memory utilization to 0.5 for each instance.&quot;&quot;&quot;</span></span></code></pre></div>
+<p><strong>File:</strong> vllm/v1/worker/utils.py (L253-272)</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) <span class="op">-&gt;</span> <span class="bu">float</span>:</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="co">    Calculate the amount of memory required by vLLM, then validate</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="co">    that the current amount of free memory is sufficient for that.</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    requested_memory <span class="op">=</span> init_snapshot.total_memory <span class="op">*</span> cache_config.gpu_memory_utilization</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> init_snapshot.free_memory <span class="op">&lt;</span> requested_memory:</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>        GiB <span class="op">=</span> <span class="kw">lambda</span> b: <span class="bu">round</span>(b <span class="op">/</span> GiB_bytes, <span class="dv">2</span>)</span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">ValueError</span>(</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;Free memory on device </span><span class="sc">{</span>init_snapshot<span class="sc">.</span>device_<span class="sc">}</span><span class="ss"> &quot;</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;(</span><span class="sc">{</span>GiB(init_snapshot.free_memory)<span class="sc">}</span><span class="ss">/&quot;</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;</span><span class="sc">{</span>GiB(init_snapshot.total_memory)<span class="sc">}</span><span class="ss"> GiB) on startup &quot;</span></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;is less than desired GPU memory utilization &quot;</span></span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;(</span><span class="sc">{</span>cache_config<span class="sc">.</span>gpu_memory_utilization<span class="sc">}</span><span class="ss">, &quot;</span></span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;</span><span class="sc">{</span>GiB(requested_memory)<span class="sc">}</span><span class="ss"> GiB). Decrease GPU memory &quot;</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;utilization or reduce GPU memory used by other processes.&quot;</span></span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> requested_memory</span></code></pre></div>
+<p><strong>File:</strong> vllm/v1/worker/gpu_worker.py (L343-345)</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.available_kv_cache_memory_bytes <span class="op">=</span> (</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>.requested_memory <span class="op">-</span> profile_result.non_kv_cache_memory</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>        )</span></code></pre></div>
+<p><strong>File:</strong> vllm/v1/core/kv_cache_utils.py (L829-844)</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> get_num_blocks(</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>    vllm_config: VllmConfig, num_layers: <span class="bu">int</span>, available_memory: <span class="bu">int</span>, page_size: <span class="bu">int</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> <span class="bu">int</span>:</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a><span class="co">    Get the number of kv cache blocks.</span></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a><span class="co">    Args:</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a><span class="co">        vllm_config: The global VllmConfig</span></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a><span class="co">        num_layers: The number of layers</span></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a><span class="co">        available_memory: Memory available for KV cache in bytes.</span></span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a><span class="co">        page_size: The page size of the KV cache.</span></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> <span class="bu">int</span>(available_memory <span class="op">//</span> page_size <span class="op">//</span> num_layers)</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> <span class="bu">max</span>(num_blocks, <span class="dv">0</span>)</span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>    num_blocks <span class="op">=</span> may_override_num_blocks(vllm_config, num_blocks)</span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> num_blocks</span></code></pre></div>
+<p><strong>File:</strong> docs/configuration/optimization.md
+(L15-24)</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode markdown"><code class="sourceCode markdown"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>WARNING 05-09 00<span class="sc">:49:</span>33 scheduler.py:1057 Sequence group 0 is preempted by PreemptionMode.RECOMPUTE mode because there is not enough KV cache space. This can affect the end-to-end performance. Increase gpu_memory_utilization or tensor_parallel_size to provide more KV cache memory. total_cumulative_preemption_cnt=1</span></code></pre></div>
+<p>While this mechanism ensures system robustness, preemption and
+recomputation can adversely affect end-to-end latency. If you frequently
+encounter preemptions, consider the following actions:</p>
+<ul>
+<li>Increase <code>gpu_memory_utilization</code>. vLLM pre-allocates GPU
+cache using this percentage of memory. By increasing utilization, you
+can provide more KV cache space.</li>
+<li>Decrease <code>max_num_seqs</code> or
+<code>max_num_batched_tokens</code>. This reduces the number of
+concurrent requests in a batch, thereby requiring less KV cache
+space.</li>
+<li>Increase <code>tensor_parallel_size</code>. This shards model
+weights across GPUs, allowing each GPU to have more memory available for
+KV cache. However, increasing this value may cause excessive
+synchronization overhead.</li>
+<li>Increase <code>pipeline_parallel_size</code>. This distributes model
+layers across GPUs, reducing the memory needed for model weights on each
+GPU, indirectly leaving more memory available for KV cache. However,
+increasing this value may cause latency penalties.</li>
+</ul>
+<pre><code>
+**File:** docs/configuration/optimization.md (L43-48)
+```markdown
+You can tune the performance by adjusting `max_num_batched_tokens`:
+
+- Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
+- Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
+- For optimal throughput, we recommend setting `max_num_batched_tokens &gt; 8192` especially for smaller models on large GPUs.
+- If `max_num_batched_tokens` is the same as `max_model_len`, that&#39;s almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).</code></pre>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-01-05</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" data-title="一些参数" data-hashtags="coding,vllm"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" data-title="一些参数"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" data-title="一些参数"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" data-title="一些参数"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/vllm/">Vllm</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/ai%E9%98%85%E8%AF%BBmegatron/" class="prev" rel="prev" title="ai阅读megatron"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>ai阅读megatron</a>
+            <a href="/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" class="next" rel="next" title="vllm高效推理全链路">vllm高效推理全链路<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

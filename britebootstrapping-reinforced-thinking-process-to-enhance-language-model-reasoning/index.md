@@ -1,8 +1,7 @@
 # BRiTE：Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning
 
-好的，非常荣幸能以领域专家的身份，与您一同深入探讨这篇富有洞见的论文《BRITE: Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning》。这篇论文确实触及了当前大模型领域一个核心且棘手的问题：如何让模型不仅能生成流畅的文本，更能进行可靠、严谨的逻辑推理。
 
-首先，我将为您呈现一份对该论文的整体性深度解读。
+利用EM算法思想的论文。
 
 ---
 

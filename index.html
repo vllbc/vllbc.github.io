@@ -148,224 +148,137 @@
         <a href="/shortcode%E7%BD%AE%E9%A1%B6/">阅读全文</a><div class="post-tags">
                 <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/%E5%B7%A5%E5%85%B7/">工具</a></div></div>
 </article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/qwen/">qwen</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-08-08">2025-08-08</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/model/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Model</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><pre class="python3"><code>------------------------------------------------------------------------------------------------------
-# Qwen-1
-+ Embedding and output projection. (Untied embedding for input embedding and output projection)
-+ ROPE
-+ QKV bias required
-+ Pre-Norm &amp; RMSNorm
-+ SwiGLU
-
-------------------------------------------------------------------------------------------------------
-# Qwen-2
-- Multi-Head Attention
-
-+ MoE
-+ Grouped Query Attention
-+ Dual Chunk Attention
-+ YARN
-+ Expert Granularity
-+ Expert Routing
-+ Expert Initialization
-+ Shared Experts
-
-------------------------------------------------------------------------------------------------------
-# Qwen-2.5
-+ More control tokens. 3 -&gt; 22
-
-------------------------------------------------------------------------------------------------------
-# Qwen-3
-- QKV bias
-- Shared experts
-
-+ QK-Norm
-------------------------------------------------------------------------------------------------------</code></pre>
-<h2 id="参考">参考</h2>
-<p><a href="https://zhuanlan.zhihu.com/p/1933558376689804480">Qwen
-各版本主要结构变化</a></p></div><div class="post-footer">
-        <a href="/qwen/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/model/">Model</a></div></div>
+        <a href="/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/">GRPO训练排查：策略坍塌 vs 训练崩溃</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-08-31">2026-08-31</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/rlhf/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>RLHF</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div><div class="content"><h1 id="grpo-训练排查策略坍塌-vs-训练崩溃">GRPO 训练排查：策略坍塌 vs
+训练崩溃</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心思想</strong>：GRPO
+训出问题先分类——<strong>策略坍塌</strong>（policy collapse，算法层：GRPO
+目标函数的内在倾向，什么都没做错也会往那个方向走）和<strong>训练崩溃</strong>（training
+crash，工程层：两侧概率不一致、loss mask 写错、bf16 精度不够，是 bug
+不是超参问题）是两种病，排查路径完全不同，混着查等于两边都查不干净。
+<strong>最大收获</strong>：排查顺序是固定的——<strong>先排工程层</strong>（bug
+是 0/1
+的，能被穷尽排除），排干净再动算法层；且二分法按时间尺度切并不严谨，复杂情况要按<strong>信号链四问</strong>（前提关系）来切。
+<strong>一句话方法论</strong>：抓崩溃前后各 10~20 条 rollout
+<strong>人工读</strong>——3 分钟完成的分类，读曲线要半小时还可能分错。
+<strong>监控补篇（第 2 篇，09-01 并入）</strong>：GRPO 无
+critic，唯一信号来自组内相对优势——<strong>信号健康度可直接观测、必须观测</strong>。平均熵只是报警器；pass@k
+取 k=group size 免费算但有四个缺口，且必须配各自调优的
+temperature；<strong>题内多样性与跨题可区分度是能反向走的两个量</strong>，只测前者会漏掉最典型的”高熵模板化”坍塌——补一个一次前向的检索准确率即可堵上。
+<strong>信号健康度补篇（第 3 篇，09-02 并入）</strong>：50%
+零方差报警线是错的——占比是 G 与题集难度的函数，要比对预测基线；clip
+上界下界分开计、按 advantage 符号解读；两侧引擎 logprob 差 mean&lt;0.001
+健康、&gt;0.01 停训（阈值只适用 mean 不适用
+max）；长度爆涨先按对错拆再定性；<strong>预警看 ESS ratio，确认看 grad
+norm</strong>。 <strong>策略坍塌五条 root cause（第 4 篇，09-02
+并入）</strong>：σ 归一化不是 bug
+也不该一刀切关——<strong>单样本权重主要由组内稀罕度而非信号可靠性决定</strong>；少数派
+advantage 上界 ≈ (G-1)/√G（G=16 时 3.75，不是无限）；Dr. GRPO 去 σ
+是按各自 σ 缩放不是乘常数（因此同 lr A/B 会误判”方法无效”）；DAPO
+动态采样和 Dr. GRPO 去 σ <strong>处理不同区间</strong>（p=0/1 vs
+极端但非零方差），先拆零方差构成（全对/全错）再决定。</p></div><div class="post-footer">
+        <a href="/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/rlhf/">RLHF</a>,&nbsp;<a href="/tags/grpo/">GRPO</a>,&nbsp;<a href="/tags/troubleshooting/">Troubleshooting</a></div></div>
 </article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/%E4%BF%A1%E7%94%A8%E5%88%86%E9%85%8D/">信用分配</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-08-05">2025-08-05</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/reasoning/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reasoning</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><p>最近涌现了很多关于信用分配的论文，因此整理一下</p>
-<h2 id="first-return-entropy-eliciting-explore"><a
-href="../../reading/Reasoning/First%20Return,%20Entropy-Eliciting%20Explore.md">First
-Return, Entropy-Eliciting Explore</a></h2>
-<h2
-id="good-learners-think-their-thinkinggenerative-prm-makes-large-reasoning-model-more-efficient-math-learne"><a
-href="../../reading/Reasoning/Good%20Learners%20Think%20Their%20Thinking：Generative%20PRM%20Makes%20Large%20Reasoning%20Model%20More%20Efficient%20Math%20Learne.md">Good
-Learners Think Their Thinking：Generative PRM Makes Large Reasoning
-Model More Efficient Math Learne</a></h2>
-<h2 id="group-sequence-policy-optimization"><a
-href="../../reading/LLM-RL/Group%20Sequence%20Policy%20Optimization.md">Group
-Sequence Policy Optimization</a></h2>
-<h2 id="process-reinforcement-through-implicit-rewards"><a
-href="../../reading/Reasoning/PROCESS%20REINFORCEMENT%20THROUGH%20IMPLICIT%20REWARDS.md">PROCESS
-REINFORCEMENT THROUGH IMPLICIT REWARDS</a></h2>
-<h2
-id="rlvmrreinforcement-learning-with-verifiable-meta-reasoning-rewards-for-robust-long-horizon-agents"><a
-href="../../reading/Planning/RLVMR：Reinforcement%20Learning%20with%20Verifiable%20Meta-Reasoning%20Rewards%20for%20Robust%20Long-Horizon%20Agents.md">RLVMR：Reinforcement
-Learning with Verifiable Meta-Reasoning Rewards for Robust Long-Horizon
-Agents</a></h2>
-<h2
-id="vapoefficient-and-reliable-reinforcement-learning-for-advanced-reasoning-tasks"><a
-href="../../reading/LLM-RL/VAPO：Efficient%20and%20Reliable%20Reinforcement%20Learning%20for%20Advanced%20Reasoning%20Tasks.md">VAPO：Efficient
-and Reliable Reinforcement Learning for Advanced Reasoning
-Tasks</a></h2>
-<h2 id="group-in-group-policy-optimization-for-llm-agent-training"><a
-href="../../reading/Planning/Group-in-Group%20Policy%20Optimization%20for%20LLM%20Agent%20Training.md">Group-in-Group
-Policy Optimization for LLM Agent Training</a></h2>
-<h2
-id="capotowards-enhancing-llm-reasoning-through-verifiable-generative-credit-assignment"><a
-href="../../reading/Reasoning/CAPO：Towards%20Enhancing%20LLM%20Reasoning%20through%20Verifiable%20Generative%20Credit%20Assignment.md">CAPO：Towards
-Enhancing LLM Reasoning through Verifiable Generative Credit
-Assignment</a></h2>
-<h2
-id="beyond-policy-optimizationa-data-curation-flywheel-for-sparse-reward-long-horizon-planning"><a
-href="../../reading/Planning/Beyond%20Policy%20Optimization：A%20Data%20Curation%20Flywheel%20for%20Sparse-Reward%20Long-Horizon%20Planning.md">Beyond
-Policy Optimization：A Data Curation Flywheel for Sparse-Reward
-Long-Horizon Planning</a></h2>
-<h2
-id="gtpo-and-grpo-stoken-and-sequence-level-reward-shaping-with-policy-entropy"><a
-href="../../reading/Reasoning/GTPO%20and%20GRPO-S：Token%20and%20Sequence-Level%20Reward%20Shaping%20with%20Policy%20Entropy.md">GTPO
-and GRPO-S：Token and Sequence-Level Reward Shaping with Policy
-Entropy</a></h2>
-<h2
-id="gtpotrajectory-based-policy-optimization-in-large-language-models"><a
-href="../../reading/Reasoning/GTPO：Trajectory-Based%20Policy%20Optimization%20in%20Large%20Language%20Models.md">GTPO：Trajectory-Based
-Policy Optimization in Large Language Models</a></h2></div><div class="post-footer">
-        <a href="/%E4%BF%A1%E7%94%A8%E5%88%86%E9%85%8D/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/reasoning/">Reasoning</a></div></div>
+        <a href="/rsirecursive-self-improvement-%E5%88%86%E7%B1%BB%E5%9B%BE%E8%B0%B1/">RSI：Recursive Self-Improvement 分类图谱</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-08-31">2026-08-31</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/agent/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Agent</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div><div class="content"><h1 id="rsirecursive-self-improvement-分类图谱">RSI：Recursive
+Self-Improvement 分类图谱</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心思想</strong>：RSI（Recursive
+Self-Improvement）= 让 LLM / Agent
+不仅完成任务，还能利用自己产生的经验、数据、反馈甚至代码，迭代地改进自己。近义词极多（self-evolve
+/ self-play / self-refine / self-reward /
+self-distill），但闭环程度和”被改进的东西”各不相同。
+<strong>最大收获</strong>：所有工作都沿同一条主线推进——<strong>逐步把人移出
+improvement loop</strong>。Test-Time 侧，改进对象从 output → weights →
+Agent 本身（persistence 递增）；Training-Time 侧，从自造
+supervision（zero-label）→ 自造 curriculum（zero-data）→
+自造改进策略（auto research）。
+<strong>为什么重要</strong>：闭环每扩展一层，最终都撞上同一个问题——<strong>verification
+是否可靠</strong>。现状是绝大部分 self-evolving 工作仍停留在
+human-on-the-loop，真正的 closed loop 远未实现。</p></div><div class="post-footer">
+        <a href="/rsirecursive-self-improvement-%E5%88%86%E7%B1%BB%E5%9B%BE%E8%B0%B1/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/agent/">Agent</a>,&nbsp;<a href="/tags/rsi/">RSI</a>,&nbsp;<a href="/tags/self-evolving/">Self-Evolving</a>,&nbsp;<a href="/tags/test-time/">Test-Time</a>,&nbsp;<a href="/tags/self-rewarding/">Self-Rewarding</a>,&nbsp;<a href="/tags/verifier/">Verifier</a></div></div>
 </article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/k2/">K2</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-30">2025-07-30</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/model/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Model</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><h2 id="预训练">预训练</h2>
-<h3 id="muon-clip">Muon-clip</h3>
-<p>详见<a href="../../Deep%20Learning/优化器/Muon.md">Muon</a></p>
-<p>通过裁剪权重解决Max-Logit问题，实现稳定训练。</p>
-<h3 id="数据增强">数据增强</h3>
-<p>通过改写句子来提高token效率，避免重复使用token造成的过拟合，改写方法如下：</p></div><div class="post-footer">
-        <a href="/k2/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/model/">Model</a></div></div>
-</article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/alibi/">ALiBi</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-29">2025-07-29</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/basic/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Basic</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><p>在softmax的结果后添加一个静态的不可学习的偏置项。 <img
-src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250729142636.png"
-alt="image.png" /> q1和k1之间的距离是0，所以对应位置就是0<br />
- q2和k1之间的距离是「相对位置偏移为“<strong>k的索引</strong>”1」 -
-「q的索引2」，得到1-2 = -1，就对应到了中间矩阵的取值为-1了<br />
-以此类推，相对距离矩阵的中间对角线上都是0，然后左下角的取值都是对应的「k的索引」-「q的索引」了</p></div><div class="post-footer">
-        <a href="/alibi/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/basic/">Basic</a></div></div>
-</article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/gemma/">Gemma</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-29">2025-07-29</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/model/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Model</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><h2 id="gemma-3">Gemma 3</h2>
-<h3 id="qk-norm">QK-Norm</h3>
-<p>简单来说就是在Q和K矩阵上进行RMSNorm，即：</p>
-<p><span class="math display">\[
-\begin{aligned}
-O &amp;= softmax(\bar{Q}\bar{K}^T)V \\
-\bar{Q} &amp;=RMSNorm(Q) \\
-\bar{K} &amp;=RMSNorm(V)
-\end{aligned}\
-\]</span></p>
-<p>但这种方法的问题是不适用MLA的推理阶段，因为推理阶段的MLA将Wk吸取到了Q中，具体见<a
-href="../Attention/MLA.md">MLA</a></p></div><div class="post-footer">
-        <a href="/gemma/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/model/">Model</a></div></div>
-</article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/dynamic_bsz/">dynamic_bsz</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-27">2025-07-27</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div><div class="content">
+        <a href="/nope/">NoPE</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-08-03">2026-08-03</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/llm-architecture/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM Architecture</a>&nbsp;<a href="/categories/llm-architecture/basic/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM Architecture/Basic</a>&nbsp;<a href="/categories/basic/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Basic</a></span></div><div class="content">
 </div><div class="post-footer">
-        <a href="/dynamic_bsz/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/verl/">Verl</a></div></div>
+        <a href="/nope/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm-architecture/">LLM Architecture</a>,&nbsp;<a href="/tags/llm-architecture/basic/">LLM Architecture/Basic</a>,&nbsp;<a href="/tags/basic/">Basic</a></div></div>
 </article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/dataset/">Dataset</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-26">2025-07-26</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div><div class="content"><p>详细讲解一下verl中的RLHFDataset，它继承自torch的Dataset，需要实现__getitem__来返回数据。</p>
-<h2 id="初始化">初始化</h2>
-<div class="sourceCode" id="cb1"><pre
-class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> RLHFDataset(Dataset):</span>
-<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;</span></span>
-<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="co">    Load and preprocess RLHF data from Parquet files.</span></span>
-<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="co">    - Caches files locally.</span></span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="co">    - Reads into a HuggingFace Dataset and tokenizes prompts.</span></span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="co">    - Optionally handles images/videos via a ProcessorMixin.</span></span>
-<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="co">    - Filters prompts over a max length.</span></span>
-<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="co">    - Supports resuming from checkpoints.</span></span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="co">    Args:</span></span>
-<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a><span class="co">        data_files (str or list): Path(s) to Parquet file(s).</span></span>
-<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a><span class="co">        tokenizer (PreTrainedTokenizer): For the tokenization of text to token IDs.</span></span>
-<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="co">        config (DictConfig): Options like cache_dir, prompt_key, max_prompt_length, truncation, etc.</span></span>
-<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="co">        processor (ProcessorMixin, optional): Multimodal preprocessor for images/videos.</span></span>
-<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
-<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(</span>
-<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>,</span>
-<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>        data_files: <span class="bu">str</span> <span class="op">|</span> <span class="bu">list</span>[<span class="bu">str</span>],</span>
-<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>        tokenizer: PreTrainedTokenizer,</span>
-<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>        config: DictConfig,</span>
-<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>        processor: Optional[ProcessorMixin] <span class="op">=</span> <span class="va">None</span>,</span>
-<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>    ):</span>
-<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="kw">not</span> <span class="bu">isinstance</span>(data_files, <span class="bu">list</span> <span class="op">|</span> ListConfig):</span>
-<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>            data_files <span class="op">=</span> [data_files]</span>
-<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.data_files <span class="op">=</span> copy.deepcopy(data_files)</span>
-<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.original_data_files <span class="op">=</span> copy.deepcopy(data_files)  <span class="co"># use for resume</span></span>
-<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.tokenizer <span class="op">=</span> tokenizer</span>
-<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.processor <span class="op">=</span> processor</span>
-<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.config <span class="op">=</span> config</span>
-<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.cache_dir <span class="op">=</span> os.path.expanduser(config.get(<span class="st">&quot;cache_dir&quot;</span>, <span class="st">&quot;~/.cache/verl/rlhf&quot;</span>))</span>
-<span id="cb1-35"><a href="#cb1-35" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.prompt_key <span class="op">=</span> config.get(<span class="st">&quot;prompt_key&quot;</span>, <span class="st">&quot;prompt&quot;</span>)</span>
-<span id="cb1-36"><a href="#cb1-36" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.image_key <span class="op">=</span> config.get(<span class="st">&quot;image_key&quot;</span>, <span class="st">&quot;images&quot;</span>)</span>
-<span id="cb1-37"><a href="#cb1-37" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.video_key <span class="op">=</span> config.get(<span class="st">&quot;video_key&quot;</span>, <span class="st">&quot;videos&quot;</span>)</span>
-<span id="cb1-38"><a href="#cb1-38" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.max_prompt_length <span class="op">=</span> config.get(<span class="st">&quot;max_prompt_length&quot;</span>, <span class="dv">1024</span>)</span>
-<span id="cb1-39"><a href="#cb1-39" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.return_raw_chat <span class="op">=</span> config.get(<span class="st">&quot;return_raw_chat&quot;</span>, <span class="va">False</span>)</span>
-<span id="cb1-40"><a href="#cb1-40" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.return_full_prompt <span class="op">=</span> config.get(<span class="st">&quot;return_full_prompt&quot;</span>, <span class="va">False</span>)</span>
-<span id="cb1-41"><a href="#cb1-41" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.truncation <span class="op">=</span> config.get(<span class="st">&quot;truncation&quot;</span>, <span class="st">&quot;error&quot;</span>)</span>
-<span id="cb1-42"><a href="#cb1-42" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.filter_overlong_prompts <span class="op">=</span> config.get(<span class="st">&quot;filter_overlong_prompts&quot;</span>, <span class="va">True</span>)</span>
-<span id="cb1-43"><a href="#cb1-43" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-44"><a href="#cb1-44" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.num_workers <span class="op">=</span> config.get(<span class="st">&quot;filter_overlong_prompts_workers&quot;</span>, <span class="bu">max</span>(<span class="dv">1</span>, os.cpu_count() <span class="op">//</span> <span class="dv">4</span>))</span>
-<span id="cb1-45"><a href="#cb1-45" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.num_workers <span class="op">=</span> <span class="bu">min</span>(<span class="va">self</span>.num_workers, os.cpu_count())</span>
-<span id="cb1-46"><a href="#cb1-46" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.use_shm <span class="op">=</span> config.get(<span class="st">&quot;use_shm&quot;</span>, <span class="va">False</span>)</span>
-<span id="cb1-47"><a href="#cb1-47" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.chat_template_func <span class="op">=</span> config.get(<span class="st">&quot;chat_template_func&quot;</span>, <span class="va">None</span>)</span>
-<span id="cb1-48"><a href="#cb1-48" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.need_tools_kwargs <span class="op">=</span> config.get(<span class="st">&quot;need_tools_kwargs&quot;</span>, <span class="va">False</span>)</span>
-<span id="cb1-49"><a href="#cb1-49" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.filter_prompts <span class="op">=</span> config.get(<span class="st">&quot;filter_prompts&quot;</span>, <span class="va">True</span>)</span>
-<span id="cb1-50"><a href="#cb1-50" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.serialize_dataset <span class="op">=</span> <span class="va">False</span></span>
-<span id="cb1-51"><a href="#cb1-51" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.return_multi_modal_inputs <span class="op">=</span> config.get(<span class="st">&quot;return_multi_modal_inputs&quot;</span>, <span class="va">True</span>)</span>
-<span id="cb1-52"><a href="#cb1-52" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-53"><a href="#cb1-53" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._download()</span>
-<span id="cb1-54"><a href="#cb1-54" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._read_files_and_tokenize()</span></code></pre></div>
-<p><img
-src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250726163009.png"
-alt="image.png" /> （来自deepwiki）</p></div><div class="post-footer">
-        <a href="/dataset/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/verl/">Verl</a></div></div>
+        <a href="/%E9%9D%A2%E7%BB%8F_2026/">LLM 算法岗面试手册 2026</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-07-30">2026-07-30</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/interview/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Interview</a>&nbsp;<a href="/categories/interview/%E9%9D%A2%E7%BB%8F/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Interview/面经</a>&nbsp;<a href="/categories/%E9%9D%A2%E7%BB%8F/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>面经</a></span></div><div class="content">
+</div><div class="post-footer">
+        <a href="/%E9%9D%A2%E7%BB%8F_2026/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/interview/">Interview</a>,&nbsp;<a href="/tags/interview/%E9%9D%A2%E7%BB%8F/">Interview/面经</a>,&nbsp;<a href="/tags/%E9%9D%A2%E7%BB%8F/">面经</a>,&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/%E9%9D%A2%E8%AF%95/">面试</a></div></div>
 </article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/device_mesh/">device_mesh</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-26">2025-07-26</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/%E5%A4%A7%E6%A8%A1%E5%9E%8B%E5%88%86%E5%B8%83%E5%BC%8F/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>大模型分布式</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><h2 id="verl中的device_mesh">verl中的device_mesh</h2>
-<p>verl中有3个device_mesh，分别是： - 训练用的FSDP mesh（通常是一维） -
-推理用的rollout mesh（包含tp维度） - Ulysses序列并行的mesh（dp×sp）</p></div><div class="post-footer">
-        <a href="/device_mesh/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/%E5%A4%A7%E6%A8%A1%E5%9E%8B%E5%88%86%E5%B8%83%E5%BC%8F/">大模型分布式</a></div></div>
+        <a href="/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/">MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-07-29">2026-07-29</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/llm-rl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM-RL</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div><div class="content"><h1 id="mopdmulti-teacher-on-policy-distillation">MOPD：Multi-Teacher
+On-Policy Distillation</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心问题</strong>：经领域 RL 训练后的 LLM
+在单领域很强，但如何把多个领域（Math / Code / IF /
+SWE）专家融合成一个统一模型？ <strong>核心方法</strong>：Multi-Teacher
+On-Policy Distillation —— 三阶段流水线（General SFT → 各领域 RL 并行得
+teacher → 多 teacher 蒸馏）。学生<strong>自己
+rollout</strong>（on-policy），每个 prompt <strong>路由到对应 domain
+teacher</strong>，teacher prefill 给 per-token log-prob，用
+<strong>reverse KL</strong> 让学生模仿。 <strong>关键结果</strong>：在
+Qwen3-30B-A3B 上 normalized score <strong>0.937</strong>（vs RL Teacher
+1.000、Mix-RL 0.882、Cascade RL 0.775、Param-Merge 0.328–0.857）。跨
+domain 极差仅 0.044，最均匀。已在 <strong>MiMo-V2-Flash (309B)</strong>
+生产训练中部署。</p></div><div class="post-footer">
+        <a href="/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/llm-rl/">LLM-RL</a>,&nbsp;<a href="/tags/distillation/">Distillation</a>,&nbsp;<a href="/tags/multi-teacher/">Multi-Teacher</a>,&nbsp;<a href="/tags/post-training/">Post-Training</a></div></div>
 </article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
-        <a href="/agent_loop/">agent_loop</a>
-    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2025-07-24">2025-07-24</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div><div class="content"><p>Verl 最近实现了 agent loop 功能，也就是多轮工具调用 RL ，弥补了 verl
-中 vllm 无法使用多轮 rollout 的不足。整体流程大致如下（来自
-https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/verl/multi-turn/imgs/Multi-Turn_Rollout_Workflow.png）</p>
-<figure>
-<img
-src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250724162847.png"
-alt="image.png" />
-<figcaption aria-hidden="true">image.png</figcaption>
-</figure>
-<p>在官方实现中（目前在 verl/experimental/agent_loop
-目录下），核心代码在
-agent_loop.py中，single_turn_agent_loop.py和tool_agent_loop对应两种agent_loop，tool_parser.py定义了hermes工具解析类。所以重点就是在agent_loop.py中，各个类的协作流程如下图：</p></div><div class="post-footer">
-        <a href="/agent_loop/">阅读全文</a><div class="post-tags">
-                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/verl/">Verl</a></div></div>
+        <a href="/%E4%BB%8Egpt-2%E5%88%B0kimi-k3/">从 GPT-2 到 Kimi K3：大模型架构如何演进</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-07-29">2026-07-29</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a>&nbsp;<a href="/categories/infra/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Infra</a></span></div><div class="content"><blockquote>
+<p>[!info] 来源 整理自 ali（<a
+href="https://x.com/waterloo_intern"><span class="citation"
+data-cites="waterloo_intern">@waterloo_intern</span></a>）于 2026-07-27
+发布的 X Article：<a
+href="https://x.com/waterloo_intern/status/2081762065392541951">22580:
+From GPT2 to Kimi3,
+Explained</a>。本文不是逐句翻译，而是对原文论证主线的中文重组。</p></div><div class="post-footer">
+        <a href="/%E4%BB%8Egpt-2%E5%88%B0kimi-k3/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/linear-attention/">Linear Attention</a>,&nbsp;<a href="/tags/deltanet/">DeltaNet</a>,&nbsp;<a href="/tags/moe/">MoE</a>,&nbsp;<a href="/tags/kimi/">Kimi</a>,&nbsp;<a href="/tags/attnres/">AttnRes</a></div></div>
+</article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
+        <a href="/review%E8%87%AA%E8%BF%9B%E5%8C%96agent%E7%9A%84rl-memory%E4%B8%8Eskill%E6%96%B9%E6%B3%95%E6%89%B9%E5%88%A4/">Review：自进化Agent的RL Memory与Skill方法批判</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-07-23">2026-07-23</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/agent/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Agent</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div><div class="content"><blockquote>
+<p>一篇对当前 “用 RL 提升 memory / skill refinement”
+这条线的批判性综述。作者把现状分成 4 类：SkillRL、MemRL、纯 prompt
+memory、search-augmented RL。本笔记整理作者的核心观点,并与 vault
+内已有的相关论文笔记交叉链接。</p></div><div class="post-footer">
+        <a href="/review%E8%87%AA%E8%BF%9B%E5%8C%96agent%E7%9A%84rl-memory%E4%B8%8Eskill%E6%96%B9%E6%B3%95%E6%89%B9%E5%88%A4/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/agent/">Agent</a>,&nbsp;<a href="/tags/memory/">Memory</a>,&nbsp;<a href="/tags/rl/">RL</a>,&nbsp;<a href="/tags/skill/">Skill</a>,&nbsp;<a href="/tags/credit-assignment/">Credit Assignment</a></div></div>
+</article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
+        <a href="/verl-v1-%E4%B8%BB%E7%BA%BF%E9%87%8D%E6%9E%84/">verl V1 主线重构 · 给后训练工作者的三问</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-07-23">2026-07-23</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Categories</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a>&nbsp;<a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a></span></div><div class="content"><blockquote>
+<p>来源：<a
+href="https://syt-nju.github.io/files/visual-reading/verl-v1-mainline-pipeline/">verl
+主线 V1 重构 · 给后训练工作者的三问</a></p>
+<p>仓库：<a
+href="https://github.com/verl-project/verl">verl-project/verl</a></p>
+<p>关联笔记： - [[Engineering/coding/verl/verl总体概览]] -
+[[Engineering/coding/verl/agent_loop]] -
+[[Engineering/coding/verl/veRL_Ray执行流程源码解析]] -
+[[Engineering/coding/verl/veRL_colocate实现源码解析]] -
+[[Engineering/coding/verl/DataProto]]</p></div><div class="post-footer">
+        <a href="/verl-v1-%E4%B8%BB%E7%BA%BF%E9%87%8D%E6%9E%84/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/verl/">Verl</a>,&nbsp;<a href="/tags/v1/">V1</a>,&nbsp;<a href="/tags/agentloop/">AgentLoop</a>,&nbsp;<a href="/tags/transferqueue/">TransferQueue</a>,&nbsp;<a href="/tags/%E5%BC%82%E6%AD%A5%E8%AE%AD%E7%BB%83/">异步训练</a></div></div>
+</article><article class="single summary" itemscope itemtype="http://schema.org/Article"><h1 class="single-title" itemprop="name headline">
+        <a href="/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/">DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理</a>
+    </h1><div class="post-meta"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-publish">发布于 <time datetime="2026-07-07">2026-07-07</time></span>&nbsp;<span class="post-category">收录于 <a href="/categories/pretraining/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Pretraining</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div><div class="content"><blockquote>
+<p>来源：<a
+href="https://zhuanlan.zhihu.com/p/2052200237373118275">DeepSeekV4 Infra
+Deep Dive · 第四节 4.4: PyTorch 训练显存管理：从 Caching Allocator 到
+Stream 同步</a></p>
+<p>系列：可灵 AI infra
+训练团队出品，全文系列见原文末链接。本文是该系列的 4.4
+一篇，专门讲训练显存怎么分、怎么 OOM、怎么省。</p></div><div class="post-footer">
+        <a href="/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/">阅读全文</a><div class="post-tags">
+                <i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/pretraining/">Pretraining</a>,&nbsp;<a href="/tags/fsdp/">FSDP</a>,&nbsp;<a href="/tags/zero/">ZeRO</a>,&nbsp;<a href="/tags/moe/">MoE</a>,&nbsp;<a href="/tags/recompute/">Recompute</a>,&nbsp;<a href="/tags/nccl/">NCCL</a></div></div>
 </article><ul class="pagination"><li class="page-item active">
                     <span class="page-link">
                         <a href="/">1</a>
@@ -382,11 +295,11 @@ agent_loop.py中，single_turn_agent_loop.py和tool_agent_loop对应两种agent_
                     <span class="page-link" aria-hidden="true">&hellip;</span>
                 </li><li class="page-item ">
                     <span class="page-link">
-                        <a href="/page/23/">23</a>
+                        <a href="/page/42/">42</a>
                     </span>
                 </li></ul></div></div>
             </main><footer class="footer">
-        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2025</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
         </div>
     </footer></div>
 

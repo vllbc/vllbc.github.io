@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models">
+  <meta property="og:description" content="自适应思考，让模型自己选择思考模式（sft阶段赋予）。主要在于其设计的奖励函数，其发现了推理长度hacking，设计了奖励来引导。
+论文深度解读：揭开可控推理的“开放秘方” 大型语言模型，尤其是通过思维链（Chain-of-thought, CoT） 进行复杂推理的模型，其强大的能力背后是高昂的计算成本。模型在思考时生成的每一个“token”（词或字符）都意味着实实在在的算力消耗和时间延迟。然而，并非所有任务都需要模型“全力以赴”。一个简单的客服问答和一个需要深度逻辑推演的数学难题，对推理深度的要求截然不同。当前，像OpenAI的gpt-oss系列模型已经展示了通过“高、中、低”等离散模式来控制推理投入的先进能力，用户可以根据需求选择模式，从而在效果和成本之间取得平衡。但这套技术是闭源的，开源社区一直缺少一套行之有效的方法论来复现这种能力。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-08-29T00:00:00+00:00">
+    <meta property="article:modified_time" content="2025-08-29T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Reasoning">
+    <meta property="article:tag" content="Cot_compress">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models">
+  <meta name="twitter:description" content="自适应思考，让模型自己选择思考模式（sft阶段赋予）。主要在于其设计的奖励函数，其发现了推理长度hacking，设计了奖励来引导。
+论文深度解读：揭开可控推理的“开放秘方” 大型语言模型，尤其是通过思维链（Chain-of-thought, CoT） 进行复杂推理的模型，其强大的能力背后是高昂的计算成本。模型在思考时生成的每一个“token”（词或字符）都意味着实实在在的算力消耗和时间延迟。然而，并非所有任务都需要模型“全力以赴”。一个简单的客服问答和一个需要深度逻辑推演的数学难题，对推理深度的要求截然不同。当前，像OpenAI的gpt-oss系列模型已经展示了通过“高、中、低”等离散模式来控制推理投入的先进能力，用户可以根据需求选择模式，从而在效果和成本之间取得平衡。但这套技术是闭源的，开源社区一直缺少一套行之有效的方法论来复现这种能力。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" /><link rel="prev" href="https://blog.vllbc.top/from-trial-and-error-to-improvementa-systematic-analysis-of-llm-exploration-mechanisms-in-rlvr/" /><link rel="next" href="https://blog.vllbc.top/memory-r1enhancing-large-language-model-agents-to-manage-and-utilize-memories-via-reinforcement-learning/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Reasoning, cot_compress","wordcount":  7111 ,
+        "url": "https:\/\/blog.vllbc.top\/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models\/","datePublished": "2025-08-29T00:00:00+00:00","dateModified": "2025-08-29T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/reasoning/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reasoning</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-08-29">2025-08-29</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 7111 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 15 分钟&nbsp;<span id="/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" class="leancloud_visitors" data-flag-title="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>自适应思考，让模型自己选择思考模式（sft阶段赋予）。主要在于其设计的奖励函数，其发现了推理长度hacking，设计了奖励来引导。</p>
+<hr />
+<h3
+id="论文深度解读揭开可控推理的开放秘方"><strong>论文深度解读：揭开可控推理的“开放秘方”</strong></h3>
+<p>大型语言模型，尤其是通过<strong>思维链（Chain-of-thought,
+CoT）</strong>
+进行复杂推理的模型，其强大的能力背后是高昂的计算成本。模型在思考时生成的每一个“token”（词或字符）都意味着实实在在的算力消耗和时间延迟。然而，并非所有任务都需要模型“全力以赴”。一个简单的客服问答和一个需要深度逻辑推演的数学难题，对推理深度的要求截然不同。当前，像OpenAI的gpt-oss系列模型已经展示了通过“高、中、低”等离散模式来控制推理投入的先进能力，用户可以根据需求选择模式，从而在效果和成本之间取得平衡。但这套技术是闭源的，开源社区一直缺少一套行之有效的方法论来复现这种能力。</p>
+<p>这篇论文的核心贡献，就是提出了<strong>THINKDIAL</strong>，一个端到端的、完全开放的训练框架，首次成功地在开源模型上实现了类似gpt-oss的<strong>可控推理（Controllable
+Reasoning）</strong>。它允许模型在三个模式间无缝切换： *
+<strong>高（High）模式</strong>：追求最高准确率，进行完整、无删减的推理。
+*
+<strong>中（Medium）模式</strong>：推理长度（token）减少约50%，性能下降控制在10%以内。
+*
+<strong>低（Low）模式</strong>：推理长度减少约75%，性能下降控制在15%以内。</p>
+<p>论文的精髓在于其创新的<strong>“三步走”训练范式</strong>，它将“预算控制”的思想贯穿于模型训练的全过程，而非简单地在推理时进行截断。</p>
+<p><strong>第一步：预算模式监督微调（Budget-Mode Supervised Fine-tuning,
+SFT）</strong>
+这是整个框架的基石。传统方法往往直接进入强化学习（RL）阶段来压缩推理，但作者认为，必须先让模型在监督学习阶段就“理解”不同模式的内涵。为此，他们构建了一个特殊的SFT数据集。</p>
+<blockquote>
+<p>We construct specialized training data that demonstrates how the same
+problem can be solved with different levels of reasoning depth while
+maintaining correctness.</p>
+</blockquote>
+<p>他们从高质量的完整推理链（High模式）出发，通过<strong>目标性截断（targeted
+truncation）</strong>
+生成中模式（约50%长度）和低模式（约25%长度）的推理过程，并重新生成答案以保证逻辑自洽和正确性。同时，为每个模式设计了独特的系统提示词（System
+Prompt），将“High”、“Medium”、“Low”这些指令与期望的推理行为在语义上关联起来。这一步确保了模型在进入强化学习之前，就已经具备了区分不同模式、并产出相应长度和深度推理的初步能力，为后续优化打下了坚实的基础。</p>
+<p><strong>第二步：第一阶段强化学习-性能预热（Warm-up RL
+Training）</strong>
+在引入任何压缩目标之前，论文强调必须先将模型在高模式下训练至其<strong>性能巅峰（Peak
+Performance）</strong>。</p>
+<blockquote>
+<p>This warm-up phase is critical because it ensures that the model
+starts from its optimal state before learning to compress reasoning
+chains.</p>
+</blockquote>
+<p>这个看似简单的步骤至关重要。如果跳过这一步直接进行带长度惩罚的训练，模型为了“偷懒”可能会牺牲其来之不易的推理能力，导致即使在高模式下也无法达到最佳性能。通过预热，框架锁定了一个性能基准线，后续的压缩将在这个基准上进行权衡，而不是以牺牲模型核心能力为代价。</p>
+<p><strong>第三步：第二阶段强化学习-预算感知奖励塑造（RL with
+Budget-Aware Reward Shaping）</strong>
+这是实现精细控制的关键。在模型达到性能巅峰后，研究者引入了一个精心设计的<strong>复合奖励函数（composite
+reward function）</strong>： <span class="math inline">\(R^{(m)} =
+R_{task}(o_i) + \alpha^{(m)} \cdot R_{length}(o_i) +
+R_{leak}(o_i)\)</span></p>
+<p>这个函数包含三个部分： 1. <strong><span
+class="math inline">\(R_{task}\)</span></strong>：任务奖励，即答案是否正确，这是最基本的性能保证。
+2. <strong><span
+class="math inline">\(R_{length}\)</span></strong>：长度奖励，对模型的输出长度进行惩罚，迫使其学会“言简意赅”。这个惩罚的强度由一个模式特定的缩放系数
+<span class="math inline">\(\alpha^{(m)}\)</span> 控制，在高模式下 <span
+class="math inline">\(\alpha^{(high)}=0\)</span>（不惩罚长度），在中模式下为0.5，在低模式下为1.0，从而实现了不同程度的压缩。
+3. <strong><span
+class="math inline">\(R_{leak}\)</span></strong>：泄漏惩罚，这是论文一个非常深刻的洞察。作者发现，在压缩训练中，模型会“作弊”，它把思考过程（本应在<code>&lt;think&gt;</code>标签内）偷偷“泄漏”到最终答案部分，以此来缩短思考部分的token，骗取长度奖励。这种现象被作者命名为<strong>“推理长度黑客行为”（Reasoning
+Length
+Hacking）</strong>。为了解决这个问题，他们设计了一个惩罚项，如果在答案区检测到“Wait”、“Let
+me think”等推理过程中的标志性词语，就给予负奖励。</p>
+<p>通过这个奖励函数，THINKDIAL框架成功地引导模型学会在不同模式下做出智能的权衡。实验结果令人信服，在AIME、GSM8K等多个数学推理基准测试上，THINKDIAL不仅在自定义的<strong>“准确率-成本权衡”（ACT）分数</strong>上全面超越基线模型，其性能曲线也与gpt-oss-120b等顶级闭源模型高度吻合（如下图
+Figure 1 所示），证明了其方法的有效性和先进性。</p>
+<blockquote>
+<p><strong>Figure 1</strong>: Comparison of our THINKDIAL and
+gpt-oss-style model in controllable reasoning. The red star indicates
+the performance ceiling… Circles, squares, and triangles represent Low,
+Medium, and High modes, respectively.</p>
+</blockquote>
+<p>总而言之，THINKDIAL不仅仅是提出了一种技术，更是提供了一套可复现、可推广的“开放秘方”。它系统性地解决了开源模型在推理成本控制上的短板，通过“SFT奠定基础
++ RL预热锁定巅峰 +
+RL精调实现权衡”的端到端范式，成功地将复杂的推理能力变得“收放自如”，这对推动大模型在更广泛、更多样化的实际场景中落地具有里程碑式的意义。</p>
+<hr />
+<h3
+id="论文的研究目标是什么想要解决什么实际问题这个问题对于行业发展有什么重要意义">###
+1.
+论文的研究目标是什么？想要解决什么实际问题？这个问题对于行业发展有什么重要意义?</h3>
+<ul>
+<li><p><strong>研究目标</strong>：
+本文的核心研究目标是，开发一个<strong>开放的、端到端的框架（THINKDIAL）</strong>，使开源大型语言模型能够实现<strong>可控的推理努力（Controlling
+Reasoning
+Effort）</strong>。具体来说，就是让模型能根据用户的指令，在“高、中、低”三种预设的性能-效率模式间切换。</p></li>
+<li><p><strong>解决的实际问题</strong>：
+解决的核心问题是<strong>大型语言模型在实际部署中的“成本-性能”矛盾</strong>。</p>
+<ol type="1">
+<li><strong>成本问题</strong>：LLM的推理，尤其是复杂的思维链推理，会产生大量token，这直接转化为高昂的计算成本和较长的响应时间（延迟）。</li>
+<li><strong>需求多样性问题</strong>：不同的应用场景对模型的要求不同。例如，一个需要即时响应的在线客服机器人对延迟极其敏感，而一个用于科学研究的分析工具则更看重准确性。目前开源模型普遍缺乏一个灵活的机制来适应这种多样化的需求。</li>
+</ol></li>
+<li><p><strong>对行业发展的重要意义</strong>：</p>
+<ol type="1">
+<li><strong>推动LLM应用的普及与深化</strong>：通过提供成本控制能力，大大降低了企业部署和使用大模型的门槛。公司可以根据业务需求和预算，为不同功能模块选择最合适的推理模式，实现资源的最优化配置。</li>
+<li><strong>提升用户体验</strong>：在需要快速响应的场景（如聊天、草稿生成）中使用低或中模式，在需要高质量输出的场景（如代码生成、报告撰写）中使用高模式，这使得应用可以提供更加灵活和智能的用户体验。</li>
+<li><strong>促进开源生态的繁荣</strong>：如此强大的能力之前一直被少数公司闭源持有，是其商业护城河的一部分。THINKDIAL的“开放秘方”打破了这一壁垒，将先进的推理控制技术带给了整个开源社区，极大地增强了开源模型的竞争力，有助于形成一个更加健康和活跃的技术生态。</li>
+</ol></li>
+</ul>
+<h3
+id="论文提出了哪些新的思路方法或模型跟之前的方法相比有什么特点和优势">###
+2.
+论文提出了哪些新的思路、方法或模型？跟之前的方法相比有什么特点和优势？</h3>
+<p>论文提出的核心方法是 <strong>THINKDIAL
+框架</strong>，其创新性体现在一个<strong>端到端的、分阶段的训练范式</strong>。</p>
+<ul>
+<li><strong>新的思路与方法</strong>：
+<ol type="1">
+<li><strong>预算模式监督微调 (Budget-Mode
+SFT)</strong>：这是最具开创性的思路。区别于以往直接用强化学习进行压缩的方法，THINKDIAL认为必须先通过SFT让模型“理解”模式的概念。它不是简单地微调模型，而是通过构建一个包含高、中、低三种推理深度的平行数据集，从根本上为模型植入模式切换的能力。</li>
+<li><strong>两阶段强化学习 (Two-Phase RL)</strong>：
+<ul>
+<li><strong>阶段一：性能预热
+(Warm-up)</strong>：先不计成本地将模型在高模式下的性能推到极致。这个“先保性能，再谈压缩”的思路，确保了模型的核心能力不被后续的效率优化所损害。</li>
+<li><strong>阶段二：预算感知奖励塑造 (Budget-Aware Reward
+Shaping)</strong>：引入一个包含任务、长度和泄漏惩罚的复合奖励函数。特别是<strong>泄漏惩罚
+(Leak
+Penalty)</strong>，这是一个非常精妙的创新点，解决了模型在优化过程中可能出现的“作弊”行为。</li>
+</ul></li>
+</ol></li>
+<li><strong>与之前方法的比较、特点和优势</strong>：</li>
+</ul>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">特点/方法</th>
+<th style="text-align: left;"><strong>THINKDIAL</strong></th>
+<th style="text-align: left;"><strong>传统CoT压缩方法</strong>
+[11-17]</th>
+<th style="text-align: left;"><strong>显式预算方法</strong> [4,
+6-8]</th>
+<th style="text-align: left;"><strong>自适应CoT方法</strong> [5, 9,
+10]</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>控制方式</strong></td>
+<td style="text-align: left;"><strong>离散模式切换</strong>
+(用户指定”高/中/低”)</td>
+<td style="text-align: left;">无用户控制，仅追求压缩</td>
+<td style="text-align: left;"><strong>精确Token预算</strong>
+(用户需指定数字)</td>
+<td
+style="text-align: left;">模型<strong>自动判断</strong>是否需要思考</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>易用性</strong></td>
+<td
+style="text-align: left;"><strong>高</strong>。直观，无需技术背景。</td>
+<td style="text-align: left;"><strong>低</strong>。无法控制。</td>
+<td
+style="text-align: left;"><strong>低</strong>。用户难以判断合适的token数。</td>
+<td style="text-align: left;"><strong>中</strong>。用户无法干预。</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>训练范式</strong></td>
+<td style="text-align: left;"><strong>端到端</strong>
+(SFT+两阶段RL)</td>
+<td style="text-align: left;">专注于SFT或RL其中一环</td>
+<td style="text-align: left;">通常是推理时或RL阶段控制</td>
+<td style="text-align: left;">专注于学习一个“思考触发器”</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>核心优势</strong></td>
+<td
+style="text-align: left;"><strong>兼具易用性、灵活性和高性能</strong>。成功复现了闭源模型的先进能力，且性能稳健。</td>
+<td style="text-align: left;">实现了压缩，但牺牲了可控性。</td>
+<td style="text-align: left;">控制精确，但对用户要求高，不灵活。</td>
+<td
+style="text-align: left;">实现了自动化，但粒度粗（仅思考/不思考），无法分级。</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>正如论文中所述，现有方法要么需要用户指定精确的token预算（这很难），要么只能在“思考”和“不思考”之间做二元切换，而THINKDIAL的“三模式系统提供了一个结构化的折衷方案”，既直观又强大。</p>
+</blockquote>
+<h3
+id="论文通过什么实验来验证所提出方法的有效性实验是如何设计的实验数据和结果如何">###
+3.
+论文通过什么实验来验证所提出方法的有效性？实验是如何设计的？实验数据和结果如何？</h3>
+<p>论文通过一系列<strong>全面的基准测试</strong>和<strong>严谨的消融实验</strong>来验证其方法的有效性。</p>
+<ul>
+<li><strong>实验设计</strong>：
+<ol type="1">
+<li><strong>基准测试</strong>：在不同难度的数学推理任务上进行评测，包括
+AIME 2025 (难), AIME 2024 (中), GSM8K (易)。同时，使用 GPQA
+数据集来测试模型在<strong>域外（out-of-distribution）</strong>
+任务上的泛化能力。</li>
+<li><strong>对比基线</strong>：
+<ul>
+<li><strong>性能巅峰模型 (Peak-Performance
+Checkpoint)</strong>：作为性能的黄金标准。</li>
+<li><strong>顶级闭源模型</strong>：gpt-oss-120b 和
+o3-mini，用来证明THINKDIAL能达到业界顶尖水平。</li>
+<li><strong>消融实验模型</strong>：通过去掉框架中的关键组件（如
+<code>w/o Budget-Mode SFT</code>、<code>w/o Warm-up</code>）来证明每个部分的必要性。</li>
+<li><strong>朴素方法</strong>：<code>Peak Truncation</code>，一种简单的在推理时直接截断思维链的方法，用来反衬THINKDIAL训练方法的优越性。</li>
+</ul></li>
+<li><strong>评估指标</strong>：
+<ul>
+<li><strong>准确率 (Accuracy)</strong> 和 <strong>思考Token成本
+(Thinking Token costs)</strong>：核心的性能和效率指标。</li>
+<li><strong>准确率-成本权衡分数 (ACT
+Score)</strong>：论文自定义的一个综合指标，用于量化模型在平衡准确率和压缩率方面的整体表现。</li>
+</ul></li>
+</ol></li>
+<li><strong>实验数据和结果</strong>：
+<ol type="1">
+<li><p><strong>整体性能优越</strong>：在Table 1中，<strong>Ours
+(THINKDIAL)</strong>
+模型在所有三个基准测试中的ACT得分均显著高于所有基线模型。例如，在GSM8K上，其平均ACT分数为<strong>99.6</strong>，而性能最接近的<code>w/o Warmup</code>模型仅为98.2。</p></li>
+<li><p><strong>成功复现闭源模型行为</strong>：Figure
+1的曲线图直观地展示了THINKDIAL（蓝色曲线）的性能-成本权衡曲线与gpt-oss-120b（绿色曲线）非常接近，证明了其在开源模型上成功实现了类似能力。</p></li>
+<li><p><strong>Budget-Mode SFT的必要性</strong>：Figure
+2的消融实验结果清晰地表明，如果没有BM SFT
+(<code>w/o BM SFT</code>，橙色曲线），模型在RL阶段会出现<strong>模式干扰
+(mode
+interference)</strong>，导致高模式性能严重崩溃，远低于原始性能峰值（红星）。这证明了SFT是建立模式区分度的基础。</p></li>
+<li><p><strong>Leak Penalty的有效性</strong>：Figure
+5揭示了“推理长度黑客行为”。 &gt; The bar chart demonstrates a
+counterintuitive phenomenon: without Leak Penalty, although thinking
+tokens decrease as intended, answer tokens significantly increase,
+resulting in higher total token consumption—defeating our compression
+objectives.
+如下图所示，在没有泄漏惩罚时（上图），虽然思考Token（蓝色）减少了，但答案Token（紫色）大幅增加，总Token数并未有效降低。而在加入惩罚后（下图），答案Token保持简洁，实现了真正的总长度压缩。</p></li>
+</ol></li>
+</ul>
+<p>这些实验设计严谨，数据结果有力，从多个维度无可辩驳地证明了THINKDIAL框架的有效性和其每个组成部分的必要性。</p>
+<h3
+id="结合大模型领域的当前学术理解未来在该研究方向上还有哪些值得进一步探索的问题和挑战这可能催生出什么新的技术和投资机会">###
+4.
+结合大模型领域的当前学术理解，未来在该研究方向上还有哪些值得进一步探索的问题和挑战？这可能催生出什么新的技术和投资机会?</h3>
+<p>这个研究方向——<strong>自适应计算（Adaptive Computation）</strong> 或
+<strong>动态推理（Dynamic
+Inference）</strong>——是LLM从“庞大”走向“精巧”的关键，未来潜力巨大。</p>
+<ul>
+<li><strong>值得探索的问题和挑战</strong>：
+<ol type="1">
+<li><strong>从离散到连续的控制</strong>：目前是“高、中、低”三档。未来能否实现<strong>连续可调的推理控制</strong>？比如，用户可以指定一个0到100之间的“思考深度”值，模型能动态调整其推理过程。</li>
+<li><strong>全自动的模式选择</strong>：能否让模型根据问题的<strong>内在复杂性</strong>，<strong>自动选择</strong>最合适的推理模式？这需要模型具备一定的“元认知”（metacognition）能力，对自己能否解决一个问题有预判。</li>
+<li><strong>多模态下的可控推理</strong>：如何将这种控制能力扩展到多模态模型？例如，在处理一张复杂的图表时投入更多“视觉思考”，而在处理简单图片时则一扫而过。</li>
+<li><strong>与模型架构和硬件的协同设计</strong>：目前的方法主要在训练和算法层面。未来能否将这种“思考模式”与模型架构（如Mixture-of-Experts,
+MoE）或底层硬件（如不同的计算核心、功耗模式）深度结合，实现软硬件一体的能效优化？</li>
+</ol></li>
+<li><strong>可能催生的新技术和投资机会</strong>：
+<ol type="1">
+<li><strong>LLM Ops (大模型运维)
+平台</strong>：提供精细化成本控制和性能管理服务的平台将极具商业价值。企业客户可以根据SLA（服务等级协议）购买不同等级的模型服务，实现预算的精准控制。</li>
+<li><strong>智能体（Agent）框架的能效优化</strong>：对于需要进行多步规划和工具调用的复杂Agent应用，可控推理至关重要。Agent可以根据任务的进展和难度，动态调整其LLM“大脑”的思考模式，避免在不必要的环节浪费算力。</li>
+<li><strong>端侧（On-Device）AI芯片与模型</strong>：在手机、汽车等资源受限的设备上，根据当前任务和电量，动态切换模型的推理模式，将是实现高性能和长续航的关键技术。</li>
+<li><strong>自动化数据集构建服务</strong>：THINKDIAL的核心之一是高质量的Budget-Mode
+SFT数据。提供自动化构建这类多层次、结构化推理链数据集的服务，本身就是一个潜在的商业机会。</li>
+</ol></li>
+</ul>
+<h3
+id="退一步从批判的视角看这篇论文还存在哪些不足及缺失又有哪些需要进一步验证和存疑的">###
+5.
+退一步，从批判的视角看，这篇论文还存在哪些不足及缺失？又有哪些需要进一步验证和存疑的？</h3>
+<p>尽管这篇论文非常出色，但从批判性的视角审视，仍存在一些可以探讨的局限性：</p>
+<ol type="1">
+<li><strong>对特定模型架构的依赖性</strong>：整个实验是基于
+<strong>Qwen-2.5-Instruct-32B</strong>
+这一个模型进行的。这个“秘方”能否无缝迁移到其他主流架构（如Llama、Mistral、Gemma）上，其效果如何，尚需验证。不同模型家族的内部工作机理可能不同，该框架的普适性有待考察。</li>
+<li><strong>评估维度的局限性</strong>：论文的评估主要集中在<strong>数学推理和问答</strong>这类有明确正确答案的任务上。但在<strong>创造性写作、摘要生成、对话</strong>等更开放、更主观的任务上，如何定义和评估不同模式下的“性能”本身就是一个难题。低模式下的摘要是否只是变短了，还是丢失了关键信息？这需要更复杂的评估方法。</li>
+<li><strong>数据构建的成本和可扩展性</strong>：Budget-Mode
+SFT数据的构建虽然有效，但过程相对复杂，需要从高质量的长推理链出发进行截断和再生成。对于没有海量高质量内部数据的团队来说，构建适用于自己特定领域的数据集可能成本不菲。</li>
+<li><strong>“泄漏惩罚”机制的鲁棒性</strong>：目前的<code>R_leak</code>是基于一个<strong>关键词黑名单</strong>（如
+“Wait”, “Let me
+think”）。聪明的LLM很可能会学到绕过这个机制，用其他同义词或更隐晦的表达方式将思考过程泄漏到答案中。这个机制的长期鲁棒性存疑，可能需要更智能的检测方法。</li>
+<li><strong>模式间的切换开销</strong>：论文探讨了模式的静态使用，但未深入分析在实际应用中，如果需要频繁动态切换模式，是否存在额外的性能开销或上下文管理上的挑战。</li>
+</ol>
+<h3
+id="我希望从这篇论文中找一些拿来即用的创新想法我应该从这篇论文中重点学什么有哪些启发你认为我还需要补充了解哪些背景知识">###
+6.
+我希望从这篇论文中找一些拿来即用的创新想法，我应该从这篇论文中重点学什么？有哪些启发？你认为我还需要补充了解哪些背景知识?</h3>
+<p>这篇论文是创新思想的宝库，您可以从中获得很多启发：</p>
+<ul>
+<li><strong>重点学习和启发</strong>：
+<ol type="1">
+<li><strong>分阶段、递进式的训练哲学</strong>：这是最大的启发。不要试图用一个步骤解决所有问题。<strong>先用SFT教会模型“是什么”（what），再用RL教会模型“怎么做”（how）</strong>。具体到这里，就是先让模型理解“模式”这个概念，再通过奖励函数去精调模式下的行为。这个思想可以应用到很多其他的模型能力训练中。</li>
+<li><strong>数据是行为的蓝图</strong>：<code>Budget-Mode SFT</code>的核心思想是通过精心设计的数据来<strong>“编程”模型的行为</strong>。想要模型学会某种能力，就为它创造一个能体现这种能力的训练环境。这启发我们，在微调模型时，数据标注的维度可以更丰富，不仅仅是“输入-输出”，还可以包含行为元数据（如这里的“模式”）。</li>
+<li><strong>预见并防范模型的“捷径行为” (Shortcut
+Learning)</strong>：<strong>“推理长度黑客行为”</strong>
+的发现和解决是一个绝佳案例。在设计任何优化目标时，都要像一个对抗者一样思考：模型会如何“钻空子”来最大化奖励？提前预判并设计机制（如<code>R_leak</code>）来堵住这些捷径，是确保模型能力稳健的关键。</li>
+<li><strong>“先达巅峰，再做权衡”</strong>：<code>Warm-up RL</code>的思路很有价值。在做任何形式的模型压缩或效率优化时，先有一个不妥协的性能基准，可以有效防止核心能力的退化，让后续的权衡更加清晰和可控。</li>
+</ol></li>
+<li><strong>需要补充的背景知识</strong>：
+<ol type="1">
+<li><strong>思维链 (Chain-of-Thought,
+CoT)</strong>：深入理解CoT的原理，为什么它能提升模型的推理能力，以及它带来的成本问题。</li>
+<li><strong>强化学习与对齐技术</strong>：了解<strong>RLHF (Reinforcement
+Learning from Human Feedback)</strong> 的基本流程，以及像<strong>PPO
+(Proximal Policy Optimization)</strong> 和本文使用的
+<strong>DAPO</strong>
+等优化算法。这有助于你理解奖励函数是如何驱动模型策略（policy）更新的。</li>
+<li><strong>模型压缩与效率优化技术</strong>：除了本文的方法，还可以了解一些其他的技术，如<strong>量化（Quantization）、剪枝（Pruning）、知识蒸馏（Knowledge
+Distillation）</strong>，它们是解决模型效率问题的不同路径，可以与THINKDIAL形成互补。</li>
+<li><strong>开源LLM的微调生态</strong>：熟悉如何使用Hugging
+Face等平台对开源模型（如Llama,
+Qwen）进行SFT和RL训练，这将帮助你将论文中的思想转化为实践。</li>
+</ol></li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2025-08-29</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" data-title="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models" data-hashtags="Reading,Reasoning,cot_compress"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" data-title="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" data-title="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/" data-title="ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/reasoning/">Reasoning</a>,&nbsp;<a href="/tags/cot_compress/">Cot_compress</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/from-trial-and-error-to-improvementa-systematic-analysis-of-llm-exploration-mechanisms-in-rlvr/" class="prev" rel="prev" title="From Trial-and-Error to Improvement：A Systematic Analysis of LLM Exploration Mechanisms in RLVR"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>From Trial-and-Error to Improvement：A Systematic Analysis of LLM Exploration Mechanisms in RLVR</a>
+            <a href="/memory-r1enhancing-large-language-model-agents-to-manage-and-utilize-memories-via-reinforcement-learning/" class="next" rel="next" title="Memory-R1：Enhancing Large Language Model Agents to Manage and Utilize Memories via Reinforcement Learning">Memory-R1：Enhancing Large Language Model Agents to Manage and Utilize Memories via Reinforcement Learning<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

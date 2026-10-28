@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>training_model - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/training_model/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="training_model">
+  <meta property="og:description" content="整体训练流程架构 这是一个基于Megatron-LM框架的多模态（视觉-语言）模型训练脚本。训练流程从__main__入口开始：
+if __name__ == &#34;__main__&#34;: train_valid_test_dataloaders_provider.is_distributed = True pretrain( train_valid_test_dataloaders_provider, model_provider, ModelType.encoder_or_decoder, forward_step, args_defaults={&#39;tokenizer_type&#39;: &#39;Qwen2VLTokenizer&#39;}, extra_args_provider=get_patch_args, process_non_loss_data_func=write_online_eval_to_tensorboard, non_loss_data_func=run_online_eval, ) 核心组件详解 1. 模型构建 (model_provider) def model_provider( pre_process=True, post_process=True, add_encoder=True, add_decoder=True, vp_stage: Optional[int] = None ) -&gt; Union[Qwen2_5VLModel]: args = get_args() print_rank_0(&#34;start building qwen2-vl model ...&#34;) # Config of vit, llm and projector config = core_transformer_config_from_args(args, Qwen2VLTransformerConfig) use_te = args.transformer_impl == &#34;transformer_engine&#34; if not use_te: raise NotImplementedError(&#34;The Qwen2-VL model is only implemented with TransformerEngine!&#34;) if args.rotary_seq_len_interpolation_factor is not None or args.rotary_seq_len_interpolation_factor != 1: print_rank_0(&#39;Multimodal RoPE currently not support RoPE interpolation, set to None...&#39;) args.rotary_seq_len_interpolation_factor = None vision_config = get_vision_model_config(args, deepcopy(config)) vision_config.pipeline_model_parallel_size = 1 vision_config.num_layers_in_first_pipeline_stage = None vision_projector_config = get_vision_projection_config(deepcopy(config), vision_config.hidden_size, vision_config.spatial_merge_size) print_rank_0(&#34;building Qwen2-5-VL model in TE...&#34;) # Layer Specs of vit, llm and projector transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(args.qk_layernorm) vision_model_spec = get_qwen2vl_vision_model_spec() vision_projector_spec = get_mlp_module_spec(add_norm=False).submodules model = Qwen2_5VLModel( language_transformer_config=config, language_transformer_layer_spec=transformer_layer_spec, language_vocab_size=args.padded_vocab_size, language_max_sequence_length=args.max_position_embeddings, vision_transformer_config=vision_config, vision_transformer_layer_spec=vision_model_spec, drop_vision_class_token=False, # NOTE: no class token to drop? vision_projection_config=vision_projector_config, vision_projection_layer_spec=vision_projector_spec, vision_projection_type=&#39;mlp&#39;, allow_missing_vision_projection_checkpoint= False, # TODO: may parameterized language_position_embedding_type=args.position_embedding_type, language_rotary_percent=args.rotary_percent, language_rotary_base=args.rotary_base, pre_process=pre_process, post_process=post_process, add_decoder=add_decoder, add_encoder=add_encoder, fp16_lm_cross_entropy=args.fp16_lm_cross_entropy, parallel_output=True, language_share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights, vp_stage=vp_stage ) model.freeze( freeze_language_model=getattr(args, &#39;freeze_LM&#39;, False), freeze_vision_model=getattr(args, &#39;freeze_ViT&#39;, False), freeze_vision_projection=False ) return model 作用：构建Qwen2.5-VL多模态模型 - 创建三个组件的配置：语言模型、视觉模型、视觉投影层 - 使用TransformerEngine实现（强制要求） - 支持冻结语言模型或视觉模型的参数">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-11-12T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-06-03T16:33:56+08:00">
+    <meta property="article:tag" content="Coding">
+    <meta property="article:tag" content="Pai-Megatron">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="training_model">
+  <meta name="twitter:description" content="整体训练流程架构 这是一个基于Megatron-LM框架的多模态（视觉-语言）模型训练脚本。训练流程从__main__入口开始：
+if __name__ == &#34;__main__&#34;: train_valid_test_dataloaders_provider.is_distributed = True pretrain( train_valid_test_dataloaders_provider, model_provider, ModelType.encoder_or_decoder, forward_step, args_defaults={&#39;tokenizer_type&#39;: &#39;Qwen2VLTokenizer&#39;}, extra_args_provider=get_patch_args, process_non_loss_data_func=write_online_eval_to_tensorboard, non_loss_data_func=run_online_eval, ) 核心组件详解 1. 模型构建 (model_provider) def model_provider( pre_process=True, post_process=True, add_encoder=True, add_decoder=True, vp_stage: Optional[int] = None ) -&gt; Union[Qwen2_5VLModel]: args = get_args() print_rank_0(&#34;start building qwen2-vl model ...&#34;) # Config of vit, llm and projector config = core_transformer_config_from_args(args, Qwen2VLTransformerConfig) use_te = args.transformer_impl == &#34;transformer_engine&#34; if not use_te: raise NotImplementedError(&#34;The Qwen2-VL model is only implemented with TransformerEngine!&#34;) if args.rotary_seq_len_interpolation_factor is not None or args.rotary_seq_len_interpolation_factor != 1: print_rank_0(&#39;Multimodal RoPE currently not support RoPE interpolation, set to None...&#39;) args.rotary_seq_len_interpolation_factor = None vision_config = get_vision_model_config(args, deepcopy(config)) vision_config.pipeline_model_parallel_size = 1 vision_config.num_layers_in_first_pipeline_stage = None vision_projector_config = get_vision_projection_config(deepcopy(config), vision_config.hidden_size, vision_config.spatial_merge_size) print_rank_0(&#34;building Qwen2-5-VL model in TE...&#34;) # Layer Specs of vit, llm and projector transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(args.qk_layernorm) vision_model_spec = get_qwen2vl_vision_model_spec() vision_projector_spec = get_mlp_module_spec(add_norm=False).submodules model = Qwen2_5VLModel( language_transformer_config=config, language_transformer_layer_spec=transformer_layer_spec, language_vocab_size=args.padded_vocab_size, language_max_sequence_length=args.max_position_embeddings, vision_transformer_config=vision_config, vision_transformer_layer_spec=vision_model_spec, drop_vision_class_token=False, # NOTE: no class token to drop? vision_projection_config=vision_projector_config, vision_projection_layer_spec=vision_projector_spec, vision_projection_type=&#39;mlp&#39;, allow_missing_vision_projection_checkpoint= False, # TODO: may parameterized language_position_embedding_type=args.position_embedding_type, language_rotary_percent=args.rotary_percent, language_rotary_base=args.rotary_base, pre_process=pre_process, post_process=post_process, add_decoder=add_decoder, add_encoder=add_encoder, fp16_lm_cross_entropy=args.fp16_lm_cross_entropy, parallel_output=True, language_share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights, vp_stage=vp_stage ) model.freeze( freeze_language_model=getattr(args, &#39;freeze_LM&#39;, False), freeze_vision_model=getattr(args, &#39;freeze_ViT&#39;, False), freeze_vision_projection=False ) return model 作用：构建Qwen2.5-VL多模态模型 - 创建三个组件的配置：语言模型、视觉模型、视觉投影层 - 使用TransformerEngine实现（强制要求） - 支持冻结语言模型或视觉模型的参数">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/training_model/" /><link rel="prev" href="https://blog.vllbc.top/llavaov_1_5/" /><link rel="next" href="https://blog.vllbc.top/hf2megatron/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "training_model",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/training_model\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "coding, pai-megatron","wordcount":  2221 ,
+        "url": "https:\/\/blog.vllbc.top\/training_model\/","datePublished": "2025-11-12T00:00:00+00:00","dateModified": "2026-06-03T16:33:56+08:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">training_model</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/pai-megatron/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Pai-Megatron</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-11-12">2025-11-12</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 2221 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 5 分钟&nbsp;<span id="/training_model/" class="leancloud_visitors" data-flag-title="training_model">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><h2 id="整体训练流程架构">整体训练流程架构</h2>
+<p>这是一个基于Megatron-LM框架的多模态（视觉-语言）模型训练脚本。训练流程从<code>__main__</code>入口开始：</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode 427:439:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">&quot;__main__&quot;</span>:</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    train_valid_test_dataloaders_provider.is_distributed <span class="op">=</span> <span class="va">True</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    pretrain(</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>        train_valid_test_dataloaders_provider,</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a>        model_provider,</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>        ModelType.encoder_or_decoder,</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>        forward_step,</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>        args_defaults<span class="op">=</span>{<span class="st">&#39;tokenizer_type&#39;</span>: <span class="st">&#39;Qwen2VLTokenizer&#39;</span>},</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>        extra_args_provider<span class="op">=</span>get_patch_args,</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>        process_non_loss_data_func<span class="op">=</span>write_online_eval_to_tensorboard,</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>        non_loss_data_func<span class="op">=</span>run_online_eval,</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
+<h2 id="核心组件详解">核心组件详解</h2>
+<h3 id="模型构建-model_provider">1. <strong>模型构建
+(<code>model_provider</code>)</strong></h3>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode 70:133:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> model_provider(</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    pre_process<span class="op">=</span><span class="va">True</span>, post_process<span class="op">=</span><span class="va">True</span>, add_encoder<span class="op">=</span><span class="va">True</span>, add_decoder<span class="op">=</span><span class="va">True</span>, vp_stage: Optional[<span class="bu">int</span>] <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>) <span class="op">-&gt;</span> Union[Qwen2_5VLModel]:</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    args <span class="op">=</span> get_args()</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    print_rank_0(<span class="st">&quot;start building qwen2-vl model ...&quot;</span>)</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Config of vit, llm and projector</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    config <span class="op">=</span> core_transformer_config_from_args(args, Qwen2VLTransformerConfig)</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    use_te <span class="op">=</span> args.transformer_impl <span class="op">==</span> <span class="st">&quot;transformer_engine&quot;</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="kw">not</span> use_te:</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>        <span class="cf">raise</span> <span class="pp">NotImplementedError</span>(<span class="st">&quot;The Qwen2-VL model is only implemented with TransformerEngine!&quot;</span>)</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> args.rotary_seq_len_interpolation_factor <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span> <span class="kw">or</span> args.rotary_seq_len_interpolation_factor <span class="op">!=</span> <span class="dv">1</span>:</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>        print_rank_0(<span class="st">&#39;Multimodal RoPE currently not support RoPE interpolation, set to None...&#39;</span>)</span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>        args.rotary_seq_len_interpolation_factor <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    vision_config <span class="op">=</span> get_vision_model_config(args, deepcopy(config))</span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>    vision_config.pipeline_model_parallel_size <span class="op">=</span> <span class="dv">1</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>    vision_config.num_layers_in_first_pipeline_stage <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>    vision_projector_config <span class="op">=</span> get_vision_projection_config(deepcopy(config), vision_config.hidden_size, vision_config.spatial_merge_size)</span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>    print_rank_0(<span class="st">&quot;building Qwen2-5-VL model in TE...&quot;</span>)</span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Layer Specs of vit, llm and projector</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>    transformer_layer_spec <span class="op">=</span> get_gpt_layer_with_transformer_engine_spec(args.qk_layernorm)</span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>    vision_model_spec <span class="op">=</span> get_qwen2vl_vision_model_spec()</span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>    vision_projector_spec <span class="op">=</span> get_mlp_module_spec(add_norm<span class="op">=</span><span class="va">False</span>).submodules</span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>    model <span class="op">=</span> Qwen2_5VLModel(</span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>        language_transformer_config<span class="op">=</span>config,</span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        language_transformer_layer_spec<span class="op">=</span>transformer_layer_spec,</span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>        language_vocab_size<span class="op">=</span>args.padded_vocab_size,</span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>        language_max_sequence_length<span class="op">=</span>args.max_position_embeddings,</span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>        vision_transformer_config<span class="op">=</span>vision_config,</span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        vision_transformer_layer_spec<span class="op">=</span>vision_model_spec,</span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>        drop_vision_class_token<span class="op">=</span><span class="va">False</span>, <span class="co"># </span><span class="al">NOTE</span><span class="co">: no class token to drop?</span></span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>        vision_projection_config<span class="op">=</span>vision_projector_config,</span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>        vision_projection_layer_spec<span class="op">=</span>vision_projector_spec, </span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>        vision_projection_type<span class="op">=</span><span class="st">&#39;mlp&#39;</span>,</span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>        allow_missing_vision_projection_checkpoint<span class="op">=</span> <span class="va">False</span>, <span class="co"># </span><span class="al">TODO</span><span class="co">: may parameterized</span></span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>        language_position_embedding_type<span class="op">=</span>args.position_embedding_type,</span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>        language_rotary_percent<span class="op">=</span>args.rotary_percent,</span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>        language_rotary_base<span class="op">=</span>args.rotary_base,</span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>        pre_process<span class="op">=</span>pre_process,</span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>        post_process<span class="op">=</span>post_process,</span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>        add_decoder<span class="op">=</span>add_decoder,</span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a>        add_encoder<span class="op">=</span>add_encoder,</span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>        fp16_lm_cross_entropy<span class="op">=</span>args.fp16_lm_cross_entropy,</span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a>        parallel_output<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>        language_share_embeddings_and_output_weights<span class="op">=</span><span class="kw">not</span> args.untie_embeddings_and_output_weights,</span>
+<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a>        vp_stage<span class="op">=</span>vp_stage</span>
+<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>    model.freeze(</span>
+<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a>        freeze_language_model<span class="op">=</span><span class="bu">getattr</span>(args, <span class="st">&#39;freeze_LM&#39;</span>, <span class="va">False</span>), </span>
+<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a>        freeze_vision_model<span class="op">=</span><span class="bu">getattr</span>(args, <span class="st">&#39;freeze_ViT&#39;</span>, <span class="va">False</span>), </span>
+<span id="cb2-61"><a href="#cb2-61" aria-hidden="true" tabindex="-1"></a>        freeze_vision_projection<span class="op">=</span><span class="va">False</span></span>
+<span id="cb2-62"><a href="#cb2-62" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb2-63"><a href="#cb2-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-64"><a href="#cb2-64" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> model</span></code></pre></div>
+<p><strong>作用</strong>：构建Qwen2.5-VL多模态模型 -
+创建三个组件的配置：语言模型、视觉模型、视觉投影层 -
+使用TransformerEngine实现（强制要求） -
+支持冻结语言模型或视觉模型的参数</p>
+<h3 id="数据加载-train_valid_test_dataloaders_provider">2.
+<strong>数据加载
+(<code>train_valid_test_dataloaders_provider</code>)</strong></h3>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode 356:403:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> train_valid_test_dataloaders_provider(train_val_test_num_samples):</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Build multimodal train, validation and test dataloaders.&quot;&quot;&quot;</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> get_tensor_model_parallel_rank() <span class="op">!=</span> <span class="dv">0</span>:</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">None</span>, <span class="va">None</span>, <span class="va">None</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    args <span class="op">=</span> get_args()</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    worker_debug_path <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    worker_log_level <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    rank <span class="op">=</span> parallel_state.get_data_parallel_rank()</span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    world_size <span class="op">=</span> parallel_state.get_data_parallel_world_size()</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    data_parallel_group <span class="op">=</span> parallel_state.get_data_parallel_group()</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    worker_config <span class="op">=</span> WorkerConfig(</span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>        rank<span class="op">=</span>rank,</span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>        world_size<span class="op">=</span>world_size,</span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>        num_workers<span class="op">=</span>args.num_workers,</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>        data_parallel_group<span class="op">=</span>data_parallel_group,</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>        worker_debug_path<span class="op">=</span>worker_debug_path,</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>        worker_log_level<span class="op">=</span>worker_log_level,</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>    train_ds, valid_ds1, test_ds <span class="op">=</span> datasets_provider(worker_config)</span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>    train_dataloader <span class="op">=</span> get_savable_loader(train_ds, worker_config<span class="op">=</span>worker_config)</span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> args.load <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="bu">getattr</span>(args, <span class="st">&quot;dataloader_save&quot;</span>, <span class="va">None</span>):</span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>            dp_rank <span class="op">=</span> parallel_state.get_data_parallel_rank()</span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>            data_save_name <span class="op">=</span> get_checkpoint_name(</span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>                args.dataloader_save,</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>                args.iteration,</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>                basename<span class="op">=</span><span class="ss">f&quot;train_dataloader_dprank</span><span class="sc">{</span>dp_rank<span class="sc">:03d}</span><span class="ss">.pt&quot;</span>,</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> os.path.exists(data_save_name):</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>                <span class="cf">try</span>:</span>
+<span id="cb3-36"><a href="#cb3-36" aria-hidden="true" tabindex="-1"></a>                    dataset_state_dict <span class="op">=</span> torch.load(data_save_name, map_location<span class="op">=</span><span class="st">&quot;cpu&quot;</span>)</span>
+<span id="cb3-37"><a href="#cb3-37" aria-hidden="true" tabindex="-1"></a>                    train_dataloader.restore_state_rank(dataset_state_dict[<span class="st">&quot;dataloader_state_dict&quot;</span>])</span>
+<span id="cb3-38"><a href="#cb3-38" aria-hidden="true" tabindex="-1"></a>                    print_rank_0(<span class="ss">f&quot;restored dataset state from </span><span class="sc">{</span>data_save_name<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb3-39"><a href="#cb3-39" aria-hidden="true" tabindex="-1"></a>                <span class="cf">except</span> <span class="pp">Exception</span> <span class="im">as</span> e:</span>
+<span id="cb3-40"><a href="#cb3-40" aria-hidden="true" tabindex="-1"></a>                    print_rank_0(<span class="st">&quot;loading dataloader checkpoint failed. Skipping. &quot;</span> <span class="op">+</span> <span class="bu">str</span>(e))</span>
+<span id="cb3-41"><a href="#cb3-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-42"><a href="#cb3-42" aria-hidden="true" tabindex="-1"></a>    valid_dataloader <span class="op">=</span> [</span>
+<span id="cb3-43"><a href="#cb3-43" aria-hidden="true" tabindex="-1"></a>        EnergonDataloader(get_loader(valid_ds, worker_config<span class="op">=</span>worker_config))</span>
+<span id="cb3-44"><a href="#cb3-44" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> valid_ds <span class="kw">in</span> valid_ds1</span>
+<span id="cb3-45"><a href="#cb3-45" aria-hidden="true" tabindex="-1"></a>    ]</span>
+<span id="cb3-46"><a href="#cb3-46" aria-hidden="true" tabindex="-1"></a>    test_dataloader <span class="op">=</span> <span class="va">None</span> <span class="co"># </span><span class="al">NOTE</span><span class="co">: no test</span></span>
+<span id="cb3-47"><a href="#cb3-47" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-48"><a href="#cb3-48" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> EnergonDataloader(train_dataloader), valid_dataloader, <span class="va">None</span></span></code></pre></div>
+<p><strong>作用</strong>：创建分布式数据加载器 - 只在tensor并行的rank
+0上创建dataloader - 使用Megatron Energon框架处理多模态数据 -
+支持断点续训时恢复dataloader状态</p>
+<h3 id="数据集创建-datasets_provider">3. <strong>数据集创建
+(<code>datasets_provider</code>)</strong></h3>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode 316:353:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> datasets_provider(worker_config<span class="op">=</span><span class="va">None</span>):</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Create multimodal train, validation and test datasets.&quot;&quot;&quot;</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    args <span class="op">=</span> get_args()</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    train_dataset <span class="op">=</span> get_train_dataset(</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>        args.train_data_path[<span class="dv">0</span>],</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>        batch_size<span class="op">=</span>args.micro_batch_size,</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>        task_encoder<span class="op">=</span>TaskEncoder(),</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>        worker_config<span class="op">=</span>worker_config,</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>        virtual_epoch_length<span class="op">=</span><span class="dv">1000</span>,</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>        max_samples_per_sequence<span class="op">=</span><span class="dv">100</span>,</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>        shuffle_buffer_size<span class="op">=</span><span class="dv">100</span>,</span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>        handler<span class="op">=</span>print_error_handler,</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>        image_decode<span class="op">=</span><span class="st">&quot;pil&quot;</span>,</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a>    val_datasets <span class="op">=</span> get_val_datasets(</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>        args.valid_data_path[<span class="dv">0</span>],</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>        batch_size<span class="op">=</span>args.micro_batch_size,</span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a>        <span class="co"># This is the total number over all workers</span></span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a>        <span class="co"># limit=args.eval_iters * get_num_microbatches(),</span></span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>        task_encoder<span class="op">=</span>TaskEncoder(),</span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>        worker_config<span class="op">=</span>worker_config,</span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a>        handler<span class="op">=</span>print_error_handler,</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a>        image_decode<span class="op">=</span><span class="st">&quot;pil&quot;</span>,</span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a>    val_datasets_without_source_datasets <span class="op">=</span> [</span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Limit the dataset to eval_iters * num_microbatches</span></span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a>        LimitDataset(</span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a>            <span class="co"># Repeat the inner dataset in case it&#39;s too short</span></span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>            RepeatDataset(val_ds, worker_config<span class="op">=</span>worker_config),</span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a>            length<span class="op">=</span>args.eval_iters <span class="op">*</span> get_num_microbatches(),</span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a>            worker_config<span class="op">=</span>worker_config,</span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>            reset_after_epoch<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> val_ds, _src_ds <span class="kw">in</span> val_datasets</span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a>    ]</span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> train_dataset, val_datasets_without_source_datasets, <span class="va">None</span></span></code></pre></div>
+<p><strong>作用</strong>：配置训练和验证数据集 -
+使用<code>TaskEncoder</code>处理多模态任务 -
+验证集使用<code>RepeatDataset</code>和<code>LimitDataset</code>包装，确保固定的评估步数</p>
+<h3 id="批次数据获取-get_batch">4. <strong>批次数据获取
+(<code>get_batch</code>)</strong></h3>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode 166:229:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> get_batch(model, data_iterator):</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Generate a batch&quot;&quot;&quot;</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    imgs <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    tokens <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    labels <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    loss_mask <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>    attention_mask <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>    position_ids <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Broadcast data.</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>    torch.cuda.nvtx.range_push(<span class="st">&quot;get_data&quot;</span>)</span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> data_iterator <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span> <span class="kw">and</span> get_tensor_model_parallel_rank() <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a>        data <span class="op">=</span> <span class="bu">next</span>(data_iterator)</span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a>    <span class="cf">else</span>:</span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a>        data <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a>    data_text <span class="op">=</span>  broadcast_data([<span class="st">&quot;text&quot;</span>], data, torch.int64)[<span class="st">&quot;text&quot;</span>]</span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a>    target <span class="op">=</span>  broadcast_data([<span class="st">&quot;target&quot;</span>], data, torch.int64)[<span class="st">&quot;target&quot;</span>]</span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a>    <span class="co"># shape: num_tiles x c x h x w</span></span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a>    imgs <span class="op">=</span> broadcast_data([<span class="st">&quot;imgs&quot;</span>], data, torch.float32)[<span class="st">&quot;imgs&quot;</span>]</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a>    <span class="co"># shape: num_tiles x c x h w</span></span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a>    videos <span class="op">=</span> broadcast_data([<span class="st">&quot;videos&quot;</span>], data, torch.float32)[<span class="st">&quot;videos&quot;</span>]</span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a>    <span class="co"># shape: n_image_samples</span></span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a>    image_thw_grids <span class="op">=</span> broadcast_data([<span class="st">&quot;image_thw_grids&quot;</span>], data, torch.<span class="bu">long</span>)[<span class="st">&quot;image_thw_grids&quot;</span>]</span>
+<span id="cb5-26"><a href="#cb5-26" aria-hidden="true" tabindex="-1"></a>    <span class="co"># shape: n_video_samples</span></span>
+<span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a>    video_thw_grids <span class="op">=</span> broadcast_data([<span class="st">&quot;video_thw_grids&quot;</span>], data, torch.<span class="bu">long</span>)[<span class="st">&quot;video_thw_grids&quot;</span>]</span>
+<span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a>    <span class="co"># shape: n_video_samples</span></span>
+<span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a>    second_per_grid_ts <span class="op">=</span> broadcast_data([<span class="st">&#39;second_per_grid_ts&#39;</span>], data, torch.float32)[<span class="st">&#39;second_per_grid_ts&#39;</span>]</span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a>    image_input_mask <span class="op">=</span> broadcast_data([<span class="st">&quot;image_input_mask&quot;</span>], data, torch.<span class="bu">bool</span>)[<span class="st">&quot;image_input_mask&quot;</span>]</span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a>    video_input_mask <span class="op">=</span> broadcast_data([<span class="st">&quot;video_input_mask&quot;</span>], data, torch.<span class="bu">bool</span>)[<span class="st">&quot;video_input_mask&quot;</span>]</span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a>    torch.cuda.nvtx.range_pop()</span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a>    torch.cuda.nvtx.range_push(<span class="st">&quot;index tokens&quot;</span>)</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a>    tokenizer <span class="op">=</span> get_tokenizer()</span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a>    tokens <span class="op">=</span> data_text.<span class="bu">long</span>().contiguous()</span>
+<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a>    labels <span class="op">=</span> target.contiguous()</span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> tokens.shape <span class="op">==</span> labels.shape, <span class="ss">f&quot;tokens: </span><span class="sc">{</span>tokens<span class="sc">.</span>shape<span class="sc">}</span><span class="ss"> != labels: </span><span class="sc">{</span>labels<span class="sc">.</span>shape<span class="sc">}</span><span class="ss">&quot;</span></span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>    torch.cuda.nvtx.range_pop()</span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>    <span class="co"># </span><span class="al">NOTE</span><span class="co">: no sequence packing in LLM inputs</span></span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>    torch.cuda.nvtx.range_push(<span class="st">&quot;get_ltor_masks_and_position_ids&quot;</span>)</span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>    attention_mask, loss_mask, position_ids <span class="op">=</span> get_ltor_masks_and_position_ids(</span>
+<span id="cb5-48"><a href="#cb5-48" aria-hidden="true" tabindex="-1"></a>        model, tokens, image_thw_grids, video_thw_grids, labels, tokenizer.pad_token_id, second_per_grid_ts</span>
+<span id="cb5-49"><a href="#cb5-49" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb5-50"><a href="#cb5-50" aria-hidden="true" tabindex="-1"></a>    torch.cuda.nvtx.range_pop()</span>
+<span id="cb5-51"><a href="#cb5-51" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-52"><a href="#cb5-52" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> (</span>
+<span id="cb5-53"><a href="#cb5-53" aria-hidden="true" tabindex="-1"></a>        tokens, </span>
+<span id="cb5-54"><a href="#cb5-54" aria-hidden="true" tabindex="-1"></a>        labels, </span>
+<span id="cb5-55"><a href="#cb5-55" aria-hidden="true" tabindex="-1"></a>        loss_mask, </span>
+<span id="cb5-56"><a href="#cb5-56" aria-hidden="true" tabindex="-1"></a>        attention_mask, </span>
+<span id="cb5-57"><a href="#cb5-57" aria-hidden="true" tabindex="-1"></a>        position_ids, </span>
+<span id="cb5-58"><a href="#cb5-58" aria-hidden="true" tabindex="-1"></a>        imgs, </span>
+<span id="cb5-59"><a href="#cb5-59" aria-hidden="true" tabindex="-1"></a>        videos,</span>
+<span id="cb5-60"><a href="#cb5-60" aria-hidden="true" tabindex="-1"></a>        image_thw_grids, </span>
+<span id="cb5-61"><a href="#cb5-61" aria-hidden="true" tabindex="-1"></a>        video_thw_grids,</span>
+<span id="cb5-62"><a href="#cb5-62" aria-hidden="true" tabindex="-1"></a>        image_input_mask, </span>
+<span id="cb5-63"><a href="#cb5-63" aria-hidden="true" tabindex="-1"></a>        video_input_mask</span>
+<span id="cb5-64"><a href="#cb5-64" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
+<p><strong>作用</strong>：从数据迭代器获取并处理一个batch -
+使用<code>broadcast_data</code>在tensor并行组间广播数据（只有rank
+0读取数据） - 处理多模态输入：文本tokens、图像、视频 -
+获取位置编码和损失掩码 - 使用NVTX标记进行性能分析</p>
+<h3 id="位置编码和掩码生成-get_ltor_masks_and_position_ids">5.
+<strong>位置编码和掩码生成
+(<code>get_ltor_masks_and_position_ids</code>)</strong></h3>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode 135:164:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> get_ltor_masks_and_position_ids(</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>        model,</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>        input_ids, </span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>        image_thw_grids,</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>        video_thw_grids,</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>        target, </span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>        pad_token, </span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>        second_per_grid_ts,</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>        ignore_index<span class="op">=</span><span class="va">None</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    ):</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Build masks and position id for left to right model.&quot;&quot;&quot;</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Position ids. [3 X bs X seqlen]</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>    position_ids, _ <span class="op">=</span> model.get_rope_index(</span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>        input_ids<span class="op">=</span>input_ids,</span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>        image_grid_thw<span class="op">=</span>image_thw_grids,</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>        video_grid_thw<span class="op">=</span>video_thw_grids,</span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a>        second_per_grid_ts<span class="op">=</span>second_per_grid_ts,</span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>        attention_mask<span class="op">=</span>input_ids <span class="op">!=</span> pad_token</span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Loss mask.</span></span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a>    loss_mask <span class="op">=</span> torch.ones(target.size(), dtype<span class="op">=</span>torch.<span class="bu">float</span>, device<span class="op">=</span>input_ids.device)</span>
+<span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a>    loss_mask[target <span class="op">==</span> pad_token] <span class="op">=</span> <span class="fl">0.0</span>  <span class="co"># mask paddings</span></span>
+<span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> ignore_index <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
+<span id="cb6-25"><a href="#cb6-25" aria-hidden="true" tabindex="-1"></a>        loss_mask[target <span class="op">==</span> ignore_index] <span class="op">=</span> <span class="fl">0.0</span>  <span class="co"># mask prompts</span></span>
+<span id="cb6-26"><a href="#cb6-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-27"><a href="#cb6-27" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Attention mask.</span></span>
+<span id="cb6-28"><a href="#cb6-28" aria-hidden="true" tabindex="-1"></a>    attention_mask <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb6-29"><a href="#cb6-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-30"><a href="#cb6-30" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> attention_mask, loss_mask, position_ids</span></code></pre></div>
+<p><strong>作用</strong>：为多模态输入生成位置编码 -
+使用特殊的RoPE索引处理图像/视频的时空网格信息 -
+<code>position_ids</code>是3维的（支持多模态RoPE） -
+创建损失掩码，忽略padding和可选的prompt部分</p>
+<h3 id="前向传播-forward_step">6. <strong>前向传播
+(<code>forward_step</code>)</strong></h3>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode 260:300:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> forward_step(data_iterator, model: Qwen2_5VLModel):</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Forward training step.</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="co">    Args:</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="co">        data_iterator : Input data iterator</span></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a><span class="co">        model (GPTModel): The GPT Model</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    timers <span class="op">=</span> get_timers()</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Get the batch.</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    timers(<span class="st">&quot;batch-generator&quot;</span>, log_level<span class="op">=</span><span class="dv">2</span>).start()</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    (</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>        tokens, </span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>        labels, </span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>        loss_mask, </span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>        attention_mask, </span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>        position_ids, </span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>        imgs, </span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>        videos,</span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>        image_thw_grids, </span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>        video_thw_grids,</span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a>        image_input_mask, </span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a>        video_input_mask</span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a>    ) <span class="op">=</span> get_batch(unwrap_model(model), data_iterator)</span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>    timers(<span class="st">&quot;batch-generator&quot;</span>).stop()</span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true" tabindex="-1"></a>    vision_data <span class="op">=</span> torch.cat([imgs, videos], dim<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true" tabindex="-1"></a>    vision_grid <span class="op">=</span> torch.cat([image_thw_grids, video_thw_grids], dim<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb7-28"><a href="#cb7-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-29"><a href="#cb7-29" aria-hidden="true" tabindex="-1"></a>    output_tensor <span class="op">=</span> model(</span>
+<span id="cb7-30"><a href="#cb7-30" aria-hidden="true" tabindex="-1"></a>        input_ids <span class="op">=</span> tokens,</span>
+<span id="cb7-31"><a href="#cb7-31" aria-hidden="true" tabindex="-1"></a>        position_ids <span class="op">=</span> position_ids,</span>
+<span id="cb7-32"><a href="#cb7-32" aria-hidden="true" tabindex="-1"></a>        vision_data <span class="op">=</span> vision_data,</span>
+<span id="cb7-33"><a href="#cb7-33" aria-hidden="true" tabindex="-1"></a>        vision_grid_thw <span class="op">=</span>  vision_grid,</span>
+<span id="cb7-34"><a href="#cb7-34" aria-hidden="true" tabindex="-1"></a>        video_start_index <span class="op">=</span> image_input_mask.<span class="bu">sum</span>().cpu().item(),</span>
+<span id="cb7-35"><a href="#cb7-35" aria-hidden="true" tabindex="-1"></a>        image_input_mask <span class="op">=</span> image_input_mask,</span>
+<span id="cb7-36"><a href="#cb7-36" aria-hidden="true" tabindex="-1"></a>        video_input_mask <span class="op">=</span> video_input_mask,</span>
+<span id="cb7-37"><a href="#cb7-37" aria-hidden="true" tabindex="-1"></a>        attention_mask <span class="op">=</span> attention_mask,</span>
+<span id="cb7-38"><a href="#cb7-38" aria-hidden="true" tabindex="-1"></a>        labels <span class="op">=</span> labels</span>
+<span id="cb7-39"><a href="#cb7-39" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb7-40"><a href="#cb7-40" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-41"><a href="#cb7-41" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> output_tensor, partial(loss_func, loss_mask)</span></code></pre></div>
+<p><strong>作用</strong>：执行一次训练前向传播 - 合并图像和视频数据 -
+通过<code>video_start_index</code>区分图像和视频 -
+返回输出和损失函数（使用<code>partial</code>绑定loss_mask）</p>
+<h3 id="损失计算-loss_func">7. <strong>损失计算
+(<code>loss_func</code>)</strong></h3>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode 231:258:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Loss function.</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="co">    Args:</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a><span class="co">        loss_mask (torch.Tensor): Used to mask out some portions of the loss</span></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="co">        output_tensor (torch.Tensor): The tensor with the losses</span></span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a><span class="co">    &quot;&quot;&quot;</span></span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>    args <span class="op">=</span> get_args()</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a>    losses <span class="op">=</span> output_tensor.<span class="bu">float</span>()</span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>    loss_mask <span class="op">=</span> loss_mask.view(<span class="op">-</span><span class="dv">1</span>).<span class="bu">float</span>()</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a>    loss <span class="op">=</span> torch.stack([torch.<span class="bu">sum</span>(losses.view(<span class="op">-</span><span class="dv">1</span>) <span class="op">*</span> loss_mask), loss_mask.<span class="bu">sum</span>()])</span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> args.context_parallel_size <span class="op">&gt;</span> <span class="dv">1</span>:</span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true" tabindex="-1"></a>        torch.distributed.all_reduce(loss, group<span class="op">=</span>mpu.get_context_parallel_group())</span>
+<span id="cb8-16"><a href="#cb8-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-17"><a href="#cb8-17" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Check individual rank losses are not NaN prior to DP all-reduce.</span></span>
+<span id="cb8-18"><a href="#cb8-18" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> args.check_for_nan_in_loss_and_grad:</span>
+<span id="cb8-19"><a href="#cb8-19" aria-hidden="true" tabindex="-1"></a>        global_rank <span class="op">=</span> torch.distributed.get_rank()</span>
+<span id="cb8-20"><a href="#cb8-20" aria-hidden="true" tabindex="-1"></a>        <span class="cf">assert</span> <span class="kw">not</span> loss.isnan().<span class="bu">any</span>(), (</span>
+<span id="cb8-21"><a href="#cb8-21" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;Rank </span><span class="sc">{</span>global_rank<span class="sc">}</span><span class="ss">: found NaN in local forward loss calculation. &quot;</span></span>
+<span id="cb8-22"><a href="#cb8-22" aria-hidden="true" tabindex="-1"></a>            <span class="ss">f&quot;Device: </span><span class="sc">{</span>torch<span class="sc">.</span>cuda<span class="sc">.</span>current_device()<span class="sc">}</span><span class="ss">, node: </span><span class="sc">{</span>os<span class="sc">.</span>uname()[<span class="dv">1</span>]<span class="sc">}</span><span class="ss">&quot;</span></span>
+<span id="cb8-23"><a href="#cb8-23" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb8-24"><a href="#cb8-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-25"><a href="#cb8-25" aria-hidden="true" tabindex="-1"></a>    averaged_loss <span class="op">=</span> average_losses_across_data_parallel_group(loss)</span>
+<span id="cb8-26"><a href="#cb8-26" aria-hidden="true" tabindex="-1"></a>    averaged_loss <span class="op">=</span> averaged_loss[<span class="dv">0</span>] <span class="op">/</span> averaged_loss[<span class="dv">1</span>]</span>
+<span id="cb8-27"><a href="#cb8-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-28"><a href="#cb8-28" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> loss[<span class="dv">0</span>] <span class="op">/</span> loss[<span class="dv">1</span>] <span class="op">*</span> args.context_parallel_size, {<span class="st">&quot;lm loss&quot;</span>: averaged_loss}</span></code></pre></div>
+<p><strong>作用</strong>：计算并聚合损失 - 应用loss_mask忽略特定tokens -
+在context并行组和data并行组间聚合损失 - 支持NaN检测 -
+返回局部损失和全局平均损失</p>
+<h3 id="辅助类和函数">8. <strong>辅助类和函数</strong></h3>
+<h4 id="energondataloader"><code>EnergonDataloader</code></h4>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode 406:420:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> EnergonDataloader:</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;A wrapper to use Megatron Energon dataloader with the Megatron-LM training loop.&quot;&quot;&quot;</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, dataloader):</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._dataloader <span class="op">=</span> dataloader</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._iter <span class="op">=</span> <span class="bu">iter</span>(cyclic_iter(dataloader))</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__next__</span>(<span class="va">self</span>):</span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>._iter.<span class="fu">__next__</span>()</span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__iter__</span>(<span class="va">self</span>):</span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>._iter.<span class="fu">__iter__</span>()</span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> save_state(<span class="va">self</span>):</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>._dataloader.save_state_rank()</span></code></pre></div>
+<p><strong>作用</strong>：包装Energon dataloader以兼容Megatron训练循环 -
+提供无限循环的迭代器 - 支持保存和恢复状态</p>
+<h4 id="cyclic_iter"><code>cyclic_iter</code></h4>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode 422:425:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> cyclic_iter(<span class="bu">iter</span>):</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">while</span> <span class="va">True</span>:</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> x <span class="kw">in</span> <span class="bu">iter</span>:</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>            <span class="cf">yield</span> x</span></code></pre></div>
+<p><strong>作用</strong>：创建无限循环的迭代器</p>
+<h4 id="评估相关函数">评估相关函数</h4>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode 302:314:examples/qwen2_5_vl/pretrain_qwen.py"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> run_online_eval(model):</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Run an evaluation benchmark during training.&quot;&quot;&quot;</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Do nothing.</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> []</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> write_online_eval_to_tensorboard(data, iteration, writer):</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>    <span class="co">&quot;&quot;&quot;Write online evaluation data to Tensorboard.&quot;&quot;&quot;</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="kw">not</span> writer:</span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> item <span class="kw">in</span> data:</span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> k, v <span class="kw">in</span> item.items():</span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a>            writer.add_scalar(k, v, iteration)</span></code></pre></div>
+<h2 id="训练流程总结">训练流程总结</h2>
+<ol type="1">
+<li><strong>初始化阶段</strong>：
+<ul>
+<li>解析命令行参数</li>
+<li>初始化分布式环境（TP、PP、DP、CP）</li>
+<li>创建tokenizer</li>
+</ul></li>
+<li><strong>模型构建阶段</strong>（<code>model_provider</code>）：
+<ul>
+<li>创建语言模型配置</li>
+<li>创建视觉模型配置</li>
+<li>创建视觉投影层配置</li>
+<li>实例化<code>Qwen2_5VLModel</code></li>
+<li>应用参数冻结策略</li>
+</ul></li>
+<li><strong>数据准备阶段</strong>（<code>train_valid_test_dataloaders_provider</code>）：
+<ul>
+<li>配置分布式worker</li>
+<li>创建训练/验证数据集</li>
+<li>包装成Energon dataloader</li>
+</ul></li>
+<li><strong>训练循环</strong>（由Megatron的<code>pretrain</code>函数驱动）：
+<ul>
+<li>获取batch（<code>get_batch</code>）</li>
+<li>前向传播（<code>forward_step</code>）</li>
+<li>计算损失（<code>loss_func</code>）</li>
+<li>反向传播（Megatron自动处理）</li>
+<li>参数更新（Megatron自动处理）</li>
+<li>定期验证和保存checkpoint</li>
+</ul></li>
+<li><strong>关键特性</strong>：
+<ul>
+<li>支持图像和视频的混合训练</li>
+<li>使用3D RoPE位置编码处理时空信息</li>
+<li>支持模型并行（TP、PP、DP、CP）</li>
+<li>支持选择性参数冻结</li>
+<li>使用TransformerEngine加速</li>
+</ul></li>
+</ol>
+<p>这是一个完整的多模态大模型训练pipeline，充分利用了Megatron-LM的分布式训练能力。</p>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-06-03&nbsp;<a class="git-hash" href="https://github.com/vllbc/vllbc.github.io/commit/99cfa25263c73050d0bc668a65a69f594a279a0c" target="_blank" title="commit by vllbc(vllbc66@gmail.com) 99cfa25263c73050d0bc668a65a69f594a279a0c: reorganize vault to 8-category structure">
+                                    <i class="fas fa-hashtag fa-fw" aria-hidden="true"></i>99cfa25</a></span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/training_model/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/training_model/" data-title="training_model" data-hashtags="coding,pai-megatron"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/training_model/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/training_model/" data-title="training_model"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/training_model/" data-title="training_model"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/training_model/" data-title="training_model"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/pai-megatron/">Pai-Megatron</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/llavaov_1_5/" class="prev" rel="prev" title="llavaov_1_5"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>llavaov_1_5</a>
+            <a href="/hf2megatron/" class="next" rel="next" title="hf2megatron">hf2megatron<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

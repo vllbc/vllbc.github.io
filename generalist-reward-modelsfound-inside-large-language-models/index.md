@@ -1,9 +1,5 @@
 # GENERALIST REWARD MODELS：FOUND INSIDE LARGE LANGUAGE MODELS
 
-好的，非常荣幸能以领域专家的身份，与您一同深入探讨这篇具有开创性意义的论文《Generalist Reward Models: Found Inside Large Language Models》。这篇论文提出了一种颠覆性的思想：我们或许不再需要耗费巨资去训练一个独立的奖励模型（Reward Model），因为一个强大的通用奖励模型，早已“内生”于任何一个通过标准方式（next-token prediction）训练的语言模型之中。
-
-接下来，我将首先为您提供一个整体性的深度解读，然后严格按照您提出的六个问题，逐一进行剖析。
-
 ### 论文综合深度解读
 
 这篇论文的核心贡献，在于它揭示并严谨地证明了一个深刻的“二象性”：大型语言模型（LLM）的训练过程，不仅是在学习“如何生成文本”（模仿），同时也是在隐式地学习“如何评价文本的好坏”（奖励）。作者将这种内在于 LLM 自身、无需额外训练即可提取的奖励信号，命名为**“内生奖励”（Endogenous Reward）**。这彻底改变了我们对 LLM 对齐（Alignment）的传统认知。

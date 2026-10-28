@@ -1,0 +1,1354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理 - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理">
+  <meta property="og:description" content="来源：DeepSeekV4 Infra Deep Dive · 第四节 4.4: PyTorch 训练显存管理：从 Caching Allocator 到 Stream 同步
+系列：可灵 AI infra 训练团队出品，全文系列见原文末链接。本文是该系列的 4.4 一篇，专门讲训练显存怎么分、怎么 OOM、怎么省。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-07-07T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-07-07T00:00:00+00:00">
+    <meta property="article:tag" content="LLM">
+    <meta property="article:tag" content="Pretraining">
+    <meta property="article:tag" content="FSDP">
+    <meta property="article:tag" content="ZeRO">
+    <meta property="article:tag" content="MoE">
+    <meta property="article:tag" content="Recompute">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理">
+  <meta name="twitter:description" content="来源：DeepSeekV4 Infra Deep Dive · 第四节 4.4: PyTorch 训练显存管理：从 Caching Allocator 到 Stream 同步
+系列：可灵 AI infra 训练团队出品，全文系列见原文末链接。本文是该系列的 4.4 一篇，专门讲训练显存怎么分、怎么 OOM、怎么省。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" /><link rel="prev" href="https://blog.vllbc.top/rl%E9%9D%A2%E8%AF%95%E9%A2%982026/" /><link rel="next" href="https://blog.vllbc.top/verl-v1-%E4%B8%BB%E7%BA%BF%E9%87%8D%E6%9E%84/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "LLM, Pretraining, FSDP, ZeRO, MoE, Recompute, NCCL","wordcount":  12097 ,
+        "url": "https:\/\/blog.vllbc.top\/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86\/","datePublished": "2026-07-07T00:00:00+00:00","dateModified": "2026-07-07T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/pretraining/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Pretraining</a>&nbsp;<a href="/categories/llm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2026-07-07">2026-07-07</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 12097 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 25 分钟&nbsp;<span id="/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" class="leancloud_visitors" data-flag-title="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><blockquote>
+<p>来源：<a
+href="https://zhuanlan.zhihu.com/p/2052200237373118275">DeepSeekV4 Infra
+Deep Dive · 第四节 4.4: PyTorch 训练显存管理：从 Caching Allocator 到
+Stream 同步</a></p>
+<p>系列：可灵 AI infra
+训练团队出品，全文系列见原文末链接。本文是该系列的 4.4
+一篇，专门讲训练显存怎么分、怎么 OOM、怎么省。</p>
+</blockquote>
+<p>笔记以”按生命周期分四类”为主线展开。<strong>比按”哪一项占得多”分类更能看清
+OOM 卡在哪一环</strong>：从初始化到 step
+结束，四类显存分别在什么时刻驻留、用什么手段能挪走，挪到哪里去。</p>
+<hr />
+<h2 id="allocated-与-reserved-的语义">01 <code>allocated</code> 与
+<code>reserved</code> 的语义</h2>
+<p>这一段是后面所有判断的前提。</p>
+<ul>
+<li><code>allocated</code> = caching allocator 实际切给存活 tensor
+的字节数</li>
+<li><code>reserved</code> = allocator 从驱动一次性申请到的 segment
+总量；驱动一次分一大块连续显存，叫一个 segment</li>
+</ul>
+<p>两者永远满足 <code>reserved ≥ allocated</code>，差出来的是 allocator
+持有的、暂时既不还驱动也没分出去的空闲
+block，也就是<strong>碎片</strong>。</p>
+<pre class="text"><code>reserved = allocated + 碎片 + 瞬态峰值被抬高后留下的「台阶」</code></pre>
+<p>「台阶」是 OOM 判断里最容易踩的坑：caching allocator 的
+<code>free</code> 只把 block 退回池里复用、并不向驱动退还，整段 segment
+全部空闲才有资格归还。瞬态峰值那几块大 block 常常和长寿命
+block（激活缓存、通信预留）位于同一 segment，始终无法同时空出来，于是
+<code>reserved</code>
+只升难降——它记录的<strong>不是此刻用了多少</strong>，而是<strong>训练至今某一瞬间最多需要过多少连续显存</strong>。</p>
+<blockquote>
+<p>「<code>allocated</code> 不高却 OOM」通常就是这道
+<code>reserved</code> 台阶造成的。</p>
+</blockquote>
+<hr />
+<h2 id="四类训练显存按生命周期划分">02 四类训练显存：按生命周期划分</h2>
+<p>训练显存的增量主要来自反向传播。推理时单卡 HBM 上基本只有
+weights，加一份随生成长度增长的 KV
+cache；训练多出的十几倍几乎都来自反向——chain rule
+要求前向中间结果和梯度副本一直驻留到反向用完，于是
+activation、梯度、optimizer state、重算中间值才同时占用卡上
+HBM。下面四类是<strong>同一个反向需求在不同生命周期上的分布</strong>，去掉反向（即推理）它们全部消失。</p>
+<p>按生命周期划分，关注每一类显存什么时候分配、什么时候释放、有没有可能跨
+step
+还被保留。四类按占用从高到低排列：当前最高的那类降下来后，下一类就成为主导项。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>类别</th>
+<th>生命周期</th>
+<th>单卡量级（V3）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>恒定占用（weights / grads / opt state）</td>
+<td>跨 step 不变</td>
+<td>68.5 GB</td>
+</tr>
+<tr>
+<td>Activation（forward saved）</td>
+<td>单 step 单峰</td>
+<td>131 GB（未压缩）</td>
+</tr>
+<tr>
+<td>计算峰值（kernel 内瞬态）</td>
+<td>μs 尖峰</td>
+<td>单层 GiB 级</td>
+</tr>
+<tr>
+<td>通信 buffer（NCCL 预留）</td>
+<td>跨 step 常驻</td>
+<td>数百 MiB ~ 1 GB（EP all-to-all + DP all-reduce）</td>
+</tr>
+</tbody>
+</table>
+<p>下面逐类拆开。</p>
+<h3 id="恒定占用weights-gradients-optimizer-states">02.1
+恒定占用：weights / gradients / optimizer states</h3>
+<p>生命周期跨 step
+不变：从初始化那一刻分配出来，持续保留到训练结束。每一步前向 / 反向 /
+optimizer 都要读它们，没有任何释放窗口。</p>
+<p>体现在 <code>reserved</code> 曲线上：训练启动后几个 step
+内，<code>reserved</code> 分几次跳到一个稳定值，此后整段训练再不变。</p>
+<p>必须提前一次性分配。DDP 下模型刚 build 出来就占满。FSDP / ZeRO
+是特例，按 rank 分片到多卡。除了沿 DP 副本维度分片的 FSDP / ZeRO，TP（按
+head / hidden 划分）、PP（按层划分）、EP（按 expert
+划分）也都在削减这条恒定基线，只是各占一个不同的维度。</p>
+<h3 id="activation前向累积反向释放">02.2
+Activation：前向累积、反向释放</h3>
+<p>生命周期由 chain rule 决定：前向算到第 i
+层时产生的中间结果，要保留到反向传播回第 i
+层、读取完成后才释放。中间隔着「forward 跑完剩下层 + backward
+倒回这一层」几十毫秒到秒级的窗口——<strong>跨 kernel 却不跨
+step</strong>。</p>
+<p><code>allocated</code> 曲线上是随 forward 单调累积、随 backward
+单调消费的单峰曲线——前向到达峰值时全部 activation 都保留在 HBM
+上，backward 每过一层释放一份。这段累积-释放曲线是 Activation
+Checkpointing 的优化目标。</p>
+<p>每个 micro-batch 临时申请：每一步开始前 activation
+都不存在；前向算到哪层，那层中间结果就被 allocator 划出
+block；分配路径仍留在 caching allocator 内部。</p>
+<p>上一个 micro-batch 释放的同档 block 留在池里复用。warmup 之后几乎所有
+activation 分配都在 allocator 内部命中已有
+block，驱动那条较慢的路径只在分桶不匹配（请求大小不落进任一现成 block
+的尺寸区间）或 segment 已用尽时才走。</p>
+<h3 id="单个-kernel-内的瞬态峰值">02.3 单个 kernel 内的瞬态峰值</h3>
+<p>进入 kernel 时申请、退出 kernel
+立刻释放，存在时间只有毫秒甚至微秒级。MoE 的 expert FFN
+intermediate、FlashAttention backward 的 work tensor、cuBLAS GEMM 的
+workspace 都属于这一类。</p>
+<p>在 MemTrace 上表现为一道 kernel
+刻度宽的尖峰，按时间平均下来几乎看不出来，瞬时却常常达到单层 GiB
+级。因为存在时间太短、不进入前向保存的激活，手算 saved activation
+时容易漏掉。</p>
+<p><strong>常驻还是临时</strong>：看上去是临时的，kernel
+跑完就标记为空闲。但 caching allocator 的 <code>free</code> 只把 block
+退回池里复用、并不向驱动退还，整段 segment
+全部空闲才有资格归还；瞬态峰值那几块大 block 常常和长寿命 block 位于同一
+segment，始终无法同时空出来，于是 <code>reserved</code> 只升难降。</p>
+<blockquote>
+<p><code>allocated</code> 曲线规律地起落，<code>reserved</code>
+却是台阶式抬升。</p>
+</blockquote>
+<p>这类瞬时峰值的根本解决办法是 fused kernel，把多个 kernel
+的中间结果保留在 SRAM、不写回 HBM，单次数据量不会产生几 GiB 的瞬态
+buffer。</p>
+<h3 id="通信-buffer集合通信的中转缓冲">02.4 通信
+buffer：集合通信的中转缓冲</h3>
+<p>训练一开始就预分配，此后一直占用。NCCL 按上限一次性预留每条通道的发送
+/ 接收缓冲、ring 上的中转 buffer、reduce 算法的工作区。</p>
+<p>尺寸由四个因素共同决定：message size、rank 数、NCCL 选定的算法（ring
+/ tree / NVLS）、bucket 聚合。</p>
+<p>若是等训练主循环跑起来之后才临时申请，<code>cudaMalloc</code>
+会阻塞发起它的 CPU 线程，并触发 device-wide 同步：整卡所有 stream
+已入队的工作要先排空，卡在集合通信的关键路径上。中后期
+<code>reserved</code> 已接近上限，驱动这一刻可能分配不出连续的几百
+MiB，等到通信发不出去才发现显存不够，训练 hang
+在集合通信上。预分配在启动时一次性解决这些不确定性，跑起来之后通信
+buffer 占用恒定不变，不再与主计算争用驱动。</p>
+<h3 id="通信-streamoverlap-与显存池分裂的取舍">02.5 通信 stream：overlap
+与显存池分裂的取舍</h3>
+<p>同一条 stream 上的 kernel
+严格按提交顺序串行执行，通信和计算共用同一条 stream 时，allreduce
+一发就阻塞后面的 GEMM，重叠执行无从谈起。</p>
+<p>为了 overlap，NCCL 的集合通信通常跑在独立的通信 stream 上：集合通信
+kernel 独立排队执行，主计算 stream 同时还能发
+GEMM。这不是强制要求——集合通信留在 default stream
+一样能跑通，只是退化成串行，但 buffer
+进入主池反倒不分裂、碎片更少。只有真正存在数据依赖的关键点才用
+<code>wait_event</code> 显式同步，比如 backward 算到 dW 那一刻等待上一步
+allreduce 的 event。</p>
+<p>副作用是<strong>显存池跟着分裂</strong>。caching allocator
+按「一个池只服务一条 stream」的规则过滤空闲 block（隔离用于保证正确性：A
+stream 的 kernel 可能还没读完这块 block，B stream
+拿去写会发生数据竞争）。主计算 stream 的池占满之后，通信 stream 名下整段
+segment 即便全部空闲也无法被主计算 stream 复用，OOM 由此产生。</p>
+<p>反过来，通信 stream 上要是没多少计算 /
+通信可重叠，或显存已经紧张到池分裂的额外开销划不来，就不要分出去——让通信留在主
+stream，用一点串行换回不分裂的显存池更划算。</p>
+<hr />
+<h2 id="四类合计deepseek-v3-建模">03 四类合计：DeepSeek V3 建模</h2>
+<p>四类合计对 V4 同样成立。下表 per-GPU 数字取自 NVIDIA Megatron Core
+MoE 报告对 V3 配置的建模（报告设 256 GPU、PP4×VPP4×EP64，对标 H100 80 GB
+容量）：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>类别</th>
+<th>per-GPU 占用</th>
+<th>生命周期</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>恒定占用（weights + gradients + optimizer states）</td>
+<td>68.5 GB</td>
+<td>全程恒定</td>
+</tr>
+<tr>
+<td>Activation（forward saved，未压缩）</td>
+<td>131 GB</td>
+<td>单峰</td>
+</tr>
+<tr>
+<td>计算峰值（MoE 专家 FFN 中间值等单 kernel 瞬态）</td>
+<td>单层 GiB 级</td>
+<td>μs 尖峰</td>
+</tr>
+<tr>
+<td>通信 buffer（NCCL EP all-to-all + DP allreduce 预留）</td>
+<td>数百 MiB ~ 1 GB 量级</td>
+<td>全程恒定</td>
+</tr>
+</tbody>
+</table>
+<p>表中通信 buffer 只计 EP all-to-all + DP allreduce 预留；再加上 PP
+send/recv（点对点，非集合通信）预留，整体 ≈ 3 GB。</p>
+<p>第一行给出恒定基线 68.5 GB，只剩 11.5 GB 供动态显存使用。第二行
+Activation 131 GB 是这点余量的十倍有余——recompute、FP8 storage、offload
+都是要把它压缩到 11.5 GB
+以内；压缩不下去，就只能继续划分恒定基线，腾出更多余量。</p>
+<p>未优化前合计 199.5 GB ≈ 2.5× H100。目标是把 per-GPU 总占用压回 80
+GB；131 GB 的 activation 是首要压缩目标。</p>
+<h3 id="真实峰值不是各类最大值的简单相加">03.1
+真实峰值不是各类最大值的简单相加</h3>
+<p>四类峰并不在同一时刻。判断某套配置会不会超出容量，要逐时刻看占用：</p>
+<ul>
+<li>恒定占用与通信 buffer 是两条<strong>水平线</strong></li>
+<li>activation 是一个<strong>单峰</strong></li>
+<li>计算峰值是一个<strong>尖峰</strong></li>
+</ul>
+<p>某一刻的占用 = 那一刻各类的瞬时值相加；真峰值 = 这个逐时刻之和在整个
+step 里取到的最大值。峰值时刻 <span class="math inline">\(t^*\)</span>
+会随配置变化：</p>
+<ul>
+<li><strong>不开 recompute</strong> 时，activation 单峰停在 forward
+末端，<span class="math inline">\(t^*\)</span> 位于那里。</li>
+<li><strong>开 full recompute</strong> 后，forward
+末端那段保存的激活被削平，但 backward
+早期出现一个新窗口：层间保存的激活还没卸掉几层、当前层 recompute
+重算出的 forward intermediate、当前层新分配的 grad buffer
+三类在同一窗口叠加，<span class="math inline">\(t^*\)</span> 从 forward
+末端移到 backward 早期。</li>
+</ul>
+<p>这只是把它推迟到反向、并非删除。峰值是否下降取决于移入窗口的高度：低于被削平那段就降低（V3
+full recompute 即把峰值从 199.5 GB 压到 ~85
+GB），要是比削平那段还高，反而会更早 OOM。</p>
+<hr />
+<h2 id="memtrace-与-oom-诊断">04 MemTrace 与 OOM 诊断</h2>
+<h3 id="怎么打-snapshot">04.1 怎么打 snapshot</h3>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>torch.cuda.memory._record_memory_history(max_entries<span class="op">=</span><span class="dv">100000</span>)</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="co"># 跑几个 step</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>torch.cuda.memory._dump_snapshot(path)</span></code></pre></div>
+<p>得到的 pickle 文件里，每一次 alloc / free 都带着时间戳、字节数、所在
+stream 和 Python stack trace。</p>
+<p>把 <code>allocated</code> 和 <code>reserved</code> 按时间画出来，是
+MemTrace 时间线；取 <code>allocated</code> 最高那一刻各类的瞬时值、按
+tensor 归类排列，是峰值占用分解。</p>
+<h3 id="案例peak-93.5-gb部分-recompute-后">04.2 案例：peak ≈ 93.5
+GB（部分 recompute 后）</h3>
+<p>下面这张 MemTrace 时间线，浅色区域是 <code>allocated</code>，深色线是
+<code>reserved</code>；峰值落在 backward 早期 recompute 窗口，OPT
+段另有约 10 GB 的临时 m / v 副本尖峰。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260707110818-1.jpg"
+alt="MemTrace" />
+<figcaption aria-hidden="true">MemTrace</figcaption>
+</figure>
+<p>下面这张是同一时刻峰值截面按 tensor 来源分解，合计约 93.5 GB，高出
+H100 80 GB 上限约 13.5 GB。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260707110818-2.jpg"
+alt="峰值占用分解" />
+<figcaption aria-hidden="true">峰值占用分解</figcaption>
+</figure>
+<p>同一时刻的占用分解里，六项是：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>分量</th>
+<th>大小</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>恒定占用</td>
+<td>68.5 GB</td>
+<td>Megatron 报告 Table 3 拆为 BF16 weights+gradients 36.4 GB + FP32
+main weights+optimizer states 32.1 GB</td>
+</tr>
+<tr>
+<td>通信 buffer</td>
+<td>3 GB</td>
+<td>PP send/recv（P2P）+ 各集合通信预留池</td>
+</tr>
+<tr>
+<td>Activation 保存的激活</td>
+<td>12 GB</td>
+<td>部分 recompute 后还没被反向消费完</td>
+</tr>
+<tr>
+<td>recompute forward intermediate</td>
+<td>2 GB</td>
+<td>当前层重算出的中间量</td>
+</tr>
+<tr>
+<td>grad buffer</td>
+<td>3 GB</td>
+<td>当前层 backward 临时分配的 dY/dX/dW</td>
+</tr>
+<tr>
+<td>allocator overhead</td>
+<td>5 GB</td>
+<td><code>reserved − allocated</code> 之间的碎片余量</td>
+</tr>
+</tbody>
+</table>
+<p>这六类与开头四类并非一一对应：Activation 在峰值处拆成层间保存的激活和
+recompute intermediate（计算峰值瞬态归入后者的重算窗口），另起 grad
+buffer 与 allocator overhead；恒定占用与通信 buffer
+在占用分解里保持不变。</p>
+<h3 id="oom-的两种典型情况">04.3 OOM 的两种典型情况</h3>
+<p><strong>情况 A：<code>reserved</code> 与 <code>allocated</code>
+都接近上限。</strong>
+空间已经用尽，瓶颈在峰值时刻各类的同时占用量。看峰值时刻哪一类（恒定基线、层间激活缓存、瞬态、还是
+allocator 空隙）的量级最大，针对最大的那类优化。开 recompute
+才有意义，它压缩的层间激活缓存正是触及上限的主因。</p>
+<p><strong>情况 B：<code>reserved</code>
+已达上限，<code>allocated</code> 却低出好几 GB。</strong>
+可用字节并没有真的被填满，实际是 <code>reserved</code> 被虚高抬起。抬高
+<code>reserved</code> 的三种成因都不靠多用显存：</p>
+<ul>
+<li>瞬态峰值被抬进 <code>reserved</code> 后不再回落形成的那道台阶</li>
+<li>shape 变化造成的碎片</li>
+<li>多 stream 分池后一条 stream 的空闲填不进另一条的请求</li>
+</ul>
+<p>再开 recompute 去压缩 <code>allocated</code>
+没有收益——压缩的那一维根本不是瓶颈。</p>
+<blockquote>
+<p>OOM
+判断要同时看峰值占用分解（<strong>时间维</strong>：某一刻同时被持有多少）和
+allocator
+碎片状态（<strong>空间维</strong>：池能不能凑出这一刻要的连续大块）。低于上限的峰值遇到碎片化的池照样
+OOM；等于上限的峰值若 shape 固定、池无碎片，反而能分配成功。</p>
+</blockquote>
+<h3 id="失效条件">04.4 失效条件</h3>
+<p>一次 snapshot 只是某个 step、某张 rank 的快照。MoE 路由逐 step
+波动，负载最重的那张 rank
+也不固定在同一张卡上——这一回没碰到峰值，不能推导出下一个
+step、另一张卡也安全。要做出判断，得在几个高负载 step、几张可疑 rank
+上各采样分析一次，看差值是<strong>稳定接近上限</strong>还是<strong>偶发接近上限</strong>。</p>
+<h3 id="各分量能否静态估计">04.5 各分量能否静态估计</h3>
+<p>各分量字节量可以静态估到 ± 数 GB；真正无法静态预测的只有两样：</p>
+<ul>
+<li>峰值落点 <span class="math inline">\(t^*\)</span>（取决于运行时
+stream 交错、各 kernel 时长、MoE 路由逐 step 波动）</li>
+<li>allocator 碎片余量</li>
+</ul>
+<p>都只能事后从 snapshot 里分析出来。</p>
+<hr />
+<h2 id="优化手段四类各自的取舍">05 优化手段：四类各自的取舍</h2>
+<h3 id="恒定占用分片降精度offload">05.1
+恒定占用：分片、降精度、offload</h3>
+<p>V3 配置下，恒定占用这三块不分片的话，单 rank 要装：</p>
+<p><span class="math display">\[
+m_{const} = \underbrace{2N}_{\text{BF16 weights}} +
+\underbrace{2N}_{\text{BF16 gradients}} +
+\underbrace{(4+4)N}_{\text{Adam FP32 m/v}} \approx 218 \text{ GB}
+\]</span></p>
+<p>若加 FP32 master weight（4 bytes/param），完整是 16 bytes/param ≈ 291
+GB。前面表里的 68.5 GB 是 Megatron 报告口径下按 V3 并行度切分后的
+per-GPU 值。</p>
+<h4 id="分片">分片</h4>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>工具</th>
+<th>划分对象</th>
+<th>关键代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FSDP / ZeRO-3</td>
+<td>三类全分片（沿 DP 维）</td>
+<td>每层 all-gather + reduce-scatter；sharding
+组越大通信越靠近关键路径</td>
+</tr>
+<tr>
+<td>ZeRO-1 / ZeRO-2</td>
+<td>仅分片 opt state / +grad</td>
+<td>通信量低于 ZeRO-3，省得少</td>
+</tr>
+<tr>
+<td>Megatron TP</td>
+<td>按 head / hidden 维切 attention 和 MLP 权重</td>
+<td>同时划分该层 activation；每层 4 次 all-reduce，<strong>节点内 NVLink
+限 8-way</strong></td>
+</tr>
+<tr>
+<td>PP</td>
+<td>按层切分（每 rank 持 <span class="math inline">\(L/p\)</span>
+层）</td>
+<td>跨 stage send/recv 通信；bubble 代价；<strong>不动 activation
+峰值</strong></td>
+</tr>
+<tr>
+<td>EP</td>
+<td>按 expert 切分（每 rank 持 <span class="math inline">\(1/e\)</span>
+份 expert）</td>
+<td>主要削减 MoE 参数大头；dense 部分不动</td>
+</tr>
+</tbody>
+</table>
+<p>四种切法各对应一个维度，互不争用同一维度，可以相乘：</p>
+<p><span class="math display">\[
+\text{per-GPU 恒定占用} = \frac{\text{全量}}{\prod \text{各相关并行维}}
+\]</span></p>
+<h4 id="降精度">降精度</h4>
+<ul>
+<li><strong>FP8 weight</strong>：把 forward / backward 实际计算、并参与
+DP all-gather 的那份工作权重从 BF16 降到 FP8，单 weights 一项再省
+2×；FP32 master weight 仍保持高精度。改变的是 forward / backward
+的计算精度与 all-gather 的通信精度，optimizer 更新仍在 FP32 计算。</li>
+<li><strong>FP8 optimizer state</strong>：把 Adam 的 m / v 也降到
+FP8。</li>
+</ul>
+<p><strong>失效条件</strong>：master weight、m / v
+这类「极小增量反复累加进一个大基数」的量，仅靠 scaling
+还不够。每步要加的更新值比基数小几个数量级，量化后落在基数尾数能分辨的台阶之下，加法被整个舍去，即
+<strong>swamping</strong>（大基数把小增量淹没）。表现为参数实际不更新、loss
+曲线无报错却不再下降。所以这类累加量必须保留一份高精度累加器。</p>
+<h4 id="外移">外移</h4>
+<ul>
+<li><strong>Optimizer state offload → CPU</strong>：通过 PCIe Gen5（≈ 64
+GB/s 单向）移到 CPU 内存</li>
+<li><strong>Weights → NVMe</strong>：再往后退一档到 NVMe（PCIe +
+filesystem，≈ 7 GB/s 单向）</li>
+</ul>
+<p>从 NVMe 把 weights 拉回 GPU 计算一层比 HBM 直接读取慢两个数量级，MFU
+会大幅下降，所以只在「单卡资源严重受限、必须容纳大模型」的场景才用。</p>
+<blockquote>
+<p>降精度只在划分完之后单项仍占几 GB 以上时才划算。FSDP 划分到 256 rank
+后 per-GPU optimizer state 已经只有 0.57 GB，再降到 FP8 也只节省约 0.4
+GB，不值得为这点字节数增加复杂度。</p>
+</blockquote>
+<h3 id="activation-缓存的压缩手段">05.2 Activation 缓存的压缩手段</h3>
+<p>Activation 缓存是峰值的大头，V3 配置下未压缩前每卡就有 131 GB（约
+1.6× 一张 H100）。</p>
+<h4 id="recompute时间换空间">Recompute（时间换空间）</h4>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>策略</th>
+<th>做法</th>
+<th>代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Full layer recompute</strong></td>
+<td>每层只 save 一个 layer-input <code>2BSD</code>，反向把整层 forward +
+backward 一并跑</td>
+<td>forward:backward ≈ 1:2 原本是 1+2=3 份算力，full recompute 变成
+1+(1+2)=4 份，wall-time ≈ +33%</td>
+</tr>
+<tr>
+<td><strong>Selective recompute</strong></td>
+<td>只对 attention / MLP / LayerNorm 某几种 op 重算</td>
+<td>节省的缓存少、wall-time 也少；Megatron 最初做的是只重算 attention 的
+<code>5BHS²</code> 项，但 FA 之后 <code>5BHS²</code> 已不在
+HBM，意义变小</td>
+</tr>
+<tr>
+<td><strong>模块级混合</strong></td>
+<td>按 nn.Module 边界标记 checkpoint，不同 module 独立决定</td>
+<td>V3/V4 这种 MoE 主导的架构里常比 full layer 更省时间</td>
+</tr>
+</tbody>
+</table>
+<h4 id="offload搬到-cpu-nvme">Offload（搬到 CPU / NVMe）</h4>
+<ul>
+<li><strong>Activation → CPU offload</strong>：走 PCIe Gen5 ≈ 64 GB/s
+单向</li>
+<li><strong>Activation → NVMe offload</strong>：再慢 10×
+以上，预训练中几乎不用</li>
+</ul>
+<p><strong>关键</strong>：必须把 PCIe DMA 和 forward / backward 计算
+overlap：移下去要赶在下一层 forward
+还没需要缓存之前完成，移回来要在反向使用缓存之前预取完。两个方向都得对准时序，任一边没与计算重叠
+MFU 就下降——recompute 只在反向单点插入一段重算，offload
+要双向与计算重叠，调度余量小得多。</p>
+<h4 id="序列并行长上下文">序列并行（长上下文）</h4>
+<p>按 sequence 维切到多 rank 上。序列越长、<code>S</code>
+相关的那几项越主导，把 <code>S</code> 划分到多 rank
+是唯一随长度同步缩小数据量的方式。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>工具</th>
+<th>划分对象</th>
+<th>代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Megatron SP</strong></td>
+<td>补充 TP，划分 TP 没覆盖的
+<code>10sbh</code>（LayerNorm、dropout、block 输入激活）</td>
+<td>仅动 TP 没划到的部分</td>
+</tr>
+<tr>
+<td><strong>CP / Ring Attention</strong></td>
+<td>每卡 <code>S/N</code>，attention kernel 内数据量随 S/N 缩小</td>
+<td>跨 rank 通信</td>
+</tr>
+<tr>
+<td><strong>DeepSpeed-Ulysses</strong></td>
+<td>两次 all-to-all 在 sequence ↔︎ head 间交换维度</td>
+<td>P 受 attention head 整除限制；GQA/MQA 下常受 KV head 数限制</td>
+</tr>
+<tr>
+<td><strong>USP（Ulysses + Ring-Attention）</strong></td>
+<td>同时叠加</td>
+<td>long-context 训练目前的常见组合</td>
+</tr>
+</tbody>
+</table>
+<h4 id="fp8-storage">FP8 storage</h4>
+<p>把前向保存下来的中间值每元素的字节数从 16 bit 降到 8 bit。activation
+是一次性写、一次性读的量，配 scaling 和反量化即可。</p>
+<h4 id="fused-kernel中间量留-sram">Fused kernel（中间量留 SRAM）</h4>
+<p>SRAM 和 HBM 的容量、带宽都差一个数量级，中间量每在 HBM
+上往返一趟就消耗一份带宽。fuse 把数据量沿某个维度划分成小到能整个放进
+SRAM 的 tile，逐 tile 算完只把最终结果写回 HBM，中间 tensor
+始终留在片上、既不占 HBM 也不付往返带宽。<strong>融合的边界由 SRAM
+预算限定</strong>。</p>
+<p>判据不在中间量是否瞬时，而看 consumer 要的每个输出
+tile，是不是只依赖产出它的那一个 CTA（一个 thread block）：</p>
+<ul>
+<li>依赖都在本 CTA 就留片上：逐元素 pointwise，或归约轴整条留在 CTA 内
+streaming</li>
+<li>要跨 CTA 读取就必须物化——在 producer 已切散到多 CTA 的那根轴上做
+reduction / transpose / shuffle</li>
+</ul>
+<p>归约本身不必然导致物化：只要归约轴留在 CTA 内 streaming（FA 的
+KV、norm 的 <span class="math inline">\(D\)</span>，running state
+小到进寄存器），归约也能片上；物化只在归约轴被 tile 到多个 CTA
+时才出现。</p>
+<p>代表实例：</p>
+<ul>
+<li><strong>FlashAttention 系</strong>：把 <code>QK^T</code>、softmax
+输出 <code>P</code>、<code>dS</code>、<code>dP</code> 全部留在 SRAM tile
+内。HBM 上只剩 <code>O ∈ [B,S,D]</code> 和 LSE
+<code>∈ [B,H,S]</code>。参考参数 (<span class="math inline">\(B=4, H=32,
+S=8192, D=4096\)</span>, BF16) 下，原本几块约 40 GiB，FA 后只剩 0.254
+GiB</li>
+<li><strong>fused LayerNorm / RMSNorm + residual</strong>：归约轴 <span
+class="math inline">\(D\)</span> 整条留在 CTA 内</li>
+<li><strong>fused MoE token permute</strong>：路由后的 token 重排融进
+grouped-GEMM 的数据准备路径（Megatron 开关
+<code>moe_permute_fusion</code>）</li>
+<li><strong>fused cross-entropy</strong>（长 vocab）：<span
+class="math inline">\(V \ge 128k\)</span> 时把 logits 和 NLL loss
+合并到一个 kernel 内，按 row 流式计算</li>
+</ul>
+<h3 id="计算峰值瞬态的压缩">05.3 计算峰值瞬态的压缩</h3>
+<p>瞬态是 kernel 执行中临时占用的 HBM，规模 = f(B, 每卡 token 数, dtype
+位宽)。recompute 和 offload 对瞬态均无效：瞬态是 kernel 内 μs
+级的瞬时量，recompute 针对的是跨 kernel 存下来给反向用的 saved
+activation，削减它反而新开一个重算窗口、又产生一份瞬态；offload 走
+PCIe，搬运延迟比 μs 慢几个数量级，根本来不及在 kernel
+算完前把数据量移出。</p>
+<p>走 fused kernel / tiling
+这条路：不去缩小数据量的尺寸，而是让中间量根本不写进 HBM。</p>
+<p><strong>fused MoE expert FFN</strong> 是个典型反例：把 expert 内部的
+up_proj + gate_proj + 激活（SwiGLU）+ down_proj 几步在 expert 内
+fuse，能不能留片上取决于 kernel 怎么
+tiling，而不取决于「融没融」。标准实现（Megatron-Core grouped GEMM、V3
+同理）下这份 <code>[C_local, 2n]</code> 实际会落 HBM：FC1 把输出按 N
+维切散到多个 CTA，FC2 又要沿同一维（FC1 的输出维 F）跨 CTA
+归约。<strong>这正是「跨 CTA 读取就得物化」那种情形，只能过
+HBM/L2</strong>。即便把 FC1 + 激活 + FC2 强融进一个 megakernel
+也没用——一个 kernel 不等于一个 CTA，各 stage 间仍要在 global memory
+上会合。</p>
+<p>要真留片上，得换成每个 CTA 独占 token 行块、自己做完整 <span
+class="math inline">\(F\)</span> 归约的 FA 式 tiling，代价是降低 GEMM
+并行度 / 吞吐。V3 训练路径同理走 grouped GEMM、这份激活照样落 HBM：按 V3
+配置 (<span class="math inline">\(B=1, S=4096\)</span>) 静态估算，<span
+class="math inline">\([C_local, 2n]\)</span> 单层约 0.3 GiB /
+卡，不是单层峰值主导项；主峰是随路由数 K 放大的进出口张量（<span
+class="math inline">\([C_local, D]\)</span> 量级、随 K 累加）。</p>
+<p>cuBLAS workspace shrink：<code>CUBLAS_WORKSPACE_CONFIG=:4096:8</code>
+固定 workspace 上限（多 stream 共享 handle 时换取确定性），可省下几十个
+handle 累积的几 GiB；代价是某些 SplitK / 多阶段 GEMM
+算法用不了，吞吐可能略降。</p>
+<h3 id="通信-buffer减少-staging-份数与尺寸">05.4 通信 buffer：减少
+staging 份数与尺寸</h3>
+<p>NCCL 在每个 GPU 上为每条通信 stream 注册一段 staging
+buffer，尺寸按最坏情况一次预分配。V3 配置下每卡每方向 EP all-to-all
+staging 约百 MiB 级（某配置下估算约 230 MiB）。</p>
+<h4 id="调度bucket-聚合">调度（bucket 聚合）</h4>
+<p>把同一层多个参数的 gradient 合并成一次 collective。bucket
+小则小消息多、staging 总量大、带宽利用率低；bucket 大则单次 staging
+大、还要等更多 grad 准备好才发，反向关键路径等待时间长。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>工具</th>
+<th>默认 bucket</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDP <code>bucket_cap_mb</code></td>
+<td>25 MiB</td>
+<td>经典 PyTorch 默认</td>
+</tr>
+<tr>
+<td>FSDP</td>
+<td>无 MiB 级阈值</td>
+<td>合并粒度由 <code>fully_shard</code> 包裹的 module 单元决定</td>
+</tr>
+<tr>
+<td>DeepSpeed ZeRO <code>reduce_bucket_size</code></td>
+<td>5e8 元素 ≈ 1 GB</td>
+<td>DeepSpeed 风格</td>
+</tr>
+</tbody>
+</table>
+<h4 id="配置nccl-环境变量">配置（NCCL 环境变量）</h4>
+<ul>
+<li><code>NCCL_BUFFSIZE</code> × channel 数 = 每个 rank 预留的总
+staging（Simple 默认 4 MiB/channel）</li>
+<li><code>NCCL_NTHREADS</code>：每 channel 线程数，决定 staging
+复用速度</li>
+<li><code>NCCL_ALGO</code> / <code>NCCL_PROTO</code>：选 ring / tree /
+collnet / nvls 算法与协议（LL 有效带宽 50% / LL128 95% / Simple
+最高延迟也最高）</li>
+</ul>
+<h4 id="算法-拓扑">算法 / 拓扑</h4>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>算法</th>
+<th>特点</th>
+<th>硬件前提</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ring</td>
+<td>每跳一份 staging，N 卡 ring 一共 N 份；带宽最优，latency 随 N
+线性涨</td>
+<td>通用</td>
+</tr>
+<tr>
+<td>Tree</td>
+<td>二叉树聚合，latency log(N)</td>
+<td>通用</td>
+</tr>
+<tr>
+<td>Collnet</td>
+<td>借交换机 / fabric 做 in-network aggregation</td>
+<td>SHARP 硬件</td>
+</tr>
+<tr>
+<td>NVLS</td>
+<td>走 NVLink SHARP，把 reduction offload 到 NVSwitch 域；几乎不在 GPU
+显存里留 staging</td>
+<td>NVSwitch + NVLink SHARP</td>
+</tr>
+</tbody>
+</table>
+<h4 id="复用对称内存直接写远端">复用（对称内存直接写远端）</h4>
+<ul>
+<li><strong>NVSHMEM</strong>：rank A 可直接 <code>nvshmem_put</code>
+把数据写到 rank B 显存上，省去本地 + 远端 staging</li>
+<li><strong>DeepEP</strong>：早期 / legacy 版本用 NVSHMEM 省去 EP
+all-to-all 两侧的中转拷贝（某配置下每卡每方向 ≈ 230 MiB）</li>
+</ul>
+<h3 id="对照表">05.5 对照表</h3>
+<p>「优先级」一列表示当前配置下的收益/代价排序：先动富余资源，后动紧缺资源。它会随配置变：通信已是反向关键路径瓶颈时再做恒定占用的拆分反而不划算。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>显存类型</th>
+<th>典型手段顺序</th>
+<th>取舍逻辑</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>恒定占用</td>
+<td>FSDP / ZeRO &gt; FP8 master + opt state &gt; offload</td>
+<td>先按 rank 摊薄常驻状态；分片收益耗尽后，再考虑降精度或 offload</td>
+</tr>
+<tr>
+<td>Activation 激活缓存</td>
+<td>recompute &gt; FP8 storage / offload（视代价）&gt;
+序列并行类（长上下文）&gt; fused kernel</td>
+<td>通常先用 recompute；FP8 storage / offload 取决于数值风险和带宽；CP /
+Ulysses 主要改善负载均衡</td>
+</tr>
+<tr>
+<td>计算峰值 瞬态</td>
+<td>fused kernel（FA / MoE FFN）&gt; kernel 内 tiling</td>
+<td>中间量留 SRAM，省 HBM 往返</td>
+</tr>
+<tr>
+<td>通信 buffer</td>
+<td>bucket 调度 &gt; algorithm 选择 &gt; NVSHMEM</td>
+<td>bucket 调度通常先改；算法/拓扑依赖硬件；NVSHMEM
+用有界对称内存替换随跳数增长的 staging</td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260707110818-3.jpg"
+alt="四类显存与工具的映射" />
+<figcaption aria-hidden="true">四类显存与工具的映射</figcaption>
+</figure>
+<h3 id="各手段的失效条件">05.6 各手段的失效条件</h3>
+<ul>
+<li><strong>FSDP / ZeRO</strong>：sharding 组扩大到 all-gather
+慢于反向计算时就不再划算——通信从「藏在计算后面」变成关键路径瓶颈</li>
+<li><strong>FP8
+storage</strong>：失效在反复累加那一类量（swamping），只有一次性读写的激活才换得安全</li>
+<li><strong>Offload</strong>：搬运时间藏不进计算就反过来拖慢，PCIe
+来回的延迟进入关键路径</li>
+<li><strong>fused kernel</strong>：标准 grouped-GEMM
+实现下反向会失效——反向要把它整张 fan-out 给多个梯度 GEMM，forward
+那种「逐 tile 流过、从不整张落地」的办法用不上</li>
+<li><strong>NVSHMEM</strong>：用单边写替换掉随跳数增长的
+staging，但同步和完成语义要自己管</li>
+</ul>
+<hr />
+<h2 id="cpsppptp-各分片哪一段显存">06 CP/SP/PP/TP 各分片哪一段显存</h2>
+<h3 id="想降低恒定-68.5-gb用-fsdp-zero">06.1 想降低恒定 68.5 GB：用 FSDP
+/ ZeRO</h3>
+<p>每加一份 DP 维就 <span
+class="math inline">\(/N\)</span>。分到极致的代价是每步都要 all-gather +
+reduce-scatter，再往下分省下的显存会被新增的通信开销抵消——这时要退回到
+HSDP（hybrid sharding，组内分片、组间用 DDP）或限制 sharding
+组大小。</p>
+<p>PP（按层划分）、EP（按 expert
+划分）同样把恒定占用降到这条基线，但它们<strong>对激活缓存帮助有限</strong>。</p>
+<h3 id="层间激活缓存靠什么分片">06.2 层间激活缓存靠什么分片</h3>
+<p>设每 step 的 Global Token Size = <span
+class="math inline">\(G\)</span>，切 sequence 后每个 rank 持有 <span
+class="math inline">\(G/N\)</span> 个 token，attention
+数据量总和没变。</p>
+<p>固定 Global Batch Size 时，划分序列会让 Local Batch Size
+上涨，省下的又被原样涨回：总卡数固定，新拿去划分 sequence 的卡只能从 DP
+维分出，DP 度一降，<span class="math inline">\(global\_batch = DP \times
+local\_batch\)</span> 里每个 DP rank 摊到的 local batch
+就成倍上涨。这种抵消对所有 activation 项都成立：</p>
+<p><span class="math display">\[
+\text{CP 沿 S 切每项} \times \frac{1}{N}, \quad \text{batch 涨回} \times
+N \;\Rightarrow\; \text{单卡峰值净变化趋近零}
+\]</span></p>
+<p>抵消假设涨上来的 local batch 由并发 micro-batch
+承担——峰值激活只由同时在飞的 micro-batch
+数决定。若改用梯度累积让多出来的 batch 串行跑，峰值激活并不回弹，CP
+切出的 <span class="math inline">\(S/N\)</span> 不被抵消、仍净省。</p>
+<p>例外条件：当训练目标是训更长 context、要容纳单卡放不下的 sequence
+时，CP 加卡用来容纳更长 <span class="math inline">\(S\)</span>、不从 DP
+分卡，local batch 不回弹——此时相对「不切 sequence
+直接训练同样长度」，划分 sequence 才真正压低单卡 activation。</p>
+<h3 id="反向当前层的临时量与-kernel-数据量tp-或-fused-kernel">06.3
+反向当前层的临时量与 kernel 数据量：TP 或 fused kernel</h3>
+<p>峰值窗口里的动态量分两种：</p>
+<ul>
+<li><strong>Chain rule 决定的反向临时量</strong>：重算出的 forward
+intermediate、与它同形状的中间量梯度（MLP/MoE 这档宽 <span
+class="math inline">\(2n\)</span>），以及 dY、dX、dQ、dK、dV 这类宽 D
+的边界梯度——这类不能删，只能用 TP 减少每卡持有的 head / hidden
+切片（attention / MLP 数据量同样划分 <span
+class="math inline">\(/t\)</span>），代价是每层 4 次 all-reduce、对
+NVLink 带宽敏感</li>
+<li><strong>真正 μs 级的 kernel workspace</strong>：靠 fused kernel 或
+workspace 配置缩小</li>
+</ul>
+<h3 id="pp-对激活缓存帮助有限">06.4 PP 对激活缓存帮助有限</h3>
+<p>PP 大小 <span class="math inline">\(p\)</span>
+在激活缓存公式里被直接约掉：1F1B 第一阶段同时在飞 <span
+class="math inline">\(m_{inflight} = p\)</span> 个 micro-batch（<span
+class="math inline">\(m \ge p\)</span> 时）。原因：1F1B 启动时先逐级跑完
+<span class="math inline">\(p\)</span> 个 micro-batch 的前向、把 <span
+class="math inline">\(p\)</span> 级流水线填满，才轮到第一个 micro-batch
+的反向，同时驻留 <span class="math inline">\(p\)</span>
+份激活缓存，正好与 PP 度 <span class="math inline">\(p\)</span>
+约掉。</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Schedule</th>
+<th>multiplier</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1F1B</td>
+<td><span class="math inline">\(1\times\)</span></td>
+<td>经典做法</td>
+</tr>
+<tr>
+<td>VPP（virtual pipeline, <span class="math inline">\(m_v\)</span>
+chunks）</td>
+<td><span class="math inline">\(1 + \frac{p-1}{p \cdot
+m_v}\)</span></td>
+<td><span class="math inline">\(p=16, m_v=4\)</span> 时 ≈ 1.23×</td>
+</tr>
+<tr>
+<td>DualPipe</td>
+<td><span class="math inline">\(1 + \frac{1}{PP}\)</span></td>
+<td>DeepSeek V3 双向流水线；另需双份模型参数副本（独立代价，V3 靠大 EP
+摊薄）</td>
+</tr>
+</tbody>
+</table>
+<p>Korthikanti et al. 2022 (arXiv:2205.05198 §4.2.3) 给出的最优
+schedule，bubble 最小化的代价是<strong>内存压力集中在 pipeline 第一个
+stage</strong>。</p>
+<blockquote>
+<p>Schedule multiplier 讨论只在不开 recompute
+时才显著：那时激活缓存是整层中间结果，V3 未压缩前每卡 131 GB，<span
+class="math inline">\(1\times\)</span> 与 <span
+class="math inline">\(1.25\times\)</span> 能差出三十多 GB。开启 Full
+Recompute 后，每层只 save 一个 layer-input <span
+class="math inline">\(2BSD\)</span>，激活缓存缩到 3.5 GiB（V3
+量级），multiplier 差异不到 1 GiB。</p>
+</blockquote>
+<h3 id="分片维度对照">06.5 分片维度对照</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>工具</th>
+<th>划分对象</th>
+<th>量级效果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Activation Checkpointing</td>
+<td>层间激活缓存</td>
+<td>缩减到只剩 layer-input <span
+class="math inline">\(2BSD\)</span></td>
+</tr>
+<tr>
+<td>Activation Offload</td>
+<td>层间激活缓存（移到 CPU）</td>
+<td>受 PCIe 带宽限制，覆盖不了 μs 级 kernel workspace</td>
+</tr>
+<tr>
+<td>FSDP / ZeRO</td>
+<td>恒定占用</td>
+<td>按 DP 度数 N 划分，每卡 /N</td>
+</tr>
+<tr>
+<td>PP（pipeline）</td>
+<td>恒定占用（按层 <span class="math inline">\(L/p\)</span> 摊）</td>
+<td>每 stage 参数 /p；不划分激活缓存（一卡放 <span
+class="math inline">\(L/p\)</span> 层、激活缓存 <span
+class="math inline">\(\propto L/p \times m_{inflight}\)</span>，<span
+class="math inline">\(p\)</span> 在两头约掉）</td>
+</tr>
+<tr>
+<td>EP（expert parallel）</td>
+<td>恒定占用里的 expert 权重</td>
+<td>每卡 expert /e；划分的是 MoE 参数大头，dense 部分不动</td>
+</tr>
+<tr>
+<td>TP（Megatron）</td>
+<td>恒定 + 激活缓存 + kernel 数据量（按 head / hidden 维划分）</td>
+<td>attention 数据量 /t、MLP 中间 /t；受 NVLink 带宽限制，最多
+8-way</td>
+</tr>
+<tr>
+<td>Megatron SP</td>
+<td>TP 未覆盖的 sequence 维</td>
+<td><span class="math inline">\(10sbh\)</span>（每 rank
+各存一份）/t；不动 attention</td>
+</tr>
+<tr>
+<td>CP / Ring Attention</td>
+<td>全局 sequence 维</td>
+<td>每卡 <span class="math inline">\(S/N\)</span>；Global Token
+固定时作用是负载均衡</td>
+</tr>
+<tr>
+<td>DeepSpeed-Ulysses</td>
+<td>sequence + head 两次 all-to-all</td>
+<td>同 CP，但 P 受 attention head 整除限制（GQA/MQA 下常受限于 KV head
+数，可经 KV replication 放宽）</td>
+</tr>
+<tr>
+<td>小 micro-batch <span class="math inline">\(B\)</span></td>
+<td><span class="math inline">\(B\)</span></td>
+<td>瞬态量随 B 降低；代价是单 kernel 数据量变小、算力利用率下降，且 PP
+下 m 会变大（激活缓存总量不变）</td>
+</tr>
+<tr>
+<td>FlashAttention</td>
+<td>attention 的 <span class="math inline">\(S^2\)</span> 项</td>
+<td>移到 SRAM，HBM 只剩 <span class="math inline">\(2BSD\)</span>（O）+
+<span class="math inline">\(4BHS\)</span>（LSE，FP32）</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="fa-之后-hbm-上的残留">07 FA 之后 HBM 上的残留</h2>
+<p>今天主流训练框架默认用 FlashAttention，标准 attention 那个 <span
+class="math inline">\([B, H, S, S]\)</span> 不再 materialize 到
+HBM。</p>
+<p>峰值主要来自 FA 之后还留在 HBM 上的：MoE 层的 dispatch / permute /
+expert FFN 中间值，以及 Full Recompute 重算窗口里的中间值。</p>
+<p>FA 那段的参考参数 (<span class="math inline">\(B=4, H=32, S=8192,
+D=4096\)</span>, BF16) 是单 EP rank、单层、单 micro-batch
+的尺度——真实训练里还要再乘上 PP、EP 和 micro-batch 数。</p>
+<p>未启用 fused expert kernel 的配置下，MoE FFN intermediate <span
+class="math inline">\([C_local, 2n]\)</span> 会成为主导项之一。启用
+fused kernel（把 SwiGLU 融进 FC1 epilogue）后，<span
+class="math inline">\(2n\)</span> 宽的 pre-activation <span
+class="math inline">\(H\)</span> 在 forward 不再单独落 HBM——逐 tile 在
+epilogue 里算完即被消费。但这条收益对反向容易失效：反向算 expert FFN
+梯度时，forward intermediate <span class="math inline">\([C_local,
+2n]\)</span> <strong>必须在场</strong>——无论是 save-for-backward
+存下来的，还是 full recompute
+现算出来的——它本来就得写出去。此刻还要同时生成它同形状的梯度 <span
+class="math inline">\(dH\)</span>（同样 <span
+class="math inline">\([C_local, 2n]\)</span>）。forward
+不必把它整张落地（随算随被下一段消费），backward 却要整张物化在 HBM 上
+fan-out 给多个梯度 GEMM——失效的根因是这道刚性物化边界，不是「tile 超过
+SRAM 容量」的问题。</p>
+<hr />
+<h2 id="full-recompute-之后峰值仍达-85-gb差值来自哪几项">08 Full
+Recompute 之后峰值仍达 85 GB：差值来自哪几项</h2>
+<p>上面 MemTrace 占用分解那 93.5 GB，是部分
+recompute（层间激活缓存还残留 12 GB）时截下来的快照；这里改为分析 full
+recompute 把层间激活缓存降到下界后，峰值还剩多少、能不能回到 80 GB
+以内。三个配置档的峰值依次递减：</p>
+<ul>
+<li>未优化 199.5 GB</li>
+<li>部分 recompute 削到 93.5 GB</li>
+<li>full recompute 继续降低</li>
+</ul>
+<p>按 per-GPU 视角逐项算（EP 路由波动下最重 rank 只会更吃紧），V3
+配置（<span class="math inline">\(PP=16, L=61, S=4096, B=1,
+D=7168\)</span>, BF16）下六类分量：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>分量</th>
+<th>大小</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>恒定占用</td>
+<td>68.5 GB</td>
+<td>已切分后的 per-GPU 数</td>
+</tr>
+<tr>
+<td>通信 buffer</td>
+<td>3 GB</td>
+<td>EP all-to-all + DP allreduce + PP send/recv</td>
+</tr>
+<tr>
+<td>层间激活缓存</td>
+<td>3.5 GiB</td>
+<td>full recompute 后只留 layer-input <span
+class="math inline">\(2BSD\)</span>；1F1B 下总激活缓存与 <span
+class="math inline">\(p\)</span> 无关</td>
+</tr>
+<tr>
+<td>当前层重算 forward intermediate</td>
+<td>≈ 2 GB</td>
+<td>recompute
+换来的是时间、不是让这部分消失——重算的那一瞬间该层所有中间产物都保留在
+HBM 上；MoE 是大头（进出口张量 <span class="math inline">\([C_local,
+D]\)</span> 随 K 累加）</td>
+</tr>
+<tr>
+<td>当前层 grad buffer</td>
+<td>≈ 3 GB</td>
+<td>dY + dX + 当前层 dW（用完即并入梯度存储）</td>
+</tr>
+<tr>
+<td>allocator overhead</td>
+<td>≈ 5 GB</td>
+<td><code>reserved − allocated</code>，V3 预训练 shape
+稳定，碎片率低</td>
+</tr>
+</tbody>
+</table>
+<p>合计：</p>
+<p><span class="math display">\[
+68.5 + 3 + 3.76 + 2 + 3 + 5 \approx 85 \text{ GB}
+\]</span></p>
+<p>这一组分量可代入估算：</p>
+<p><span class="math display">\[
+\text{恒定基线} \approx \frac{218 \text{ GB}}{\prod \text{FSDP} \times
+\text{TP} \times \text{PP} \times \text{EP}}
+\]</span></p>
+<p><span class="math display">\[
+\text{层间激活缓存} \approx 2BSD \cdot \frac{L}{p} \cdot
+\text{multiplier} \cdot \text{recompute\_factor}
+\]</span></p>
+<p>其中 <code>multiplier</code> 是 PP 调度系数（1F1B ≈ 1×、VPP ≈
+1.23×），<code>recompute_factor</code> 是该粒度下每层的保留比例（full
+recompute 取 1，不开则是整层中间结果的倍数）。</p>
+<p>若峰值超出容量 5 GB，同一时刻占用最大的是恒定那 68.5
+GB，该动的就是它：进一步分片（FSDP / TP / PP / EP）或压精度（FP8 master
+weight / optimizer state）。层间激活缓存只剩 3.5
+GiB，再加大重算收益已经很小。</p>
+<hr />
+<h2 id="hopper-blackwellpp-依赖随硬件扩容下降">09 Hopper → Blackwell：PP
+依赖随硬件扩容下降</h2>
+<p>之前讨论的前提是单卡 HBM 容量与 NVLink
+域大小固定不变；这两项参数一旦变了，最先受影响的就是 PP。</p>
+<p>PP 主要解决两件事：</p>
+<ol type="1">
+<li>单卡 HBM 容纳不下整个模型，只能按层把恒定占用分摊到多卡</li>
+<li>模型必须跨节点划分时，PP 的跨 stage 通信量比 TP/EP
+小得多，能用较低带宽的连接承载——代价是流水线 bubble</li>
+</ol>
+<p>单卡 HBM 从 H100 80 GB → H200 141 GB → B200（HGX B200 常见可用 180 GB
+HBM3e，物理口径 192
+GB），一张卡能容纳的层数随之上升，容量约束首先放宽。更关键的是 NVLink
+域的扩张：Hopper 一域 8 卡，到 NVL72 一域 72
+卡。原来必须跨节点、只能交给 PP 走低带宽连接的那部分
+TP/EP，现在能整块放进同一个高带宽 NVLink
+域里，低带宽连接的约束也随之消失。这两条约束都放宽后，PP 那份 bubble
+代价就不再划算，对 PP 的依赖会逐步下降。</p>
+<hr />
+<h2 id="一些个人化整理">10 一些个人化整理</h2>
+<p>把全文拆成三句话总结：</p>
+<ol type="1">
+<li><strong>OOM
+看的是「峰值时刻各类同时占用」</strong>，不是某一类的最大值；reserved
+容易被瞬态峰值抬成台阶只升难降。</li>
+<li><strong>降显存最划算的顺序</strong>：先用 FSDP / ZeRO
+把恒定占用摊薄；再用 recompute / fused kernel 砍 activation
+峰值；最后才考虑 FP8 / offload 这些有数值或带宽代价的手段。</li>
+<li><strong>2026 年的硬件趋势</strong>让 PP 的必要性下降：HBM 增大 +
+NVLink 域扩张，把跨节点划分的硬约束松开了；未来大概率是 TP / EP / CP 在
+NVLink 域内整块摊开、PP 留给极少数真正跨域的场景。</li>
+</ol>
+<p>跟 [[UltraScale Playbook 笔记]]
+互为补充：那本讲「怎么选并行度」，这篇讲「选完之后峰值落在哪、会不会
+OOM」。两份笔记里 FSDP / ZeRO / TP 的描述口径一致，差异主要在本文把 MoE
++ Recompute 的反向窗口单独拎出来画了峰值时刻分解。</p>
+<hr />
+<h2 id="参考">参考</h2>
+<ul>
+<li>原文：<a
+href="https://zhuanlan.zhihu.com/p/2052200237373118275">DeepSeekV4 Infra
+Deep Dive · 第四节 4.4: PyTorch 训练显存管理</a></li>
+<li>同系列：
+<ul>
+<li><a href="https://zhuanlan.zhihu.com/p/2031523642467689507">第一节:
+infra 的设计原则</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/2032298882625976192">第二节:
+Hybrid Attention - 问题演进视角</a></li>
+<li><a
+href="https://zhuanlan.zhihu.com/p/2034345100680114900">第三节：在缓存命中率就是一切的世界里，PagedAttention
+失效后会怎样？</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/2036897911921964012">4.1:
+Deepseek V4 为什么不能再按 module 做 checkpoint？</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/2036898381826675516">4.2:
+Activation Checkpointing 的四档粒度</a></li>
+<li><a href="https://zhuanlan.zhihu.com/p/2037700892774888414">4.3:
+Tensor-level AC 的三个工程问题：joint graph、最小子图、storage
+reuse</a></li>
+</ul></li>
+<li>配套阅读：
+<ul>
+<li>[[UltraScale Playbook 笔记]]</li>
+<li>Korthikanti et al. 2022 (arXiv:2205.05198) — Reducing Activation
+Recomputation in Large Transformer Models</li>
+<li>Liu et al. 2023 (arXiv:2310.01889) — Ring Attention with Blockwise
+Transformers</li>
+<li>Jacobs et al. 2023 (arXiv:2309.14509) — DeepSpeed-Ulysses</li>
+<li>Fang et al. 2024 (arXiv:2405.07719) — USP: A Unified Sequence
+Parallelism Approach</li>
+</ul></li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-07-07</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" data-title="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理" data-hashtags="LLM,Pretraining,FSDP,ZeRO,MoE,Recompute,NCCL"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" data-hashtag="LLM"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" data-title="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" data-title="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/" data-title="DeepSeek V4 Infra Deep Dive 4.4: PyTorch 训练显存管理"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/llm/">LLM</a>,&nbsp;<a href="/tags/pretraining/">Pretraining</a>,&nbsp;<a href="/tags/fsdp/">FSDP</a>,&nbsp;<a href="/tags/zero/">ZeRO</a>,&nbsp;<a href="/tags/moe/">MoE</a>,&nbsp;<a href="/tags/recompute/">Recompute</a>,&nbsp;<a href="/tags/nccl/">NCCL</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/rl%E9%9D%A2%E8%AF%95%E9%A2%982026/" class="prev" rel="prev" title="RL 面试题 2026"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>RL 面试题 2026</a>
+            <a href="/verl-v1-%E4%B8%BB%E7%BA%BF%E9%87%8D%E6%9E%84/" class="next" rel="next" title="verl V1 主线重构 · 给后训练工作者的三问">verl V1 主线重构 · 给后训练工作者的三问<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

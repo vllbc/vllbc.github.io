@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent">
+  <meta property="og:description" content="context_engineering的好文
+论文深度解读 这篇论文的核心目标是解决当前大模型在处理超长文本时面临的“不可能三角”困境，即无限文本长度（Arbitrary Length）、无损性能（Lossless Extrapolation）和线性计算成本（Linear Cost）三者难以兼得。传统的长文本方案，无论是通过位置编码外推（如YaRN、NTK-Aware Scaled RoPE）、稀疏注意力机制（如Longformer）还是状态空间模型（如Mamba），都或多或少地在其中一两个方面做出妥协。例如，基于完整注意力的模型虽然效果好，但其计算和内存复杂度是文本长度的二次方（O(n²)），在处理数百万token的文本时成本高昂且不切实际；而线性复杂度的模型虽然快，却常常伴随着性能下降和外推能力的损失。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-08-22T00:00:00+00:00">
+    <meta property="article:modified_time" content="2025-08-22T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Agent">
+    <meta property="article:tag" content="Context">
+    <meta property="article:tag" content="Memory">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent">
+  <meta name="twitter:description" content="context_engineering的好文
+论文深度解读 这篇论文的核心目标是解决当前大模型在处理超长文本时面临的“不可能三角”困境，即无限文本长度（Arbitrary Length）、无损性能（Lossless Extrapolation）和线性计算成本（Linear Cost）三者难以兼得。传统的长文本方案，无论是通过位置编码外推（如YaRN、NTK-Aware Scaled RoPE）、稀疏注意力机制（如Longformer）还是状态空间模型（如Mamba），都或多或少地在其中一两个方面做出妥协。例如，基于完整注意力的模型虽然效果好，但其计算和内存复杂度是文本长度的二次方（O(n²)），在处理数百万token的文本时成本高昂且不切实际；而线性复杂度的模型虽然快，却常常伴随着性能下降和外推能力的损失。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" /><link rel="prev" href="https://blog.vllbc.top/reinforcement-learning-with-rubric-anchors/" /><link rel="next" href="https://blog.vllbc.top/mem0building-production-ready-ai-agents-with-scalable-long-term-memory/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Agent, context, memory","wordcount":  6390 ,
+        "url": "https:\/\/blog.vllbc.top\/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent\/","datePublished": "2025-08-22T00:00:00+00:00","dateModified": "2025-08-22T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/agent/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Agent</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-08-22">2025-08-22</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 6390 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 13 分钟&nbsp;<span id="/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" class="leancloud_visitors" data-flag-title="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p><a
+href="../../../Agent/Memory/context_engineering.md">context_engineering</a>的好文</p>
+<hr />
+<h3 id="论文深度解读">论文深度解读</h3>
+<p>这篇论文的核心目标是解决当前大模型在处理超长文本时面临的“不可能三角”困境，即<strong>无限文本长度（Arbitrary
+Length）</strong>、<strong>无损性能（Lossless
+Extrapolation）</strong>和<strong>线性计算成本（Linear
+Cost）</strong>三者难以兼得。传统的长文本方案，无论是通过位置编码外推（如YaRN、NTK-Aware
+Scaled
+RoPE）、稀疏注意力机制（如Longformer）还是状态空间模型（如Mamba），都或多或少地在其中一两个方面做出妥协。例如，基于完整注意力的模型虽然效果好，但其计算和内存复杂度是文本长度的二次方（O(n²)），在处理数百万token的文本时成本高昂且不切实际；而线性复杂度的模型虽然快，却常常伴随着性能下降和外推能力的损失。</p>
+<p>MemAgent的作者们另辟蹊径，提出了一种全新的范式。他们认为，与其在模型架构上“死磕”，不如改变问题本身的解法。其核心思想源于一个非常符合直觉的人类行为：</p>
+<blockquote>
+<p>When humans process long-context information, we tend to abstract out
+the main revealing conceptions to capture the essence of the whole text,
+often by making notes of critical details or using short-handed
+stenograph to record the key points, while discarding redundant and
+irrelevant data.
+（当我们处理长文本信息时，我们倾向于抽象出关键概念来把握全文精髓，通常通过做笔记或速记来记录要点，同时丢弃冗余和无关的信息。）</p>
+</blockquote>
+<p>基于此，他们设计了
+<strong>MemAgent</strong>，一个基于强化学习（<strong>Reinforcement
+Learning,
+RL</strong>）的记忆代理工作流。它并不直接处理一个巨大的、完整的文本，而是将长文本视作一个“证据流”，进行分块（chunk-by-chunk）处理。</p>
+<p>其工作流程（见下图，原文Figure 2）可以概括为： 1.
+<strong>分块读取</strong>：模型在每一步只读取一小部分文本（一个chunk）和一段固定长度的“记忆”（memory）。
+2.
+<strong>记忆更新</strong>：在读取完当前文本块后，模型的核心任务是生成一段<strong>新的、更新后</strong>的记忆，用来<strong>覆盖（overwrite）</strong>旧的记忆。这段新记忆是模型对截至目前所有相关信息的压缩和提炼。
+3. <strong>循环往复</strong>：模型不断重复上述过程，直到读完所有文本块。
+4.
+<strong>最终回答</strong>：最后，模型利用最终形成的记忆来回答用户提出的问题。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250822165828.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250822165813.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>这个设计最精妙的地方在于，它将一个棘手的长文本处理问题，转化为了一个序列决策问题。由于记忆的长度是固定的，模型在每一步处理的上下文长度（文本块
++
+记忆）也是恒定的，这直接导致了整个流程的计算复杂度与文本总长度呈线性关系（<strong>O(N)</strong>），完美解决了成本问题。</p>
+<p>然而，新的挑战也随之而来：模型如何“学会”更新记忆？“覆盖”是一个离散操作，无法通过传统的反向传播进行端到端优化。这正是强化学习登场的舞台。作者将“生成新记忆”这一行为看作是RL中的一个<strong>动作（action）</strong>。模型因为做出了一个“好的”记忆更新（即保留了对最终答案有用的信息，丢弃了无用信息），并最终答对了问题，而获得<strong>奖励（reward）</strong>。</p>
+<p>为了实现这一目标，作者对现有的RL算法进行了改进，提出了<strong>多轮对话DAPO（Multi-Conv
+DAPO）</strong>。传统的LLM强化学习算法（如PPO、DAPO）通常针对单轮或多轮连续对话进行优化。但在MemAgent的设定中，一次完整的长文本处理过程包含了多次独立的“上下文处理”对话（每次更新记忆都是一轮），这些对话共同服务于最终的“答案生成”对话。Multi-Conv
+DAPO算法的核心在于，它将最终答案的奖励公平地分配给所有在此之前的记忆更新步骤，从而让模型学会每一步都做出最优的决策。</p>
+<p>论文的实验结果极其亮眼。最令人印象深刻的是，一个在<strong>8K</strong>上下文长度上训练的MemAgent模型，能够成功外推到处理长达<strong>350万</strong>token的问答任务，并且性能损失极小。从原文的Figure
+1和Table
+2中可以看到，RL-MemAgent-14B模型在处理7K长度文本时准确率为83.59%，在处理3.5M长度文本时准确率仍有78.12%。相比之下，一些先进的基线模型，如QwenLong-L1-32B，在超过其训练长度后性能急剧下降，而Qwen2.5-Instruct-1M在896K长度时准确率已经降为0。这充分证明了MemAgent在长文本外推能力上的巨大优势。</p>
+<p>此外，通过消融实验（Ablation
+Study），作者证明了<strong>强化学习训练的必要性</strong>。一个只具备记忆机制但未经RL训练的模型（MemAgent
+w/o
+RL），其性能会随着文本长度增加而显著下降。而经过RL训练后，模型性能则能保持稳定（见原文Figure
+5）。这说明，仅仅提供一个“记忆”的结构是不够的，模型必须通过RL学会如何有效地“使用”这个记忆。</p>
+<p>总而言之，MemAgent论文提供了一个优雅且高效的工程解决方案，它没有发明新的模型结构，而是通过一个巧妙的工作流和RL训练范式，将任何中等上下文长度的LLM“变身”为强大的长文本处理工具，为解决行业核心难题开辟了全新的道路。</p>
+<h3 id="论文的研究目标是什么">1. 论文的研究目标是什么？</h3>
+<ul>
+<li><p><strong>研究目标</strong>：解决大型语言模型在处理超长文本时面临的根本性挑战，即如何在保持<strong>线性计算复杂度</strong>的同时，实现对<strong>任意长度文本</strong>的处理，并且在超出训练长度时性能<strong>不发生显著衰减</strong>（即强大的外推能力）。</p></li>
+<li><p><strong>实际问题</strong>：当前的大模型通常有一个固定的上下文窗口（Context
+Window），例如4K, 8K, 或128K
+tokens。一旦需要处理的文本（如一本小说、一份几百页的财报、一个完整的代码库）超过这个长度，模型就无能为力。现有的解决方案存在以下问题：</p>
+<ul>
+<li><strong>暴力扩展</strong>：直接使用完整的注意力机制处理长文本，会导致O(n²)的计算灾难。</li>
+<li><strong>架构修改</strong>：采用稀疏注意力、线性注意力或状态空间模型等架构，虽然能降低复杂度，但往往以牺牲部分性能为代价，且在处理远超训练长度的文本时表现不佳。</li>
+<li><strong>RAG
+(检索增强生成)</strong>：依赖外部检索系统，但检索质量不稳定，且难以处理需要全局理解才能回答的复杂问题。</li>
+</ul></li>
+<li><p><strong>行业意义</strong>：解锁真正意义上的长文本处理能力，是推动大模型从“玩具”走向“生产力工具”的关键一步。它将极大地扩展LLM的应用场景，例如：</p>
+<ul>
+<li><strong>知识密集型工作</strong>：自动分析和总结法律合同、科学文献、金融财报等长篇文档。</li>
+<li><strong>软件开发</strong>：理解整个代码库的上下文，进行代码生成、Bug修复和重构。</li>
+<li><strong>个性化AI</strong>：实现具有长期记忆的AI助手，能够记住与用户数月乃至数年的对话历史。</li>
+<li><strong>内容创作</strong>：阅读整本书后，进行续写、角色分析或情节推理。</li>
+</ul></li>
+</ul>
+<h3 id="论文提出了哪些新的思路方法或模型">2.
+论文提出了哪些新的思路、方法或模型？</h3>
+<p>论文的核心创新在于提出了一套新的<strong>工作流（Workflow）</strong>和相应的<strong>训练算法</strong>，而不是一个全新的模型架构。</p>
+<ul>
+<li><strong>新思路：流式处理与记忆更新</strong>
+<ul>
+<li><strong>核心理念</strong>：将长文本视为一个“受控的证据流”（controlled
+stream of
+evidence），而非一个静态的整体。这从根本上改变了问题的建模方式。</li>
+<li><strong>记忆机制</strong>：引入一个固定大小、基于token的<strong>显式记忆（explicit
+memory）</strong>。这个记忆和输入的文本块一样，都是普通token，可以直接被Transformer模型处理，无需任何架构改动。</li>
+<li><strong>覆盖策略（Overwrite
+Strategy）</strong>：这是实现系统可扩展性的关键。记忆的长度永远不会增长，模型通过不断生成更精炼的新记忆来迭代更新，确保了每一步的计算成本都是恒定的。</li>
+</ul></li>
+<li><strong>新方法：MemAgent工作流</strong>
+<ul>
+<li>该工作流将推理过程分解为两个模块：
+<ol type="1">
+<li><strong>上下文处理模块（Context-Processing）</strong>：循环迭代，输入为“问题
++ 上一轮记忆 + 当前文本块”，输出为“更新后的记忆”。</li>
+<li><strong>答案生成模块（Answer-Generation）</strong>：在处理完所有文本后调用，输入为“问题
++ 最终记忆”，输出为最终答案。</li>
+</ol></li>
+</ul></li>
+<li><strong>新算法：多轮对话DAPO（Multi-Conv DAPO）</strong>
+<ul>
+<li><strong>特点与优势</strong>：该算法是为MemAgent工作流量身定制的。
+&gt; However, due to the nature of the MEMAGENT approach, it generates
+multiple context-independent conversations for a single query…
+Therefore, policy optimization cannot be implemented by simply applying
+the attention mask as is done in multi-turn tool-calling optimization.
+&gt;
+（然而，由于MEMAGENT方法的特性，它会为单个查询生成多个上下文独立的对话……因此，不能像在多轮工具调用优化中那样简单地应用注意力掩码来实现策略优化。）</li>
+<li><strong>相比传统RL算法</strong>：传统RL方法（如用于工具学习的RL）通常处理一个线性的、交错的对话流。而MemAgent的记忆更新过程是多个并行的、服务于同一目标的“子对话”。Multi-Conv
+DAPO通过将最终的<strong>结果奖励（outcome
+reward）</strong>（即答案是否正确）<strong>均匀地分配</strong>给所有前序的记忆更新对话，从而对整个决策链进行优化。这使得模型能够学习到一个<strong>通用能力</strong>：如何提炼和压缩信息以服务于最终目标，而不是学习特定位置的注意力模式。</li>
+</ul></li>
+</ul>
+<h3 id="论文通过什么实验来验证所提出方法的有效性">3.
+论文通过什么实验来验证所提出方法的有效性？</h3>
+<p>论文设计了一系列严谨的实验来验证MemAgent的有效性、外推能力和泛化能力。</p>
+<ul>
+<li><strong>实验设计</strong>：
+<ul>
+<li><strong>基础模型</strong>：选用Qwen2.5-7B和Qwen2.5-14B作为基础模型，证明该方法的通用性。</li>
+<li><strong>训练设置</strong>：为了专门测试<strong>外推能力</strong>，作者故意将模型的训练上下文窗口限制在<strong>8K</strong>。</li>
+<li><strong>数据集</strong>：主要使用<strong>RULER</strong>基准中的<strong>HotpotQA</strong>任务。这是一个多跳问答数据集，被改造用于长文本评测，非常适合检验模型在充满干扰信息（haystack）的长文本中定位和整合关键信息（needle）的能力。</li>
+<li><strong>测试集生成</strong>：通过在问题周围填充不同数量的干扰文章，生成了从7K到3.5M
+token等不同长度的测试集。</li>
+</ul></li>
+<li><strong>关键实验与数据结果</strong>：
+<ol type="1">
+<li><strong>长文本外推能力测试 (Main Results, Table
+2)</strong>：这是核心实验，旨在比较MemAgent与当前主流长文本模型在不同长度下的性能。
+<ul>
+<li><strong>MemAgent表现</strong>：如前所述，<strong>RL-MEMAGENT-14B</strong>在3.5M
+token长度下准确率仍高达<strong>78.12%</strong>，相比于它在7K长度下的83.59%，性能几乎没有衰减。</li>
+<li><strong>基线模型对比</strong>：<strong>QwenLong-L1-32B</strong>在224K后性能开始大幅下滑，到896K时仅剩<strong>11.72%</strong>。被认为拥有1M上下文的<strong>Qwen2.5-Instruct-1M</strong>系列，在896K时准确率已降至<strong>0%</strong>，说明它们虽然有很大的上下文窗口，但无法有效利用超长距离的信息。</li>
+</ul></li>
+</ol></li>
+</ul>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">模型</th>
+<th style="text-align: left;">7K</th>
+<th style="text-align: left;">112K</th>
+<th style="text-align: left;">896K</th>
+<th style="text-align: left;">3.5M</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">QwenLong-L1-32B</td>
+<td style="text-align: left;">72.66%</td>
+<td style="text-align: left;">31.25%</td>
+<td style="text-align: left;">11.72%</td>
+<td style="text-align: left;">N/A</td>
+</tr>
+<tr>
+<td style="text-align: left;">Qwen2.5-Instruct-14B-1M</td>
+<td style="text-align: left;">60.16%</td>
+<td style="text-align: left;">50.00%</td>
+<td style="text-align: left;">0.00%</td>
+<td style="text-align: left;">N/A</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>RL-MEMAGENT-14B</strong></td>
+<td style="text-align: left;"><strong>83.59%</strong></td>
+<td style="text-align: left;"><strong>76.56%</strong></td>
+<td style="text-align: left;"><strong>77.34%</strong></td>
+<td style="text-align: left;"><strong>78.12%</strong></td>
+</tr>
+</tbody>
+</table>
+<ol start="2" type="1">
+<li><strong>消融研究 (Ablation Study, Figure
+5)</strong>：该实验旨在验证强化学习（RL）的必要性。
+<ul>
+<li><strong>实验对比</strong>：比较了三个模型：1) 原始模型截断输入，2)
+有记忆机制但<strong>无RL训练</strong>的模型 (MemAgent w/o RL)，3)
+完整的RL训练模型。</li>
+<li><strong>结果</strong>：无RL训练的模型性能随着文本变长而持续下降，而<strong>RL训练后的模型性能曲线几乎是平的</strong>。这强有力地证明了RL是教会模型如何有效管理记忆的关键。</li>
+</ul></li>
+<li><strong>跨任务泛化能力测试 (Out-of-Distribution Tasks, Figure
+6)</strong>：评估模型学习到的记忆能力是否能泛化到训练任务之外。
+<ul>
+<li><strong>实验内容</strong>：在RULER基准的其他任务（如多针寻草、变量跟踪等）上进行测试。</li>
+<li><strong>结果</strong>：MemAgent在各种任务上都表现出一致的优越性。例如，<strong>MEMAGENT-14B</strong>在10个RULER任务上的平均准确率超过<strong>95%</strong>（在512K上下文内），远超所有基线模型。</li>
+</ul></li>
+</ol>
+<h3 id="未来在该研究方向上还有哪些值得进一步探索的问题和挑战">4.
+未来在该研究方向上还有哪些值得进一步探索的问题和挑战？</h3>
+<p>该研究方向极具潜力，未来可以从以下几个方面进行探索：</p>
+<ul>
+<li><strong>更复杂的记忆结构与操作</strong>：
+<ul>
+<li><strong>结构化记忆</strong>：当前的记忆是扁平的token序列。未来可以探索更复杂的记忆结构，如<strong>知识图谱、键值对（Key-Value）或层级化摘要</strong>，这可能让模型更好地组织和检索信息。</li>
+<li><strong>多样化记忆操作</strong>：除了“覆盖”，是否可以引入“追加（append）”、“编辑（edit）”、“遗忘（forget）”等更精细的记忆操作？这将构成一个更丰富的RL动作空间，但也增加了训练难度。</li>
+</ul></li>
+<li><strong>高级强化学习算法</strong>：
+<ul>
+<li><strong>智能奖励分配</strong>：目前采用均匀奖励分配。未来可以研究更智能的<strong>信用分配（Credit
+Assignment）</strong>策略。例如，一个关键信息的发现步骤是否应该比常规的总结步骤获得更高的奖励？</li>
+<li><strong>探索与利用</strong>：如何平衡对新信息的探索和对现有记忆的巩固利用，是一个值得研究的课题。</li>
+</ul></li>
+<li><strong>与现有技术的融合</strong>：
+<ul>
+<li><strong>混合模型</strong>：是否可以将MemAgent与<strong>RAG</strong>结合？当记忆模块判断信息不足时，可以主动触发一次外部检索，并将检索结果作为新的文本块来处理。</li>
+<li><strong>与高效注意力结合</strong>：在处理单个文本块时，依然可以利用Flash
+Attention等高效注意力机制来加速计算。</li>
+</ul></li>
+<li><strong>新的技术和投资机会</strong>：
+<ul>
+<li><strong>下一代RAG系统</strong>：MemAgent的思想可能催生出“自适应RAG”或“RAG
+2.0”，其中LLM自身成为主动的知识管理者，而不是被动地接收检索结果。</li>
+<li><strong>企业级知识管理</strong>：为企业提供能够消化全部内部文档（数百万甚至上亿token）的AI解决方案，实现真正的“企业大脑”。</li>
+<li><strong>专业领域AI助手</strong>：在法律、医疗、科研等领域，打造能够持续学习和记忆领域知识的专家级AI助手。</li>
+<li><strong>开发工具链</strong>：围绕这种Agentic
+Memory范式，可能会出现新的开发框架、调试工具和优化服务。</li>
+</ul></li>
+</ul>
+<h3 id="从批判的视角看这篇论文还存在哪些不足及缺失">5.
+从批判的视角看，这篇论文还存在哪些不足及缺失？</h3>
+<p>尽管这篇论文非常出色，但仍存在一些潜在的局限性和待验证的问题：</p>
+<ul>
+<li><strong>任务类型的局限性</strong>：
+<ul>
+<li>论文的主要评估任务是<strong>抽取式问答（Extractive
+QA）</strong>，例如HotpotQA和Needle-in-a-Haystack。这类任务的核心是“定位和提取”。对于需要对整个文本进行<strong>高度抽象、综合和创造性推理</strong>的任务（例如，“请分析《百年孤独》中魔幻现实主义的叙事风格”），MemAgent的表现如何尚待验证。它的记忆机制是否能保存足够复杂的文体和情感信息是一个疑问。</li>
+</ul></li>
+<li><strong>错误累积与鲁棒性</strong>：
+<ul>
+<li>这是一个序列决策过程，<strong>早期的错误可能会被累积和放大</strong>。如果模型在处理前面某个文本块时犯了关键错误（例如，丢弃了一个对后续至关重要的信息），它可能无法在后续步骤中恢复。论文对此“灾难性遗忘”的风险和应对策略讨论不足。</li>
+</ul></li>
+<li><strong>推理速度与延迟</strong>：
+<ul>
+<li>虽然计算复杂度是线性的，但其<strong>串行处理</strong>的本质意味着总的推理时间是所有步骤时间的累加。对于需要低延迟的应用，这种分块处理的方式可能成为瓶颈，因为它无法像并行架构那样一次性处理。论文主要关注FLOPs，但对实际的<strong>wall-clock
+time</strong>讨论较少。</li>
+</ul></li>
+<li><strong>“记忆”的真正内涵</strong>：
+<ul>
+<li>将token序列称为“记忆”是一个非常贴切的类比，但其本质上仍是一个高度浓缩的<strong>文本摘要</strong>。它是否真正形成了类似人类的结构化、可推理的记忆，还有待进一步的机制解释性研究。</li>
+</ul></li>
+</ul>
+<h3 id="我应该从这篇论文中重点学什么">6.
+我应该从这篇论文中重点学什么？</h3>
+<p>这篇论文为我们提供了非常宝贵的启发，尤其是关于如何“换个思路解决问题”。</p>
+<ul>
+<li><strong>核心启发</strong>：
+<ol type="1">
+<li><strong>重构问题，而非硬解问题</strong>：当在架构层面遇到瓶颈时（如Transformer的O(n²)复杂度），尝试从更高维度的工作流或算法层面重新定义问题。将“处理一个大问题”分解为“处理一系列小问题”，是工程和科研中一种极其强大的思想。</li>
+<li><strong>强化学习是Agent工作流的“粘合剂”</strong>：对于包含离散决策、需要长期规划的Agentic流程（无论是使用工具还是更新记忆），RL提供了一个完美的数学框架来对其进行端到端优化，将过程与最终结果联系起来。</li>
+<li><strong>通用技能的价值 &gt;
+特定长度的拟合</strong>：通过RL训练模型学会一种通用的“信息压缩与摘要”技能，远比让它去死记硬背超长上下文中的位置信息要更具扩展性和鲁棒性。这是一种“授人以渔”的训练哲学。</li>
+</ol></li>
+<li><strong>需要补充的背景知识</strong>：
+<ol type="1">
+<li><strong>长文本LLM技术</strong>：建议了解主流的长文本解决方案，包括：
+<ul>
+<li><strong>位置编码外推</strong>：<strong>RoPE (Rotary Position
+Embedding)</strong> 及其改进，如 PI, YaRN, DCA。</li>
+<li><strong>高效注意力机制</strong>：<strong>Sparse Attention
+(Longformer)</strong>, <strong>Linear Attention</strong>, <strong>Flash
+Attention</strong>。</li>
+<li><strong>非Transformer架构</strong>：<strong>State Space Models
+(Mamba, Griffin)</strong>, <strong>RWKV</strong>。</li>
+<li>了解这些技术的优缺点，才能更深刻地理解MemAgent的创新之处。</li>
+</ul></li>
+<li><strong>LLM的强化学习</strong>：
+<ul>
+<li><strong>基础</strong>：了解 <strong>RLHF (Reinforcement Learning
+from Human Feedback)</strong> 的基本流程，以及核心算法 <strong>PPO
+(Proximal Policy Optimization)</strong>。</li>
+<li><strong>前沿</strong>：学习 <strong>DPO (Direct Preference
+Optimization)</strong>
+及其变体（如本文的DAPO）。DPO是当前更稳定、更受欢迎的对齐技术。</li>
+</ul></li>
+<li><strong>AI Agent (智能体)</strong>：
+<ul>
+<li>了解AI Agent的基本概念，特别是像 <strong>ReAct (Reason +
+Act)</strong>
+这样的框架，它们展示了LLM如何通过“思考”和“行动”的循环来解决复杂问题。MemAgent可以看作是一种特殊形式的、专注于内部记忆管理的Agent。</li>
+</ul></li>
+</ol></li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2025-08-22</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" data-title="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent" data-hashtags="Reading,Agent,context,memory"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" data-title="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" data-title="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/" data-title="MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/agent/">Agent</a>,&nbsp;<a href="/tags/context/">Context</a>,&nbsp;<a href="/tags/memory/">Memory</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/reinforcement-learning-with-rubric-anchors/" class="prev" rel="prev" title="Reinforcement Learning with Rubric Anchors"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>Reinforcement Learning with Rubric Anchors</a>
+            <a href="/mem0building-production-ready-ai-agents-with-scalable-long-term-memory/" class="next" rel="next" title="未命名">未命名<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

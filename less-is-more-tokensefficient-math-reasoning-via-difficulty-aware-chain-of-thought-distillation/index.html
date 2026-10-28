@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation">
+  <meta property="og:description" content="利用dpo来压缩思维链，和Pruning Long Chain-of-Thought of Large Reasoning Models via Small-Scale Preference Optimization思路很像。本文的方法是先生成，后压缩，然后利用压缩后和压缩前的作为偏好数据训练。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-09-09T00:00:00+00:00">
+    <meta property="article:modified_time" content="2025-09-09T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Reasoning">
+    <meta property="article:tag" content="Cot_compress">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation">
+  <meta name="twitter:description" content="利用dpo来压缩思维链，和Pruning Long Chain-of-Thought of Large Reasoning Models via Small-Scale Preference Optimization思路很像。本文的方法是先生成，后压缩，然后利用压缩后和压缩前的作为偏好数据训练。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" /><link rel="prev" href="https://blog.vllbc.top/plan-verification-for-llm-based-embodied-task-completion-agents/" /><link rel="next" href="https://blog.vllbc.top/agent-workflow-memory/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Reasoning, cot_compress","wordcount":  6304 ,
+        "url": "https:\/\/blog.vllbc.top\/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation\/","datePublished": "2025-09-09T00:00:00+00:00","dateModified": "2025-09-09T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/reasoning/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reasoning</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-09-09">2025-09-09</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 6304 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 13 分钟&nbsp;<span id="/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" class="leancloud_visitors" data-flag-title="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>利用dpo来压缩思维链，和<a
+href="Pruning%20Long%20Chain-of-Thought%20of%20Large%20Reasoning%20Models%20via%20Small-Scale%20Preference%20Optimization.md">Pruning
+Long Chain-of-Thought of Large Reasoning Models via Small-Scale
+Preference
+Optimization</a>思路很像。本文的方法是先生成，后压缩，然后利用压缩后和压缩前的作为偏好数据训练。</p>
+<hr />
+<p>这篇论文的核心思想在于，它挑战了当前大语言模型（LLM）在进行链式思考（Chain-of-Thought,
+CoT）时普遍存在的“思考过度”（over-thinking）问题。目前的LLM在解决问题时，无论问题难易，往往会生成长度相近、步骤繁琐的推理过程。这不仅导致了在简单问题上的资源浪费（增加了推理延迟和计算成本），也与人类认知中“根据任务难度动态调整认知资源”的直觉相悖。</p>
+<p>为此，作者提出了一个创新的<strong>“难度感知链式思考蒸馏”
+(Difficulty-Aware Chain-of-Thought Distillation)</strong>
+框架。这个框架的精髓在于“按需思考”，即训练模型学会像人类一样，对简单问题进行简洁推理，对复杂问题进行详尽思考。它并非通过修改模型架构，而是通过精心构建高质量的训练数据，向模型“教导”这种动态推理能力。</p>
+<p>整个流程可以分为两个核心阶段：</p>
+<p><strong>第一阶段：生成难度对齐的推理数据</strong>
+这个阶段的目标是创建一个“理想”的训练数据集，其中每个问题的推理过程长度都与其内在难度相匹配。
+1. <strong>难度评估 (Difficulty
+Estimation)</strong>：首先，论文使用一个强大的模型（如GPT-4o-mini），依据一个类似人类竞赛的标准（AoPS，Art
+of Problem
+Solving），为每个数学问题打上一个1到10的难度分数。这是一个关键步骤，它为后续的“按需压缩”提供了量化指标。
+2. <strong>长链推理生成 (Verbose CoT
+Generation)</strong>：接着，使用一个能力顶尖的“教师模型”（如DeepSeek-R1）为每个问题生成一个详尽、步骤完整的“长链式思考”解答。这些解答虽然正确率高，但通常非常冗长。
+3. <strong>难度感知压缩 (Difficulty-Aware
+Compression)</strong>：最后，再次利用GPT-4o-mini，根据第一步评估出的难度分数，对“长链式思考”进行压缩。难度低的问题会被大幅简化，只保留核心步骤；难度高的问题则会保留更多必要的推理细节。</p>
+<blockquote>
+<p>正如论文中所描述的：“This function adapts the verbosity of the
+reasoning proportionally to the problem’s difficulty—minimal steps for
+easy problems and more elaborate chains for hard ones—while preserving
+logical correctness and the final answer.”</p>
+</blockquote>
+<p>通过这个流程，研究者们得到了一批高质量的、推理长度与问题难度正相关的训练样本。</p>
+<p><strong>第二阶段：混合式训练学生模型</strong>
+有了理想的数据集后，研究者们选择更小、更高效的“学生模型”（如Qwen2.5-Math），并采用一种创新的“课程学习”策略进行训练：
+1. <strong>监督微调 (Supervised Fine-Tuning,
+SFT)</strong>：首先进行SFT训练，目标是让学生模型模仿压缩后的推理轨迹。这一步主要是让模型学会生成简洁、格式清晰、符合难度预期的推理“形式”和“风格”。
+2. <strong>直接偏好优化 (Direct Preference Optimization,
+DPO)</strong>：SFT虽然能教会模型“形似”，但有时会为了追求简洁而牺牲推理的准确性。因此，第二步引入了DPO。在DPO阶段，模型会学习一个偏好：它被告知“压缩后、正确的推理”优于“原始的、冗长的推理”。<strong>DPO</strong>是一种无需显式奖励模型的强化学习对齐技术，它通过对比“偏好”和“不偏好”的样本对，直接优化模型，使其生成更符合人类期望（在这里是既简洁又准确）的输出。</p>
+<blockquote>
+<p>论文强调了这种混合训练的互补性：“SFT encourages the model to mimic
+surface-level patterns… DPO complements this by learning from pairwise
+preferences, optimizing for correctness and clarity without relying on
+exact sequence matching.”</p>
+</blockquote>
+<p>实验结果有力地证明了该框架的有效性。例如，在unimodal（纯文本）数学任务的AIME基准测试中，7B参数的SFT+DPO模型相较于其基础模型，<strong>pass@1（一次生成正确率）从35.0%略微下降到31.7%，但平均token消耗从6360骤降至5724，减少了近10%</strong>。在某些任务上，它甚至能以更少的token实现更高的准确率。在GSM8K基-准上，1.5B的SFT+DPO模型用<strong>1527个token达到了82.3%的准确率</strong>，与其使用<strong>1660个token的基础模型（83.9%）</strong>
+性能相当，实现了显著的效率提升。</p>
+<p>这一系列详实的数据表明，通过“难度感知蒸馏”和“SFT+DPO”的组合拳，模型确实学会了在保持或提升性能的同时，更智能地分配其“思考资源”。这不仅是一个技术上的创新，更是对如何构建更高效、更经济、更接近人类智能的AI系统的一次成功探索。</p>
+<p>接下来，我将为您逐一深入解读您提出的六个问题。</p>
+<h3
+id="论文的研究目标是什么-想要解决什么实际问题这个问题对于行业发展有什么重要意义">1.
+论文的研究目标是什么？
+想要解决什么实际问题？这个问题对于行业发展有什么重要意义?</h3>
+<ul>
+<li><strong>研究目标</strong>：论文的核心研究目标是，在不牺牲甚至提升任务性能的前提下，显著<strong>降低大语言模型在推理任务中的计算成本和延迟</strong>。</li>
+<li><strong>实际问题</strong>：它要解决的是当前基于<strong>链式思考（CoT）</strong>
+的LLM普遍存在的“计算资源浪费”问题。具体来说，现有模型在处理所有问题时，不论难易，都倾向于生成冗长的推理步骤（即“over-thinking”）。这导致在实际应用中，尤其是在处理海量简单任务时，会产生不必要的token生成，直接转化为更高的API调用费用和更长的用户等待时间。</li>
+<li><strong>行业意义</strong>：
+<ol type="1">
+<li><strong>经济效益</strong>：在LLM服务大规模部署的今天，推理成本是制约其应用广度的关键瓶颈之一。根据论文引用，“推理成本将远超训练成本”。如果能让模型在保证效果的同时“少说废话”，就意味着可以为企业和开发者节省大量的运营成本，推动LLM在更多对成本敏感的场景中落地。</li>
+<li><strong>用户体验</strong>：对于实时交互应用（如智能客服、在线教育、编程助手），低延迟至关重要。通过生成更简洁的推理，可以大幅缩短模型的响应时间，提升用户体验。</li>
+<li><strong>模型智能的演进</strong>：该研究推动了模型从“机械地执行指令”向“智能化地分配资源”迈进。让模型学会“判断何时需要深入思考，何时可以快速作答”，是其认知能力和智能水平提升的重要标志，使其行为模式更接近人类。</li>
+</ol></li>
+</ul>
+<h3
+id="论文提出了哪些新的思路方法或模型跟之前的方法相比有什么特点和优势">2.
+论文提出了哪些新的思路、方法或模型？跟之前的方法相比有什么特点和优势？</h3>
+<p>论文的核心创新在于提出了一套<strong>端到端的Difficulty-Aware CoT
+Distillation框架</strong>，其新颖之处体现在以下几个方面：</p>
+<ul>
+<li><strong>新的思路：动态与自适应推理</strong>
+<ul>
+<li><strong>核心思想</strong>：将<strong>问题难度 (problem
+difficulty)</strong>
+作为调节推理详细程度的关键变量。这是一种动态的、自适应的资源分配策略。</li>
+<li><strong>对比优势</strong>：之前的方法，如<code>L1</code> [31]
+等，通常采用<strong>固定长度控制</strong>或<strong>统一压缩</strong>策略，它们试图将所有推理都压缩到某个固定的预算内，这可能导致在复杂问题上“思考不足”，从而损害性能。本论文的方法则更加灵活和智能，它允许模型为难题保留详尽的推理，只在简单问题上进行压缩，实现了效率和效果的更优平衡。</li>
+</ul></li>
+<li><strong>新的方法：数据驱动的难度感知能力注入</strong>
+<ul>
+<li><strong>方法特点</strong>：论文的巧妙之处在于，它不依赖于复杂的模型结构修改或强化学习环境，而是通过一个<strong>精心设计的数据生成流程</strong>，将难度感知的行为“蒸馏”到学生模型中。这个流程包括了<strong>基于LLM的难度打分</strong>和<strong>基于难度的提示词压缩</strong>，是一种可扩展、可复制的范式。</li>
+<li><strong>对比优势</strong>：相比于一些需要复杂强化学习设置或修改解码策略的方法，本论文的方法实现起来相对简单，本质上是一种高质量的数据工程。它证明了通过巧妙地构建训练数据，同样可以赋予模型复杂的行为能力。</li>
+</ul></li>
+<li><strong>新的训练范式：SFT与DPO的课程化结合</strong>
+<ul>
+<li><strong>方法特点</strong>：论文验证了一个高效的<strong>“SFT →
+DPO”两阶段训练策略</strong>。
+<ul>
+<li><strong>SFT</strong>：负责“塑形”，让模型快速学习到简洁推理的格式和长度。</li>
+<li><strong>DPO</strong>：负责“铸魂”，在模型已经掌握了形式的基础上，通过偏好学习来优化其推理的<strong>正确性</strong>和<strong>逻辑性</strong>。</li>
+</ul></li>
+<li><strong>对比优势</strong>：单独使用SFT可能会导致模型为了模仿简洁格式而丢失关键信息，造成性能下降（如Table
+2中，7B模型的SFT版本在AIME上准确率仅为8.4%）。单独使用DPO则可能无法有效缩短token长度。SFT+DPO的组合拳恰好取长补短，实现了形式（简洁）与内容（准确）的统一。</li>
+</ul></li>
+</ul>
+<h3
+id="论文通过什么实验来验证所提出方法的有效性实验是如何设计的实验数据和结果如何">3.
+论文通过什么实验来验证所提出方法的有效性？实验是如何设计的？实验数据和结果如何？</h3>
+<p>论文设计了严谨且全面的实验来验证其方法的有效性，覆盖了不同模态和模型规模。</p>
+<ul>
+<li><strong>实验设计</strong>：
+<ul>
+<li><strong>任务领域</strong>：实验分为两大类：<strong>Unimodal（纯文本数学推理）</strong>
+和
+<strong>Multimodal（图文结合的数学推理）</strong>，验证了方法的普适性。</li>
+<li><strong>评估基准 (Benchmarks)</strong>：
+<ul>
+<li>Unimodal: 使用了AIME, MATH, AMC, GSM8K,
+HMMT等多个高难度、公认的数学推理数据集。</li>
+<li>Multimodal: 使用了MathVerse, MathVision, OlympiadBench,
+MMStar等视觉推理数据集。</li>
+</ul></li>
+<li><strong>对比基线 (Baselines)</strong>：
+<ol type="1">
+<li><strong>基础模型
+(Base)</strong>：即在原始长CoT数据上微调的学生模型，代表了高token消耗下的性能上限。</li>
+<li><strong>单独训练模型 (SFT-only,
+DPO-only)</strong>：用于消融实验，证明SFT+DPO组合的必要性。</li>
+<li><strong>其他SOTA模型</strong>：如<code>LLaVA-CoT</code>，代表了领域内其他强大的多模态推理模型。</li>
+</ol></li>
+<li><strong>评估指标 (Metrics)</strong>：
+<ol type="1">
+<li><strong>Pass@1</strong>：一次生成即获得正确答案的概率，衡量<strong>准确性</strong>。</li>
+<li><strong>Average Token
+Count</strong>：模型生成推理过程的平均token数，衡量<strong>效率</strong>。</li>
+<li><strong>LLM-as-Judge</strong>：使用GPT-4o-mini从<strong>清晰度、完整性、正确性、冗余度</strong>四个维度对推理质量进行打分，进行<strong>定性评估</strong>。</li>
+</ol></li>
+</ul></li>
+<li><strong>关键数据和结果</strong>：
+<ul>
+<li><strong>Unimodal 结果 (Table 2)</strong>: &gt;
+在AIME基准上，7B的SFT+DPO模型相较于Base模型，在token数减少10% (5724 vs
+6360) 的情况下，准确率仅有微小差距 (31.7 vs
+35.0)。而在GSM8K上，SFT+DPO模型在token数减少8% (498 vs
+553)的情况下，准确率几乎持平 (86.9 vs
+88.0)。这清晰地展示了“效率-准确率”的权衡优势。</li>
+<li><strong>Multimodal 结果 (Figure 1)</strong>: &gt;
+在MathVerse基准上，7B的SFT+DPO模型取得了与教师模型(Qwen2.5-VL-7B)相当的准确率，但平均token数从378减少到296，<strong>效率提升了约22%</strong>。相比于LLaVA-CoT-11B模型，SFT+DPO模型在多个基准上（如MMStar）都取得了更高的准确率，同时token消耗更少。</li>
+<li><strong>定性评估结果 (Figure 2)</strong>： &gt;
+LLM-as-Judge的评分显示，SFT+DPO模型在<strong>清晰度(Clarity)</strong>、<strong>完整性(Completeness)</strong>和<strong>正确性(Correctness)</strong>上全面优于或持平于基线模型，同时在<strong>冗余度(Redundancy)</strong>上得分显著更低（得分越低越好），证明其生成的推理过程质量更高。</li>
+</ul></li>
+</ul>
+<p>下面是Unimodal任务上7B模型关键结果的总结表，能更直观地体现其优势：</p>
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 26%" />
+<col style="width: 26%" />
+<col style="width: 26%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">模型 (7B)</th>
+<th style="text-align: center;">AIME (Pass@1 / Tokens)</th>
+<th style="text-align: center;">Math (Pass@1 / Tokens)</th>
+<th style="text-align: center;">GSM8K (Pass@1 / Tokens)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Base</strong></td>
+<td style="text-align: center;">35.0 / 6360</td>
+<td style="text-align: center;">86.0 / 3050</td>
+<td style="text-align: center;">88.0 / 553</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>SFT only</strong></td>
+<td style="text-align: center;">8.4 / 864</td>
+<td style="text-align: center;">75.4 / 474</td>
+<td style="text-align: center;">88.5 / 244</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>DPO only</strong></td>
+<td style="text-align: center;">25.0 / 6584</td>
+<td style="text-align: center;">86.0 / 3062</td>
+<td style="text-align: center;">89.2 / 592</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>SFT + DPO</strong></td>
+<td style="text-align: center;"><strong>31.7 / 5724</strong></td>
+<td style="text-align: center;"><strong>88.8 / 2745</strong></td>
+<td style="text-align: center;"><strong>86.9 / 498</strong></td>
+</tr>
+</tbody>
+</table>
+<h3
+id="结合大模型领域的当前学术理解未来在该研究方向上还有哪些值得进一步探索的问题和挑战">4.
+结合大模型领域的当前学术理解，未来在该研究方向上还有哪些值得进一步探索的问题和挑战？</h3>
+<p>这个研究方向——即<strong>自适应计算 (Adaptive Computation)</strong> 或
+<strong>条件计算 (Conditional
+Computation)</strong>——是提升LLM效率和能力的关键，未来充满机遇和挑战。</p>
+<ul>
+<li><strong>值得探索的问题</strong>：
+<ol type="1">
+<li><strong>更精细的难度/复杂度度量</strong>：目前仅使用一个1-10的标量来表示难度。未来可以探索更丰富的度量，例如区分“计算密集型”和“逻辑密集型”难题，或者根据问题的主题、所需知识领域来动态调整推理策略。</li>
+<li><strong>跨领域适用性</strong>：将此框架从数学推理扩展到<strong>代码生成、法律文书分析、科学文献综述</strong>等其他需要复杂推理的领域。不同领域的“简洁”和“详尽”定义不同，需要新的数据和策略。</li>
+<li><strong>推理路径的动态选择</strong>：不仅仅是调整推理的长度，模型是否可以学习在不同的推理“算法”（如CoT,
+Tree-of-Thought,
+Graph-of-Thought）之间进行动态选择？例如，简单问题用CoT，复杂问题自动切换到更高成本但更强的ToT。</li>
+<li><strong>与模型架构结合</strong>：探索与<strong>Mixture-of-Experts
+(MoE)</strong>
+架构的结合。模型能否根据问题难度，动态地决定激活哪些专家网络？简单问题激活少量通用专家，复杂问题激活更多专业化专家。</li>
+</ol></li>
+<li><strong>技术和投资机会</strong>：
+<ol type="1">
+<li><strong>AI模型推理优化服务</strong>：可能会催生出专门为企业提供LLM推理优化服务的公司。他们可以利用类似的技术，帮助客户在不牺牲业务效果的前提下，大幅降低模型API调用成本。</li>
+<li><strong>下一代AI芯片/硬件</strong>：支持动态计算的硬件架构将更具优势。能够根据计算负载快速调整功耗和资源分配的芯片，将与自适应推理的软件算法形成协同效应。</li>
+<li><strong>自动化数据标注与蒸馏平台</strong>：构建一个自动化平台，能够为任何模型和任务，自动完成“难度评估-数据生成-压缩蒸馏”的流程，这将是一个极具价值的AI开发工具。</li>
+</ol></li>
+</ul>
+<h3 id="从批判的视角看这篇论文还存在哪些不足及缺失">5.
+从批判的视角看，这篇论文还存在哪些不足及缺失？</h3>
+<p>尽管这篇论文非常出色，但从批判性角度审视，仍存在一些可以进一步完善的地方，作者在“Limitations”一节也坦诚地指出了部分问题：</p>
+<ol type="1">
+<li><strong>难度评估的可靠性与偏差</strong>：整个框架的基石是GPT-4o-mini对问题难度的评估。这个评估本身是否足够准确、客观和稳定？如果评估存在偏差（比如对某些类型的问题系统性地高估或低估难度），这种偏差会<strong>沿着整个数据处理管道被放大</strong>，最终影响学生模型的训练效果。论文缺乏对这一核心环节的深入误差分析。</li>
+<li><strong>数据集规模与泛化性</strong>：作者承认，他们使用的训练数据集比业界其他大规模蒸馏工作（如DeepSeek-Distil）要小得多。这可能会<strong>限制模型在未见过（out-of-distribution）的问题类型上的泛化能力</strong>。模型可能只是学会了在“训练集内的难度分布”上进行自适应，但在面对全新的、难度特征不同的问题时，其自适应能力可能会退化。</li>
+<li><strong>微调方法的局限性</strong>：出于计算资源的限制，论文使用了<strong>参数高效微调（LoRA）</strong>。虽然LoRA效率高，但它的能力通常被认为弱于<strong>全量微调（Full
+Fine-Tuning）</strong>。如果采用全量微调，模型是否能更好地内化这种难度感知能力，达到更高的性能上限？这是一个悬而未决的问题。</li>
+<li><strong>评估指标的单一性</strong>：论文主要使用<code>pass@1</code>作为准确性指标。但对于生成式任务，<code>pass@k</code>（生成k次，只要有一次正确就算对）能更好地衡量模型的综合能力，因为它考虑到了生成的随机性。使用<code>pass@1</code>可能会低估模型的真实水平。</li>
+</ol>
+<h3
+id="我希望从这篇论文中找一些拿来即用的创新想法我应该从这篇论文中重点学什么有哪些启发">6.
+我希望从这篇论文中找一些拿来即用的创新想法，我应该从这篇论文中重点学什么？有哪些启发？</h3>
+<p>这篇论文是创新思想的宝库，您可以从中获得诸多启发：</p>
+<ul>
+<li><strong>重点学习与启发</strong>：
+<ol type="1">
+<li><strong>核心启发：为AI注入“成本意识”</strong>：最大的启发是将<strong>计算经济性</strong>作为模型行为优化的一个核心目标。在您的项目中，可以思考：是否所有任务都需要模型“全力以赴”？能否设计一个简单的分类器或路由机制，将任务分发给不同能力（和成本）的模型或提示模板？</li>
+<li><strong>数据工程的胜利</strong>：这篇论文再次证明，<strong>高质量、有思想的数据
+curation
+远比单纯堆砌模型参数或数据量更重要</strong>。创新不一定来自算法层面，通过设计巧妙的数据生成流程，可以赋予现有模型全新的能力。您可以思考如何为您的特定任务构建一个“理想”的训练集。</li>
+<li><strong>“模仿”与“偏好”的结合</strong>：SFT+DPO的训练范式非常实用。当您想让模型学习某种特定风格（如简洁、专业、幽默），但又担心其“学歪了”（丢失核心信息）时，可以借鉴这个思路：
+<ul>
+<li><strong>第一步
+(SFT)</strong>：用少量高质量样本，让模型快速模仿出您想要的<strong>格式和风格</strong>。</li>
+<li><strong>第二步 (DPO)</strong>：构建偏好对（&lt;好的输出,
+坏的输出&gt;），让模型在保持风格的同时，学会<strong>优化内容质量</strong>。</li>
+</ul></li>
+</ol></li>
+<li><strong>需要补充的背景知识</strong>：
+<ol type="1">
+<li><strong>链式思考 (Chain-of-Thought,
+CoT)</strong>：这是理解论文问题背景的基础。您需要了解CoT是什么，以及它为什么能提升LLM的推理能力。</li>
+<li><strong>模型蒸馏 (Knowledge
+Distillation)</strong>：这是论文方法论的核心。了解其基本思想，即如何将一个强大的“教师模型”的能力迁移到一个小型的“学生模型”中。</li>
+<li><strong>直接偏好优化 (Direct Preference Optimization,
+DPO)</strong>：<strong>这是理解论文技术关键的重中之重</strong>。您需要深入了解DPO的原理，它如何绕过传统的奖励模型，通过偏好数据直接微调LLM。理解DPO，您才能明白为什么论文的第二阶段训练如此高效和成功。它是当前对齐大模型的主流技术之一。</li>
+</ol></li>
+</ul>
+<p>希望这份详尽的解读能帮助您全面、深入地理解这篇优秀的论文，并从中汲取有价值的创新灵感。</p>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2025-09-09</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" data-title="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation" data-hashtags="Reading,Reasoning,cot_compress"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" data-title="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" data-title="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/less-is-more-tokensefficient-math-reasoning-via-difficulty-aware-chain-of-thought-distillation/" data-title="Less is More Tokens：Efficient Math Reasoning via Difficulty-Aware Chain-of-Thought Distillation"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/reasoning/">Reasoning</a>,&nbsp;<a href="/tags/cot_compress/">Cot_compress</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/plan-verification-for-llm-based-embodied-task-completion-agents/" class="prev" rel="prev" title="Plan Verification for LLM-Based Embodied Task Completion Agents"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>Plan Verification for LLM-Based Embodied Task Completion Agents</a>
+            <a href="/agent-workflow-memory/" class="next" rel="next" title="AGENT WORKFLOW MEMORY">AGENT WORKFLOW MEMORY<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

@@ -2,7 +2,7 @@
 
 ## pre-norm
 
-Pre-norm:$X_t+1=X_{t}+F_{t}(Norm(X_{t}))$
+Pre-norm:$X_{t+1}=X_{t}+F_{t}(Norm(X_{t}))$
 
 $先来看Pre-norm^{+},递归展开：$
 $$X_{t+1}=X_t+F_t(Norm(X_t))$$
@@ -99,6 +99,9 @@ $它在add norm之前给输入乘了一个up-scale^+的常数系数 α>1$。
 $$X_{t+1}=\frac{\alpha^{t+1}X_{0}}{\sqrt{2}^{t+1}}+\frac{\alpha^{t}F_{0}(X_{0})}{\sqrt{2}^{t+1}}+\ldots+\frac{\alpha F_{t-1}(X_{t-1})}{\sqrt{2}^{2}}+\frac{F_{t}(X_{t})}{\sqrt{2}}$$
 因为$\alpha>1$ ,所以它能够在保留post-norm真正增加了深度这优点的同时，一定程度避免了梯度消失。（本质还是post-norm）
 
+## Peri-LN
+
+[Peri-LN：Revisiting Normalization Layer in the Transformer Architecture](../../../Research/Papers/Transformer/Peri-LN：Revisiting Normalization Layer in the Transformer Architecture.md)
 
 ## 参考
 [Transformer梳理（一）：Post-Norm VS Pre-Norm - 知乎 (zhihu.com)](https://zhuanlan.zhihu.com/p/662794447)

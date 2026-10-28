@@ -1,8 +1,5 @@
 # WebThinker：Empowering Large Reasoning Models with Deep Research Capability
 
-好的，作为大模型领域的专家，我很乐意为您深入解读这篇富有洞见的论文《WebThinker: Empowering Large Reasoning Models with Deep Research Capability》。这篇论文确实触及了当前大模型研究的前沿核心——如何让模型从一个静态的“知识库”转变为一个动态的“研究员”。
-
-首先，我将为您全面、深入地解读这篇论文的核心思想与贡献。
 
 ### 论文深度解读
 

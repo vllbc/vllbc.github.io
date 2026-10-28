@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents">
+  <meta property="og:description" content="这篇论文的核心，在于它直面了当前大模型智能体（LLM Agents）领域一个非常棘手且普遍存在的问题：智能体应该在什么时候思考（规划），什么时候行动？ 这并非一个哲学问题，而是一个关乎计算效率、任务性能和最终智能体实用性的核心工程与科学问题。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-09-08T00:00:00+00:00">
+    <meta property="article:modified_time" content="2025-09-08T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Planning">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents">
+  <meta name="twitter:description" content="这篇论文的核心，在于它直面了当前大模型智能体（LLM Agents）领域一个非常棘手且普遍存在的问题：智能体应该在什么时候思考（规划），什么时候行动？ 这并非一个哲学问题，而是一个关乎计算效率、任务性能和最终智能体实用性的核心工程与科学问题。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" /><link rel="prev" href="https://blog.vllbc.top/planning-with-reasoning-using-vision-language-world-model/" /><link rel="next" href="https://blog.vllbc.top/learning-to-refineself-refinement-of-parallel-reasoning-in-llms/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Planning","wordcount":  7490 ,
+        "url": "https:\/\/blog.vllbc.top\/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents\/","datePublished": "2025-09-08T00:00:00+00:00","dateModified": "2025-09-08T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/planning/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Planning</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-09-08">2025-09-08</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 7490 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 15 分钟&nbsp;<span id="/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" class="leancloud_visitors" data-flag-title="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p><img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250908172439.png"
+alt="image.png" /> <img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250908172456.png"
+alt="image.png" /></p>
+<hr />
+<p>这篇论文的核心，在于它直面了当前大模型智能体（LLM
+Agents）领域一个非常棘手且普遍存在的问题：<strong>智能体应该在什么时候思考（规划），什么时候行动？</strong>
+这并非一个哲学问题，而是一个关乎计算效率、任务性能和最终智能体实用性的核心工程与科学问题。</p>
+<p>在解读之前，我们先要理解一个关键概念：<strong>测试时计算（Test-Time
+Compute）</strong>。简单来说，这指的是模型在接收到用户输入后、给出最终输出前所花费的计算资源。例如，通过“思维链（Chain-of-Thought）”让模型一步步思考，就是在增加测试时计算，以期获得更好的结果。对于智能体而言，“规划”就是一种典型的增加测试时计算的方式。</p>
+<p>现有的智能体框架，如经典的 <strong>ReAct
+(Reason-Act)</strong>，通常采用一种简单粗暴的策略：<strong>在每一步行动前都进行规划</strong>。这种“凡事三思而后行”的模式，虽然在某些简单任务上有效，但论文敏锐地指出其两大弊病：
+1.
+<strong>计算成本高昂</strong>：每一步都生成长篇的规划文本，极大地增加了推理时间和成本。
+2.
+<strong>性能退化</strong>：在长周期的复杂任务中，过于频繁的规划（或称“重新规划”）会导致智能体行为不稳定，可能在几个子目标间来回摇摆，或者放弃一个原本可行的计划，这种现象被论文精辟地称为<strong>不稳定性成本（Instability
+Cost）</strong>。</p>
+<p>与此相对的另一个极端是<strong>从不规划</strong>，智能体仅根据当前观察和历史信息直接输出行动。这种方式虽然快，但显然缺乏远见，难以完成需要多步协调的复杂任务。</p>
+<p>这篇论文的真正洞见在于，它明确指出“总是规划”和“从不规划”都是次优策略。最优解存在于两者之间，存在一个<strong>“金发姑娘区（Goldilocks
+Zone）”</strong>——一个既不过度规划、也不缺乏规划的最佳频率。而这篇论文最大的贡献，就是提出了一个系统性的方法，让智能体能够<strong>学会动态地、自适应地决定何时需要规划</strong>，从而将计算资源智能地分配到最需要的决策点上。</p>
+<p>为了实现这一目标，论文设计了一个简洁而强大的两阶段训练流程： 1.
+<strong>监督微调（SFT）启动（Priming with
+SFT）</strong>：此阶段的目标是向模型“注入”规划的概念和能力。研究者们使用一个更强大的“教师模型”（Llama-3.3-70B）在游戏环境（Crafter）中生成了大量的“专家轨迹”。这些轨迹数据不仅包含了一系列的行动，还包含了在某些步骤生成的自然语言规划（<code>&lt;plan&gt;...&lt;/plan&gt;</code>）。通过在这些数据上进行监督微调，一个较小的“学生模型”（Llama-3.1-8B）学会了规划的格式、语言以及如何将规划与行动联系起来。正如论文所强调的，这一步至关重要，它为模型提供了必要的“归纳偏置（inductive
+biases）”，为后续学习打下基础。一个非常有趣的发现是（如图1c所示），即使是基于完全相同的行动序列进行训练，获得了规划文本信息（Primed-Dynamic）的模型，其模仿学习的效果也显著优于只学习行动本身（Primed-Naive）的模型。这说明，规划文本不仅仅是需要被模仿的行为，更是理解和学习后续行为的强大“催化剂”。</p>
+<ol start="2" type="1">
+<li><strong>强化学习（RL）微调（Multi-step
+RL）</strong>：在模型具备了基础的规划能力后，第二阶段通过强化学习让模型学会在真实环境中<strong>策略性地使用</strong>这种能力。智能体在环境中与交互，根据任务的成功与否获得奖励。同时，生成规划所消耗的计算资源（以token数量衡量）会作为一个负向奖励（惩罚项）被计入总回报中。通过优化这个目标函数，智能体被激励去找到一个平衡点：只在那些“规划的预期收益”大于“规划的计算成本”的时刻进行规划。实验结果（如图1e所示）清晰地表明，经过SFT+RL完整训练的动态规划智能体，在学习效率和最终性能上，都显著超越了所有基线方法，包括从头开始用RL训练的智能体。</li>
+</ol>
+<p>更令人印象深刻的是，论文还展示了这种动态规划智能体的<strong>可控性（Steerability）</strong>。一个经过充分训练的智能体，能够理解并遵循人类提供的高级计划。在实验中，通过人类的指导，该智能体成功完成了在Crafter游戏中挖掘钻石的终极任务——这是任何自主智能体都未能实现的壮举（如图4和图10所示）。这不仅证明了方法的有效性，也为构建更安全、更可信、人机协作能力更强的智能体系统指明了方向。</p>
+<p>总而言之，这篇论文不仅仅是提出了一种新的训练技巧，它提供了一个关于如何高效利用LLM进行顺序决策的<strong>概念框架</strong>，并通过一个精心设计的<strong>两阶段学习范式</strong>成功地将其付诸实践。它将“何时规划”从一个固定的、由人类设计的超参数，转变为一个由智能体在与环境交互中自主学习的动态策略，这是迈向更高效、更自适应、更具扩展性智能体系统的重要一步。</p>
+<hr />
+<h3
+id="论文的研究目标是什么-想要解决什么实际问题这个问题对于行业发展有什么重要意义">1.
+论文的研究目标是什么？
+想要解决什么实际问题？这个问题对于行业发展有什么重要意义?</h3>
+<ul>
+<li><p><strong>研究目标</strong>：核心目标是训练一个大型语言模型智能体（LLM
+Agent），使其能够<strong>动态地、高效地分配其在测试时的计算资源</strong>，即学会自主决定<strong>在何时进行规划（plan）</strong>。</p></li>
+<li><p><strong>解决的实际问题</strong>：</p>
+<ol type="1">
+<li><strong>计算效率问题</strong>：当前主流的如ReAct等智能体框架，通常在每一步行动前都强制进行“思考-行动”循环，导致了大量的计算冗余和高昂的推理成本，这在实际部署中是难以承受的。</li>
+<li><strong>长程任务性能瓶颈</strong>：研究发现，在需要长期记忆和执行的复杂任务中，过于频繁的规划会引入行为不稳定性（如在子目标间摇摆），反而降低任务成功率。</li>
+<li><strong>策略僵化问题</strong>：固定的规划策略（如“总是规划”或“每隔N步规划一次”）无法适应动态变化的环境和任务需求。智能体需要根据当前情况的复杂性和不确定性来调整其思考的深度和频率。</li>
+</ol></li>
+<li><p><strong>行业发展意义</strong>：</p>
+<ul>
+<li><strong>降低运营成本</strong>：对于任何需要大规模部署LLM智能体的应用（如AI客服、自动化软件测试、游戏AI等），能够将计算成本降低一个数量级同时保持甚至提升性能，将极大地提高其商业可行性。</li>
+<li><strong>提升复杂任务解决能力</strong>：通过学会策略性地思考，智能体能更好地应对长程、复杂、动态的任务，这对于推动LLM在机器人控制、科学发现、战略游戏等前沿领域的应用至关重要。</li>
+<li><strong>构建更鲁棒和可信的AI系统</strong>：一个知道“何时该仔细想想”的智能体，比一个机械执行固定逻辑的智能体更可靠。此外，论文证明了这种智能体具有良好的“可控性”，能够接受人类指导，这为人机协作和AI安全提供了新的思路。</li>
+</ul></li>
+</ul>
+<hr />
+<h3
+id="论文提出了哪些新的思路方法或模型跟之前的方法相比有什么特点和优势">2.
+论文提出了哪些新的思路、方法或模型？跟之前的方法相比有什么特点和优势？</h3>
+<ul>
+<li><strong>新思路：动态规划的成本效益框架</strong>
+<ul>
+<li><p>论文首次将智能体的规划决策形式化为一个<strong>成本效益分析</strong>问题。它提出了两个核心概念：
+&gt; <strong>规划优势 (Planning Advantage, A_plan)</strong>:
+生成一个新计划相比于沿用旧计划，在未来预期回报上的提升。 &gt;
+<strong>规划成本 (Cost of Planning, C_plan)</strong>:
+包含了三个部分：<strong>计算成本 (C_tokens)</strong>、<strong>延迟成本
+(C_latency)</strong> 和一个非常新颖的 <strong>不稳定性成本
+(C_noise)</strong>。</p></li>
+<li><p><strong>特点与优势</strong>：这个框架的巧妙之处在于，它不仅考虑了显性的计算成本，还创造性地指出了<strong>“过度思考”带来的隐性成本</strong>（<code>C_noise</code>）。这为“为什么ReAct在长任务中表现不佳”提供了一个深刻的理论解释。它将问题从“如何规划”提升到了“何时规划”的元认知（meta-cognitive）层面。</p></li>
+</ul></li>
+<li><strong>新方法：两阶段训练范式 (SFT Priming + RL
+Fine-Tuning)</strong>
+<ul>
+<li><strong>第一阶段：监督微调启动 (SFT Priming)</strong>
+<ul>
+<li><strong>做法</strong>：使用一个强大的教师模型生成带有间歇性规划的专家数据，然后用这些数据对目标智能体模型进行微调。</li>
+<li><strong>特点</strong>：这并非简单的行为克隆。其目的是让模型学习规划的<strong>“语法”和“语义”</strong>，建立起“规划-行动”的关联，为后续的RL学习提供一个优质的起点。如论文所言，这是为了“注入关键的归纳偏置”。</li>
+</ul></li>
+<li><strong>第二阶段：强化学习微调 (RL Fine-Tuning)</strong>
+<ul>
+<li><strong>做法</strong>：使用<strong>近端策略优化 (PPO)</strong>
+算法，在环境中进行在线学习。奖励函数被设计为<strong>任务奖励减去规划的token成本</strong>。</li>
+<li><strong>特点</strong>：RL阶段的核心是让智能体学会<strong>“策略性地”</strong>使用SFT阶段学到的规划能力。通过将规划成本直接纳入优化目标，智能体被迫在“任务进展”和“节约计算”之间做出权衡，最终学会动态规划。</li>
+</ul></li>
+</ul></li>
+<li><strong>与之前方法的比较优势</strong>：
+<ul>
+<li><strong>vs. ReAct等固定策略</strong>：最大的优势是<strong>自适应性</strong>和<strong>效率</strong>。ReAct是固定的“总是规划”策略，而本文方法是学习到的动态策略，能够在简单、确定的情境下直接行动，在复杂、不确定的情境下进行规划，从而实现性能和效率的最优平衡。</li>
+<li><strong>vs. 传统分层强化学习
+(HRL)</strong>：传统HRL通常关注于学习在不同“选项”（或子策略）之间进行选择，但高层策略的调用通常是固定的（例如每一步或每隔固定步数）。本文的方法则直接解决了<strong>“何时调用高层规划模块”</strong>这个元决策问题，这在LLM作为规划模块的场景下尤其重要，因为这个调用本身成本极高。</li>
+</ul></li>
+</ul>
+<hr />
+<h3
+id="论文通过什么实验来验证所提出方法的有效性实验是如何设计的实验数据和结果如何">3.
+论文通过什么实验来验证所提出方法的有效性？实验是如何设计的？实验数据和结果如何？</h3>
+<p>论文设计了一系列环环相扣的实验，在两个环境中进行：<strong>POGS</strong>
+(一个用于评估探索效率的自定义图搜索环境) 和 <strong>Crafter</strong>
+(一个复杂的、灵感源于《我的世界》的长期生存游戏基准)。</p>
+<ul>
+<li><strong>实验一：零样本评估 (Zero-Shot Evaluation)</strong>
+<ul>
+<li><strong>设计</strong>：使用强大的Llama-3.3-70B模型，不进行任何微调，仅通过不同的提示（prompt）来引导其采用固定的规划频率（从不规划、每步规划、每2/4/8…步规划一次）。</li>
+<li><strong>数据与结果</strong>：如图1(a)和(b)所示，结果清晰地展示了<strong>“金发姑娘”效应</strong>。
+&gt;
+在Crafter环境中，“never”规划和”always”规划（ReAct模式）的性能都显著低于每4步或每8步规划一次的策略。例如，在Crafter中，“always”规划策略的最终得分约为0.33，而每4步规划一次的策略得分接近0.37，同时其计算成本（输出token数）显著降低。</li>
+<li><strong>结论</strong>：这个实验有力地证明了论文的核心假设：存在一个最优的、非极端的规划频率。</li>
+</ul></li>
+<li><strong>实验二：SFT启动阶段的有效性验证</strong>
+<ul>
+<li><strong>设计</strong>：比较两个模型在SFT阶段的学习情况。两者都基于相同的专家行动序列进行训练，但一个模型（<code>Primed-Dynamic</code>）的训练目标包含规划文本，另一个（<code>Primed-Naive</code>）则只包含行动。</li>
+<li><strong>数据与结果</strong>：如图1(c)所示。 &gt;
+尽管行动监督完全相同，<code>Primed-Dynamic</code>模型在训练过程中的任务奖励始终高于<code>Primed-Naive</code>模型。这表明，规划文本作为额外的上下文信息，极大地帮助了模型理解和学习行动序列，起到了“认知脚手架”的作用。</li>
+</ul></li>
+<li><strong>实验三：端到端RL训练性能对比</strong>
+<ul>
+<li><strong>设计</strong>：对比四种智能体配置的性能：
+<ol type="1">
+<li><strong>Base+RL no plan</strong>: 基础模型直接RL，不规划。</li>
+<li><strong>Base+RL plan dynamically</strong>:
+基础模型直接RL，动态规划。</li>
+<li><strong>SFT+RL no plan</strong>:
+经过SFT启动（仅动作）后RL，不规划。</li>
+<li><strong>SFT+RL plan dynamically</strong>: 完整的两阶段方法。</li>
+</ol></li>
+<li><strong>数据与结果</strong>：如图1(e)和图5所示，结果具有决定性。
+&gt; <strong>SFT+RL plan dynamically</strong>
+智能体在学习速度（样本效率）和最终达到的性能上都显著优于其他所有变体。与之对比，没有经过SFT启动的<code>Base+RL plan dynamically</code>智能体表现最差，说明在没有先验知识的情况下，让模型从零开始学习何时规划非常困难。</li>
+</ul></li>
+<li><strong>实验四：人机协作与可控性测试</strong>
+<ul>
+<li><strong>设计</strong>：在实验三中表现最好的智能体（SFT+RL plan
+dynamically）的基础上，由人类提供高级别的战略计划。</li>
+<li><strong>数据与结果</strong>：如图4和图10所示。 &gt;
+在人类的指导下，该智能体成功地完成了挖掘钻石并通关Crafter的壮举，而这是所有自主智能体都未能达到的成就。这证明了模型不仅学会了自主规划，还能有效地将外部指令融入其决策流程中。</li>
+</ul></li>
+</ul>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: left;">实验阶段</th>
+<th style="text-align: left;">关键发现</th>
+<th style="text-align: left;">支持数据/图表</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>零样本评估</strong></td>
+<td
+style="text-align: left;">存在最优的“金发姑娘”规划频率，过度规划和不规划都非最优。</td>
+<td style="text-align: left;">图1 (a-b)，中间频率性能最高</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>SFT启动</strong></td>
+<td
+style="text-align: left;">规划文本能显著促进模仿学习的效率和效果。</td>
+<td style="text-align: left;">图1
+(c-d)，<code>SFT plan</code>奖励更高，KL散度更低</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>完整RL训练</strong></td>
+<td
+style="text-align: left;">SFT+RL的两阶段范式在样本效率和最终性能上最优。</td>
+<td style="text-align: left;">图1 (e-f),
+图5，<code>SFT+RL plan</code>曲线最高</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>人机协作</strong></td>
+<td
+style="text-align: left;">训练后的智能体可被人类计划有效引导，完成超高难度任务。</td>
+<td style="text-align: left;">图4, 图10，成功挖掘钻石</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3
+id="结合大模型领域的当前学术理解未来在该研究方向上还有哪些值得进一步探索的问题和挑战这可能催生出什么新的技术和投资机会">4.
+结合大模型领域的当前学术理解，未来在该研究方向上还有哪些值得进一步探索的问题和挑战？这可能催生出什么新的技术和投资机会?</h3>
+<ul>
+<li><strong>值得探索的问题和挑战</strong>：
+<ol type="1">
+<li><strong>规划的粒度与深度</strong>：当前模型的决策是二元的（规划/不规划）。未来的研究可以探索更复杂的决策空间，例如<strong>动态决定规划的深度</strong>（思考一步还是十步？）、<strong>广度</strong>（考虑多少种可能性？），甚至<strong>规划的抽象层次</strong>。这类似于人类在不同问题上投入不同心智资源。</li>
+<li><strong>模型规模的缩放法则 (Scaling
+Laws)</strong>：本文主要在8B模型上进行微调。一个关键问题是，这种“学习何时规划”的能力如何随着模型规模的增长而变化？一个千亿甚至万亿参数的模型，是否可能在没有SFT的情况下，仅通过提示或更少的RL就能学会动态规划？探索这其中的Scaling
+Laws将非常有价值。</li>
+<li><strong>更复杂的环境与任务</strong>：将此方法从游戏环境扩展到更开放、更真实的领域，如<strong>网页浏览、软件开发、机器人控制</strong>等。在这些领域，“规划漂移（plan
+drift）”问题会更严重，对智能体自适应 replan 的能力要求也更高。</li>
+<li><strong>将成本效益框架显式化</strong>：论文中的<code>C_noise</code>等成本是隐式地通过RL来优化的。未来的算法能否设计出一种方法来<strong>实时估计当前状态下的“规划优势”和“不稳定性成本”</strong>，并将其作为模型决策的显式输入，可能会进一步提升性能和可解释性。</li>
+<li><strong>从固定教师到自我提升</strong>：SFT阶段依赖于一个更强大的固定教师模型。一个更前沿的方向是探索如何让智能体通过<strong>自我博弈</strong>或<strong>自我反思</strong>（self-improvement）来生成更高质量的训练数据，实现能力的自举（bootstrapping）。</li>
+</ol></li>
+<li><strong>新的技术和投资机会</strong>：
+<ul>
+<li><strong>高效能智能体平台</strong>：基于这种动态计算分配技术，可以开发出新一代的LLM智能体平台。对于需要部署成千上万个智能体的企业客户（如游戏公司、软件自动化公司），这种平台能提供“<strong>更智能、更便宜、更快速</strong>”的解决方案，具有巨大的商业潜力。</li>
+<li><strong>AI原生工作流自动化</strong>：这项技术将催生出更可靠的AI员工或AI助手，能够自主处理复杂的多步工作流。投资机会在于开发面向特定行业（如金融分析、法律文书处理、供应链管理）的AI原生自动化解决方案。</li>
+<li><strong>下一代人机协作工具</strong>：该研究展示了AI在接受人类高级指导方面的潜力。未来的投资机会可能在于开发能够与人类专家进行流畅、高效协作的AI工具，AI负责执行和战术规划，人类负责战略制定和监督，共同解决复杂问题。</li>
+</ul></li>
+</ul>
+<hr />
+<h3
+id="退一步从批判的视角看这篇论文还存在哪些不足及缺失又有哪些需要进一步验证和存疑的">5.
+退一步，从批判的视角看，这篇论文还存在哪些不足及缺失？又有哪些需要进一步验证和存疑的？</h3>
+<p>尽管这篇论文非常出色，但从批判性角度看，仍存在一些值得商榷和深入探讨的地方：</p>
+<ul>
+<li><strong>模型规模的局限性</strong>：实验主要基于Llama-3.1-8B模型进行微调。虽然这对于验证方法的普适性有好处，但也带来一个疑问：SFT
+priming之所以如此关键，是否恰恰是因为8B模型本身“规划能力不足”，需要大量外部知识注入？对于GPT-4、Claude
+3
+Opus或未来的更强模型，其强大的零样本规划能力可能使得SFT阶段的必要性降低，或者说仅通过更精巧的提示工程+RL就足以达到类似效果。</li>
+<li><strong>环境复杂度的限制</strong>：Crafter虽然是一个公认的基准，但它仍然是一个状态和动作空间相对有限的2D网格世界。在真实物理世界或开放式网络环境中，状态的不可预测性和观测的噪声要大得多。论文提出的方法在这些更具挑战性的场景下的鲁棒性有待验证。</li>
+<li><strong>“学会规划”的可解释性不足</strong>：智能体通过RL学会了何时规划，但其决策机制是一个“黑箱”。论文并未深入分析智能体是<strong>根据哪些状态特征</strong>来决定规划的。例如，它是在遇到新奇事物时规划，还是在生命值低时规划，或是在任务陷入僵局时规划？对这一“元认知”决策过程的深入分析将非常有价值。</li>
+<li><strong>教师数据的质量上限</strong>：SFT阶段的教师数据是由一个采用“固定频率”规划的70B模型生成的。这位“教师”本身就不是最优的。如果使用一个已经通过本文方法训练好的、更懂得动态规划的智能体作为教师，是否能形成一个“迭代增强”的循环，培养出更强的学生？这篇论文没有探讨这种可能性。</li>
+<li><strong>“不稳定性成本”的量化</strong>：<code>C_noise</code>
+是一个非常精彩的理论概念，但在实验中它是被隐式优化的。论文缺乏对这种不稳定性的直接量化和分析。例如，是否可以统计智能体在不同规划频率下“目标切换”或“无效回溯”的次数，来为<code>C_noise</code>提供更具体的实证支持？</li>
+</ul>
+<hr />
+<h3
+id="我希望从这篇论文中找一些拿来即用的创新想法我应该从这篇论文中重点学什么有哪些启发你认为我还需要补充了解哪些背景知识">6.
+我希望从这篇论文中找一些拿来即用的创新想法，我应该从这篇论文中重点学什么？有哪些启发？你认为我还需要补充了解哪些背景知识?</h3>
+<p>这篇论文是创新想法的宝库，以下是您可以重点学习和借鉴的：</p>
+<ul>
+<li><strong>核心启发与创新点</strong>：
+<ol type="1">
+<li><strong>“金发姑娘”原则的泛化应用</strong>：<strong>“更多的计算/思考并不总是更好”</strong>。这个原则不仅适用于LLM智能体，也适用于任何需要权衡计算资源和性能的系统。在你的项目中，可以思考是否存在类似的“过度计算”导致性能下降的场景，并尝试找到最优的“计算甜点区”。</li>
+<li><strong>两阶段学习范式 (SFT -&gt;
+RL)</strong>：这是一个非常实用且强大的范式，可以被广泛应用。当你需要模型学习一个它不擅长但有结构的行为时（比如生成特定格式的代码、遵循复杂的指令），可以先用SFT教它“怎么做”（what
+and
+how），再用RL教它“什么时候做”（when）。这比单纯使用RL从零开始学习要高效得多。</li>
+<li><strong>将“元认知”能力作为学习目标</strong>：不要只让模型学习解决任务，还要让模型学习<strong>“如何更好地解决任务”</strong>。本文的“学习何时规划”就是一个元认知能力。你可以思考在你的应用场景中，是否存在其他可以被学习的元认知策略，例如“学习何时求助人类”、“学习何时调整自己的参数”等。</li>
+<li><strong>理由（Rationale）作为学习的催化剂</strong>：SFT实验最令人惊讶的结论是，<strong>提供行动背后的“理由”（即规划），能极大地帮助模型学习行动本身</strong>。这给数据构建带来了深刻启示：在创建训练数据时，如果可能，尽量包含解释性、结构性的信息（如代码注释、设计文档、思维过程），而不仅仅是最终结果。这会大大提高模型的学习效率和泛化能力。</li>
+</ol></li>
+<li><strong>需要补充的背景知识</strong>：
+<ul>
+<li><strong>强化学习 (Reinforcement
+Learning)</strong>：特别是<strong>策略梯度方法</strong>和<strong>PPO
+(Proximal Policy
+Optimization)</strong>算法。你需要理解RL的基本框架（Agent, Environment,
+State, Action, Reward），以及PPO是如何稳定地更新策略网络的。</li>
+<li><strong>LLM智能体框架 (Agentic
+Frameworks)</strong>：了解<strong>ReAct (Reason-Act)</strong>
+的工作原理，它是本文反复对比的基线。理解其优点（结构化推理）和缺点（僵化、高成本）将帮助你更好地理解本文的创新之处。</li>
+<li><strong>LLM微调技术</strong>：熟悉<strong>监督微调 (SFT)</strong>
+的概念和实践，以及它与<strong>基于人类反馈的强化学习 (RLHF)</strong>
+的区别与联系。</li>
+<li><strong>部分可观察马尔可夫决策过程
+(POMDP)</strong>：论文在第4页将其环境建模为POMDP。虽然不要求深入的数学推导，但理解其核心概念——智能体无法观察到全部环境状态，只能通过不完整的“观测”来做决策——有助于理解为什么“规划”和“探索”在这些任务中如此重要。</li>
+</ul></li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2025-09-08</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" data-title="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents" data-hashtags="Reading,Planning"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" data-title="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" data-title="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/" data-title="Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/planning/">Planning</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/planning-with-reasoning-using-vision-language-world-model/" class="prev" rel="prev" title="Planning with Reasoning using Vision Language World Model"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>Planning with Reasoning using Vision Language World Model</a>
+            <a href="/learning-to-refineself-refinement-of-parallel-reasoning-in-llms/" class="next" rel="next" title="Learning to Refine：Self-Refinement of Parallel Reasoning in LLMs">Learning to Refine：Self-Refinement of Parallel Reasoning in LLMs<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

@@ -1,6 +1,6 @@
 # Peri-LN：Revisiting Normalization Layer in the Transformer Architecture
 
-好的，非常荣幸能以领域专家的身份，与您一同深入探讨这篇关于 Transformer 架构中归一化策略的优秀论文——《Peri-LN: Revisiting Normalization Layer in the Transformer Architecture》。
+
 
 这篇论文系统地研究了大型语言模型（LLM）中一个长期存在但又至关重要的技术细节：**层归一化（Layer Normalization, LN）** 的放置位置。传统的 **Post-LN** 和 **Pre-LN** 策略各有优劣，前者梯度流不稳定，后者激活值容易爆炸，这给大模型的训练带来了诸多挑战。该论文通过详尽的理论分析和大规模实验，聚焦于一种被部分开源模型“悄然”采用但缺乏系统研究的“第三种”策略，并将其命名为 **Peri-LN (Peripheral-LN)**，即“外围层归一化”。
 

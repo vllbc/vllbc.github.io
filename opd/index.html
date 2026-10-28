@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>OPD (On-Policy Distillation) - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/opd/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="OPD (On-Policy Distillation)">
+  <meta property="og:description" content="OPD (On-Policy Distillation) [!info] TL;DR 核心思想：On-Policy Distillation 把 on-policy RL 的状态对齐和 KD 的密集 token 级监督结合起来。学生用自己的策略采样 rollout，对每个学生访问到的状态，让 teacher 给出 next-token 分布，学生去匹配这个分布。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-07-31T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-07-31T00:00:00+00:00">
+    <meta property="article:tag" content="LLM">
+    <meta property="article:tag" content="RLHF">
+    <meta property="article:tag" content="Verl">
+    <meta property="article:tag" content="Distillation">
+    <meta property="article:tag" content="Reading-Note">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="OPD (On-Policy Distillation)">
+  <meta name="twitter:description" content="OPD (On-Policy Distillation) [!info] TL;DR 核心思想：On-Policy Distillation 把 on-policy RL 的状态对齐和 KD 的密集 token 级监督结合起来。学生用自己的策略采样 rollout，对每个学生访问到的状态，让 teacher 给出 next-token 分布，学生去匹配这个分布。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/opd/" /><link rel="prev" href="https://blog.vllbc.top/%E9%9D%A2%E7%BB%8F_2026/" /><link rel="next" href="https://blog.vllbc.top/sftrl-%E4%B8%8E-opd%E5%88%86%E5%B8%83%E8%A7%86%E8%A7%92/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "OPD (On-Policy Distillation)",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/opd\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "reading-note","keywords": "LLM, RLHF, verl, distillation, reading-note","wordcount":  3605 ,
+        "url": "https:\/\/blog.vllbc.top\/opd\/","datePublished": "2026-07-31T00:00:00+00:00","dateModified": "2026-07-31T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><div class="page single special"><h1 class="single-title animate__animated animate__pulse animate__faster">OPD (On-Policy Distillation)</h1><div class="content" id="content"><h1 id="opd-on-policy-distillation">OPD (On-Policy Distillation)</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心思想</strong>：On-Policy Distillation 把
+<strong>on-policy RL 的状态对齐</strong>和 <strong>KD 的密集 token
+级监督</strong>结合起来。学生用自己的策略采样
+rollout，对每个学生访问到的状态，让 teacher 给出 next-token
+分布，学生去匹配这个分布。</p>
+<p><strong>最大收获</strong>：解决 KD 的 <em>exposure bias</em>（teacher
+状态 ≠ student 状态），同时避开 RLVR 的稀疏奖励。</p>
+<p><strong>为什么重要</strong>：把”是否能用大 teacher”这件事从纯离线
+SFT/KD 拉到了和 RL 同等地位，是 DeepSeek-V4 / Nemotron-Cascade 2 等 2026
+年模型的标配。</p>
+</blockquote>
+<h2 id="笔记地图">笔记地图</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" checked="" />§1 背景：为什么需要
+OPD（KD vs RLVR）</label></li>
+<li><label><input type="checkbox" checked="" />§2 OPD
+总损失公式与流程</label></li>
+<li><label><input type="checkbox" checked="" />§3 两种变体：GKD vs
+PG</label></li>
+<li><label><input type="checkbox" checked="" />§4 多教师 OPD
+(MOPD)</label></li>
+<li><label><input type="checkbox" checked="" />§5 配方速查（quick start
+/ GKD / PG / MOPD）</label></li>
+<li><label><input type="checkbox" checked="" />§6
+配置参数（蒸馏命名空间）</label></li>
+<li><label><input type="checkbox" checked="" />§7 架构：teacher logprob
++ student 更新</label></li>
+<li><label><input type="checkbox" checked="" />§8 指标 / Debug /
+关键源码</label></li>
+<li><label><input type="checkbox" />自己跑一次单 teacher GKD
+实验</label></li>
+</ul>
+<hr />
+<h2 id="背景kd-vs-rlvr-vs-opd">§1 背景：KD vs RLVR vs OPD</h2>
+<p>传统训练有三条路线，<strong>OPD 是第三条</strong>：</p>
+<pre class="mermaid"><code>flowchart LR
+    subgraph KD[&quot;Standard KD / SFT&quot;]
+        K1[teacher 采样轨迹] --&gt; K2[student 学 teacher 分布]
+        K1 -.exposure bias.-&gt; K2
+    end
+    subgraph RLVR[&quot;RLVR (PPO / GRPO)&quot;]
+        R1[student 采自己] --&gt; R2[sparse 序列级 reward]
+        R2 --&gt; R3[policy 更新]
+    end
+    subgraph OPD[&quot;On-Policy Distillation&quot;]
+        O1[student 采自己] --&gt; O2[teacher 给 per-token logprobs]
+        O2 --&gt; O3[dense token 级监督]
+    end
+    KD -- &quot;状态来自 teacher&quot; --&gt; X[训练/推理分布不一致]
+    RLVR -- &quot;reward 只到序列末&quot; --&gt; Y[信号稀疏]
+    OPD -.取两者优点.-&gt; Z[状态对齐 + 密集信号]</code></pre>
+<p><strong>Exposure bias
+的具体例子</strong>（来自原文）：学生喜欢代数证明、teacher
+喜欢几何证明。KD 训练数据全是 teacher 采的几何轨迹，student
+在推理时继续走代数路径，结果根本没学到 teacher
+在”自己的状态”下会怎么做。</p>
+<p><strong>RLVR 的代价</strong>：reward 通常是 0/1 二元的、在
+<code>&lt;/answer&gt;</code> 处一次性给出。一个 rollout 中所有 token
+的梯度都收到同一个 advantage，对长 CoT 任务信息密度太低。</p>
+<blockquote>
+<p>[!note] 核心 idea <strong>用 student 自己采样得到的 state（保证
+on-policy）做 teacher 的 KD</strong>，等价于把 RL 的 actor-critic
+换成”teacher 监督器”。这样既保留 on-policy 的状态分布一致性，又拿到
+token 级密集信号。</p>
+</blockquote>
+<hr />
+<h2 id="opd-总损失公式">§2 OPD 总损失公式</h2>
+<p>学生用自己策略采样 <span class="math inline">\(y \sim
+\pi_\theta(\cdot \mid x)\)</span>，对每个 state <span
+class="math inline">\(s_t = (x, y_{&lt;t})\)</span>，计算与 teacher 分布
+<span class="math inline">\(\nu\)</span> 的某种 divergence <span
+class="math inline">\(D\)</span>：</p>
+<p><span class="math display">\[
+\mathcal{L}_{\mathrm{OPD}}(\theta)
+=
+\mathbb{E}_{x,\, y \sim \pi_{\theta}}
+\left[
+\frac{1}{|y|}
+\sum_{t=1}^{|y|}
+D\!\left(\pi_{\theta}(\cdot \mid s_t),\ \nu(\cdot \mid s_t),\ y_t\right)
+\right]
+\]</span></p>
+<p><strong>采样是固定的</strong>——更新 student 时，<span
+class="math inline">\(y\)</span> 不重新采样，只是 <span
+class="math inline">\(D\)</span> 的选择决定了信号怎么传到 student
+参数上。这就把 OPD 切成两个子问题：</p>
+<ol type="1">
+<li><strong>信号怎么定义</strong>：<span
+class="math inline">\(D\)</span> 选 forward-KL 还是
+reverse-KL？精确计算还是 top-k 近似？单样本 MC 估计用哪个无偏估计？</li>
+<li><strong>信号怎么反传</strong>：直接对 student
+概率反传（GKD），还是把 <span class="math inline">\(-D\)</span> 当
+reward 跑 policy gradient（PG）？</li>
+</ol>
+<hr />
+<h2 id="两种变体gkd-vs-pg">§3 两种变体：GKD vs PG</h2>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>维度</th>
+<th><strong>GKD OPD</strong></th>
+<th><strong>PG OPD</strong></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Divergence</td>
+<td>Forward KL <span class="math inline">\(\mathrm{KL}(\nu \,\|\,
+\pi_\theta)\)</span></td>
+<td>Reverse KL <span class="math inline">\(\mathrm{KL}(\pi_\theta \,\|\,
+\nu)\)</span></td>
+</tr>
+<tr>
+<td>实现</td>
+<td>teacher top-k logits，<strong>直接反传</strong> student
+概率梯度</td>
+<td>单样本 k1 估计器，<strong>负 reverse KL 当 reward</strong>，PPO
+更新</td>
+</tr>
+<tr>
+<td>梯度来源</td>
+<td><span class="math inline">\(\nabla_\theta \log \pi_\theta\)</span>
+对 <strong>teacher top-k 所有 token</strong></td>
+<td><span class="math inline">\(\nabla_\theta \log \pi_\theta\)</span>
+只对 <strong>被采样的 token</strong></td>
+</tr>
+<tr>
+<td>适用 loss_mode</td>
+<td><code>forward_kl_topk</code></td>
+<td><code>k1</code></td>
+</tr>
+<tr>
+<td><code>use_policy_gradient</code></td>
+<td><code>false</code></td>
+<td><code>true</code></td>
+</tr>
+<tr>
+<td>优点</td>
+<td>利用完整 teacher 分布信号</td>
+<td>兼容 PPO clip 体系、易与 RLHF 流程合并</td>
+</tr>
+<tr>
+<td>代价</td>
+<td>依赖 teacher top-k 实现</td>
+<td>反传只过采样 token，浪费 distributional 信息</td>
+</tr>
+</tbody>
+</table>
+<h3 id="forward-kl-gkd-的精确形式">Forward KL (GKD) 的精确形式</h3>
+<p><span class="math display">\[
+D_t = \sum_{v \in V} \nu(v \mid s_t)\, \log\frac{\nu(v \mid
+s_t)}{\pi_\theta(v \mid s_t)}
+\]</span></p>
+<p>实现上只能取 teacher top-k：</p>
+<p><span class="math display">\[
+\mathcal{L}_{\mathrm{GKD}}^{(k)}(s_t) = \sum_{v \in
+\mathrm{TopK}(\nu(\cdot \mid s_t))} \nu(v \mid s_t)\bigl[\log\nu(v \mid
+s_t) - \log\pi_\theta(v \mid s_t)\bigr]
+\]</span></p>
+<h3 id="reverse-kl-的-k1-估计-pg">Reverse KL 的 k1 估计 (PG)</h3>
+<p><span class="math display">\[
+r_t = \mathrm{sg}\!\left(\log \nu(y_t \mid s_t) - \log \pi_\theta(y_t
+\mid s_t)\right),\quad y_t \sim \pi_\theta(\cdot \mid s_t)
+\]</span></p>
+<p><strong>为什么需要 stop-gradient</strong>：reward 在 policy gradient
+目标里，不阻断梯度会对 <span class="math inline">\(\theta\)</span>
+求导时让 <span class="math inline">\(\log \nu\)</span> 项消失（teacher
+不依赖 <span class="math inline">\(\theta\)</span>），结果 loss 跟
+teacher 无关。</p>
+<blockquote>
+<p>[!warning] 别踩这两个坑 1. <code>use_policy_gradient=True</code> +
+<code>loss_mode="forward_kl_topk"</code>：verl 会发 warning。top-k
+损失里 teacher 偏好的 token 多半不是被采样那个，policy gradient 只动
+<span class="math inline">\(\log\pi_\theta(y_t)\)</span>，top-k
+信号基本被丢光。 2. <code>use_policy_gradient=False</code> +
+<code>loss_mode="k1"</code>：直接 ValueError。k1 没有通向 teacher
+logprob 的梯度，反传没意义。</p>
+</blockquote>
+<hr />
+<h2 id="多教师-opd-mopd">§4 多教师 OPD (MOPD)</h2>
+<blockquote>
+<p>[!example]+ MOPD 何时用（点击展开） 当学生要跨多个领域（math / code /
+instruction following）综合能力时，每个领域训一个 domain-specific
+teacher，路由键选 <code>data_source</code>：</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">distillation</span><span class="kw">:</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">n_gpus_per_node</span><span class="kw">:</span><span class="at"> </span><span class="dv">8</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">nnodes</span><span class="kw">:</span><span class="at"> </span><span class="dv">2</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">teacher_key</span><span class="kw">:</span><span class="at"> data_source</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">teacher_models</span><span class="kw">:</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">gsm8k</span><span class="kw">:</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">key</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;openai/gsm8k&quot;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">model_path</span><span class="kw">:</span><span class="at"> Qwen/Qwen3-32B</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">num_replicas</span><span class="kw">:</span><span class="at"> </span><span class="dv">2</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">inference</span><span class="kw">:</span><span class="at"> </span><span class="kw">{</span><span class="fu">tensor_model_parallel_size</span><span class="kw">:</span><span class="at"> </span><span class="dv">2</span><span class="kw">,</span><span class="at"> </span><span class="fu">gpu_memory_utilization</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.6</span><span class="kw">}</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">geo3k</span><span class="kw">:</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">key</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;hiyouga/geometry3k&quot;</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">model_path</span><span class="kw">:</span><span class="at"> Qwen/Qwen3-VL-32B-Instruct</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">num_replicas</span><span class="kw">:</span><span class="at"> </span><span class="dv">3</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">inference</span><span class="kw">:</span><span class="at"> </span><span class="kw">{</span><span class="fu">tensor_model_parallel_size</span><span class="kw">:</span><span class="at"> </span><span class="dv">4</span><span class="kw">,</span><span class="at"> </span><span class="fu">gpu_memory_utilization</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.8</span><span class="kw">}</span></span></code></pre></div>
+<p><strong>GPU 池约束</strong>：<code>n_gpus_per_node × nnodes</code>
+必须严格等于 <code>Σ(num_replicas × per_replica_world_size)</code>。每个
+replica 的 bundle 不能跨 node 边界（例：5-GPU replica 在 8-GPU node
+上属于 1 个 node，但若被切成 <code>[6,7]</code> + <code>[8,9,10]</code>
+就会触发 <code>_validate_replica_node_alignment</code>）。</p>
+<p><strong>路由坑</strong>：训练数据要
+<code>shuffle: true</code>。否则拼接的 dataset 会让一个 epoch 内只激活单
+teacher 一段。</p>
+</blockquote>
+<hr />
+<h2 id="配方速查">§5 配方速查</h2>
+<p>四种开箱即用配置，按需取用：</p>
+<details>
+<summary>
+<b>单 teacher quick start</b> —— 启用蒸馏、分配 teacher 池、关掉
+reference-KL
+</summary>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="fu">distillation</span><span class="kw">:</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">enabled</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">n_gpus_per_node</span><span class="kw">:</span><span class="at"> </span><span class="dv">2</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">nnodes</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">teacher_models</span><span class="kw">:</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">teacher_model</span><span class="kw">:</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">model_path</span><span class="kw">:</span><span class="at"> Qwen/Qwen3-32B</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">inference</span><span class="kw">:</span><span class="at"> </span><span class="kw">{</span><span class="fu">name</span><span class="kw">:</span><span class="at"> vllm</span><span class="kw">,</span><span class="at"> </span><span class="fu">gpu_memory_utilization</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.8</span><span class="kw">}</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="fu">actor_rollout_ref</span><span class="kw">:</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">actor</span><span class="kw">:</span><span class="at"> </span><span class="kw">{</span><span class="fu">use_kl_loss</span><span class="kw">:</span><span class="at"> </span><span class="ch">false</span><span class="kw">}</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a><span class="fu">algorithm</span><span class="kw">:</span></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">use_kl_in_reward</span><span class="kw">:</span><span class="at"> </span><span class="ch">false</span></span></code></pre></div>
+<p>注意 teacher 与 student <strong>必须共享
+tokenizer/vocab</strong>（同家族即可，例如 Qwen3-8B ↔︎
+Qwen3-32B）。同时关掉 PPO/GRPO 的 reference-policy KL，避免 student
+同时被 reference 和 teacher 拉扯。</p>
+</details>
+<details>
+<summary>
+<b>GKD OPD</b> —— top-k forward KL 直接反传
+</summary>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">distillation</span><span class="kw">:</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">distillation_loss</span><span class="kw">:</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">loss_mode</span><span class="kw">:</span><span class="at"> forward_kl_topk</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">topk</span><span class="kw">:</span><span class="at"> </span><span class="dv">128</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">use_policy_gradient</span><span class="kw">:</span><span class="at"> </span><span class="ch">false</span></span></code></pre></div>
+<p><strong>不要</strong>叠加
+<code>use_policy_gradient: true</code>，top-k 的 distributional 信号会被
+PG 浪费掉。</p>
+</details>
+<details>
+<summary>
+<b>PG OPD</b> —— k1 单样本估计当 reward 走 PPO
+</summary>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="fu">distillation</span><span class="kw">:</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">distillation_loss</span><span class="kw">:</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">loss_mode</span><span class="kw">:</span><span class="at"> k1</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">use_policy_gradient</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">policy_loss_mode</span><span class="kw">:</span><span class="at"> vanilla</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">clip_ratio_low</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.2</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">clip_ratio_high</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.28</span></span></code></pre></div>
+<p>当前只支持
+<code>policy_loss_mode=vanilla</code>，<code>dppo_tv</code> 等其他模式
+OPD 尚未实现。</p>
+</details>
+<details>
+<summary>
+<b>OPD + 任务奖励</b> —— 同时蒸馏并跑 PPO/GRPO
+</summary>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="fu">distillation</span><span class="kw">:</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">distillation_loss</span><span class="kw">:</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">use_task_rewards</span><span class="kw">:</span><span class="at"> </span><span class="ch">true</span><span class="co">       # 默认 true</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">distillation_loss_coef</span><span class="kw">:</span><span class="at"> </span><span class="fl">1.5</span><span class="co">  # 最终 loss = policy_loss + 1.5 × distill_loss</span></span></code></pre></div>
+<p><code>use_task_rewards=false</code> 时 PPO/GRPO 任务项被清零，只剩
+distillation loss。</p>
+</details>
+<hr />
+<h2 id="配置参数">§6 配置参数</h2>
+<p>verl 把蒸馏配置切成 3 个命名空间：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Namespace</th>
+<th>内容</th>
+<th>关键字段</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>distillation.*</code></td>
+<td>总开关 + teacher 资源池</td>
+<td><code>enabled</code>, <code>n_gpus_per_node</code>,
+<code>nnodes</code>, <code>teacher_key</code>,
+<code>teacher_models</code></td>
+</tr>
+<tr>
+<td><code>distillation.teacher_models.&lt;name&gt;.*</code></td>
+<td>每个 teacher 一项</td>
+<td><code>key</code>, <code>model_path</code>,
+<code>num_replicas</code>, <code>inference.*</code></td>
+</tr>
+<tr>
+<td><code>distillation.distillation_loss.*</code></td>
+<td>损失模式 + 聚合</td>
+<td><code>loss_mode</code>, <code>topk</code>,
+<code>use_task_rewards</code>, <code>use_policy_gradient</code>,
+<code>clip_ratio_*</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="loss_mode-速查">loss_mode 速查</h3>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>loss_mode</th>
+<th>类型</th>
+<th>是否 top-k</th>
+<th>与 <code>use_policy_gradient</code> 兼容性</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>forward_kl_topk</code></td>
+<td>Forward KL over teacher top-k</td>
+<td>是 (k 默认 32)</td>
+<td>只能 <code>false</code></td>
+</tr>
+<tr>
+<td><code>kl</code>, <code>k2</code>, <code>k3</code>,
+<code>low_var_kl</code>, <code>abs</code>, <code>mse</code></td>
+<td>Reverse KL 单样本估计</td>
+<td>否</td>
+<td>倾向 <code>true</code>（PG OPD）</td>
+</tr>
+<tr>
+<td><code>k1</code></td>
+<td>Reverse KL 无偏估计（log π - log ν）</td>
+<td>否</td>
+<td>必须 <code>true</code>（直接反传无意义）</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>[!warning] <code>teacher_model</code> 这个名字的坑 单 teacher
+时命名约定叫 <code>teacher_model</code>。但<strong>多 teacher
+时这个键会被静默丢弃</strong>——若同时存在 <code>teacher_model</code> 和
+<code>teacher_model2</code>，只有 <code>teacher_model2</code> 生效。</p>
+<p>多 teacher
+必须改名：<code>teacher_model1</code>、<code>teacher_model2</code>，或干脆不保留
+<code>teacher_model</code> 键。</p>
+</blockquote>
+<h3 id="temperature-强制-1.0">temperature 强制 1.0</h3>
+<p>teacher logprob 计算时 <code>temperature</code> 永远强制
+<code>1.0</code>（无论你配多少）。<code>prompt_logprobs</code> 是一次
+forward pass，没真采样，温度不影响结果。YAML 默认通过 Hydra 插值
+<code>temperature: ${oc.select:actor_rollout_ref.rollout.temperature}</code>，若
+student rollout 用 0.7 之类温度，会被忽略并打 warning。</p>
+<hr />
+<h2 id="架构teacher-logprob-与-student-更新">§7 架构：teacher logprob 与
+student 更新</h2>
+<pre class="mermaid"><code>sequenceDiagram
+    autonumber
+    participant S as Student Rollout
+    participant AL as AgentLoopWorker
+    participant TS as Teacher Server Pool
+    participant T as Train Worker (FSDP/Megatron)
+
+    Note over S,AL: 每个 sample 一个 asyncio 任务
+    S-&gt;&gt;AL: generate(prompt) → response
+    AL-&gt;&gt;AL: _agent_loop_postprocess(per sample)
+    AL-&gt;&gt;TS: compute_teacher_logprobs(prompt+response)&lt;br/&gt;max_tokens=1, prompt_logprobs=topk
+    TS--&gt;&gt;AL: teacher_ids (S, K), teacher_logprobs (S, K)
+    AL-&gt;&gt;T: DataProto(rollouts ⊕ teacher_logprobs)
+
+    alt top-k loss_mode
+        T-&gt;&gt;T: forward pass → distillation_ppo_loss&lt;br/&gt;(作为 logits processor, 顺手算 overlap)
+    end
+    T-&gt;&gt;T: final distillation_ppo_loss
+    alt GKD (use_policy_gradient=false)
+        T-&gt;&gt;T: 直接 backprop on distillation_losses
+    else PG (use_policy_gradient=true)
+        T-&gt;&gt;T: -KL 当 advantage, PPO clip 更新
+    end
+    T--&gt;&gt;S: 更新 student 参数</code></pre>
+<p><strong>两条关键设计选择</strong>：</p>
+<ol type="1">
+<li><strong>teacher 调用与 rollout
+解耦</strong>：<code>compute_teacher_logprobs</code> 是 per-sample
+触发，没 batch-wide barrier。teacher 工作能 overlap 在其他 sample 的
+rollout 上。</li>
+<li><strong>top-k 损失”折中实现”</strong>：当前推理服务只返回 sampled
+token + teacher top-k token 的 logprobs，不支持按任意 token id
+gather。所以 verl 只能实现 <em>teacher-top-k forward KL</em>，无法做
+<em>student-top-k reverse KL</em>。</li>
+</ol>
+<hr />
+<h2 id="指标-debug-源码">§8 指标 / Debug / 源码</h2>
+<h3
+id="核心指标actordistillation">核心指标（<code>actor/distillation/*</code>）</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>指标</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loss</code></td>
+<td>未缩放 distillation loss；与 <code>actor/pg_loss</code> 对比可定
+<code>distillation_loss_coef</code></td>
+</tr>
+<tr>
+<td><code>abs_loss</code></td>
+<td>loss 的绝对值（k1 这种有符号估计器特别有用）</td>
+</tr>
+<tr>
+<td><code>loss_min</code> / <code>loss_max</code></td>
+<td>batch 内 per-token loss 的极值</td>
+</tr>
+<tr>
+<td><code>student_mass</code></td>
+<td>student 在 teacher top-k 上的概率质量</td>
+</tr>
+<tr>
+<td><code>teacher_mass</code></td>
+<td>teacher 在自己的 top-k 上的概率质量（太低 → top-k 截断太多）</td>
+</tr>
+<tr>
+<td><code>overlap_ratio</code></td>
+<td><span class="math inline">\(\|\mathrm{TopK}_\nu \cap
+\mathrm{TopK}_\pi\| / k\)</span>；接近 1 = 两边 top-k 集合高度一致</td>
+</tr>
+</tbody>
+</table>
+<h3 id="debug-技巧">Debug 技巧</h3>
+<p>把 student 设成与 teacher 相同的模型，<strong>loss 应近似为
+0</strong>（不是精确 0，因为 train engine 和 inference engine
+有数值差）。这是验证蒸馏链路是否接通的快速 sanity check。</p>
+<h3 id="关键文件">关键文件</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>文件</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>verl/experimental/teacher_loop/teacher_model.py</code></td>
+<td>teacher 推理 replica 池 + per-teacher
+<code>LLMServerClient</code></td>
+</tr>
+<tr>
+<td><code>verl/experimental/teacher_loop/teacher_manager.py</code></td>
+<td><code>AsyncTeacherLLMServerManager</code>：单/多 teacher 路由</td>
+</tr>
+<tr>
+<td><code>verl/experimental/agent_loop/agent_loop.py</code></td>
+<td><code>_compute_teacher_logprobs</code>：post-rollout 触发</td>
+</tr>
+<tr>
+<td><code>verl/trainer/distillation/{fsdp,megatron}/losses.py</code></td>
+<td><code>compute_forward_kl_topk</code> 各后端实现</td>
+</tr>
+<tr>
+<td><code>verl/trainer/config/distillation/distillation.yaml</code></td>
+<td>YAML 默认值</td>
+</tr>
+<tr>
+<td><code>examples/on_policy_distillation_trainer/</code></td>
+<td><code>run_qwen3_8b_{fsdp,megatron}.sh</code> +
+<code>run_qwen3_vl_8b_fsdp.sh</code> +
+<code>run_qwen3_8b_mopd_fsdp.sh</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="我的批注">我的批注</h2>
+<ul>
+<li>⚡ <strong>亮点</strong>：把 teacher logprob 当 per-sample 异步 hook
+接到 agent loop，比 batch-level KD pipeline 吞吐高很多。teacher 池与
+student 池完全解耦也是工程上的关键决策。</li>
+<li>❓ <strong>疑问</strong>：
+<ul>
+<li>“为什么 k1 必须配 PG？” → 直觉是 k1 = (log π − log ν) 的
+sg，反传时如果 student logprob 这一支被 detach，那信号就完全来自 log π
+的梯度方向上，确实是 PG 的语义。但实际 verl 的
+<code>_aggregate_distillation_losses</code> 是怎么把这个 reward 接到 PPO
+clip 上的？需要看 <code>compute_policy_loss</code> 的内部。</li>
+<li>“Forward KL 还是 Reverse KL 谁更适合做 student 蒸馏？”
+经典结论：forward KL 是 mode-covering（student 分布铺得更开），reverse
+KL 是 mode-seeking（student 更集中）。对 LLM 这种多模分布，应该 forward
+KL（mode-covering 更安全），所以 GKD OPD 默认走 forward KL
+是合理的。</li>
+</ul></li>
+<li>🔗
+相关笔记：[[PPO]]、[[grpo]]、[[dapo]]、[[CISPO]]、[[SAPO]]、[[RLOO]]、[[ReMAX（REINFORCE
+argmax）]]</li>
+</ul>
+<hr />
+<h2 id="行动项">行动项</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />跑
+<code>examples/on_policy_distillation_trainer/run_qwen3_8b_fsdp.sh</code>
+单 teacher GKD 实验，看 <code>actor/distillation/overlap_ratio</code>
+收敛曲线</label></li>
+<li><label><input type="checkbox" />对比 PG OPD（k1）vs GKD
+OPD（forward_kl_topk）在同一 student / teacher 上的
+<code>abs_loss</code> 与 <code>student_mass</code></label></li>
+<li><label><input type="checkbox" />阅读
+<code>verl/trainer/distillation/fsdp/losses.py</code> 中
+<code>compute_forward_kl_topk</code> 的实现，确认 top-k 截断后是否补
+mass normalization</label></li>
+<li><label><input type="checkbox" />在 [[RLHF
+调研笔记]]（如不存在则新建）汇总 OPD 与 [[CISPO]]、[[SAPO]]
+的差异</label></li>
+</ul>
+</div><div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></div></div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

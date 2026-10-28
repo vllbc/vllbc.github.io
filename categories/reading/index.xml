@@ -3,122 +3,165 @@
         <title>Reading - 分类 - vllbc02&#39;s blogs</title>
         <link>https://blog.vllbc.top/categories/reading/</link>
         <description>Reading - 分类 - vllbc02&#39;s blogs</description>
-        <generator>Hugo -- gohugo.io</generator><language>zh-CN</language><copyright>This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.</copyright><lastBuildDate>Mon, 28 Jul 2025 00:00:00 &#43;0000</lastBuildDate><atom:link href="https://blog.vllbc.top/categories/reading/" rel="self" type="application/rss+xml" /><item>
-    <title>Can Language Models Serve as Text-Based World Simulators?</title>
-    <link>https://blog.vllbc.top/can-language-models-serve-as-text-based-world-simulators/</link>
-    <pubDate>Mon, 28 Jul 2025 00:00:00 &#43;0000</pubDate>
+        <generator>Hugo -- gohugo.io</generator><language>zh-CN</language><copyright>This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.</copyright><lastBuildDate>Mon, 31 Aug 2026 00:00:00 &#43;0000</lastBuildDate><atom:link href="https://blog.vllbc.top/categories/reading/" rel="self" type="application/rss+xml" /><item>
+    <title>GRPO训练排查：策略坍塌 vs 训练崩溃</title>
+    <link>https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/</link>
+    <pubDate>Mon, 31 Aug 2026 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/can-language-models-serve-as-text-based-world-simulators/</guid>
-    <description><![CDATA[<p>这篇论文发表于2024年6月，来自亚利桑那大学、微软研究院、艾伦人工智能研究所等顶尖机构，是一项关于大型语言模型（LLM）能力边界探索的严谨、扎实的量化研究。它并没有提出一个全新的、性能超群的模型，而是像一位严谨的实验物理学家，设计了一套精巧的实验装置，来精确测量并回答一个基础且重要的问题：<strong>当前最先进的语言模型，在多大程度上可以取代传统的手工编码，直接作为一个动态世界的“模拟器”？</strong></p>]]></description>
+    <guid>https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/</guid>
+    <description><![CDATA[<h1 id="grpo-训练排查策略坍塌-vs-训练崩溃">GRPO 训练排查：策略坍塌 vs
+训练崩溃</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心思想</strong>：GRPO
+训出问题先分类——<strong>策略坍塌</strong>（policy collapse，算法层：GRPO
+目标函数的内在倾向，什么都没做错也会往那个方向走）和<strong>训练崩溃</strong>（training
+crash，工程层：两侧概率不一致、loss mask 写错、bf16 精度不够，是 bug
+不是超参问题）是两种病，排查路径完全不同，混着查等于两边都查不干净。
+<strong>最大收获</strong>：排查顺序是固定的——<strong>先排工程层</strong>（bug
+是 0/1
+的，能被穷尽排除），排干净再动算法层；且二分法按时间尺度切并不严谨，复杂情况要按<strong>信号链四问</strong>（前提关系）来切。
+<strong>一句话方法论</strong>：抓崩溃前后各 10~20 条 rollout
+<strong>人工读</strong>——3 分钟完成的分类，读曲线要半小时还可能分错。
+<strong>监控补篇（第 2 篇，09-01 并入）</strong>：GRPO 无
+critic，唯一信号来自组内相对优势——<strong>信号健康度可直接观测、必须观测</strong>。平均熵只是报警器；pass@k
+取 k=group size 免费算但有四个缺口，且必须配各自调优的
+temperature；<strong>题内多样性与跨题可区分度是能反向走的两个量</strong>，只测前者会漏掉最典型的”高熵模板化”坍塌——补一个一次前向的检索准确率即可堵上。
+<strong>信号健康度补篇（第 3 篇，09-02 并入）</strong>：50%
+零方差报警线是错的——占比是 G 与题集难度的函数，要比对预测基线；clip
+上界下界分开计、按 advantage 符号解读；两侧引擎 logprob 差 mean&lt;0.001
+健康、&gt;0.01 停训（阈值只适用 mean 不适用
+max）；长度爆涨先按对错拆再定性；<strong>预警看 ESS ratio，确认看 grad
+norm</strong>。 <strong>策略坍塌五条 root cause（第 4 篇，09-02
+并入）</strong>：σ 归一化不是 bug
+也不该一刀切关——<strong>单样本权重主要由组内稀罕度而非信号可靠性决定</strong>；少数派
+advantage 上界 ≈ (G-1)/√G（G=16 时 3.75，不是无限）；Dr. GRPO 去 σ
+是按各自 σ 缩放不是乘常数（因此同 lr A/B 会误判”方法无效”）；DAPO
+动态采样和 Dr. GRPO 去 σ <strong>处理不同区间</strong>（p=0/1 vs
+极端但非零方差），先拆零方差构成（全对/全错）再决定。</p>]]></description>
 </item>
 <item>
-    <title>Group Sequence Policy Optimization</title>
-    <link>https://blog.vllbc.top/group-sequence-policy-optimization/</link>
-    <pubDate>Mon, 28 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>RSI：Recursive Self-Improvement 分类图谱</title>
+    <link>https://blog.vllbc.top/rsirecursive-self-improvement-%E5%88%86%E7%B1%BB%E5%9B%BE%E8%B0%B1/</link>
+    <pubDate>Mon, 31 Aug 2026 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/group-sequence-policy-optimization/</guid>
-    <description><![CDATA[<p>这篇论文的核心贡献是提出了一种名为 <strong>组序列策略优化 (Group
-Sequence Policy Optimization, GSPO)</strong>
-的新型强化学习（RL）算法，旨在解决在训练大型语言模型（特别是<strong>混合专家模型,
-Mixture-of-Experts,
-MoE</strong>）时普遍存在的训练不稳定甚至模型崩溃的痛点。这不仅仅是一次微小的算法改进，而是一次对现有主流RL优化范式的根本性反思与重构，其核心思想是
-<strong>“将优化的基本单元与奖励的基本单元对齐”</strong>。</p>]]></description>
+    <guid>https://blog.vllbc.top/rsirecursive-self-improvement-%E5%88%86%E7%B1%BB%E5%9B%BE%E8%B0%B1/</guid>
+    <description><![CDATA[<h1 id="rsirecursive-self-improvement-分类图谱">RSI：Recursive
+Self-Improvement 分类图谱</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心思想</strong>：RSI（Recursive
+Self-Improvement）= 让 LLM / Agent
+不仅完成任务，还能利用自己产生的经验、数据、反馈甚至代码，迭代地改进自己。近义词极多（self-evolve
+/ self-play / self-refine / self-reward /
+self-distill），但闭环程度和”被改进的东西”各不相同。
+<strong>最大收获</strong>：所有工作都沿同一条主线推进——<strong>逐步把人移出
+improvement loop</strong>。Test-Time 侧，改进对象从 output → weights →
+Agent 本身（persistence 递增）；Training-Time 侧，从自造
+supervision（zero-label）→ 自造 curriculum（zero-data）→
+自造改进策略（auto research）。
+<strong>为什么重要</strong>：闭环每扩展一层，最终都撞上同一个问题——<strong>verification
+是否可靠</strong>。现状是绝大部分 self-evolving 工作仍停留在
+human-on-the-loop，真正的 closed loop 远未实现。</p>]]></description>
 </item>
 <item>
-    <title>Towards Effective Code-Integrated Reasoning</title>
-    <link>https://blog.vllbc.top/towards-effective-code-integrated-reasoning/</link>
-    <pubDate>Sat, 26 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training</title>
+    <link>https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/</link>
+    <pubDate>Wed, 29 Jul 2026 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/towards-effective-code-integrated-reasoning/</guid>
-    <description><![CDATA[<p>好的，作为大模型领域的学术专家，我非常乐意为您深入解读这篇名为《Towards
-Effective Code-Integrated Reasoning》的论文
-(arXiv:2505.24480v1)。这篇论文系统性地探讨了一个在当前大模型研究中至关重要的前沿方向：如何让模型更稳定、更有效地利用外部工具（特别是代码解释器）来完成复杂的推理任务。</p>]]></description>
+    <guid>https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/</guid>
+    <description><![CDATA[<h1 id="mopdmulti-teacher-on-policy-distillation">MOPD：Multi-Teacher
+On-Policy Distillation</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心问题</strong>：经领域 RL 训练后的 LLM
+在单领域很强，但如何把多个领域（Math / Code / IF /
+SWE）专家融合成一个统一模型？ <strong>核心方法</strong>：Multi-Teacher
+On-Policy Distillation —— 三阶段流水线（General SFT → 各领域 RL 并行得
+teacher → 多 teacher 蒸馏）。学生<strong>自己
+rollout</strong>（on-policy），每个 prompt <strong>路由到对应 domain
+teacher</strong>，teacher prefill 给 per-token log-prob，用
+<strong>reverse KL</strong> 让学生模仿。 <strong>关键结果</strong>：在
+Qwen3-30B-A3B 上 normalized score <strong>0.937</strong>（vs RL Teacher
+1.000、Mix-RL 0.882、Cascade RL 0.775、Param-Merge 0.328–0.857）。跨
+domain 极差仅 0.044，最均匀。已在 <strong>MiMo-V2-Flash (309B)</strong>
+生产训练中部署。</p>]]></description>
 </item>
 <item>
-    <title>Routine：A Structural Planning Framework for LLM Agent System in Enterprise</title>
-    <link>https://blog.vllbc.top/routinea-structural-planning-framework-for-llm-agent-system-in-enterprise/</link>
-    <pubDate>Fri, 25 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>Review：自进化Agent的RL Memory与Skill方法批判</title>
+    <link>https://blog.vllbc.top/review%E8%87%AA%E8%BF%9B%E5%8C%96agent%E7%9A%84rl-memory%E4%B8%8Eskill%E6%96%B9%E6%B3%95%E6%89%B9%E5%88%A4/</link>
+    <pubDate>Thu, 23 Jul 2026 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/routinea-structural-planning-framework-for-llm-agent-system-in-enterprise/</guid>
-    <description><![CDATA[<h3
-id="论文深度解读从混沌到有序routine框架如何驯服企业级ai智能体"><strong>论文深度解读：从“混沌”到“有序”，Routine框架如何驯服企业级AI智能体</strong></h3>
-<p>当前，以大型语言模型（LLM）为核心的自主智能体（Autonomous
-Agents）正以前所未有的速度发展，展现出在数据分析、人机交互等领域的巨大潜力。然而，当我们将这些通用智能体置于规则严密、流程复杂的企业环境中时，往往会遭遇“水土不服”的窘境。论文开篇就指出了这一核心挑战：</p>]]></description>
+    <guid>https://blog.vllbc.top/review%E8%87%AA%E8%BF%9B%E5%8C%96agent%E7%9A%84rl-memory%E4%B8%8Eskill%E6%96%B9%E6%B3%95%E6%89%B9%E5%88%A4/</guid>
+    <description><![CDATA[<blockquote>
+<p>一篇对当前 “用 RL 提升 memory / skill refinement”
+这条线的批判性综述。作者把现状分成 4 类：SkillRL、MemRL、纯 prompt
+memory、search-augmented RL。本笔记整理作者的核心观点,并与 vault
+内已有的相关论文笔记交叉链接。</p>]]></description>
 </item>
 <item>
-    <title>Search and Refine During Think：Autonomous Retrieval - Augmented Reasoning of LLMs</title>
-    <link>https://blog.vllbc.top/search-and-refine-during-thinkautonomous-retrieval-augmented-reasoning-of-llms/</link>
-    <pubDate>Sun, 20 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>GVPO：Group Variance Policy Optimization for Large Language Model Post-Training</title>
+    <link>https://blog.vllbc.top/gvpogroup-variance-policy-optimization-for-large-language-model-post-training/</link>
+    <pubDate>Fri, 17 Oct 2025 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/search-and-refine-during-thinkautonomous-retrieval-augmented-reasoning-of-llms/</guid>
-    <description><![CDATA[<h3
-id="论文深度解读从思考时搜索到思考时搜索并提炼的范式革命">论文深度解读：从“思考时搜索”到“思考时搜索并提炼”的范式革命</h3>
-<p>这篇论文的核心贡献在于，它挑战了传统检索增强生成（RAG）系统中一个根深蒂固的、看似理所当然的流程，并提出了一种更为精细、鲁棒和智能的替代范式。传统的
-RAG
-模型通常遵循一种“<strong>思考时搜索</strong>”（search-during-think）的模式：当模型在生成答案的过程中意识到知识不足时，它会触发一次或多次搜索，获取外部文档，然后直接基于这些（可能混杂着大量噪声的）文档来生成最终答案。这种方法的致命弱点在于，它假设模型能够自行从混杂、冗长甚至可能错误的信息中精准地“淘金”，而现实是，这种“信息投喂”常常导致“<strong>垃圾进，垃圾出</strong>”（garbage
-in, garbage out）的困境。</p>]]></description>
+    <guid>https://blog.vllbc.top/gvpogroup-variance-policy-optimization-for-large-language-model-post-training/</guid>
+    <description><![CDATA[<p>这篇论文无疑是<strong>大语言模型（Large Language Model,
+LLM）</strong>对齐（Alignment）领域的一项杰出工作。它不仅提出了一个在数学上更优美、在实践中更稳定高效的后训练（Post-Training）算法，更重要的是，它为我们理解和统一多种主流的对齐方法提供了一个全新的理论视角。通过这篇解读，我将带您深入其核心，理解其精髓。</p>]]></description>
 </item>
 <item>
-    <title>Peri-LN：Revisiting Normalization Layer in the Transformer Architecture</title>
-    <link>https://blog.vllbc.top/peri-lnrevisiting-normalization-layer-in-the-transformer-architecture/</link>
-    <pubDate>Sat, 19 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>ReasoningBank：Scaling Agent Self-Evolving with Reasoning Memor</title>
+    <link>https://blog.vllbc.top/reasoningbankscaling-agent-self-evolving-with-reasoning-memor/</link>
+    <pubDate>Fri, 17 Oct 2025 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/peri-lnrevisiting-normalization-layer-in-the-transformer-architecture/</guid>
-    <description><![CDATA[<p>好的，非常荣幸能以领域专家的身份，与您一同深入探讨这篇关于
-Transformer 架构中归一化策略的优秀论文——《Peri-LN: Revisiting
-Normalization Layer in the Transformer Architecture》。</p>]]></description>
+    <guid>https://blog.vllbc.top/reasoningbankscaling-agent-self-evolving-with-reasoning-memor/</guid>
+    <description><![CDATA[<hr />
+<p>   </p>
+<h3 id="论文深度解读">论文深度解读</h3>
+<p>首先，让我们对这篇论文进行一个整体性的深入剖析。</p>
+<p>这篇论文的核心论点是，当前的大语言模型代理（LLM
+Agents）在执行持久化、长期的真实世界任务时，存在一个致命缺陷：它们无法从过去累积的交互历史中学习。这导致它们像一个“失忆的专家”，每次都从零开始，不断重复过去的错误，也无法利用相似问题的解决经验。论文将这一问题归结为现有记忆机制的不足。</p>]]></description>
 </item>
 <item>
-    <title>ZEROSEARCH：Incentivize the Search Capability of LLMs without Searching</title>
-    <link>https://blog.vllbc.top/zerosearchincentivize-the-search-capability-of-llms-without-searching/</link>
-    <pubDate>Fri, 18 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>Skywork-R1V3 Technical Report</title>
+    <link>https://blog.vllbc.top/skywork-r1v3-technical-report/</link>
+    <pubDate>Mon, 13 Oct 2025 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/zerosearchincentivize-the-search-capability-of-llms-without-searching/</guid>
-    <description><![CDATA[<p>好的，作为大模型领域的学术专家，我非常乐意为您深入解读这篇富有启发性的论文《ZEROSEARCH:
-Incentivize the Search Capability of LLMs without Searching》。</p>
-<p>这篇论文的核心思想极其巧妙，它直击了当前训练“搜索智能体（Search
-Agent）”LLM 时最头疼的两个问题：高昂的 API
-调用成本和不可控的搜索结果质量。传统的做法是让 LLM
-在训练时与真实的搜索引擎（如谷歌）进行交互，通过强化学习（RL）来学习何时搜索、搜索什么以及如何利用搜索结果。但这就像让一个新手司机直接在高峰期的纽约街头学开车，不仅成本高昂（每次“练习”都要花钱），而且路况复杂多变（搜索结果时好时坏），很容易让模型“学坏”或者干脆放弃学习。</p>]]></description>
+    <guid>https://blog.vllbc.top/skywork-r1v3-technical-report/</guid>
+    <description><![CDATA[<ul>
+<li><p>思考时间和性能之间有一个平衡，超过这个平衡，就算增加思考时间性能也不会有大的提升了。
+</p></li>
+<li><p>RL相对于SFT来说可以提高泛化能力，SFT之后out-domain数据集性能反而下降。</p>]]></description>
 </item>
 <item>
-    <title>BRiTE：Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning</title>
-    <link>https://blog.vllbc.top/britebootstrapping-reinforced-thinking-process-to-enhance-language-model-reasoning/</link>
-    <pubDate>Wed, 16 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>AGENTRACER：WHO IS INDUCING FAILURE IN THE LLM AGENTIC SYSTEMS</title>
+    <link>https://blog.vllbc.top/agentracerwho-is-inducing-failure-in-the-llm-agentic-systems/</link>
+    <pubDate>Tue, 23 Sep 2025 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/britebootstrapping-reinforced-thinking-process-to-enhance-language-model-reasoning/</guid>
-    <description><![CDATA[<p>好的，非常荣幸能以领域专家的身份，与您一同深入探讨这篇富有洞见的论文《BRITE:
-Bootstrapping Reinforced Thinking Process to Enhance Language Model
-Reasoning》。这篇论文确实触及了当前大模型领域一个核心且棘手的问题：如何让模型不仅能生成流畅的文本，更能进行可靠、严谨的逻辑推理。</p>]]></description>
+    <guid>https://blog.vllbc.top/agentracerwho-is-inducing-failure-in-the-llm-agentic-systems/</guid>
+    <description><![CDATA[<figure>
+
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<hr />
+<p>这篇论文聚焦于一个日益重要且极具挑战性的问题：当一个由多个大模型智能体（LLM
+Agents）组成的复杂系统在执行任务时失败了，我们如何能<strong>自动、精准地定位到是哪个智能体的哪一步操作导致了最终的失败</strong>？这一定位过程，论文称之为<strong>智能体系统失败归因（agentic
+system failure attribution）</strong>。</p>]]></description>
 </item>
 <item>
-    <title>PROCESS REINFORCEMENT THROUGH IMPLICIT REWARDS</title>
-    <link>https://blog.vllbc.top/process-reinforcement-through-implicit-rewards/</link>
-    <pubDate>Wed, 16 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>DeepDive：Advancing Deep Search Agents with Knowledge Graphs and Multi-Turn RL</title>
+    <link>https://blog.vllbc.top/deepdiveadvancing-deep-search-agents-with-knowledge-graphs-and-multi-turn-rl/</link>
+    <pubDate>Tue, 23 Sep 2025 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/process-reinforcement-through-implicit-rewards/</guid>
-    <description><![CDATA[<h3 id="论文深入解读">论文深入解读</h3>
-<p>这篇名为《Process Reinforcement through Implicit
-Rewards》(通过隐式奖励进行过程强化)
-的论文，由来自清华大学、上海人工智能实验室、UIUC
-等顶尖机构的研究者共同完成，为大语言模型（LLM）的强化学习（RL）领域带来了一个极具价值和创新性的解决方案——<strong>PRIME</strong>
-框架。其核心贡献在于，它成功地将<strong>过程监督 (Process
-Supervision)</strong> 的高效率与<strong>结果监督 (Outcome
-Supervision)</strong>
-的低成本相结合，解决了在复杂推理任务（如数学和编程）中应用强化学习时面临的关键瓶颈。</p>]]></description>
+    <guid>https://blog.vllbc.top/deepdiveadvancing-deep-search-agents-with-knowledge-graphs-and-multi-turn-rl/</guid>
+    <description><![CDATA[<p>deepresearch的工作，解决的问题是ds训练中数据短缺的问题，提出的创新主要是数据合成，方法类似于逆向工程和<a
+href="WebExplorer：Explore%20and%20Evolve%20for%20Training%20Long-Horizon%20Web%20Agents.md">WebExplorer：Explore
+and Evolve for Training Long-Horizon Web
+Agents</a>，本文的方法是在知识图谱上面随机探索，形成复杂推理路径，并且对实体进行模糊化，最后将路径作为问题，路径终点作为答案，并且还过滤难度，过于简单的直接抛弃。</p>]]></description>
 </item>
 <item>
-    <title>Search-R1：Training LLMs to Reason and Leverage Search Engines with Reinforcement Learning</title>
-    <link>https://blog.vllbc.top/search-r1training-llms-to-reason-and-leverage-search-engines-with-reinforcement-learning/</link>
-    <pubDate>Wed, 16 Jul 2025 00:00:00 &#43;0000</pubDate>
+    <title>Disentangling Memory and Reasoning Ability in Large Language Models</title>
+    <link>https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/</link>
+    <pubDate>Tue, 23 Sep 2025 00:00:00 &#43;0000</pubDate>
     <author>vllbc</author>
-    <guid>https://blog.vllbc.top/search-r1training-llms-to-reason-and-leverage-search-engines-with-reinforcement-learning/</guid>
-    <description><![CDATA[<p>好的，作为大模型领域的学术专家，我非常乐于为您深入解读这篇具有重要意义的论文《SEARCH-R
-1: Training LLMs to Reason and Leverage Search Engines with
-Reinforcement Learning》。</p>
-<p>这篇论文的核心，是探索如何让大型语言模型（LLM）<strong>学会</strong>像人类专家一样，在解决复杂问题时，<strong>主动、智能、且迭代地使用搜索引擎</strong>。它不仅仅是简单地把搜索结果“喂”给模型，而是通过<strong>强化学习（Reinforcement
-Learning,
-RL）</strong>，训练模型形成一种内在的“研究”能力——知道<strong>什么时候</strong>需要信息，需要<strong>什么</strong>信息，以及如何<strong>整合</strong>这些信息来形成最终答案。</p>]]></description>
+    <guid>https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/</guid>
+    <description><![CDATA[<p>这是去年的论文了，不过从中看到了如今search-r1的雏形，就是先提问然后调用外部工具（这里是知识大模型）给出解答，直到感觉自己信息已经掌握足够了，就进一步推理然后作答。只不过本文只是进行了sft。memory也就是掌握关键信息的环节。</p>]]></description>
 </item>
 </channel>
 </rss>

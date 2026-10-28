@@ -3,7 +3,7 @@
 ## 预训练
 
 ### Muon-clip
-详见[Muon](../../Deep%20Learning/优化器/Muon.md)
+详见[Muon](../../Foundation/深度学习/优化器/Muon.md)
 
 通过裁剪权重解决Max-Logit问题，实现稳定训练。
 

@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>veRL基于Ray的执行流程源码解析（一） - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="veRL基于Ray的执行流程源码解析（一）">
+  <meta property="og:description" content="来源：【AI Infra】【RLHF框架】一、VeRL中基于Ray的执行流程源码解析（作者：白强伟）
+前置知识：[[Engineering/coding/verl/ray前置知识]] 提到此篇博客">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-06-04T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-06-04T00:00:00+00:00">
+    <meta property="article:tag" content="Coding">
+    <meta property="article:tag" content="Verl">
+    <meta property="article:tag" content="Ray">
+    <meta property="article:tag" content="Single_controller">
+    <meta property="article:tag" content="RayWorkerGroup">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="veRL基于Ray的执行流程源码解析（一）">
+  <meta name="twitter:description" content="来源：【AI Infra】【RLHF框架】一、VeRL中基于Ray的执行流程源码解析（作者：白强伟）
+前置知识：[[Engineering/coding/verl/ray前置知识]] 提到此篇博客">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" /><link rel="prev" href="https://blog.vllbc.top/verl_colocate%E5%AE%9E%E7%8E%B0%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" /><link rel="next" href="https://blog.vllbc.top/nano-vllm%E9%98%85%E8%AF%BB%E7%AC%94%E8%AE%B0/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "veRL基于Ray的执行流程源码解析（一）",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "coding, verl, ray, single_controller, RayWorkerGroup","wordcount":  3780 ,
+        "url": "https:\/\/blog.vllbc.top\/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90\/","datePublished": "2026-06-04T00:00:00+00:00","dateModified": "2026-06-04T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">veRL基于Ray的执行流程源码解析（一）</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Categories</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a>&nbsp;<a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2026-06-04">2026-06-04</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 3780 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 8 分钟&nbsp;<span id="/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" class="leancloud_visitors" data-flag-title="veRL基于Ray的执行流程源码解析（一）">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><blockquote>
+<p>来源：<a href="https://zhuanlan.zhihu.com/p/29997527557">【AI
+Infra】【RLHF框架】一、VeRL中基于Ray的执行流程源码解析</a>（作者：白强伟）</p>
+<p>前置知识：[[Engineering/coding/verl/ray前置知识]] 提到此篇博客</p>
+</blockquote>
+<p>VeRL 是字节开源的 LLM RL 后训练框架，完整设计思路见论文《HybridFlow:
+A Flexible and Efficient RLHF
+Framework》。这篇博客从源码角度深入理解其基于 Ray 的执行流程，不涉及具体
+RL 算法。</p>
+<h2 id="一overview">一、Overview</h2>
+<h3 id="一个例子">1. 一个例子</h3>
+<p>假设有 4 个 GPU，每个 GPU 实例化一个
+<code>GPUAccumulator</code>，其成员变量 <code>value</code> 初始化为 GPU
+rank，然后对所有 value 执行加 1 操作：</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> ray</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> verl.single_controller.base <span class="im">import</span> Worker</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> verl.single_controller.ray.base <span class="im">import</span> RayWorkerGroup, RayResourcePool, RayClassWithInitArgs</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> verl.single_controller.base.decorator <span class="im">import</span> register, Dispatch</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="at">@ray.remote</span></span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> GPUAccumulator(Worker):</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>):</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>()</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.value <span class="op">=</span> torch.zeros(size<span class="op">=</span>(<span class="dv">1</span>,), device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>) <span class="op">+</span> <span class="va">self</span>.rank</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    <span class="at">@register</span>(Dispatch.ONE_TO_ALL)</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> add(<span class="va">self</span>, x):</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.value <span class="op">+=</span> x</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&#39;rank </span><span class="sc">{</span><span class="va">self</span><span class="sc">.</span>rank<span class="sc">}</span><span class="ss">, value: </span><span class="sc">{</span><span class="va">self</span><span class="sc">.</span>value<span class="sc">}</span><span class="ss">&#39;</span>)</span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.value.cpu()</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>class_with_args <span class="op">=</span> RayClassWithInitArgs(GPUAccumulator)</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>resource_pool <span class="op">=</span> RayResourcePool([<span class="dv">4</span>], use_gpu<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>workergroup <span class="op">=</span> RayWorkerGroup(resource_pool, class_with_args)</span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(workergroup.add(x<span class="op">=</span><span class="dv">1</span>))  <span class="co"># 输出：[tensor([1.]), tensor([2.]), tensor([3.]), tensor([4.])]</span></span></code></pre></div>
+<p>执行过程示意图（DriverProcess → WorkerGroup → ResourcePool →
+Worker）：</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604155100_blog1_example.jpg"
+alt="GPUAccumulator 执行流程" />
+<figcaption aria-hidden="true">GPUAccumulator 执行流程</figcaption>
+</figure>
+<h3 id="整体设计">2. 整体设计</h3>
+<p>为了实现上面的功能，VeRL 中抽象出了
+<strong>Worker</strong>、<strong>WorkerGroup</strong>、<strong>ResourcePool</strong>、<strong>DriverProcess</strong>
+的概念：</p>
+<ul>
+<li><strong>Worker</strong>：基础执行单元</li>
+<li><strong>WorkerGroup</strong>：Worker 的集合，统一调度</li>
+<li><strong>ResourcePool</strong>：资源池</li>
+<li><strong>DriverProcess</strong>：驱动进程</li>
+</ul>
+<p>下面是官方文档中这些概念的示例图：</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604155100_blog1_overview.jpg"
+alt="Worker/WorkerGroup/ResourcePool 概念图" />
+<figcaption aria-hidden="true">Worker/WorkerGroup/ResourcePool
+概念图</figcaption>
+</figure>
+<p>后面的章节通过源码的方式深入理解这些概念。</p>
+<h2 id="二数据交换协议dataproto">二、数据交换协议：DataProto</h2>
+<p><code>DataProto</code> 是 veRL
+中各种功能之间用于数据交换的标准协议。</p>
+<h3 id="基础结构">1. 基础结构</h3>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 原始代码位于 verl/protocol.py</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> DataProto:</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    batch: TensorDict <span class="op">=</span> <span class="va">None</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    non_tensor_batch: Dict <span class="op">=</span> field(default_factory<span class="op">=</span><span class="bu">dict</span>)</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    meta_info: Dict <span class="op">=</span> field(default_factory<span class="op">=</span><span class="bu">dict</span>)</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    ...</span></code></pre></div>
+<p><code>DataProto</code>
+持有三种类型的数据：<code>batch</code>、<code>non_tensor_batch</code> 和
+<code>meta_info</code>。通过命名可以看出，<code>DataProto</code> 是以
+batch 的方式组织数据的。</p>
+<h3 id="使用示例">2. 使用示例</h3>
+<p>更多使用示例见
+<code>tests/utility/test_tensor_dict_utilities.py</code>：</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 构造</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>obs <span class="op">=</span> torch.randn(<span class="dv">100</span>, <span class="dv">10</span>)  <span class="co"># batch_size 为 100 的 tensor</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>labels <span class="op">=</span> [random.choice([<span class="st">&#39;abc&#39;</span>, <span class="st">&#39;cde&#39;</span>]) <span class="cf">for</span> _ <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">100</span>)]  <span class="co"># 随机挑选 &#39;abc&#39; 和 &#39;cde&#39; 构造大小为 100 的 list</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>dataset <span class="op">=</span> DataProto.from_dict(tensors<span class="op">=</span>{<span class="st">&#39;obs&#39;</span>: obs}, non_tensors<span class="op">=</span>{<span class="st">&#39;labels&#39;</span>: labels})  <span class="co"># 实例化</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="co"># pop</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>poped_dataset <span class="op">=</span> dataset.pop(batch_keys<span class="op">=</span>[<span class="st">&#39;obs&#39;</span>])  <span class="co"># 将 batch 中的 &quot;obs&quot; 弹出，poped_dataset 仍为 DataProto</span></span></code></pre></div>
+<h3 id="dataprotofuture">3. DataProtoFuture</h3>
+<p>在 <code>verl/protocol.py</code> 中除 <code>DataProto</code>
+外，还定义了 Future 版本的 <code>DataProtoFuture</code>，保存了
+<code>ray.ObjectRef</code> 对象列表 <code>futures</code> 以及两个函数
+<code>collect_fn</code> 和 <code>dispatch_fn</code>：</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="at">@dataclass</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> DataProtoFuture:</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    collect_fn: Callable  <span class="co"># 用于将 future 对象列表简化为一个 DataProto</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    futures: List[ray.ObjectRef]</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    dispatch_fn: Callable <span class="op">=</span> <span class="va">None</span>  <span class="co"># 用于将 DataProto 划分为大小为 world_size 的多个 DataProto 列表</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> get(<span class="va">self</span>):</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> ray.get(<span class="va">self</span>.futures)</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> o <span class="kw">in</span> output:</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>            <span class="cf">assert</span> <span class="bu">isinstance</span>(o, DataProto)</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> <span class="va">self</span>.collect_fn(output)</span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">self</span>.dispatch_fn <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>            output <span class="op">=</span> <span class="va">self</span>.dispatch_fn(output)</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> output</span></code></pre></div>
+<h2 id="三基础执行单元worker">三、基础执行单元：Worker</h2>
+<p><code>Worker</code>
+负责执行具体任务的基础执行单元，保存分布式执行时必要的信息。具体的执行任务需要用户继承
+<code>Worker</code> 类来实现。</p>
+<h3 id="代码解析">1. 代码解析</h3>
+<p>在 verl 中，通过 <code>WorkerGroup</code> 统一实例化并调度
+Worker，概念上存在 <strong>master worker</strong>。先看单个 Worker。</p>
+<p>简单来说，<code>Worker</code> 类负责存储
+<code>world_size</code>、<code>rank</code>
+等分布式计算的相关信息并配置环境变量，<strong>Master Worker</strong>
+相对于其他 Worker 需要额外保存 <code>MASTER_ADDR</code> 和
+<code>MASTER_PORT</code> 的信息。简化后的代码：</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 简化后代码，原始代码位于 verl/single_controller/base/worker.py</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Worker(WorkerHelper):</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__new__</span>(cls, <span class="op">*</span>args, <span class="op">**</span>kwargs):</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>        instance <span class="op">=</span> <span class="bu">super</span>().<span class="fu">__new__</span>(cls)</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>        rank <span class="op">=</span> os.environ.get(<span class="st">&quot;RANK&quot;</span>, <span class="va">None</span>)</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>        worker_group_prefix <span class="op">=</span> os.environ.get(<span class="st">&quot;WG_PREFIX&quot;</span>, <span class="va">None</span>)</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="va">None</span> <span class="kw">not</span> <span class="kw">in</span> [rank, worker_group_prefix] <span class="kw">and</span> <span class="st">&#39;ActorClass(&#39;</span> <span class="kw">not</span> <span class="kw">in</span> cls.<span class="va">__name__</span>:</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>            instance._configure_before_init(<span class="ss">f&quot;</span><span class="sc">{</span>worker_group_prefix<span class="sc">}</span><span class="ss">_register_center&quot;</span>, <span class="bu">int</span>(rank))</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> instance</span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> _configure_before_init(<span class="va">self</span>, register_center_name: <span class="bu">str</span>, rank: <span class="bu">int</span>):</span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>        <span class="co"># rank=0 时，配置 MASTER_ADDR 和 MASTER_PORT 环境变量</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> rank <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a>            master_addr, master_port <span class="op">=</span> <span class="va">self</span>.get_availale_master_addr_port()</span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a>            rank_zero_info <span class="op">=</span> {</span>
+<span id="cb5-16"><a href="#cb5-16" aria-hidden="true" tabindex="-1"></a>                <span class="st">&quot;MASTER_ADDR&quot;</span>: master_addr,</span>
+<span id="cb5-17"><a href="#cb5-17" aria-hidden="true" tabindex="-1"></a>                <span class="st">&quot;MASTER_PORT&quot;</span>: master_port,</span>
+<span id="cb5-18"><a href="#cb5-18" aria-hidden="true" tabindex="-1"></a>            }</span>
+<span id="cb5-19"><a href="#cb5-19" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> os.getenv(<span class="st">&quot;WG_BACKEND&quot;</span>, <span class="va">None</span>) <span class="op">==</span> <span class="st">&quot;ray&quot;</span>:</span>
+<span id="cb5-20"><a href="#cb5-20" aria-hidden="true" tabindex="-1"></a>                <span class="im">from</span> verl.single_controller.base.register_center.ray <span class="im">import</span> create_worker_group_register_center</span>
+<span id="cb5-21"><a href="#cb5-21" aria-hidden="true" tabindex="-1"></a>                <span class="va">self</span>.register_center <span class="op">=</span> create_worker_group_register_center(name<span class="op">=</span>register_center_name, info<span class="op">=</span>rank_zero_info)</span>
+<span id="cb5-22"><a href="#cb5-22" aria-hidden="true" tabindex="-1"></a>            os.environ.update(rank_zero_info)</span>
+<span id="cb5-23"><a href="#cb5-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-24"><a href="#cb5-24" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, cuda_visible_devices<span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb5-25"><a href="#cb5-25" aria-hidden="true" tabindex="-1"></a>        world_size <span class="op">=</span> <span class="bu">int</span>(os.environ[<span class="st">&#39;WORLD_SIZE&#39;</span>])</span>
+<span id="cb5-26"><a href="#cb5-26" aria-hidden="true" tabindex="-1"></a>        rank <span class="op">=</span> <span class="bu">int</span>(os.environ[<span class="st">&#39;RANK&#39;</span>])</span>
+<span id="cb5-27"><a href="#cb5-27" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._rank <span class="op">=</span> rank</span>
+<span id="cb5-28"><a href="#cb5-28" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._world_size <span class="op">=</span> world_size</span>
+<span id="cb5-29"><a href="#cb5-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-30"><a href="#cb5-30" aria-hidden="true" tabindex="-1"></a>        master_addr <span class="op">=</span> os.environ[<span class="st">&quot;MASTER_ADDR&quot;</span>]</span>
+<span id="cb5-31"><a href="#cb5-31" aria-hidden="true" tabindex="-1"></a>        master_port <span class="op">=</span> os.environ[<span class="st">&quot;MASTER_PORT&quot;</span>]</span>
+<span id="cb5-32"><a href="#cb5-32" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-33"><a href="#cb5-33" aria-hidden="true" tabindex="-1"></a>        local_world_size <span class="op">=</span> <span class="bu">int</span>(os.getenv(<span class="st">&quot;LOCAL_WORLD_SIZE&quot;</span>, <span class="st">&quot;1&quot;</span>))</span>
+<span id="cb5-34"><a href="#cb5-34" aria-hidden="true" tabindex="-1"></a>        local_rank <span class="op">=</span> <span class="bu">int</span>(os.getenv(<span class="st">&quot;LOCAL_RANK&quot;</span>, <span class="st">&quot;0&quot;</span>))</span>
+<span id="cb5-35"><a href="#cb5-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-36"><a href="#cb5-36" aria-hidden="true" tabindex="-1"></a>        store <span class="op">=</span> {</span>
+<span id="cb5-37"><a href="#cb5-37" aria-hidden="true" tabindex="-1"></a>            <span class="st">&#39;_world_size&#39;</span>: world_size,</span>
+<span id="cb5-38"><a href="#cb5-38" aria-hidden="true" tabindex="-1"></a>            <span class="st">&#39;_rank&#39;</span>: rank,</span>
+<span id="cb5-39"><a href="#cb5-39" aria-hidden="true" tabindex="-1"></a>            <span class="st">&#39;_local_world_size&#39;</span>: local_world_size,</span>
+<span id="cb5-40"><a href="#cb5-40" aria-hidden="true" tabindex="-1"></a>            <span class="st">&#39;_local_rank&#39;</span>: local_rank,</span>
+<span id="cb5-41"><a href="#cb5-41" aria-hidden="true" tabindex="-1"></a>            <span class="st">&#39;_master_addr&#39;</span>: master_addr,</span>
+<span id="cb5-42"><a href="#cb5-42" aria-hidden="true" tabindex="-1"></a>            <span class="st">&#39;_master_port&#39;</span>: master_port</span>
+<span id="cb5-43"><a href="#cb5-43" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="cb5-44"><a href="#cb5-44" aria-hidden="true" tabindex="-1"></a>        <span class="co"># WorkerMeta 仅是将 store 信息存储在实例对象中</span></span>
+<span id="cb5-45"><a href="#cb5-45" aria-hidden="true" tabindex="-1"></a>        meta <span class="op">=</span> WorkerMeta(store<span class="op">=</span>store)</span>
+<span id="cb5-46"><a href="#cb5-46" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 将 meta(store) 信息更新到当前实例的 __dict__ 中并配置环境变量</span></span>
+<span id="cb5-47"><a href="#cb5-47" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._configure_with_meta(meta<span class="op">=</span>meta)</span></code></pre></div>
+<p><strong>要点</strong>： - <code>Worker</code> 继承自
+<code>WorkerHelper</code>，<code>WorkerHelper</code>
+提供唯一的功能就是获得当前节点的 IP 地址和可用端口号。 - 核心方法包括
+<code>__new__</code> 和 <code>__init__</code>： - <code>__new__</code>
+针对 rank 0 配置 <code>MASTER_ADDR</code> 和 <code>MASTER_PORT</code> -
+<code>__init__</code> 将 <code>world_size</code>、<code>rank</code>
+保存在当前实例中</p>
+<h3 id="自定义-worker-的例子">2. 自定义 Worker 的例子</h3>
+<p>Worker
+本身不执行具体计算任务，需要用户继承该类实现自定义计算任务。下面是一个模拟”数据并行
+(DP) 前向”的例子：</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> os</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> ray</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> time</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch.nn <span class="im">as</span> nn</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch.nn.functional <span class="im">as</span> F</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> verl.single_controller.base <span class="im">import</span> Worker</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MyNet(nn.Module):</span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>):</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>(MyNet, <span class="va">self</span>).<span class="fu">__init__</span>()</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.linear <span class="op">=</span> nn.Linear(<span class="dv">100</span>, <span class="dv">1</span>)</span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> compute_loss(<span class="va">self</span>, x, y):</span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>        pred <span class="op">=</span> <span class="va">self</span>.linear(x)</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>        loss <span class="op">=</span> F.mse_loss(pred, y)</span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> loss</span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a><span class="at">@ray.remote</span>(num_gpus<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> MyNetWorker(Worker):</span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>):</span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>()</span>
+<span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.network <span class="op">=</span> MyNet()</span>
+<span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.device <span class="op">=</span> torch.device(<span class="ss">f&quot;cuda&quot;</span>)</span>
+<span id="cb6-25"><a href="#cb6-25" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.network.to(<span class="va">self</span>.device)</span>
+<span id="cb6-26"><a href="#cb6-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-27"><a href="#cb6-27" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> compute_network_loss(<span class="va">self</span>, inputs, targets):</span>
+<span id="cb6-28"><a href="#cb6-28" aria-hidden="true" tabindex="-1"></a>        inputs <span class="op">=</span> inputs.to(<span class="va">self</span>.device)</span>
+<span id="cb6-29"><a href="#cb6-29" aria-hidden="true" tabindex="-1"></a>        targets <span class="op">=</span> targets.to(<span class="va">self</span>.device)</span>
+<span id="cb6-30"><a href="#cb6-30" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.network.compute_loss(inputs, targets).item()</span>
+<span id="cb6-31"><a href="#cb6-31" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-32"><a href="#cb6-32" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">__name__</span> <span class="op">==</span> <span class="st">&quot;__main__&quot;</span>:</span>
+<span id="cb6-33"><a href="#cb6-33" aria-hidden="true" tabindex="-1"></a>    ray.init()</span>
+<span id="cb6-34"><a href="#cb6-34" aria-hidden="true" tabindex="-1"></a>    options0 <span class="op">=</span> {<span class="st">&#39;runtime_env&#39;</span>: {<span class="st">&#39;env_vars&#39;</span>: {<span class="st">&#39;LOCAL_WORLD_SIZE&#39;</span>: <span class="st">&#39;2&#39;</span>, <span class="st">&#39;LOCAL_RANK&#39;</span>: <span class="st">&#39;0&#39;</span>,</span>
+<span id="cb6-35"><a href="#cb6-35" aria-hidden="true" tabindex="-1"></a>                                              <span class="st">&#39;WORLD_SIZE&#39;</span>: <span class="st">&#39;2&#39;</span>, <span class="st">&#39;RANK&#39;</span>: <span class="st">&#39;0&#39;</span>,</span>
+<span id="cb6-36"><a href="#cb6-36" aria-hidden="true" tabindex="-1"></a>                                              <span class="st">&#39;WG_PREFIX&#39;</span>: <span class="st">&#39;test&#39;</span>, <span class="st">&#39;WG_BACKEND&#39;</span>: <span class="st">&#39;ray&#39;</span>}}}</span>
+<span id="cb6-37"><a href="#cb6-37" aria-hidden="true" tabindex="-1"></a>    options1 <span class="op">=</span> {<span class="st">&#39;runtime_env&#39;</span>: {<span class="st">&#39;env_vars&#39;</span>: {<span class="st">&#39;LOCAL_WORLD_SIZE&#39;</span>: <span class="st">&#39;2&#39;</span>, <span class="st">&#39;LOCAL_RANK&#39;</span>: <span class="st">&#39;1&#39;</span>,</span>
+<span id="cb6-38"><a href="#cb6-38" aria-hidden="true" tabindex="-1"></a>                                              <span class="st">&#39;WORLD_SIZE&#39;</span>: <span class="st">&#39;2&#39;</span>, <span class="st">&#39;RANK&#39;</span>: <span class="st">&#39;1&#39;</span>,</span>
+<span id="cb6-39"><a href="#cb6-39" aria-hidden="true" tabindex="-1"></a>                                              <span class="st">&#39;WG_PREFIX&#39;</span>: <span class="st">&#39;test&#39;</span>, <span class="st">&#39;WG_BACKEND&#39;</span>: <span class="st">&#39;ray&#39;</span>}}}</span>
+<span id="cb6-40"><a href="#cb6-40" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 初始化 Master Worker</span></span>
+<span id="cb6-41"><a href="#cb6-41" aria-hidden="true" tabindex="-1"></a>    worker0 <span class="op">=</span> MyNetWorker.options(<span class="op">**</span>options0).remote()</span>
+<span id="cb6-42"><a href="#cb6-42" aria-hidden="true" tabindex="-1"></a>    time.sleep(<span class="dv">10</span>)  <span class="co"># 等待 register_center_actor 创建</span></span>
+<span id="cb6-43"><a href="#cb6-43" aria-hidden="true" tabindex="-1"></a>    register_center_actor <span class="op">=</span> ray.get_actor(<span class="st">&quot;test_register_center&quot;</span>)</span>
+<span id="cb6-44"><a href="#cb6-44" aria-hidden="true" tabindex="-1"></a>    rank_zero_info <span class="op">=</span> ray.get(register_center_actor.get_rank_zero_info.remote())</span>
+<span id="cb6-45"><a href="#cb6-45" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f&quot;rank_zero_info: </span><span class="sc">{</span>rank_zero_info<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb6-46"><a href="#cb6-46" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 更新 MASTER_ADDR 和 MASTER_PORT 至 options1，并创建 worker1</span></span>
+<span id="cb6-47"><a href="#cb6-47" aria-hidden="true" tabindex="-1"></a>    options1[<span class="st">&#39;runtime_env&#39;</span>][<span class="st">&#39;env_vars&#39;</span>].update(rank_zero_info)</span>
+<span id="cb6-48"><a href="#cb6-48" aria-hidden="true" tabindex="-1"></a>    worker1 <span class="op">=</span> MyNetWorker.options(<span class="op">**</span>options1).remote()</span>
+<span id="cb6-49"><a href="#cb6-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-50"><a href="#cb6-50" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 生成测试数据</span></span>
+<span id="cb6-51"><a href="#cb6-51" aria-hidden="true" tabindex="-1"></a>    batch_size <span class="op">=</span> <span class="dv">16</span></span>
+<span id="cb6-52"><a href="#cb6-52" aria-hidden="true" tabindex="-1"></a>    inputs <span class="op">=</span> torch.randn(batch_size, <span class="dv">100</span>)</span>
+<span id="cb6-53"><a href="#cb6-53" aria-hidden="true" tabindex="-1"></a>    targets <span class="op">=</span> torch.randn(batch_size, <span class="dv">1</span>)</span>
+<span id="cb6-54"><a href="#cb6-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-55"><a href="#cb6-55" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 分割数据为两份</span></span>
+<span id="cb6-56"><a href="#cb6-56" aria-hidden="true" tabindex="-1"></a>    split_size <span class="op">=</span> batch_size <span class="op">//</span> <span class="dv">2</span></span>
+<span id="cb6-57"><a href="#cb6-57" aria-hidden="true" tabindex="-1"></a>    inputs_split <span class="op">=</span> torch.chunk(inputs, <span class="dv">2</span>)</span>
+<span id="cb6-58"><a href="#cb6-58" aria-hidden="true" tabindex="-1"></a>    targets_split <span class="op">=</span> torch.chunk(targets, <span class="dv">2</span>)</span>
+<span id="cb6-59"><a href="#cb6-59" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-60"><a href="#cb6-60" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 并行计算</span></span>
+<span id="cb6-61"><a href="#cb6-61" aria-hidden="true" tabindex="-1"></a>    future0 <span class="op">=</span> worker0.compute_network_loss.remote(inputs_split[<span class="dv">0</span>], targets_split[<span class="dv">0</span>])</span>
+<span id="cb6-62"><a href="#cb6-62" aria-hidden="true" tabindex="-1"></a>    future1 <span class="op">=</span> worker1.compute_network_loss.remote(inputs_split[<span class="dv">1</span>], targets_split[<span class="dv">1</span>])</span>
+<span id="cb6-63"><a href="#cb6-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-64"><a href="#cb6-64" aria-hidden="true" tabindex="-1"></a>    <span class="co"># 获取结果并平均</span></span>
+<span id="cb6-65"><a href="#cb6-65" aria-hidden="true" tabindex="-1"></a>    loss0 <span class="op">=</span> ray.get(future0)</span>
+<span id="cb6-66"><a href="#cb6-66" aria-hidden="true" tabindex="-1"></a>    loss1 <span class="op">=</span> ray.get(future1)</span>
+<span id="cb6-67"><a href="#cb6-67" aria-hidden="true" tabindex="-1"></a>    avg_loss <span class="op">=</span> (loss0 <span class="op">+</span> loss1) <span class="op">/</span> <span class="dv">2</span></span>
+<span id="cb6-68"><a href="#cb6-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-69"><a href="#cb6-69" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f&quot;Worker 0 Loss: </span><span class="sc">{</span>loss0<span class="sc">:.4f}</span><span class="ss">&quot;</span>)</span>
+<span id="cb6-70"><a href="#cb6-70" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f&quot;Worker 1 Loss: </span><span class="sc">{</span>loss1<span class="sc">:.4f}</span><span class="ss">&quot;</span>)</span>
+<span id="cb6-71"><a href="#cb6-71" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f&quot;Averaged Loss: </span><span class="sc">{</span>avg_loss<span class="sc">:.4f}</span><span class="ss">&quot;</span>)</span>
+<span id="cb6-72"><a href="#cb6-72" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-73"><a href="#cb6-73" aria-hidden="true" tabindex="-1"></a>    ray.shutdown()</span></code></pre></div>
+<h3 id="装饰器">3. 装饰器</h3>
+<p>在自定义 Worker 时，可以使用装饰器 <code>register</code>
+扩展函数功能。为什么要用这个装饰器，在 [[#六、RayWorkerGroup]]
+章节详细介绍。</p>
+<h4 id="一个示例">3.1 一个示例</h4>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> os</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> verl.single_controller.base <span class="im">import</span> Worker</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> verl.single_controller.base.decorator <span class="im">import</span> register, Dispatch, Execute</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&#39;LOCAL_WORLD_SIZE&#39;</span>] <span class="op">=</span> <span class="st">&#39;2&#39;</span></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&#39;LOCAL_RANK&#39;</span>] <span class="op">=</span> <span class="st">&#39;0&#39;</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&#39;WORLD_SIZE&#39;</span>] <span class="op">=</span> <span class="st">&#39;2&#39;</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&#39;RANK&#39;</span>] <span class="op">=</span> <span class="st">&#39;0&#39;</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&#39;WG_PREFIX&#39;</span>] <span class="op">=</span> <span class="st">&#39;test&#39;</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&#39;WG_BACKEND&#39;</span>] <span class="op">=</span> <span class="st">&#39;ray&#39;</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> GPUAccumulatorDecorator(Worker):</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>):</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>()</span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.value <span class="op">=</span> torch.zeros(size<span class="op">=</span>(<span class="dv">1</span>,), device<span class="op">=</span><span class="st">&quot;cuda&quot;</span>) <span class="op">+</span> <span class="va">self</span>.rank</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>    <span class="at">@register</span>(dispatch_mode<span class="op">=</span>Dispatch.ONE_TO_ALL, execute_mode<span class="op">=</span>Execute.RANK_ZERO)</span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> add(<span class="va">self</span>, x):</span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.value <span class="op">+=</span> x</span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.value.cpu()</span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>worker <span class="op">=</span> GPUAccumulatorDecorator()</span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(worker.add.attrs_3141562937)</span></code></pre></div>
+<p>输出：<code>{'dispatch_mode': &lt;Dispatch.ONE_TO_ALL: 1&gt;, 'execute_mode': &lt;Execute.RANK_ZERO: 1&gt;, 'blocking': True}</code></p>
+<p>所以装饰器 <code>register</code> 的核心功能就是给函数添加一个新属性
+<code>attrs_3141562937</code>，该属性保存 <code>dispatch_mode</code>
+等信息。</p>
+<h4 id="源码解析">3.2 源码解析</h4>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> register(dispatch_mode<span class="op">=</span>Dispatch.ALL_TO_ALL, execute_mode<span class="op">=</span>Execute.ALL,</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>             blocking<span class="op">=</span><span class="va">True</span>, materialize_futures<span class="op">=</span><span class="va">True</span>):</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    _check_dispatch_mode(dispatch_mode<span class="op">=</span>dispatch_mode)</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    _check_execute_mode(execute_mode<span class="op">=</span>execute_mode)</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> decorator(func):</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>        <span class="at">@wraps</span>(func)</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>        <span class="kw">def</span> inner(<span class="op">*</span>args, <span class="op">**</span>kwargs):</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> materialize_futures:</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a>                <span class="co"># _materialize_futures 将 future 转换为实际的数据</span></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>                args, kwargs <span class="op">=</span> _materialize_futures(<span class="op">*</span>args, <span class="op">**</span>kwargs)</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>            <span class="cf">return</span> func(<span class="op">*</span>args, <span class="op">**</span>kwargs)</span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 为被装饰函数新增一个 MAGIC_ATTR 属性</span></span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true" tabindex="-1"></a>        attrs <span class="op">=</span> {<span class="st">&#39;dispatch_mode&#39;</span>: dispatch_mode, <span class="st">&#39;execute_mode&#39;</span>: execute_mode, <span class="st">&#39;blocking&#39;</span>: blocking}</span>
+<span id="cb8-16"><a href="#cb8-16" aria-hidden="true" tabindex="-1"></a>        <span class="bu">setattr</span>(inner, MAGIC_ATTR, attrs)</span>
+<span id="cb8-17"><a href="#cb8-17" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> inner</span>
+<span id="cb8-18"><a href="#cb8-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-19"><a href="#cb8-19" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> decorator</span></code></pre></div>
+<p><code>register</code> 仅包含两个功能： 1. 若参数是
+future，则获得实际的值 2. 为被装饰函数添加 <code>MAGIC_ATTR</code>
+属性</p>
+<h2 id="四rayclasswithinitargs">四、RayClassWithInitArgs</h2>
+<p><code>RayClassWithInitArgs</code> 保存了通过 <code>@ray.remote</code>
+定义的 Actor 类，以及一些用于异步调用该 Actor
+时所需要的参数。更像是一个工厂类，在调用 <code>__call__</code> 时再启动
+Actor。</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 简化后代码，原始代码位于 verl/single_controller/ray/base.py</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> RayClassWithInitArgs(ClassWithInitArgs):</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, cls, <span class="op">*</span>args, <span class="op">**</span>kwargs) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>(cls, <span class="op">*</span>args, <span class="op">**</span>kwargs)  <span class="co"># 保存 Actor</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._options <span class="op">=</span> {}</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._additional_resource <span class="op">=</span> {}</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__call__</span>(<span class="va">self</span>,</span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>                 placement_group,</span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>                 placement_group_bundle_idx,</span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>                 use_gpu: <span class="bu">bool</span> <span class="op">=</span> <span class="va">True</span>,</span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>                 num_gpus<span class="op">=</span><span class="dv">1</span>,</span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>                 sharing_with<span class="op">=</span><span class="va">None</span>) <span class="op">-&gt;</span> Any:</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 调度策略</span></span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>        options <span class="op">=</span> {</span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a>            <span class="st">&quot;scheduling_strategy&quot;</span>: PlacementGroupSchedulingStrategy(</span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a>                placement_group<span class="op">=</span>placement_group,</span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a>                placement_group_bundle_index<span class="op">=</span>placement_group_bundle_idx)}</span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 更新 actor 启动的一些参数</span></span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a>        options.update(<span class="va">self</span>._options)</span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="bu">len</span>(<span class="va">self</span>._additional_resource) <span class="op">&gt;</span> <span class="dv">1</span>:</span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> k, v <span class="kw">in</span> <span class="va">self</span>._additional_resource.items():</span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a>                options[k] <span class="op">=</span> v</span>
+<span id="cb9-25"><a href="#cb9-25" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Ray 中异步启动 Actor</span></span>
+<span id="cb9-26"><a href="#cb9-26" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> <span class="va">self</span>.cls.options(<span class="op">**</span>options).remote(<span class="op">*</span><span class="va">self</span>.args, <span class="op">**</span><span class="va">self</span>.kwargs)</span></code></pre></div>
+<h2 id="五资源池rayresourcepool">五、资源池：RayResourcePool</h2>
+<h3 id="ray-中的-placement-group">1. Ray 中的 Placement Group</h3>
+<p><code>Placement Group</code> 是 Ray
+中的资源组概念，允许用户跨多个节点原子性地保留一组资源。创建时需指定
+<code>bundles</code>，单个 bundle 是一个”资源”的集合，也是
+<code>Placement Group</code> 的资源预留单位。</p>
+<p>例如，包含 8 GPU 16 CPU 的节点，想用一半资源：</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> ray</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> ray.util.placement_group</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a><span class="co"># 创建包含 8GPU、16CPU 的 Ray 集群</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>ray.init(num_cpus<span class="op">=</span><span class="dv">16</span>, num_gpus<span class="op">=</span><span class="dv">8</span>)</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a><span class="co"># 创建包含 4 个 bundle 的 placement group，共使用一半资源</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>pg <span class="op">=</span> placement_group(bundles<span class="op">=</span>[{<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>},</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>                             {<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>},</span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>                             {<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>},</span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>                             {<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>}])</span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a><span class="co"># 等待资源组创建完成</span></span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a>ray.get(pg.ready(), timeout<span class="op">=</span><span class="dv">10</span>)</span></code></pre></div>
+<h3 id="rayresourcepool">2. RayResourcePool</h3>
+<p><code>RayResourcePool</code> 继承自
+<code>ResourcePool</code>，<code>ResourcePool</code>
+负责存储资源相关信息，<code>RayResourcePool</code> 则通过 Ray 的
+Placement Group 实现资源池分配。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604155100_blog1_rayresourcepool.jpg"
+alt="RayResourcePool 与 PlacementGroup 的关系" />
+<figcaption aria-hidden="true">RayResourcePool 与 PlacementGroup
+的关系</figcaption>
+</figure>
+<div class="sourceCode" id="cb11"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>resource_pool <span class="op">=</span> RayResourcePool(process_on_nodes<span class="op">=</span>[<span class="dv">4</span>, <span class="dv">4</span>], max_colocate_count<span class="op">=</span><span class="dv">2</span>, use_gpu<span class="op">=</span><span class="va">True</span>)  <span class="co"># 创建资源池</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>pgs <span class="op">=</span> resource_pool.get_placement_groups()  <span class="co"># 创建 placement group 列表</span></span></code></pre></div>
+<p>该段代码会创建 <strong>两个 Placement Group</strong>，每个包含 4 个
+GPU 和 8 个 CPU。单个 Placement Group 为：</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>pg <span class="op">=</span> placement_group(bundles<span class="op">=</span>[{<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>},</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>                             {<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>},</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>                             {<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>},</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>                             {<span class="st">&quot;CPU&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;GPU&quot;</span>: <span class="dv">1</span>}])</span></code></pre></div>
+<p>即 <code>process_on_nodes</code> 指定要创建几个 Placement Group
+以及每个包含多少 GPU。<code>max_colocate_count</code> 是 bundle 中单个
+GPU 对应多少个 CPU，因为 colocate 的 actor 至少要有 1 个 CPU。</p>
+<h2 id="六rayworkergroup">六、RayWorkerGroup</h2>
+<p><code>RayWorkerGroup</code> 扮演着资源分配和调度 Worker
+的协调器角色，核心方法包括：<code>_init_with_resource_pool</code>、<code>_bind_worker_method</code>
+和 <code>execute_all_async</code>。</p>
+<p><code>__init__</code> 中核心两件事： 1. 在指定的资源池上启动 worker
+2. 将 worker 的某些方法绑定到 workergroup 上，方便直接通过 workergroup
+进行调用</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 简化后代码，原始代码位于 verl/single_controller/ray/base.py</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> RayWorkerGroup(WorkerGroup):</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>,</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>                 resource_pool: RayResourcePool <span class="op">=</span> <span class="va">None</span>,</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>                 ray_cls_with_init: RayClassWithInitArgs <span class="op">=</span> <span class="va">None</span>,</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>                 bin_pack: <span class="bu">bool</span> <span class="op">=</span> <span class="va">True</span>,</span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>                 name_prefix: <span class="bu">str</span> <span class="op">=</span> <span class="va">None</span>,</span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>                 detached<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>                 worker_names<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>                 <span class="op">**</span>kwargs) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>(resource_pool<span class="op">=</span>resource_pool, <span class="op">**</span>kwargs)</span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.ray_cls_with_init <span class="op">=</span> ray_cls_with_init</span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>        ...</span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a>        <span class="co"># 基于 resource_pool 信息，启动 worker</span></span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._init_with_resource_pool(resource_pool<span class="op">=</span>resource_pool,</span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>                                      ray_cls_with_init<span class="op">=</span>ray_cls_with_init,</span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>                                      bin_pack<span class="op">=</span>bin_pack,</span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a>                                      detached<span class="op">=</span>detached)</span>
+<span id="cb13-19"><a href="#cb13-19" aria-hidden="true" tabindex="-1"></a>        <span class="co"># ray_cls_with_init.cls 中的某些方法绑定到 RayWorkerGroup 上</span></span>
+<span id="cb13-20"><a href="#cb13-20" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>._bind_worker_method(<span class="va">self</span>.ray_cls_with_init.cls, func_generator)</span></code></pre></div>
+<h3 id="启动-workers_init_with_resource_pool">1. 启动
+Workers：<code>_init_with_resource_pool</code></h3>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 简化后代码，原始代码位于 verl/single_controller/ray/base.py</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _init_with_resource_pool(<span class="va">self</span>, resource_pool, ray_cls_with_init):</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    <span class="co"># max_collocate_count 意味着单个 GPU 上至多有几个 worker</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    num_gpus <span class="op">=</span> <span class="dv">1</span> <span class="op">/</span> resource_pool.max_collocate_count</span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>    <span class="co"># resource_pool.store: [4, 4]</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> pg_idx, local_world_size <span class="kw">in</span> <span class="bu">enumerate</span>(resource_pool.store):</span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a>        pg <span class="op">=</span> pgs[pg_idx]  <span class="co"># 当前的 PlacementGroup</span></span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> local_rank <span class="kw">in</span> <span class="bu">range</span>(local_world_size):</span>
+<span id="cb14-9"><a href="#cb14-9" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 1. 构造 worker 需要的配置信息，包括环境变量等</span></span>
+<span id="cb14-10"><a href="#cb14-10" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 2. 通过 ray_cls_with_init.update_options 更新这些配置信息</span></span>
+<span id="cb14-11"><a href="#cb14-11" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 启动 worker</span></span>
+<span id="cb14-12"><a href="#cb14-12" aria-hidden="true" tabindex="-1"></a>            worker <span class="op">=</span> ray_cls_with_init(placement_group<span class="op">=</span>pg,</span>
+<span id="cb14-13"><a href="#cb14-13" aria-hidden="true" tabindex="-1"></a>                                       placement_group_bundle_idx<span class="op">=</span>local_rank,</span>
+<span id="cb14-14"><a href="#cb14-14" aria-hidden="true" tabindex="-1"></a>                                       num_gpus<span class="op">=</span>num_gpus)</span>
+<span id="cb14-15"><a href="#cb14-15" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>._workers.append(worker)</span>
+<span id="cb14-16"><a href="#cb14-16" aria-hidden="true" tabindex="-1"></a>            <span class="va">self</span>._worker_names.append(name)</span></code></pre></div>
+<h3 id="异步执行execute_all_async">2.
+异步执行：<code>execute_all_async</code></h3>
+<p><code>_init_with_resource_pool</code> 后，<code>self._workers</code>
+中保存着所有 worker。当需要调用所有 worker 某个方法时，可以直接使用
+<code>execute_all_async</code>。</p>
+<p>假设有 4 个 worker，需要每个 worker 都执行方法
+<code>add</code>，参数为 10：</p>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>workergroup.execute_all_async(<span class="st">&quot;add&quot;</span>, x<span class="op">=</span><span class="dv">10</span>)</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a><span class="co"># 或者</span></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>workergroup.execute_all_async(<span class="st">&quot;add&quot;</span>, x<span class="op">=</span>[<span class="dv">10</span>, <span class="dv">10</span>, <span class="dv">10</span>, <span class="dv">10</span>])</span></code></pre></div>
+<p>但用 <code>execute_all_async</code> 调用 worker
+方法并不自然，所以利用装饰器 <code>register</code> 和
+<code>_bind_worker_method</code> 让调用更自然。</p>
+<h3 id="worker-方法绑定至-workergroup_bind_worker_method">3. worker
+方法绑定至 workergroup：<code>_bind_worker_method</code></h3>
+<p><code>_bind_worker_method</code> 来自基类
+<code>WorkerGroup</code>，参数包含 <code>user_defined_cls</code> 和
+<code>func_generator</code>，其中 <code>user_defined_cls</code>
+就是用户自定义的 worker 类。</p>
+<h4 id="func_generator">3.1 func_generator</h4>
+<div class="sourceCode" id="cb16"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 原始代码位于 verl/single_controller/ray/base.py</span></span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> func_generator(<span class="va">self</span>, method_name, dispatch_fn, collect_fn, execute_fn, blocking):</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> func(<span class="op">*</span>args, <span class="op">**</span>kwargs):</span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>        args, kwargs <span class="op">=</span> dispatch_fn(<span class="va">self</span>, <span class="op">*</span>args, <span class="op">**</span>kwargs)</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> execute_fn(method_name, <span class="op">*</span>args, <span class="op">**</span>kwargs)</span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> blocking:</span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>            output <span class="op">=</span> ray.get(output)</span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a>        output <span class="op">=</span> collect_fn(<span class="va">self</span>, output)</span>
+<span id="cb16-10"><a href="#cb16-10" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> output</span>
+<span id="cb16-11"><a href="#cb16-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-12"><a href="#cb16-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> func</span></code></pre></div>
+<p><code>func_generator</code>
+的功能是构造一个函数。<code>method_name</code> 实际就是自定义 worker
+中使用装饰器 <code>register</code> 的函数。构造的新函数会： 1.
+先对参数调用 <code>dispatch_fn</code> 2. 然后执行
+<code>method_name</code> 方法 3. 最后用 <code>collect_fn</code>
+产生最终输出</p>
+<h4 id="bind_worker_method-源码">3.2 <code>_bind_worker_method</code>
+源码</h4>
+<div class="sourceCode" id="cb17"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 简化代码，原始代码位于 verl/single_controller/base/worker_group.py</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _bind_worker_method(<span class="va">self</span>, user_defined_cls, func_generator):</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> method_name <span class="kw">in</span> <span class="bu">dir</span>(user_defined_cls):  <span class="co"># 遍历类的所有方法</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="bu">hasattr</span>(method, MAGIC_ATTR):  <span class="co"># 寻找使用装饰器 `register` 的方法</span></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 获取 dispatch_fn、collect_fn 和 execut_fn</span></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>            dispatch_mode <span class="op">=</span> attribute[<span class="st">&#39;dispatch_mode&#39;</span>]</span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>            execute_mode <span class="op">=</span> attribute[<span class="st">&#39;execute_mode&#39;</span>]</span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>            blocking <span class="op">=</span> attribute[<span class="st">&#39;blocking&#39;</span>]</span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb17-10"><a href="#cb17-10" aria-hidden="true" tabindex="-1"></a>            fn <span class="op">=</span> get_predefined_dispatch_fn(dispatch_mode<span class="op">=</span>dispatch_mode)</span>
+<span id="cb17-11"><a href="#cb17-11" aria-hidden="true" tabindex="-1"></a>            dispatch_fn <span class="op">=</span> fn[<span class="st">&#39;dispatch_fn&#39;</span>]</span>
+<span id="cb17-12"><a href="#cb17-12" aria-hidden="true" tabindex="-1"></a>            collect_fn <span class="op">=</span> fn[<span class="st">&#39;collect_fn&#39;</span>]</span>
+<span id="cb17-13"><a href="#cb17-13" aria-hidden="true" tabindex="-1"></a>            execute_mode <span class="op">=</span> get_predefined_execute_fn(execute_mode<span class="op">=</span>execute_mode)</span>
+<span id="cb17-14"><a href="#cb17-14" aria-hidden="true" tabindex="-1"></a>            wg_execute_fn_name <span class="op">=</span> execute_mode[<span class="st">&#39;execute_fn_name&#39;</span>]</span>
+<span id="cb17-15"><a href="#cb17-15" aria-hidden="true" tabindex="-1"></a>            execute_fn <span class="op">=</span> <span class="bu">getattr</span>(<span class="va">self</span>, wg_execute_fn_name)</span>
+<span id="cb17-16"><a href="#cb17-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb17-17"><a href="#cb17-17" aria-hidden="true" tabindex="-1"></a>            <span class="co"># 利用 func_generator 将 dispatch_fn、collect_fn 组装到 method_name 上</span></span>
+<span id="cb17-18"><a href="#cb17-18" aria-hidden="true" tabindex="-1"></a>            func <span class="op">=</span> func_generator(<span class="va">self</span>,</span>
+<span id="cb17-19"><a href="#cb17-19" aria-hidden="true" tabindex="-1"></a>                                  method_name,</span>
+<span id="cb17-20"><a href="#cb17-20" aria-hidden="true" tabindex="-1"></a>                                  dispatch_fn<span class="op">=</span>dispatch_fn,</span>
+<span id="cb17-21"><a href="#cb17-21" aria-hidden="true" tabindex="-1"></a>                                  collect_fn<span class="op">=</span>collect_fn,</span>
+<span id="cb17-22"><a href="#cb17-22" aria-hidden="true" tabindex="-1"></a>                                  execute_fn<span class="op">=</span>execute_fn,</span>
+<span id="cb17-23"><a href="#cb17-23" aria-hidden="true" tabindex="-1"></a>                                  blocking<span class="op">=</span>blocking)</span>
+<span id="cb17-24"><a href="#cb17-24" aria-hidden="true" tabindex="-1"></a>            <span class="co"># func 绑定到 workgroup 上，func 名字仍保持为 method_name</span></span>
+<span id="cb17-25"><a href="#cb17-25" aria-hidden="true" tabindex="-1"></a>            <span class="bu">setattr</span>(<span class="va">self</span>, method_name, func)</span></code></pre></div>
+<h2 id="参考资料">参考资料</h2>
+<ul>
+<li><a
+href="https://verl.readthedocs.io/en/latest/hybrid_flow.html">verl
+官方文档 - Hybrid Flow</a></li>
+<li><a href="https://arxiv.org/abs/2409.19256">HybridFlow: A Flexible
+and Efficient RLHF Framework</a></li>
+<li><a href="https://github.com/volcengine/verl">veRL GitHub
+仓库</a></li>
+<li><a
+href="https://zhuanlan.zhihu.com/p/1918280771946382774">VeRL(v0.2.0.post2)系列文章</a></li>
+</ul>
+<h2 id="相关笔记">相关笔记</h2>
+<ul>
+<li>[[Engineering/coding/verl/ray前置知识]]</li>
+<li>[[Engineering/coding/verl/verl总体概览]]</li>
+<li>[[Engineering/coding/verl/init_workers详解]]</li>
+<li>[[Engineering/coding/verl/veRL_colocate实现源码解析]]</li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-06-04</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" data-title="veRL基于Ray的执行流程源码解析（一）" data-hashtags="coding,verl,ray,single_controller,RayWorkerGroup"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" data-title="veRL基于Ray的执行流程源码解析（一）"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" data-title="veRL基于Ray的执行流程源码解析（一）"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/verl_ray%E6%89%A7%E8%A1%8C%E6%B5%81%E7%A8%8B%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" data-title="veRL基于Ray的执行流程源码解析（一）"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/verl/">Verl</a>,&nbsp;<a href="/tags/ray/">Ray</a>,&nbsp;<a href="/tags/single_controller/">Single_controller</a>,&nbsp;<a href="/tags/rayworkergroup/">RayWorkerGroup</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/verl_colocate%E5%AE%9E%E7%8E%B0%E6%BA%90%E7%A0%81%E8%A7%A3%E6%9E%90/" class="prev" rel="prev" title="veRL中colocate实现源码解析（二）"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>veRL中colocate实现源码解析（二）</a>
+            <a href="/nano-vllm%E9%98%85%E8%AF%BB%E7%AC%94%E8%AE%B0/" class="next" rel="next" title="nano-vllm 全代码精读笔记:用 1200 行 Python 理解 vLLM 推理引擎">nano-vllm 全代码精读笔记:用 1200 行 Python 理解 vLLM 推理引擎<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

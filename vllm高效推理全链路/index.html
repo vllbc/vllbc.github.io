@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>vllm高效推理全链路 - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="vllm高效推理全链路">
+  <meta property="og:description" content="[文档目录] ## vLLM简介 vLLM 是 UC Berkeley 等开源的一款高吞吐、内存高效的大模型推理与服务引擎。它的核心创新在于 PagedAttention 算法，将注意力层的 Key-Value 缓存（KV cache）以类似操作系统虚拟内存分页的方式管理。通过这一创新，vLLM 实现了远超传统方案的推理性能。下图展示了一个13B的模型在A100 40GB的gpu上做推理时的显存占用分配，从这张图中我们可以直观感受到推理中KV cache对显存的占用。因此，如何优化KV cache，节省显存，提高推理吞吐量，就成了LLM推理框架需要解决的重点问题。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-01-07T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-01-07T00:00:00+00:00">
+    <meta property="article:tag" content="Coding">
+    <meta property="article:tag" content="Vllm">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="vllm高效推理全链路">
+  <meta name="twitter:description" content="[文档目录] ## vLLM简介 vLLM 是 UC Berkeley 等开源的一款高吞吐、内存高效的大模型推理与服务引擎。它的核心创新在于 PagedAttention 算法，将注意力层的 Key-Value 缓存（KV cache）以类似操作系统虚拟内存分页的方式管理。通过这一创新，vLLM 实现了远超传统方案的推理性能。下图展示了一个13B的模型在A100 40GB的gpu上做推理时的显存占用分配，从这张图中我们可以直观感受到推理中KV cache对显存的占用。因此，如何优化KV cache，节省显存，提高推理吞吐量，就成了LLM推理框架需要解决的重点问题。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" /><link rel="prev" href="https://blog.vllbc.top/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" /><link rel="next" href="https://blog.vllbc.top/cc%E5%B8%B8%E7%94%A8%E5%91%BD%E4%BB%A4/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "vllm高效推理全链路",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "coding, vllm","wordcount":  16987 ,
+        "url": "https:\/\/blog.vllbc.top\/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF\/","datePublished": "2026-01-07T00:00:00+00:00","dateModified": "2026-01-07T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">vllm高效推理全链路</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/vllm/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Vllm</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2026-01-07">2026-01-07</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 16987 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 34 分钟&nbsp;<span id="/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" class="leancloud_visitors" data-flag-title="vllm高效推理全链路">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>[文档目录] ## vLLM简介 vLLM 是 UC Berkeley
+等开源的一款<strong>高吞吐、内存高效</strong>的大模型推理与服务引擎。它的核心创新在于
+<strong>PagedAttention</strong> 算法，将注意力层的 Key-Value 缓存（KV
+cache）以类似操作系统虚拟内存分页的方式管理。通过这一创新，vLLM
+实现了远超传统方案的推理性能。下图展示了一个13B的模型在A100
+40GB的gpu上做推理时的显存占用分配，从这张图中我们可以直观感受到推理中KV
+cache对显存的占用。<strong>因此，如何优化KV
+cache，节省显存，提高推理吞吐量，就成了LLM推理框架需要解决的重点问题</strong>。</p>
+<p>本次分享针对vLLM v0进行，vLLM v1针对vLLM
+v0存在的一些问题进行了改进，分享过程中对部分内容会稍作提及，后续有机会也会为大家带来更详细的vLLM
+v1的分享～</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=8975111a03d9452aac84b6765afd7e73&amp;docGuid=It6SG4wfzbg-ff"
+title="vLLM 让大模型推理服务变得更“便宜”和“高效”​"
+alt="vLLM 让大模型推理服务变得更“便宜”和“高效”​" /> ## vLLM高效的关键
+vLLM 的架构围绕提高 GPU
+利用率和内存利用率而设计。其关键包括高效的推理流水线（<strong>连续批处理调度</strong>）和创新的内存管理策略（<strong>PagedAttention</strong>）。</p>
+<h3 id="静态批处理与连续批处理">2.1. 静态批处理与连续批处理</h3>
+<p>传统推理框架常采用<strong>静态批处理</strong>：</p>
+<ul>
+<li><strong>工作方式</strong>：收集多个请求 -&gt; 组成一个批次 -&gt;
+一次性输入模型 -&gt; 所有请求同时计算 -&gt;
+所有请求完成后，释放整个批次，再处理下一批。</li>
+<li><strong>致命缺陷</strong>：<strong>木桶效应</strong>。在生成任务中，每个请求的输入长度和输出长度（即需要生成的token数）都不同。一个请求可能生成10个token就结束了，而另一个需要100个token。快的请求必须等待慢的请求全部完成后，整个批次才能解散，导致GPU计算资源在每一步都有大量闲置。</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=2653c5bc0c6c488a9fcd73d87a52143f&amp;docGuid=It6SG4wfzbg-ff"
+title="静态批处理示意图" alt="静态批处理示意图" />
+<strong>连续批处理调度</strong>在每个生成迭代（每产生一个新
+token）的粒度上动态管理批次：</p>
+<ul>
+<li>每次迭代时，调度器将当前所有未完成的请求组成批次，在 GPU
+上并行推理一个 token。</li>
+<li><strong>只要某些请求完成了当前 token
+的生成，调度器立即回收其占用的计算槽和显存页，下一迭代就可立即将新到达的请求补充进来，不用等待其他请求完成。</strong></li>
+<li>通过上述机制，vLLM 的推理流水线能够持续地接纳新请求并生成输出。GPU
+几乎始终保持忙碌状态，减少空闲和等待时间，大幅提升了整体吞吐量。</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=697bd2c6ac594d58b3a8783c45dea8fd&amp;docGuid=It6SG4wfzbg-ff"
+title="连续批处理示意图" alt="连续批处理示意图" /> ### 2.2.
+内存管理策略：PagedAttention #### 2.2.1 为KV cache分配存储空间的常规方式
+在常规的推理框架中，当我们的服务接收到一条请求时，它会为这条请求中的prompts分配gpu显存空间，其中就包括对KV
+cache的分配。<strong>由于推理所生成的序列长度大小是无法事先预知的，所以大部分框架会按照(batch_size,
+max_seq_len)这样的固定尺寸，在gpu显存上预先为一条请求开辟一块连续的矩形存储空间。</strong></p>
+<ul>
+<li>我们假设max_seq_len =
+8，所以当第1条请求(prompt1)过来时，我们的推理框架为它安排了(1,
+8)大小的连续存储空间。</li>
+<li>当第2条请求（prompt2）过来时，同样也需要1块(1,
+8)大小的存储空间。</li>
+<li>但此时prompt1所在的位置上，只剩3个空格子了，所以它只能另起一行做存储。对prompt3也是同理。</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=5456415005254dcbacfba75f8bda9d2e&amp;docGuid=It6SG4wfzbg-ff"
+title="常规kc cache的存储分配" alt="常规kc cache的存储分配" />
+<strong>观察整个KV
+cache排布，你会发现它们的毛病在于太过“静态化”</strong>。当你无法预知序列大小时，你为什么一定要死板地为每个序列预留KV
+cache空间呢？<strong>为什么不能做得更动态化一些，即“用多少占多少”呢？</strong>这样我们就能减少上述这些存储碎片，使得每一时刻推理服务能处理的请求更多，提高吞吐量，这就是vLLM在做的核心事情，我们先通过一张实验图来感受下vLLM在显存利用上的改进效果（VS
+其它推理框架）：</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=a7d70d52b1ec4875b5694629e6d12940&amp;docGuid=It6SG4wfzbg-ff"
+title="vLLM让珍贵且昂贵的GPU内存“物尽其用”了"
+alt="vLLM让珍贵且昂贵的GPU内存“物尽其用”了" />
+<strong>vLLM是通过什么技术，动态地为请求分配KV
+cache显存，提升显存利用率的？</strong></p>
+<p>为了解决KV缓存带来的内存消耗低效的问题，引入了PagedAttention。</p>
+<h4 id="pagedattention机制解析">2.2.2. PagedAttention机制解析</h4>
+<p>vLLM 的 PagedAttention
+从<strong>操作系统的分页存储</strong>获得灵感，彻底改变了 KV
+缓存的管理方式：</p>
+<ul>
+<li><strong>分页存储思想</strong>：不再为每个请求分配一整块连续内存，<strong>而是将每个序列的
+KV 缓存拆分为若干固定大小的小块（KV
+页）。</strong>每个块可存储预定数量（例如 N 个）token
+的键/值向量。系统仅在需要时（生成新 token
+时）按块分配内存，并通过一个块表（block
+table）维护序列的逻辑块到物理内存块的映射。</li>
+<li><strong>非连续存储</strong>：得益于块表映射，序列的各块在物理显存中无需连续。<strong>逻辑上每个序列的
+token
+仍按顺序划分到第1块、第2块…，但实际这些块可以分散在内存任意位置。</strong>这样避免了请求间争夺大块连续内存导致的外部碎片。<strong>通过这种方式，每个request都会认为自己在一个连续且充足的存储空间上操作，尽管物理上这些数据的存储并不是连续的。</strong></li>
+<li><strong>按需分配</strong>：当序列生成新 token 时，vLLM
+先尝试放入该序列当前的最后一个块；如果该块已满，则向 GPU
+内存的<strong>空闲块池</strong>申请一个新物理块，映射为下一个逻辑块。<strong>整个生成过程中，只分配实际需要的块，不预留整段空间，从而将内存浪费降至极低。</strong></li>
+<li><strong>高效释放</strong>：<strong>当请求结束或被中止，其占用的物理块会立即归还空闲池，无需执行大范围的显存释放操作，减少碎片整理开销。</strong>由于所有块大小相同，释放后很容易被其它序列重新利用，也不会产生严重碎片。</li>
+</ul>
+<h4 id="pagedattention在不同场景下的运作">2.2.3
+PagedAttention在不同场景下的运作</h4>
+<ul>
+<li>处理单个请求</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=78259accb28d4b23a388ab2830e17c53&amp;docGuid=It6SG4wfzbg-ff"
+title="处理单个请求时，PagedAttention运作流程"
+alt="处理单个请求时，PagedAttention运作流程" /> * 处理多个不相同请求</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=9781cd287b5445e9b05d18d0f120af7d&amp;docGuid=It6SG4wfzbg-ff"
+title="处理多个不相同请求时，PagedAttention运作流程"
+alt="处理多个不相同请求时，PagedAttention运作流程" /> *
+处理多个相同请求（Parallel Sampling） * Prefill阶段： *
+逻辑块：逻辑块独立，每个Sample有各自的逻辑块。 *
+物理块：文字完全相同，共享物理空间。</p>
+<pre><code>* Decode阶段：
+    * 两个Sample分别进行推理，得到fathers和mothers。
+    * 逻辑块中，两个Sample分别保存各自的逻辑块。
+    * 物理块中，触发copy-on-write机制：由于fathers/mothers是两个完全不同的token，因此对物理块block1触发复制机制，即在物理内存上新开辟一块空间。此时物理块block1只和A2的逻辑块block1映射，将其ref count减去1；物理块block3只和A1的逻辑块block1映射，将其ref count设为1。
+
+* 总结起来，vLLM节省KV cache显存的核心思想是，对于相同数据对应的KV cache，能复用则尽量复用；无法复用时，再考虑开辟新的物理空间。</code></pre>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=8e55b69e41434056b7fc6c542c450db0&amp;docGuid=It6SG4wfzbg-ff"
+title="处理多个请求时，PagedAttention运作流程"
+alt="处理多个请求时，PagedAttention运作流程" /> * Beam
+Search：束搜索，这是LLM常用的deocde策略之一，即在每个decode阶段，我不是只产生1个token，而是产生top
+k个token（这里k也被称为束宽）。top k个token必然对应着此刻的top
+k个序列。我把这top
+k个序列喂给模型，假设词表的大小为|V|，那么在下一时刻，我就要在k*|V|个候选者中再选出top
+k，以此类推。不难想象每一时刻我把top
+k序列喂给模型时，它们的前置token中有大量的KV cache是重复的。</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=3004608e3eb64930a849c4b535f1d764&amp;docGuid=It6SG4wfzbg-ff"
+title="Beam Search" alt="Beam Search" />
+<strong>我们从右往左来看这张图。</strong>虚线位置表示“<strong>当前decoding时刻</strong>”，beam
+width = 4。<strong>图中所有的block皆为逻辑块。</strong></p>
+<ul>
+<li>因为beam width = 4，这意味着根据beam
+search算法，在当前阶段我们生成了top
+4个概率最大的token（我们记这4个token为beam candidate
+0/1/2/3），它们分别装在block5，block6，block7和block8中。</li>
+<li>现在我们继续使用beam search算法做decoding，继续找出top
+4个最可能的next token。经过我们的计算，这top 4 next token，有2个来自beam
+candidate 1，有2个来自beam candidate
+2。因此我们在block6中引出block9和block10，用于装其中两个top 2 next
+token；对block7也是同理。</li>
+<li>现在，block9/10/11/12中装的top 4 next token，就成为新的beam
+candidates，可以按照和上述一样的方式继续做beam
+search算法。而对于block5和block8，它们已经在beam
+search的搜索算法中被淘汰了，后续生成的token也不会和它们产生关系，所以可以清除掉这两个逻辑块，并释放它们对应的物理块的内存空间。</li>
+<li>好，我们继续往左边来看这幅图。block3引出block5/6/7，block4引出block8，这意味着当前这4个top4
+token，是上一个timestep下candidate1和candidate3相关序列生成的（candidate0和2的block没有画出，是因为它们所在的序列被beam
+search算法淘汰了，因此没有画出的必要）。由于block8已经被淘汰，所以block4也相继被淘汰，并释放对应的物理内存空间。</li>
+</ul>
+<p><strong>由此往左一路推，直到block0为止（block0代表着prompt，因此被beam
+seach中所有的序列共享）。这一路上，我们都根据最新时刻的beam search
+decoding结果，释放掉不再被需要的逻辑块和对应的物理内存空间，达到节省显存的目的。</strong></p>
+<h4 id="pagedattention的优势">2.2.4. PagedAttention的优势</h4>
+<p>PagedAttention 带来了多方面的优势：</p>
+<ul>
+<li><strong>内存利用率大幅提升</strong>：由于仅为实际生成的内容分配内存，并消除了跨请求的大块预留，GPU
+内存碎片和浪费显著降低。这使得同等显存下可以并发容纳更多请求的 KV
+缓存，从而支持更大的有效批量，提升吞吐。</li>
+<li><strong>支持长序列和大模型</strong>：逻辑-物理分离后，vLLM
+不需要提前为最大长度保留显存，只要有空闲块就能继续扩展序列长度。对于超长输入/输出或模型参数非常大的场景，PagedAttention
+也能灵活调度内存，用完再申请新的块。<strong>此外，vLLM
+还支持在GPU显存不足时，将部分序列的KV块交换（swap）到CPU内存，并在其重新调度时通过重算快速恢复。</strong></li>
+<li><strong>内存共享与分支开销降低</strong>：PagedAttention 天然支持KV
+缓存共享。利用块表的灵活映射，不同序列可以指向相同的物理块实现内容共享。典型应用是在<strong>并行采样</strong>和<strong>Beam
+Search</strong>等生成分支场景：多个输出序列共享相同的输入 prompt
+或共同前缀。vLLM
+中这些序列的前缀部分可以共用同一批物理KV块，避免重复存储和计算。当分支真正发生差异（如Beam
+Search某条beam生成不同新token），仅对新增部分分配块即可；若共享块需要修改，则触发写时复制（Copy-on-Write）另给新块，保证线程安全。通过共享前缀，并行采样可减少约6%~30%的内存占用，Beam
+Search 减少约44%~66%
+的KV内存。这带来明显性能收益：复杂采样算法的显存开销降低最多一半，令其在服务中更实用。</li>
+</ul>
+<p>综上，PagedAttention 将传统 LLM
+推理中低效的内存管理变成了类似操作系统虚拟内存的按需分页。几乎所有内存浪费被限制在每个序列<strong>最后一个未填满的块</strong>内。实验表明，这种改进让系统的GPU内存利用率接近最优，有效批量显著增加，从而带来吞吐量的大幅提升。PagedAttention
+正是 vLLM 性能飞跃的“秘密武器”。</p>
+<h3 id="调度与抢占">2.3. 调度与抢占</h3>
+<p>当采用动态分配显存的办法时，虽然明面上同一时刻能处理更多的prompt了，但因为没有为每个prompt预留充足的显存空间。<strong>如果在某一时刻整个显存被打满了，而此时所有的prompt都没做完推理，那该怎么办？</strong></p>
+<h4 id="vllm的总原则">2.3.1. vLLM的总原则</h4>
+<p><strong>先来先服务（FCFS），后来先抢占，gpu不够就先swap到cpu上。</strong></p>
+<ul>
+<li>后来先抢占
+<ul>
+<li>当一堆请求到达vLLM服务器，导致gpu显存不足时，vLLM会<strong>暂停这堆请求中最后到达的那些请求的推理，同时将它们相关的KV
+cache从gpu上释放掉，以便为更早到达的请求留出足够的gpu空间</strong>，<strong>让它们完成推理任务</strong>。如果不这样做的话，各个请求间相互争夺gpu资源，最终将导致没有任何一个请求能完成推理任务。等到先来的请求做完了推理，vLLM调度器认为gpu上有足够的空间了，就能恢复那些被中断的请求的执行了。</li>
+</ul></li>
+</ul>
+<h4 id="后来先抢占的实现">2.3.2. “后来先抢占”的实现</h4>
+<p>对于这些因gpu资源不足而被抢占的任务，vLLM要完成两件事：</p>
+<ul>
+<li>暂停它们的执行，同时将与之相关的KV cache从gpu上释放掉</li>
+<li>等gpu资源充足时，重新恢复它们的执行</li>
+</ul>
+<p>针对这两件事，vLLM分别设计了<strong>Swapping（交换策略）</strong>和<strong>Recomputation（重计算策略）</strong>来解决。我们来细看这两个策略。</p>
+<p><strong>（1）Swapping</strong></p>
+<p>对于被抢占的请求，vLLM要将其KV cache从gpu上释放掉，那么：</p>
+<ul>
+<li><strong>问题1：该释放哪些KV cache？</strong></li>
+<li><strong>问题2：要把这些KV cache释放到哪里去？</strong></li>
+</ul>
+<p><strong>先看问题1</strong>。<strong>在vLLM中，一般采取的是all-or-nothing策略，即释放被抢占请求的所有block</strong>。</p>
+<p><strong>再来看问题2</strong>。<strong>对于这些被选中要释放的KV
+block</strong>，如果将它们直接丢掉，那未免过于浪费。<strong>vLLM采用的做法是将其从gpu上交换（Swap）到cpu上</strong>。这样等到gpu显存充足时，再把这些block从cpu上重载回来。</p>
+<p><strong>（2）Recomputation</strong></p>
+<p>知道了Swapping机制，重计算的过程也很好理解了：对于有些任务，当它们因为资源不足而被抢占时，可以不做swap，而是直接释放它们的物理块，把它们重新放入等待处理的队列中，等后续资源充足时再重新从prefill阶段开始做推理。</p>
+<h3 id="总结">2.4. 总结​</h3>
+<p><strong>PageAttention为动态批处理提供了灵活、高效的内存管理基础，使其调度能力得以充分发挥；而动态批处理则将PageAttention节省的内存资源转化为实实在在的计算吞吐量提升。</strong></p>
+<h2 id="vllm整体架构设计">vLLM整体架构设计</h2>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=ca4403bf45704d4eb518204dd67a562d&amp;docGuid=It6SG4wfzbg-ff"
+title="vLLM代码架构" alt="vLLM代码架构" /> ### 3.1. Centralized
+Controller <strong>Centralized
+Controller，也就是前文我们所说的调度器(Scheduler)</strong>。</p>
+<ul>
+<li><strong>调度器的主要作用就是，在每1个推理阶段，决定要把哪些数据送给模型做推理，同时负责给这些模型分配KV
+Cache物理块</strong>。但要注意，它只是分配了物理块的id，而不是物理块本身。物理块的实际分配是模型在推理过程中根据物理块id来操作的，也就是CacheEngine做的事情。</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=903f8505708d49a5817b35fb257598f1&amp;docGuid=It6SG4wfzbg-ff"
+title="Scheduler结构" alt="Scheduler结构" />
+<strong>self.policy：</strong>是vLLM自定义的一个Policy实例，目标是根据调度器总策略（FCFS，First
+Come First Serve，先来先服务）原则，对各个队列里的seq_group按照其arrival
+time进行排序。</p>
+<p><strong>self.prev_time</strong>：<strong>上一次调度发起的时间点，初始化为0。</strong>我们知道每执行1次推理阶段前，调度器都要做一次调度，这个变量存放的就是上次调度发起的时间点。</p>
+<p><strong>self.prev_prompt</strong>：<strong>取值为True/False，初始化为False。若上一次调度时，调度器有从waiting队列中取出seq_group做推理，即为True，否则为False。</strong></p>
+<p><strong>self.last_prompt_latency</strong>：<strong>记录“当前调度时刻（now）
+-
+最后一次有从waiting队列中取数做推理的那个调度时刻”的差值</strong>（并不是每一次调度时，调度器一定都会从waiting队列中取seq_group，它可能依旧继续对running队列中的数据做推理），初始化为0。</p>
+<p><strong>BlockManager</strong>：物理块管理器。这也是vLLM自定义的一个class。物理块管理器这个class下又维护着两个重要属性：</p>
+<ul>
+<li><strong>BlockAllocator：</strong>物理块分配者，负责实际为seq做物理块的分配、释放、拷贝等操作。其下又分成self.gpu_allocator和self.cpu_allocator两种类型，分别管理gpu和cpu上的物理块。</li>
+<li><strong>self.block_tables：</strong>负责维护每个seq下的物理块列表。</li>
+</ul>
+<h3 id="distributed-workers">3.2. Distributed Workers</h3>
+<p>Distributed
+Workers，也就是分布式系统，你可以将每个worker理解成一块gpu。它的作用是将我们要使用的模型load到各块卡上，然后对Controller传来的数据做1次推理，返回相关结果。</p>
+<ul>
+<li><strong>Worker</strong>：<strong>在硬件上，它指gpu；在代码上，它指的是Worker实例</strong>（每个gpu上的进程维护自己的Worker实例）。在每个Worker实例中又管控着如下两个重要实例：
+<ul>
+<li><strong>CacheEngine：负责管控gpu/cpu上的KV
+cache物理块</strong>（调度器的block
+manager只负责物理块id的分配，CacheEngine则是根据这个id分配结果实打实地在管理物理块中的数据）</li>
+<li><strong>Worker.model</strong>：<strong>负责加载模型，并执行推理。</strong>PagedAttention的相关逻辑，就维护这个实例关联的代码下。</li>
+</ul></li>
+</ul>
+<h2 id="vllm运作流程">vLLM运作流程</h2>
+<p><strong>当一条请求过来时，整个vLLM是怎么运作的呢？</strong></p>
+<pre><code>from vllm import LLM, SamplingParams
+
+if __name == &quot;__main__&quot;:
+    # Sample prompts.
+    prompts = [
+        &quot;Hello, my name is&quot;,
+        &quot;The president of the United States is&quot;,
+        &quot;The capital of France is&quot;,
+        &quot;The future of AI is&quot;,
+    ]
+    # Create a sampling params object.
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    # 创建llm实例，在这个过程中也创建了llm实例下维护的llm_engine
+    llm = LLM(model=&quot;facebook/opt-125m&quot;)
+    # 执行offline batching推理，得到这批prompts的输出
+    outputs = llm.generate(prompts, sampling_params)
+    # 打印输出
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f&quot;Prompt: {prompt!r}, Generated text: {generated_text!r}&quot;)</code></pre>
+<h3 id="加载模型">4.1. 加载模型</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=bd0b7a0c6e484fddbe55d2dc7852df7f&amp;docGuid=It6SG4wfzbg-ff" /></p>
+<pre><code># ===========================================================================
+# 初始化vLLM offline batched inference实例，并加载指定模型
+# ===========================================================================
+llm = LLM(model=&quot;facebook/opt-125m&quot;)</code></pre>
+<p>这里在做的事很直观：把base model加载到worker上。</p>
+<h3 id="预分配显存">4.2. 预分配显存</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=3fdcf03b677a4679b39c9542e6afc9cd&amp;docGuid=It6SG4wfzbg-ff" />
+实例化了一个离线批处理的vLLM对象。其本质是实例化了一个内核引擎LLMEngine对象。在执行这个步骤时，LLMEngine会执行一次模拟实验（profiling），来判断需要在gpu上预留多少的显存空间给KV
+Cache block。vLLM管这个步骤叫profile_num_available_blocks。</p>
+<ul>
+<li>加载预分配的KV Cache到gpu上</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=d2b0e2d72c6e45e0b648c67550ab7fb0&amp;docGuid=It6SG4wfzbg-ff" />
+当我们确定好KV Cache block的大小后，我们就可以创建empty
+tensor，将其先放置到gpu上，实现显存的预分配。以后这块显存就是专门用来做KV
+Cache的了。也正是因为这种预分配，你可能会发现在vLLM初始化后，显存的占用比你预想地要多（高过模型大小），这就是预分配起的作用。</p>
+<h3 id="scheduler调度">4.3. Scheduler调度</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=a0d48a624ba741518a5028dec1d68bfd&amp;docGuid=It6SG4wfzbg-ff" />
+<img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=485f2f14799a4a2cbaf9b62c7b9f78f6&amp;docGuid=It6SG4wfzbg-ff" />
+* <strong>self.waiting, self.running,
+self.swapped</strong>：这三个都是python的deque()实例（双端队列，允许你从队列两侧添加或删除元素）。
+*
+<strong>waiting队列用于存放所有还未开始做推理的seq_group</strong>，“未开始”指连prefill阶段都没有经历过。所以waiting队列中的seq_group只有一个seq，即是原始的prompt。
+*
+<strong>running队列用于存放当前正在做推理的seq_group。更准确地说，它存放的是上1个推理阶段被送去做推理的seq_group们</strong>，在开始新一轮推理阶段时，调度器会根据本轮的筛选结果，更新running队列，即决定本轮要送哪些seq_group去做推理。
+*
+<strong>swapped队列用于存放被抢占的seq_group</strong>。若一个seq_group被抢占，调度器会对它执行swap或recomputation操作，分别对应着将它送去swapped队列或waiting队列。</p>
+<ul>
+<li>请求发起：The future of Artifical Intelligence</li>
+<li>到达LLMEngine
+<ul>
+<li>分词</li>
+<li>加入调度序列：waiting queue</li>
+</ul></li>
+<li>调度器Scheduler进行队列管理：筛选出需要运行的一组请求
+<ul>
+<li>当KV块内存有空闲：waiting请求变为running</li>
+<li>当没有KV块内存用于生成新token
+<ul>
+<li>running变为swapping</li>
+<li>running变为waiting</li>
+</ul></li>
+</ul></li>
+<li>BlockSpaceManager进行块空间管理：
+<ul>
+<li>给新的KVCache分配空间</li>
+<li>处理块共享</li>
+<li>交换/删除被抢占的KV块</li>
+</ul></li>
+<li>BlockAllocator：当BlockSpaceManager下达“分配”或者“交换”命令时，块分配器在真实的物理内存上进行分配和回收。</li>
+</ul>
+<h3 id="执行推理">4.4. 执行推理</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=97de40fb3c05487f902104801c5b60a3&amp;docGuid=It6SG4wfzbg-ff" />
+Distributed
+Workers接受来自Scheduler的请求，分发到各个worker上去做推理。</p>
+<ul>
+<li>CacheEngine负责管理实际KVCache。</li>
+<li>Worker.model负责加载模型，进行推理。</li>
+</ul>
+<p>推理入口：<code>outputs = llm.generate(prompts, sampling_params)</code></p>
+<p>当我们调用<code>generate()</code>时，它实际做了两件事情<strong>：</strong></p>
+<ul>
+<li><code>_add_request</code>：<strong>将输入数据传给LLMEngine：</strong>把每1个prompt包装成一个SequenceGroup对象（“1个prompt
+-&gt;
+多个outputs”的结构）。把包装成SequenceGroup对象的数据加入调度器（Scheduler）的waiting队列，等待处理。</li>
+<li><code>_run_engine</code>：<strong>执行推理：</strong>只要调度器的waiting/running/swapped队列非空，我们就认为此时这批batch还没有做完推理，这时我们就会<strong>调用LLMEngine的step()</strong>函数，来完成1次调度以决定要送哪些数据去做推理。</li>
+</ul>
+<h4 id="sequencegroup">SequenceGroup</h4>
+<p>可能出现”1个prompt -&gt;
+多个outputs”的情况。那是否能设计一种办法，对1个prompt下所有的outputs进行集中管理，来方便vLLM更好做推理呢？</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=f032d1dcf62f4ccc868e9ca6ddb9f10f&amp;docGuid=It6SG4wfzbg-ff"
+title="采样参数n=4,需要四种不同的output"
+alt="采样参数n=4,需要四种不同的output" /> <img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=058ccf4cfa83440999a784faf4473c99&amp;docGuid=ht-_3CjLmKeDb8"
+title="SequenceGroup结构" alt="SequenceGroup结构" />
+到这里不妨思考一下，vLLM v0的整个运作流程有没有哪些可以优化的地方？</p>
+<p>vLLM v1的优化，还是以offline batching为例:</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=ed9738dbc92b469aa5e6489dff0b058d&amp;docGuid=ht-_3CjLmKeDb8" />
+* vllm
+v1将<code>请求的pre-process和输出结果的post-process</code>与<code>实际的推理过程</code>拆分在2个不同的进程中(process0,
+process1)。 *
+Client负责<code>请求的pre-process和输出结果的post-process</code>，EngineCore负责<code>实际的推理过程</code>，不同进程间使用<a
+href="https://zhida.zhihu.com/search?content_id=257161760&amp;content_type=Article&amp;match_order=1&amp;q=ZMQ&amp;zhida_source=entity">ZMQ</a>来通信数据。
+*
+通过这样的进程拆分，在更好实现cpu和gpu运作的overlap的同时，也将各种模型复杂的前置和后置处理模块化，统一交给processor和output_processor进行管理。</p>
+<h2 id="scheduler">Scheduler</h2>
+<h3 id="调度器结构">5.1. 调度器结构</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=9dacef2d69cf497391a48e86a859c25d&amp;docGuid=It6SG4wfzbg-ff"
+title="Scheduler结构" alt="Scheduler结构" /> ### 5.2. 整体调度策略 <img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=8bc245d29ac14f5c967661585e9092e4&amp;docGuid=It6SG4wfzbg-ff"
+title="调度策略" alt="调度策略" />
+<strong>running队列中的seq_group不一定能继续在本次调度中被选中做推理</strong>，这是因为gpu上KV
+cache的使用情况一直在变动，以及waiting队列中持续有新的请求进来的原因。所以调度策略的职责就是要根据这些变动，对送入模型做推理的数据做动态规划。</p>
+<p>总结来说：</p>
+<ul>
+<li><strong>如果当前swapped队列为空，</strong>那就去检查是否能从waiting队列中调度seq_group，直到不满足调度条件为止（gpu空间不足，或waiting队列已为空等）。此时，1个推理阶段中，所有的seq_group都处在prefill阶段。</li>
+<li><strong>如果当前swapped队列非空，或者无法从waiting队列中调度任何seq_group时：</strong>
+<ul>
+<li>检查是否能从running队列中调度seq_group，直到不满足调度条件为止。</li>
+<li>若本次无新的被抢占的seq_group，且swapped队列非空，就检查是否能从swapped队列中调度seq_group，直到不满足调度条件为止。</li>
+</ul></li>
+</ul>
+<p><strong>此时，1个推理阶段中，所有的seq_group要么全来自running队列，要么来自running
++ swapped队列，它们都处在decode阶段。</strong></p>
+<p><strong>至此我们要记住vLLM调度中非常重要的一点：在1个推理阶段中，所有的seq_group要么全部处在prefill阶段。要么全部处在decode阶段。</strong></p>
+<p>你可能想问：<strong>为什么要以swapped是否非空为判断入口呢？</strong></p>
+<p>这是因为，如果当前调度步骤中swapped队列非空，说明在之前的调度步骤中这些可怜的seq_group因为资源不足被抢占，而停滞了推理。所以<strong>根据FCFS规则，当gpu上有充足资源时，我们应该先考虑它们，而不是考虑waiting队列中新来的那些seq_group。</strong></p>
+<p>同理，在图中你会发现，当我们进入对running队列的调度时（图中红色分支），我们会根据“<strong>本次调度是否有新的被抢占的seq_group</strong>”，来决定要不要调度swapped队列中的数据。这个理由也很简单：在本次调度中，我就是因为考虑到gpu空间不足的风险，我才新抢占了一批序列。既然存在这个风险，我就最好不要再去已有的swapped队列中继续调度seq_group了。</p>
+<h3 id="passed_delay判断调度waiting队列的时间点">5.3.
+_passed_delay：判断调度waiting队列的时间点</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=95a554e3022d403da948de409158be0f&amp;docGuid=It6SG4wfzbg-ff" />
+在5.1的流程图中，我们会看到<strong>进入waiting循环的判断条件之一是：waiting队列是否达到调度间隔阈值</strong>。这是个什么东西？又为什么要设置这样一个阈值呢？</p>
+<p>我们知道模型在做推理时，waiting队列中是源源不断有seq_group进来的，一旦vLLM选择调度waiting队列，它就会停下对running/swapped中seq_group的decode处理，转而去做waiting中seq_group的prefill，也即<strong>vLLM必须在新来的seq_group和已经在做推理的seq_group间取得一种均衡：既不能完全不管新来的请求，也不能耽误正在做推理的请求。所以“waiting队列调度间隔阈值”就是来控制这种均衡的：</strong></p>
+<ul>
+<li><strong>调度间隔设置得太小</strong>，每次调度都只关心waiting中的新请求，这样发送旧请求的用户就迟迟得不到反馈结果。且此时waiting队列中积累的新请求数量可能比较少，不利于做batching，浪费了并发处理的能力。</li>
+<li><strong>调度间隔设置得太大</strong>，waiting中的请求持续挤压，同样对vLLM推理的整体吞吐有影响。</li>
+</ul>
+<h3 id="can_allocate能否为seq_group分配物理块做prefill">5.4.
+can_allocate：能否为seq_group分配物理块做prefill</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=0dd6a6c74ba549518102d0e3c9ad5a24&amp;docGuid=It6SG4wfzbg-ff" />
+通过了调度时间阈值的判断条件，现在我们顺利从waiting中取出一个seq_group，我们将对它进行prefill操作。<strong>所以这里我们必须先判断：gpu上是否有充足的空间为该seq_group分配物理块做prefill</strong>，根据5.1中绘制的调度器结构，这个操作当然是由我们的self.block_manager来做。</p>
+<h3 id="can_append_slot能否为seq_group分配物理块做decode">5.5.
+can_append_slot：能否为seq_group分配物理块做decode</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=d1b61e2d215642a6ba667722754b3b4f&amp;docGuid=It6SG4wfzbg-ff" />
+我们从running队列中调度seq_group时，我们也会判断是否能为该seq_group分配物理块。<strong>但这时，我们的物理块空间是用来做decode的（给每个seq分配1个token的位置），而不是用来做prefill的（给每个seq分配若干个token的位置），所以这里我们采取的是另一种判断方法</strong><code>can_append_slot</code><strong>。</strong></p>
+<p>更具体来说，running队列中seq_group下的n个seqs在上1个推理阶段共生成了n个token。在本次调度中，我们要先为这n个token分配物理块空间，用于存放它们在本次调度中即将产生的KV值。我们知道：</p>
+<ul>
+<li>当往1个seq的物理块上添加1个token时，可能有两种情况：
+<ul>
+<li>之前的物理块满了，所以我新开1个物理块给它</li>
+<li>之前的物理块没满，我直接添加在最后一个物理块的空槽位上</li>
+<li><strong>所以，对于1个seq来说，最坏的情况就是添加1个物理块；对于n个seqs来说，最坏的情况就是添加n个物理块（想想前面讲过的copy-on-write机制）</strong></li>
+</ul></li>
+<li><strong>对于1个seq_group，除了那些标记为“finish”的seq外，其余seqs要么一起送去推理，要么一起不送去推理。即它们是集体行动的</strong></li>
+</ul>
+<p><strong>所以，判断能否对一个正在running的seq_group继续做推理的最保守的方式，就是判断当前可用的物理块数量是否至少为n。</strong></p>
+<h3 id="preempt抢占策略">5.6. preempt：抢占策略</h3>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=cba3527e5f1644e59e9086641df38a6d&amp;docGuid=It6SG4wfzbg-ff" />
+抢占策略的核心逻辑：</p>
+<p><strong>在若干个推理阶段后，gpu上的资源不够了，这个seq_group不幸被调度器抢占（preemption）</strong>，它相关的KV
+block也被swap
+out到cpu上。此时所有seq的状态变为swapped。这里要注意，<strong>当一个seq_group被抢占时，对它的处理有两种方式：</strong></p>
+<ul>
+<li><strong>Swap：如果该seq_group剩余生命周期中并行运行的最大seq数量
+&gt; 1，此时会采取swap策略</strong>，即把seq_group下【所有】seq的KV
+block从gpu上卸载到cpu上。（seq数量比较多，直接把算出的KV
+block抛弃，比较可惜）</li>
+<li><strong>Recomputation：如果该seq_group剩余生命周期中并行运行的最大seq数量
+=
+1，此时会采取recomputation策略</strong>，即把该seq_group相关的物理块都释放掉，然后将它重新放回waiting队列中(<strong>放在最前面</strong>)。等下次它被选中推理时，就是从prefill阶段开始重新推理了，因此被称为“重计算”。（seq数量少，重新计算KV
+block的成本不高）</li>
+</ul>
+<h3 id="vllm-v1的改进">5.7. vLLM v1的改进</h3>
+<p><strong>在V0的策略中，每次调度步骤要么全是做prefill的请求，要么全是做decode的请求，除此以外，调度器中维护着waiting，running，swapped三个队列，整体来说调度策略比较复杂</strong>。</p>
+<p>在V1中，调度策略简化许多，<strong>最主要的就是允许单次调度步骤中同时调度prefill和decode请求，同时调度器中只维护waiting和running队列。我们从vllm官方blog中来看下V1的整体调度思想</strong></p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=d2c5127eb61a44088d6dd2c74532efb1&amp;docGuid=ht-_3CjLmKeDb8" />
+如图所示：</p>
+<ul>
+<li>首先，<strong>vllm会对单次调度步骤设置一个</strong><code>token_budget</code><strong>，它用来决定每次调度中最多允许“计算”多少个token。</strong>这个token_budget可以由用户通过<code>scheduler_config.max_num_batched_tokens</code>进行配置。在我们的图例中token_budget
+= 10</li>
+<li>假设此时waiting队列中有3个R1，R2，R3三个请求（prompts），长度分别为3，5，12。请求已经按照到来的先后顺序排列好了。<strong>Vllm
+v1依然采用的是FCFS原则（First come First
+serve），按先来后到的顺序处理请求。</strong></li>
+<li>step0：
+<ul>
+<li>调度器开始执行调度。<strong>根据某种策略</strong>，调度器决定将【R1的3个token】，【R2的5个token】都算入本次调度步骤中。此时token_budget
+= 10 - 3 - 5 = 2。</li>
+<li>R3有12个token需要计算，但本轮调度的token_budget只剩2个，所以只取R3的2个token加入本次调度中</li>
+<li>R1，R2和R3都会从waiting队列转移到running队列上</li>
+</ul></li>
+<li>step1:
+<ul>
+<li>调度器开始执行新一轮调度。此时R1和R2都做完了prefill，进入decode阶段，它们待计算的token都只有1个。R3仍在prefill阶段，并根据token_budget再送入8个token进入本轮调度</li>
+</ul></li>
+<li>以此类推，可以发现，直到step3为止，最长的R3才做完了prefill，进入decode阶段。</li>
+</ul>
+<h2 id="blockmanager">BlockManager</h2>
+<h3 id="blockmanager结构">6.1. BlockManager结构</h3>
+<p>BlockManager这个class下又维护着两个重要属性：</p>
+<ul>
+<li><code>BlockAllocator</code><strong>：物理块分配者，负责实际为seq做物理块的分配、释放、拷贝等操作。</strong>其下又分成<code>self.gpu_allocator</code>和<code>self.cpu_allocator</code>两种类型，分别管理gpu和cpu上的物理块。</li>
+<li><code>self.block_tables</code><strong>：负责维护每个seq下的物理块列表，本质上它是一个字典，形式如</strong><code>{seq_id: List[PhysicalTokenBlock]}</code><strong>。</strong>注意，这个字典维护着【所有】seq_group下seq的物理块，而不是单独某一个seq的。因为调度器是全局的，所以它下面的的BlockManager自然也是全局的。</li>
+</ul>
+<p><strong>其中，BlockAllocator又分成两种类型：</strong></p>
+<ul>
+<li><code>CachedBlockAllocator</code>：<strong>按照prefix
+caching的思想来分配和管理物理块</strong>。在前面的介绍中，我们提过有些prompts中可能含有类似system
+message（例如，“假设你是一个能提供帮助的行车导航”）E）等prefix信息，带有这些相同prefix信息的prompt完全可以共享用于存放prefix的物理块，这样既节省显存，也不用再对prefix做推理。</li>
+<li><code>UncachedBlockAllocator</code>：<strong>正常分配和管理物理块，没有额外实现prefix
+caching的功能</strong>。</li>
+</ul>
+<h3 id="uncachedblockallocator">6.2.
+<strong>UncachedBlockAllocator</strong></h3>
+<p>在整体调度策略的讲解中，我们明确了非常重要的一点：<strong>在vllm的1个推理阶段，所有的seq_group要么一起做prefill，要么一起做decode</strong>。这也意味着，<strong>某次调度的结果，要么全部来自waiting队列（等待做prefill的），要么全部来自running或者running
++ swapped队列（等待做decode的）</strong>。</p>
+<h4 id="为waiting队列中的seq_group分配prefill需要的物理块">6.2.1.
+<strong>为waiting队列中的seq_group分配prefill需要的物理块</strong></h4>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=0c4c7ea88ce14646ba7eb59a6eeb2279&amp;docGuid=ht-_3CjLmKeDb8" />
+*
+调用<code>self.block_manager.can_allocate(seq_group)</code>方法，<strong>判断当前gpu上是否有充足的空间，能为当下这seq_group的prefill阶段分配充足的物理块</strong>，用于装其KV
+Cache。 *
+一旦我们认为当下空间充足，则调用<code>self._allocate(seq_group)</code>方法，<strong>为waiting队列中的这个seq_group实际分配物理块</strong>，这时我们就会运用到BlockAllocator，并且BlockAllocator的类型不同（即是否做prefix
+caching），allocate的方法也会不同。 *
+这里我们做的只是<strong>给定一种“物理块的分配方案”</strong>，我们只是在制定这个seq_group可以使用哪些物理块，<strong>但并没有实际往物理块中添加数据！“添加数据”这一步留到这1步推理实际开始时，由CacheEngine按照这个方案，往物理块中实际添加KV
+Cache。</strong></p>
+<h4 id="为runningswapped队列中的seq_group分配decode需要的物理块">6.2.2.
+<strong>为running/swapped队列中的seq_group分配decode需要的物理块</strong></h4>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=261db710fe364c6cbe9216cd8b49d162&amp;docGuid=ht-_3CjLmKeDb8" />
+接下来我们考虑为running/swapped队列中的seq_group分配decode需要的物理块。</p>
+<p>对于每个seq_group，在上1个推理阶段，我们对它下面的每个seq都产出了1个token。所以在这个推理阶段，我们判断能否为这些seq_group分配物理块时，我们也会分成两步：</p>
+<ul>
+<li><strong>调用</strong><code>self.block_manager.can_append_slot(seq_group)</code><strong>方法</strong>，判断是否至少能为这个seq_group下的每个seq都分配1个空闲物理块。如果可以则认为能调度这个seq_group。</li>
+<li><strong>调用</strong><code>self._append_slot(seq_group, blocks_to_copy)</code><strong>方法</strong>，实际分配物理块。</li>
+</ul>
+<p>同样，在这里我们依然要强调，调度器中只是给出了物理块的分配方案，并没有实际往物理块中添加数据，添加数据这一步是CacheEngine照着这个方案来实际操作的。</p>
+<h3 id="cachedblockallocator">6.3.
+<strong>CachedBlockAllocator</strong></h3>
+<pre><code># ==========================================================================# ==========================================================================
+# 如果做了prefix caching，即使用的是CachedBlockAllocator
+# ==========================================================================
+elif self.enable_caching:
+    block = self.gpu_allocator.allocate(
+        seq.hash_of_block(logical_idx),
+        seq.num_hashed_tokens_of_block(logical_idx))</code></pre>
+<h4 id="hash值的计算">6.3.1. hash值的计算</h4>
+<pre><code>block = self.gpu_allocator.allocate(
+         seq.hash_of_block(logical_idx),
+         seq.num_hashed_tokens_of_block(logical_idx))</code></pre>
+<p><code>CachedBlockAllocator</code><strong>按照prefix
+caching的思想来分配和管理物理块</strong>。在前面的介绍中，我们提过有些prompts中可能含有类似system
+message（例如，“假设你是一个能提供帮助的行车导航”）E）等prefix信息，带有这些相同prefix信息的prompt完全可以共享用于存放prefix的物理块，这样既节省显存，也不用再对prefix做推理。</p>
+<p><strong>hash值的计算就决定了这个prefix是否真的“相同”：当两个等待做prefill的seq拥有同样的hash值时，说明它们共享一样的prompt，这时就可以重复利用已有的KV
+cache。</strong></p>
+<figure>
+<img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=2cdfa9983b564689aeee64676fca27d8&amp;docGuid=ht-_3CjLmKeDb8"
+title="hash的计算过程" alt="hash的计算过程" />
+<figcaption aria-hidden="true">hash的计算过程</figcaption>
+</figure>
+<pre><code># 逻辑块0的计算：
+num_tokens = 0 * 4 + 4 = 4
+token_tuple = (A, B, C, D)  # 前4个token
+hash_value = hash(( (A,B,C,D), lora_id ))
+
+# 逻辑块1的计算：
+num_tokens = 1 * 4 + 4 = 8
+token_tuple = (A, B, C, D, E, F, G, H)  # 前8个token
+hash_value = hash(( (A,B,C,D,E,F,G,H), lora_id ))
+
+# 逻辑块2的计算：
+num_tokens = 2 * 4 + 4 = 12
+token_tuple = (A, B, C, D, E, F, G, H, I, J, K, L)
+hash_value = hash((token_tuple, lora_id))
+
+# 逻辑块3的计算
+num_tokens = 3 * 4 + 4 = 16
+token_tuple = (A, B, C, D, E, F, G, H, I, J, K, L, M, N)  # 实际只有14个
+hash_value = hash((token_tuple, lora_id))</code></pre>
+<h4 id="使用evictor管理物理块分配细节">6.3.2.
+使用evictor管理物理块分配细节</h4>
+<ul>
+<li>当一个物理块没有任何逻辑块引用时（例如一个seq刚做完整个推理），这时它理应被释放。<strong>但是在prefix
+caching的前提下，我们的优化思想是</strong>：即使这个物理块当前没有用武之地，可是如果不久之后来了一个新seq，它的prefix（例如system
+message）和这个物理块指向的内容高度一致，那么这个物理块就可以被重复使用，以此减少存储和计算开销。</li>
+<li><strong>所以，我们设置一个驱逐器（evictor）类，它的free_tables属性将用于存放这些暂时不用的物理块。</strong></li>
+<li>此时，<strong>该设备上全部可用的物理块 =
+<em>正在被使用/等待被使用的物理块数量 +
+evictor的free_tables中的物理块数量</em></strong></li>
+<li>在prefill阶段，当我们想创建一个物理块时，我们先算出这个物理块的hash值，然后<strong>去free_tables中看</strong>有没有可以重复利用的物理块，有则直接复用</li>
+<li><strong>如果没有可以重复利用的hash块，那这时我们先检查下这台设备剩余的空间是否够我们创建一个新物理块</strong>。如果可以，就创建新物理块。</li>
+<li>如果此时没有足够的空间创建新物理块，那么我们只好<strong>从free_tables中驱除掉一个物理块</strong>，为这个新的物理块腾出空间，<strong>驱逐策略如下：</strong>
+<ul>
+<li>先根据<strong>LRU（Least Recently
+Used）</strong>原则，驱逐较老的那个物理块</li>
+<li>如果找到多个最后一次使用时间相同的老物理块，那么则<strong>根据max_num_tokens原则</strong>（max_num_tokens即为6.3.1图例中的num_tokens），驱逐其hash值计算中涵盖tokens最多的那个物理块。</li>
+<li><strong>如果这些老物理块的LRU和max_num_tokens还是一致的话，那就从它们中随机驱逐一个</strong></li>
+</ul></li>
+</ul>
+<h4 id="prefix的标准">6.3.3. prefix的标准</h4>
+<p>看到这里，也许有个想法一直在你脑中徘徊：“使用prefix
+caching，是不是就意味着两个seq的prompt必须完全一致，才可以重复利用物理块呢？”</p>
+<p><strong>下面我们再通过两个例子，帮助大家解答这个疑惑，也更好理解“prefix”的含义。</strong></p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=0e01b1a24d6340e8924b7ae0742dfb6e&amp;docGuid=ht-_3CjLmKeDb8" />
+<strong>假设seq0现在做完了prefill，产出蓝色的4块物理块。现在进来一个seq1，我们想知道：seq1到底该怎么复用seq0的物理块？</strong></p>
+<ul>
+<li>当seq1刚进来时，我们先算好了它的逻辑块。现在要给每个逻辑块分配物理块。</li>
+<li>对每个逻辑块，当我们决定是否要给它分配一个新的物理块时（一个新的物理块意味着占用了新的存储空间），我们先计算这个物理块的hash值。</li>
+<li>按照这个流程，我们发现seq1的block0～2都可以复用seq0的（蓝色）</li>
+<li>但是hash(seq1 block3) != hash(seq0 block3)，因此我们需要为seq1
+block3（红色）开辟新空间。</li>
+</ul>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=93fb50c5e3dd4a5f89752667329e8cb2&amp;docGuid=ht-_3CjLmKeDb8" />
+可以发现，尽管seq0和seq1的prompt的大部分内容是相同的，但是seq1依然不能复用seq0的prompt，<strong>这是因为KV
+cache的计算也需要考虑位置编码的原因</strong>。</p>
+<p><strong>通过例1和例2，你现在是否已更好了解我们只对prefix计算hash值的原因了呢？我们再小结一下vllm中hash值计算的一些要点：</strong></p>
+<ul>
+<li><strong>vllm中，hash值的计算是block-level维度的</strong></li>
+<li><strong>vllm中，hash值的计算考虑了当前block及其之前所有block所维护的token值。这样做是为了找到最长可复用的prefix。</strong></li>
+</ul>
+<h4 id="decode阶段物理块的分配">6.3.4. decode阶段物理块的分配</h4>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=32a62e82edfb46e4a09c237cfd7e532c&amp;docGuid=ht-_3CjLmKeDb8" />
+在上面我们讲过UncachedBlockAllocator下为decode阶段分配物理块的方法（比较简单），<strong>但是现在若使用CachedBlockAllocator，考虑物理块的复用问题时，情况就更复杂一些了。</strong>
+对于每个seq_group，在上1个推理阶段，我们对它下面的每个seq都产出了1个token。所以在这个推理阶段，我们判断能否为这些seq_group分配物理块时，我们也会分成两步：</p>
+<ul>
+<li><strong>（1）调用</strong><code>self.block_manager.can_append_slot(seq_group)</code><strong>方法</strong>，判断是否至少能为这个seq_group下的每个seq都分配1个空闲物理块。如果可以则认为能调度这个seq_group。</li>
+<li><strong>（2）调用</strong><code>self._append_slot(seq_group, blocks_to_copy)</code><strong>方法</strong>，实际分配物理块。</li>
+</ul>
+<p>考虑下面这个使用parallel
+sampling做推理的例子，当n=2时，我们希望模型针对这一个prompt，产出2个推理序列结果：</p>
+<pre><code># Parallel 
+Sampling(&quot;What is the meaning of life?&quot;,
+SamplingParams(n=2, temperature=0.8, top_p=0.95, frequency_penalty=0.1))</code></pre>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=eb7a1900bd2d4e3b97866b3d9cd5705c&amp;docGuid=ht-_3CjLmKeDb8" />
+*
+<strong>首先，seq正常做完prefill（蓝色部分），我们用黄色部分表示decode。</strong>
+*
+<strong>开始做decode。根据copy-on-write机制</strong>，FG所在的block1此时被两个子序列的逻辑块引用（ref_count
+= 2），所以它需要被拷贝一份。这样我们就得到2个物理块，用于装H0和H1。 *
+<strong>在启动copy-on-write机制的同时，我们也要重新计算物理块的hash值</strong>。和prefill阶段不同，在decode阶段，<strong>当这个物理块还没满的时候，我们会给它附一个相互不重复的默认hash值</strong>（<code>from itertools import count()，hash_str = next(iter(count()))</code>）。
+*
+<strong>我们会把附上hash值的物理块加入CachedBlockAllocator的</strong><code>cached_blocks</code><strong>属性中</strong>（参见3.3节代码中的讲解），我们说过，这个属性用于记录当前正在被使用的物理块。
+* 两个子序列继续做decode（风平浪静的美丽日子） *
+<strong>当一个子序列用完当前物理块的所有slots时（例如当子序列1生成J0后），我们再对这个物理块重新做hash计算，计算方式是hash(A~J0)。</strong>
+*
+<strong>拿着这个new_hash，我们去cached_blocks（当前正在被使用的物理块列表）和free_tables（驱逐器的冷宫，曾经被使用的物理块列表）寻找</strong>。看看这两者中是否存着相同hash值的物理块：
+*
+<strong>如果找到可以复用的物理块，我们就释放当前这个物理块，复用旧物理块</strong>
+*
+<strong>如果没有找到可以复用的物理块，我们就把当前这个物理块的旧hash值从cached_blocks中释放掉，取而代之以新hash值。</strong></p>
+<h2 id="参考文档">参考文档</h2>
+<ol type="1">
+<li><a
+href="https://zhuanlan.zhihu.com/p/691038809">猛猿：图解大模型计算加速系列之：vLLM核心技术PagedAttention原理</a></li>
+<li><a
+href="https://zhuanlan.zhihu.com/p/691045737">猛猿：图解大模型计算加速系列：vLLM源码解析1，整体架构</a></li>
+<li><a
+href="https://zhuanlan.zhihu.com/p/692540949">猛猿：图解大模型计算加速系列：vLLM源码解析2，调度器策略(Scheduler)</a></li>
+<li><a
+href="https://zhuanlan.zhihu.com/p/700780161">猛猿：图解大模型计算加速系列：vLLM源码解析3，块管理器BlockManager（上篇）</a></li>
+<li><a
+href="https://zhuanlan.zhihu.com/p/707228704">猛猿：图解大模型计算加速系列：vLLM源码解析3，Prefix
+Caching</a></li>
+</ol>
+<h2 id="文末互动好礼"><strong>🎁文末互动好礼🎁</strong></h2>
+<h6 id="互动一"><strong>1️⃣ 互动一</strong></h6>
+<p>🤔在你的模型推理或服务部署实践中，<strong>你最在意的是吞吐、时延，还是资源成本？</strong></p>
+<p>🤔你是否用过
+vLLM，或正在评估类似的推理框架？它解决了你哪些问题，又留下了哪些困惑？</p>
+<h6 id="互动二">2️⃣ 互动二</h6>
+<p>✍️<strong>「周一创作者日」</strong>已经陪大家走过了一段时间，新年新气象！为更好建设社区创作者专栏，欢迎各位在评论区留下你的直觉感受和建议，你的每一条反馈，都会成为我们栏目建设的重要参考💖</p>
+<p>欢迎在评论区分享你的想法，我们将从留言中精选 <strong>5
+位走心分享的同学</strong>，送出「AI+社区」电脑包，期待你的声音 👀✨</p>
+<p><img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=3833aa3ed28c449b8362948e14fec810&amp;docGuid=ht-_3CjLmKeDb8" />
+<img
+src="https://rte.weiyun.baidu.com/wiki/attach/image/api/imageDownloadAddress?attachId=c3f2032bbe1c4e20991e2c1883a8f46e&amp;docGuid=ASDhxV6yZABnn6" /></p>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-01-07</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" data-title="vllm高效推理全链路" data-hashtags="coding,vllm"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" data-title="vllm高效推理全链路"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" data-title="vllm高效推理全链路"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/vllm%E9%AB%98%E6%95%88%E6%8E%A8%E7%90%86%E5%85%A8%E9%93%BE%E8%B7%AF/" data-title="vllm高效推理全链路"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/coding/">Coding</a>,&nbsp;<a href="/tags/vllm/">Vllm</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/%E4%B8%80%E4%BA%9B%E5%8F%82%E6%95%B0/" class="prev" rel="prev" title="一些参数"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>一些参数</a>
+            <a href="/cc%E5%B8%B8%E7%94%A8%E5%91%BD%E4%BB%A4/" class="next" rel="next" title="cc常用命令">cc常用命令<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

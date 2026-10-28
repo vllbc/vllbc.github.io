@@ -130,8 +130,8 @@ def all_gather_data_proto(data: DataProto, process_group):
 
 verl中对序列优化的做法有以下几点：
 - **序列长度平衡**：在工作线程之间分配序列以平衡计算工作负载（本章节）
-- **动态批处理**：按令牌计数而不是固定批次大小对序列进行分组（[dynamic_bsz](dynamic_bsz.md)）
-- **序列打包**：删除填充标记以提高内存效率[remove_padding](../../LLM/infra/remove_padding.md)
+- **动态批处理**：按令牌计数而不是固定批次大小对序列进行分组（见 [[batch_size解释]] 中"use_dynamic_bsz 数据流"章节）
+- **序列打包**：删除填充标记以提高内存效率[remove_padding](../../Infra/remove_padding.md)
 - **微批次优化**：重新排列批次以实现最佳 GPU 利用率
 
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250727214815.png)

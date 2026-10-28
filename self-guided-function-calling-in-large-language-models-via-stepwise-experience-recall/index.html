@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall">
+  <meta property="og:description" content="比context_engineering更高级的经验学习。从经验池中检索相似的经验来指导agent。
+论文深度解读 这篇论文的核心目标是解决大型语言模型（LLM）在执行多步骤、复杂工具调用（Multi-step Function Calling） 任务时遇到的一个根本性瓶颈：如何高效、动态地从过去的经验中学习，以应对新问题？ 传统的解决方案，如上下文学习（In-context Learning, ICL），通常依赖于在提示（Prompt）中提供一些固定的、人工筛选的示例（Few-shot Examples）。然而，这种方法存在三大问题： 1. 静态性与局限性：示例库是预先定义好的，无法适应模型在使用过程中遇到的新情况和新工具。 2. 检索粒度粗糙：传统的检索方法通常只基于用户初始问题的语义相似度来寻找示例，但这对于需要复杂工具链协作的任务来说远远不够。一个任务的解决路径（即工具的调用顺序和方式）可能比其初始描述更具参考价值。 3. 扩展性差：随着工具数量和任务复杂度的增加，手动编写高质量的示例变得极其困难且成本高昂，无法规模化。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-08-23T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-06-03T16:33:56+08:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Agent">
+    <meta property="article:tag" content="Experience">
+    <meta property="article:tag" content="Memory">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall">
+  <meta name="twitter:description" content="比context_engineering更高级的经验学习。从经验池中检索相似的经验来指导agent。
+论文深度解读 这篇论文的核心目标是解决大型语言模型（LLM）在执行多步骤、复杂工具调用（Multi-step Function Calling） 任务时遇到的一个根本性瓶颈：如何高效、动态地从过去的经验中学习，以应对新问题？ 传统的解决方案，如上下文学习（In-context Learning, ICL），通常依赖于在提示（Prompt）中提供一些固定的、人工筛选的示例（Few-shot Examples）。然而，这种方法存在三大问题： 1. 静态性与局限性：示例库是预先定义好的，无法适应模型在使用过程中遇到的新情况和新工具。 2. 检索粒度粗糙：传统的检索方法通常只基于用户初始问题的语义相似度来寻找示例，但这对于需要复杂工具链协作的任务来说远远不够。一个任务的解决路径（即工具的调用顺序和方式）可能比其初始描述更具参考价值。 3. 扩展性差：随着工具数量和任务复杂度的增加，手动编写高质量的示例变得极其困难且成本高昂，无法规模化。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" /><link rel="prev" href="https://blog.vllbc.top/think-in-blocksadaptive-reasoning-from-direct-response-to-deep-reasoning/" /><link rel="next" href="https://blog.vllbc.top/coarse-to-fine-grounded-memory-for-llm-agent-planning/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Agent, experience, memory","wordcount":  6473 ,
+        "url": "https:\/\/blog.vllbc.top\/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall\/","datePublished": "2025-08-23T00:00:00+00:00","dateModified": "2026-06-03T16:33:56+08:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/agent/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Agent</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-08-23">2025-08-23</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 6473 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 13 分钟&nbsp;<span id="/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" class="leancloud_visitors" data-flag-title="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>比<a
+href="../../../Agent/Memory/context_engineering.md">context_engineering</a>更高级的经验学习。从经验池中检索相似的经验来指导agent。</p>
+<hr />
+<h3 id="论文深度解读">论文深度解读</h3>
+<p>这篇论文的核心目标是解决大型语言模型（LLM）在执行<strong>多步骤、复杂工具调用（Multi-step
+Function Calling）</strong>
+任务时遇到的一个根本性瓶颈：<strong>如何高效、动态地从过去的经验中学习，以应对新问题？</strong>
+传统的解决方案，如<strong>上下文学习（In-context Learning,
+ICL）</strong>，通常依赖于在提示（Prompt）中提供一些固定的、人工筛选的示例（Few-shot
+Examples）。然而，这种方法存在三大问题： 1.
+<strong>静态性与局限性</strong>：示例库是预先定义好的，无法适应模型在使用过程中遇到的新情况和新工具。
+2.
+<strong>检索粒度粗糙</strong>：传统的检索方法通常只基于用户初始问题的<strong>语义相似度</strong>来寻找示例，但这对于需要复杂工具链协作的任务来说远远不够。一个任务的解决路径（即工具的调用顺序和方式）可能比其初始描述更具参考价值。
+3.
+<strong>扩展性差</strong>：随着工具数量和任务复杂度的增加，手动编写高质量的示例变得极其困难且成本高昂，无法规模化。</p>
+<p>为了克服这些挑战，作者提出了一个名为<strong>SEER (Stepwise ExperiencE
+Recall)</strong>
+的创新框架。SEER的核心思想可以概括为两点：<strong>“动态成长的经验池”</strong>
+和 <strong>“精准的、多维度经验检索”</strong>。</p>
+<p><strong>动态成长的经验池（Continual Experience
+Accumulation）</strong> 是SEER实现“自引导”的关键。论文中提到： &gt;
+Instead of relying on a static, pre-collection pool, our method adopts
+an online self-guided mechanism. After each successful task completion,
+the corresponding trajectory is added to the demonstration pool,
+enabling continual refinement and enrichment over time.</p>
+<p>这意味着SEER不再依赖一个一成不变的示例库。它建立了一个“活”的<strong>经验池（Experience
+Pool）</strong>。每当模型成功完成一个任务，整个交互过程（从用户问题到最终答案，包括中间所有的工具调用和返回结果），即一个<strong>“轨迹”（Trajectory）</strong>，就会被储存到这个池子里。如何判断成功？论文引入了一个<strong>“LLM作为裁判”（LLM-as-a-judge）</strong>的机制，让另一个LLM来评估任务是否成功完成。这个设计使得SEER能够在没有人工标注的情况下，持续地、自动地从自己的成功经验中学习，实现自我进化。这一点在论文的<strong>图2（Figure
+2）</strong>
+中得到了有力证明，实验显示随着处理的任务批次增多，SEER的准确率呈现出明显的上升趋势，从最初的37.7%攀升至最终的54.9%，直观地展示了其自学习、自提升的能力。</p>
+<p><strong>精准的、多维度经验检索（Stepwise Experience Recall）</strong>
+则是SEER的“大脑”，它决定了如何从经验池中找到对当前任务最有帮助的“导师”。传统方法可能只会问：“哪个过去的‘问题’和现在的问题最像？”
+而SEER则会问：“哪个过去的‘解决过程’对现在的任务最有启发？”
+为此，它设计了一个精妙的多维度评分系统，从三个方面来评估候选经验的价值：</p>
+<ol type="1">
+<li><strong>轨迹相似度 (Trajectory Similarity, <span
+class="math inline">\(s_1\)</span>)</strong>:
+这不仅仅是比较初始问题的相似性，而是将整个交互历史进行<strong>向量嵌入（Embedding）</strong>，比较整个问题解决流程的相似性。这使得模型能够找到结构上相似的解决范式。</li>
+<li><strong>工具链覆盖度 (ToolChain Coverage, <span
+class="math inline">\(s_2\)</span>)</strong>:
+这个指标衡量的是，候选经验中使用的工具集合，在多大程度上覆盖了当前任务已经用到的工具。这非常关键，因为它帮助模型找到那些在“如何组合使用工具”方面有指导意义的经验，尤其是在复杂的、需要多个工具协作的任务中。</li>
+<li><strong>意图匹配度 (Intent Match, <span
+class="math inline">\(s_3\)</span>)</strong>:
+这个指标确保检索到的经验在用户的核心目标上是一致的。</li>
+</ol>
+<p>最终，SEER通过一个加权公式 <code>Score = λ1*s1 + λ2*s2 + λ3*s3</code>
+来计算每个候选经验的得分，并选取分数最高的几个作为上下文示例。这种细粒度的检索机制，远比单一的语义检索要强大。论文的<strong>消融实验（Ablation
+Studies）</strong> 也验证了这一点。<strong>图3（Figure 3）</strong>
+的数据显示，如果去掉工具链覆盖度（w/o
+s2），模型在困难问题上的性能下降最为显著；而去掉意图匹配（w/o
+s3），在简单问题上性能下降更明显。这清晰地表明，SEER的每个检索维度都有其不可或缺的价值，共同构成了其强大的性能。</p>
+<p>在实验验证方面，SEER在两个权威的工具使用评测基准
+<strong>ToolQA</strong> 和 <strong>T-bench</strong>
+上都取得了SOTA（State-of-the-art）级别的表现。在ToolQA上，相较于之前的最强基线
+<strong>ExpeL</strong>，SEER在简单任务上平均准确率提升了<strong>6.1%</strong>，在困难任务上提升了<strong>4.7%</strong>。在更具挑战性的多轮对话场景
+T-bench 上，SEER更是将 <strong>Qwen2.5-72B</strong> 模型的平均成功率从
+<strong>28.46%</strong> 大幅提升至
+<strong>51.84%</strong>，几乎追平了强大的闭源模型
+<strong>GPT-4o（54.76%）</strong>。这些数据充分展示了SEER框架的有效性和巨大潜力。</p>
+<p>总而言之，这篇论文不仅仅是提出了一种新的算法，更是为构建能够自主学习和进化的AI智能代理提供了一个切实可行的工程范式。它通过“事后复盘、积累成功经验”和“遇到难题、精准求教”这两个核心机制，让LLM从一个被动执行指令的工具，向一个能够主动思考、自主成长的智能体迈进。</p>
+<hr />
+<p>接下来，我将按照您提出的六个问题，进行更详细的逐一解读。</p>
+<h3
+id="论文的研究目标是什么-想要解决什么实际问题这个问题对于行业发展有什么重要意义">1.
+论文的研究目标是什么？
+想要解决什么实际问题？这个问题对于行业发展有什么重要意义?</h3>
+<ul>
+<li><strong>研究目标</strong>:
+论文的核心研究目标是<strong>提升大型语言模型在执行多步骤、复杂函数调用任务时的性能和自主学习能力</strong>。</li>
+<li><strong>解决的实际问题</strong>:
+<ul>
+<li><strong>静态示例的局限性</strong>:
+当前LLM在进行工具调用时，严重依赖于人工编写和筛选的少量示例（Few-shot）。这些示例是静态的，无法覆盖所有场景，导致模型在遇到新问题或需要复杂的工具组合时表现不佳。</li>
+<li><strong>低效的经验利用</strong>:
+即使模型过去成功解决过类似问题，它也没有机制能自动“记住”并“复用”这些宝贵的成功经验。每一次任务都像是从零开始，缺乏成长性。</li>
+<li><strong>粗糙的检索逻辑</strong>:
+现有的检索方法大多只关注问题表面的文本相似性，而忽略了解决问题的核心——<strong>工具调用逻辑和流程</strong>的相似性。</li>
+</ul></li>
+<li><strong>行业意义</strong>:
+<ul>
+<li><strong>推动AI Agent的自主进化</strong>:
+这是迈向真正自主AI智能代理（Autonomous
+Agents）的关键一步。能够自我学习和改进的Agent，可以大大减少人工维护成本，并能适应不断变化的环境和需求，例如自动适应API的更新或新的软件功能。</li>
+<li><strong>加速复杂任务自动化</strong>:
+在金融分析、科学研究、软件开发等领域，许多任务需要调用多个API或软件工具，并根据中间结果动态规划下一步。SEER这样的技术能够让LLM更好地胜任这些“高级助理”的角色，极大地提升生产力。</li>
+<li><strong>降低Agent开发门槛</strong>:
+通过自引导学习机制，开发者不再需要为每一种可能遇到的情况手动设计和优化提示（Prompt
+Engineering），使得构建强大、鲁棒的AI Agent变得更加容易和高效。</li>
+</ul></li>
+</ul>
+<h3
+id="论文提出了哪些新的思路方法或模型跟之前的方法相比有什么特点和优势">2.
+论文提出了哪些新的思路、方法或模型？跟之前的方法相比有什么特点和优势？</h3>
+<p>论文提出了 <strong>SEER (Stepwise ExperiencE Recall)</strong>
+框架，其核心创新在于<strong>动态经验积累</strong>和<strong>多维度细粒度检索</strong>。</p>
+<ul>
+<li><strong>新思路与方法</strong>:
+<ol type="1">
+<li><strong>在线经验积累 (Online Experience Accumulation)</strong>:
+这是SEER的“自学习”模块。 &gt; we propose an online updating experience
+pool that continuously supports in-context learning, enhancing inference
+quality and real-world adaptability.
+它通过一个“LLM裁判”来自动评估任务成功与否，并将成功的交互轨迹（包括用户的每一步输入、模型的每一步思考和工具调用）存入一个动态更新的经验池。</li>
+<li><strong>多维度检索评分 (Multi-dimensional Scoring
+Strategy)</strong>:
+这是SEER的“智能检索”模块，它摒弃了单一的检索标准，综合考量三个维度：
+<ul>
+<li><strong>轨迹相似度 (<span
+class="math inline">\(s_1\)</span>)</strong>:
+比较整个交互历史的嵌入向量，而非仅仅是初始查询。这能捕捉到问题解决的“模式”相似性。</li>
+<li><strong>工具链覆盖度 (<span
+class="math inline">\(s_2\)</span>)</strong>:
+计算候选经验中的工具与当前任务所需工具的重合度。这对于规划复杂的工具序列至关重要。</li>
+<li><strong>意图匹配度 (<span
+class="math inline">\(s_3\)</span>)</strong>:
+判断用户在两个任务中的根本目的是否一致。</li>
+</ul></li>
+</ol></li>
+<li><strong>与之前方法的比较、特点和优势</strong>:
+<ul>
+<li><strong>相比静态ICL (In-context Learning)</strong>:
+<ul>
+<li><strong>特点</strong>: 动态 vs
+静态。SEER的经验池是“活”的，能不断吸收新知识。</li>
+<li><strong>优势</strong>:
+<strong>适应性强、无需人工维护</strong>。能够自动学习处理新任务，并随着使用时间的增长而变得越来越“聪明”。</li>
+</ul></li>
+<li><strong>相比传统检索方法 (如ART)</strong>:
+<ul>
+<li><strong>特点</strong>: 细粒度 vs
+粗粒度。ART等方法主要依赖任务或推理步骤的语义相似性，是“粗粒度”的。SEER的检索综合了轨迹、工具链和意图，是“细粒度”的。</li>
+<li><strong>优势</strong>:
+<strong>检索更精准</strong>。尤其在困难任务中，工具链的相似性往往比问题的文本相似性更重要。SEER能够找到在“如何做”层面更有启发性的案例，而不仅仅是“做什么”相似的案例。</li>
+</ul></li>
+<li><strong>相比强化学习方法 (如StepTool, SWIRL)</strong>:
+<ul>
+<li><strong>特点</strong>: 无需训练 vs
+需要训练。强化学习方法通常需要训练一个奖励模型或调整LLM本身的参数。</li>
+<li><strong>优势</strong>:
+<strong>实现简单、效率高</strong>。SEER在推理阶段（Inference
+time）工作，不需要额外的模型训练，可以更轻量级地集成到现有系统中。</li>
+</ul></li>
+</ul></li>
+</ul>
+<h3
+id="论文通过什么实验来验证所提出方法的有效性实验是如何设计的实验数据和结果如何">3.
+论文通过什么实验来验证所提出方法的有效性？实验是如何设计的？实验数据和结果如何？</h3>
+<p>论文通过一系列全面的实验来验证SEER的有效性，实验设计严谨，层层递进。</p>
+<ul>
+<li><strong>实验设计</strong>:
+<ol type="1">
+<li><strong>基准测试 (Benchmark Evaluation)</strong>:
+在两个公认的、有挑战性的数据集 <strong>ToolQA</strong> 和
+<strong>T-bench</strong> 上，将SEER与多种基线方法（如ReAct, ART,
+ExpeL等）进行性能对比。ToolQA侧重于单轮交互中的多步工具使用，T-bench则模拟真实世界的多轮、动态交互。</li>
+<li><strong>自改进能力验证 (Self-Improvement Experiment)</strong>:
+为了证明SEER的在线学习能力，论文设计了一个增量学习实验。将ToolQA的1530个问题分成10个批次，每完成一个批次的评估后，将所有成功的案例加入到经验池中，用于下一批次的检索。</li>
+<li><strong>消融研究 (Ablation Studies)</strong>:
+为了探究SEER多维度检索中每个部分的重要性，研究者分别移除了工具链覆盖度（<span
+class="math inline">\(s_2\)</span>）和意图匹配（<span
+class="math inline">\(s_3\)</span>），并与完整的SEER进行对比。同时，也对比了仅基于初始查询的检索（Query-based）和基于完整轨迹的检索。</li>
+<li><strong>超参数敏感性分析 (Hyperparameter Sensitivity)</strong>:
+探究了检索示例数量（Top-k）对模型性能的影响。</li>
+</ol></li>
+<li><strong>实验数据和结果</strong>:
+<ul>
+<li><strong>基准测试结果</strong>:
+<ul>
+<li>在 <strong>ToolQA</strong> 上 (Table
+3)，SEER在简单和困难任务上的平均准确率分别达到 <strong>67.9%</strong> 和
+<strong>31.1%</strong>，全面超越了所有基线方法。最强的基线ExpeL的成绩为61.8%和26.4%。</li>
+<li>在 <strong>T-bench</strong> 上 (Table 4)，SEER (72B)
+的平均成功率达到了 <strong>51.84%</strong>，相比基础的Qwen2.5-72B模型
+(28.46%) 实现了翻倍级的性能提升。</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">模型 / 方法</th>
+<th style="text-align: center;">ToolQA (Easy)</th>
+<th style="text-align: center;">ToolQA (Hard)</th>
+<th style="text-align: center;">T-bench (Avg)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">ExpeL (Baseline)</td>
+<td style="text-align: center;">61.8%</td>
+<td style="text-align: center;">26.4%</td>
+<td style="text-align: center;">-</td>
+</tr>
+<tr>
+<td style="text-align: left;">Qwen2.5-72B (Base)</td>
+<td style="text-align: center;">-</td>
+<td style="text-align: center;">-</td>
+<td style="text-align: center;">28.46%</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>SEER (Ours)</strong></td>
+<td style="text-align: center;"><strong>67.9%</strong></td>
+<td style="text-align: center;"><strong>31.1%</strong></td>
+<td style="text-align: center;"><strong>51.84%</strong></td>
+</tr>
+</tbody>
+</table></li>
+<li><strong>自改进能力结果 (Figure 2)</strong>:
+模型的准确率随着处理批次的增加而稳定提升，从第1批的
+<strong>37.7%</strong> 上升到第10批的
+<strong>54.9%</strong>，清晰地展示了其“越用越强”的特性。</li>
+<li><strong>消融研究结果 (Figure 3)</strong>:
+<ul>
+<li>移除工具链覆盖度（<span
+class="math inline">\(s_2\)</span>）后，模型在困难任务上的性能下降最大。</li>
+<li>移除意图匹配（<span
+class="math inline">\(s_3\)</span>）后，模型在简单任务上的性能下降最大。</li>
+<li>这证明了多维度检索的必要性和各维度的独特贡献。</li>
+</ul></li>
+<li><strong>超参数分析结果 (Table 5)</strong>: 实验发现，检索
+<strong>k=4</strong>
+个示例时性能达到最佳。这表明过少或过多的示例都可能对模型产生负面影响，需要一个平衡。</li>
+</ul></li>
+</ul>
+<h3
+id="结合大模型领域的当前学术理解未来在该研究方向上还有哪些值得进一步探索的问题和挑战">4.
+结合大模型领域的当前学术理解，未来在该研究方向上还有哪些值得进一步探索的问题和挑战？</h3>
+<p>该研究方向前景广阔，但仍面临诸多挑战和机遇。</p>
+<ul>
+<li><strong>值得探索的问题和挑战</strong>:
+<ol type="1">
+<li><strong>从失败中学习</strong>:
+SEER目前只从成功的经验中学习。然而，失败的经验同样宝贵，能告诉模型“什么不能做”。如何设计一个能从失败轨迹中总结教训、进行归因分析并指导未来决策的机制，是一个极具价值的研究方向。</li>
+<li><strong>经验池的管理与泛化</strong>:
+随着经验池不断增大，检索效率会下降，且可能积累大量冗余或低质量的经验。未来的研究可以探索：
+<ul>
+<li><strong>经验剪枝（Pruning）</strong>:
+自动移除陈旧或价值不高的经验。</li>
+<li><strong>经验蒸馏/总结（Distillation/Summarization）</strong>:
+将多个相似的成功经验融合成一个更具泛化性的“元经验”或“策略”。</li>
+</ul></li>
+<li><strong>动态权重调整</strong>:
+SEER中的检索权重（λ）是固定的。然而，不同类型的任务可能对轨迹、工具链、意图的侧重不同。能否让模型根据当前任务的特点，<strong>动态地调整这三个维度的权重</strong>，实现更智能的检索？</li>
+<li><strong>对“LLM裁判”的鲁棒性</strong>:
+整个自学习循环的基石是“LLM裁判”的准确性。但LLM本身存在偏见和幻觉，可能做出错误判断。如何提升裁判的准确性和鲁棒性，甚至引入多裁判“会审”机制，是一个重要的工程和研究挑战。</li>
+</ol></li>
+<li><strong>可能催生的新技术和投资机会</strong>:
+<ul>
+<li><strong>Agent操作系统/平台 (Agent OS)</strong>:
+围绕着动态经验管理、自主学习、失败归因等核心技术，可能会诞生专门为AI
+Agent服务的平台层，即Agent的“操作系统”，统一管理Agent的记忆、学习和进化过程。</li>
+<li><strong>自我进化的垂直领域Agent</strong>:
+在金融、医疗、法律等专业领域，可以利用SEER的思想，构建能够不断学习领域知识和操作流程的专用Agent，其商业价值巨大。</li>
+<li><strong>新一代RAG技术</strong>:
+SEER本质上是一种针对“行为”的<strong>检索增强生成（RAG）</strong>。这个思路可以扩展到更多领域，比如代码生成、UI设计等，催生出检索“组件”、“模式”或“流程”的新一代RAG技术。</li>
+</ul></li>
+</ul>
+<h3 id="退一步从批判的视角看这篇论文还存在哪些不足及缺失">5.
+退一步，从批判的视角看，这篇论文还存在哪些不足及缺失？</h3>
+<p>尽管这篇论文非常出色，但仍有一些值得商榷和进一步探讨的地方。</p>
+<ul>
+<li><strong>存在的不足及缺失</strong>:
+<ol type="1">
+<li><strong>冷启动问题 (Cold-Start Problem)</strong>:
+SEER的自学习机制需要有成功的“种子”经验。在系统初期，经验池为空或只有少量示例时，其性能可能很差（如图2所示，初始准确率不高）。论文没有深入探讨如何高效地度过这个冷启动阶段，或者如何构建高质量的初始经验集。</li>
+<li><strong>对LLM基础能力的依赖</strong>:
+整个框架的上限受限于底层LLM的推理能力和作为“裁判”的评估能力。如果LLM本身能力不足，就无法完成复杂的成功轨迹，经验池的质量也就无从谈起。</li>
+<li><strong>检索效率问题</strong>:
+随着经验池扩展到数万甚至数百万条，每次都进行全局的向量相似度计算和多维度评分，可能会成为性能瓶颈。论文中将经验池大小限制在1000，回避了在大规模场景下的效率问题。</li>
+<li><strong>权重设置的简单化</strong>:
+论文将三个检索维度的权重简单地设为1/3，这是一种启发式设置。缺乏理论或实验依据来证明这是最优解，也忽略了不同任务对权重需求的差异性。</li>
+</ol></li>
+<li><strong>需要进一步验证和存疑的</strong>:
+<ol type="1">
+<li><strong>LLM裁判的真实准确率</strong>:
+论文中提到了使用LLM作为裁判，但没有提供该裁判自身的评估准确率数据。如果裁判的“误判率”较高，可能会导致经验池被“污染”，反而降低模型性能。</li>
+<li><strong>在更长、更复杂任务链上的表现</strong>:
+T-bench虽然是多轮对话，但每个任务的步数仍然有限。在需要几十甚至上百步工具调用的超长任务链上，SEER的轨迹相似度等机制是否依然有效，有待验证。</li>
+<li><strong>对工具变化的适应性</strong>:
+论文主要关注任务的变化，但现实世界中工具（API）本身也会变化（如参数增减、功能更新）。SEER能否有效处理这种情况，也是一个疑问。</li>
+</ol></li>
+</ul>
+<h3
+id="我希望从这篇论文中找一些拿来即用的创新想法我应该从这篇论文中重点学什么">6.
+我希望从这篇论文中找一些拿来即用的创新想法，我应该从这篇论文中重点学什么？</h3>
+<p>这篇论文充满了可以借鉴的创新思想，尤其对于构建智能系统和优化检索流程非常有启发。</p>
+<ul>
+<li><strong>重点学习的创新点</strong>:
+<ol type="1">
+<li><strong>核心思想：为“过程”而不是“问题”建立索引</strong>:
+传统检索系统关注的是“信息”的匹配。SEER的核心启发是，我们可以为<strong>“解决方案”或“工作流程”</strong>
+建立索引和检索。在你的工作中，思考一下是否有一些重复性的“解决问题的模式”，是否可以把这些模式（轨迹）记录下来，并在遇到新问题时，去检索最相似的“模式”，而不仅仅是相似的“问题描述”。</li>
+<li><strong>多维度、可解释的检索逻辑</strong>:
+不要满足于单一的相似度得分。像SEER一样，<strong>将“相关性”分解为多个可解释的维度</strong>（如流程结构、使用工具、最终目标）。这不仅能提升检索精度，也让你的系统决策过程更透明、更易于调试和优化。</li>
+<li><strong>构建动态反馈闭环 (Feedback Loop)</strong>:
+这是从“死”系统迈向“活”系统的关键。在你的项目中，思考如何建立一个机制，自动识别出“好的”结果，并将其反馈到系统的知识库或示例库中。哪怕这个反馈机制很简单，长期的累积效应也会带来巨大的性能提升。</li>
+</ol></li>
+<li><strong>需要补充的背景知识</strong>:
+<ol type="1">
+<li><strong>上下文学习 (In-Context Learning, ICL)</strong>:
+深入理解LLM是如何通过Prompt中的示例来学习和模仿的，这是所有这类方法的基础。</li>
+<li><strong>检索增强生成 (Retrieval-Augmented Generation, RAG)</strong>:
+SEER可以看作是RAG在Agent行为生成领域的一种高级应用。了解RAG的原理，有助于你更好地理解SEER的检索机制。</li>
+<li><strong>大型语言模型作为智能代理 (LLM as Agents)</strong>:
+了解当前主流的Agent框架，如ReAct (Reason +
+Act)、Chameleon等，可以帮助你更好地理解SEER在整个Agent技术演进图谱中的位置和创新性。</li>
+<li><strong>向量嵌入与相似度计算 (Vector Embeddings &amp;
+Similarity)</strong>:
+理解文本或复杂数据结构（如轨迹）是如何被转换成向量，以及如何通过余弦相似度等方法来衡量它们的相似性，这是实现智能检索的技术基础。</li>
+</ol></li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-06-03&nbsp;<a class="git-hash" href="https://github.com/vllbc/vllbc.github.io/commit/99cfa25263c73050d0bc668a65a69f594a279a0c" target="_blank" title="commit by vllbc(vllbc66@gmail.com) 99cfa25263c73050d0bc668a65a69f594a279a0c: reorganize vault to 8-category structure">
+                                    <i class="fas fa-hashtag fa-fw" aria-hidden="true"></i>99cfa25</a></span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" data-title="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall" data-hashtags="Reading,Agent,experience,memory"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" data-title="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" data-title="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/" data-title="Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/agent/">Agent</a>,&nbsp;<a href="/tags/experience/">Experience</a>,&nbsp;<a href="/tags/memory/">Memory</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/think-in-blocksadaptive-reasoning-from-direct-response-to-deep-reasoning/" class="prev" rel="prev" title="Think in Blocks：Adaptive Reasoning from Direct Response to Deep Reasoning"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>Think in Blocks：Adaptive Reasoning from Direct Response to Deep Reasoning</a>
+            <a href="/coarse-to-fine-grounded-memory-for-llm-agent-planning/" class="next" rel="next" title="Coarse-to-Fine Grounded Memory for LLM Agent Planning">Coarse-to-Fine Grounded Memory for LLM Agent Planning<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

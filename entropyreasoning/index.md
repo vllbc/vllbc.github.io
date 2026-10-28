@@ -2,26 +2,38 @@
 
 ## 熵坍塌
 
-### [UloRL：An Ultra-Long Output Reinforcement Learning Approach for Advancing Large Language Models’ Reasoning Abilities](../../reading/Reasoning/UloRL：An%20Ultra-Long%20Output%20Reinforcement%20Learning%20Approach%20for%20Advancing%20Large%20Language%20Models’%20Reasoning%20Abilities.md)
+### [UloRL：An Ultra-Long Output Reinforcement Learning Approach for Advancing Large Language Models’ Reasoning Abilities](../../Research/Papers/Reasoning/UloRL：An Ultra-Long Output Reinforcement Learning Approach for Advancing Large Language Models’ Reasoning Abilities.md)
 
-UloRL的核心创新 **动态掩码熟练掌握正向词元（Dynamic Masking of well-Mastered Positive Tokens, DMMPTs）**。论文作者敏锐地指出，熵坍塌的根源并非“训练正样本”，而是“过度训练已经熟练掌握的正向词元（MPTs）”。MPTs指的是那些在正确答案中，且模型已经能以极高概率（如>99%）预测出来的词元。DMMPTs为此设计了一个“熵值恒温器”：
-1.  设定一个理想的“目标熵值”。
-2.  在训练时，如果模型的当前熵低于这个目标值，说明模型开始变得“僵化”了。此时，系统会自动“屏蔽”（mask）掉那些MPTs，不再对它们进行训练，迫使模型关注那些还未掌握好的部分。
-3.  如果模型熵值高于或等于目标值，则正常进行训练。
+### [ProRL：Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models](../../Research/Papers/Reasoning/ProRL：Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models.md)
 
-### [ProRL：Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models](../../reading/Reasoning/ProRL：Prolonged%20Reinforcement%20Learning%20Expands%20Reasoning%20Boundaries%20in%20Large%20Language%20Models.md)
+### [BEYOND PASS@1：SELF-PLAY WITH VARIATIONAL PROBLEM SYNTHESIS SUSTAINS RLVR](../../Research/Papers/Reasoning/BEYOND PASS@1：SELF-PLAY WITH VARIATIONAL PROBLEM SYNTHESIS SUSTAINS RLVR.md)
 
-
+### Skywork Open Reasoner 1 Technical Report
 ## 利用熵
 
-### [First Return, Entropy-Eliciting Explore](../../reading/Reasoning/First%20Return,%20Entropy-Eliciting%20Explore.md)
+### [Beyond the 80 20 Rule：High-Entropy Minority Tokens Drive Effective Reinforcement Learning for LLM Reasoning](../../Research/Papers/Reasoning/Beyond the 80 20 Rule：High-Entropy Minority Tokens Drive Effective Reinforcement Learning for LLM Reasoning.md)
 
-### [AGENTIC REINFORCED POLICY OPTIMIZATION](../../reading/Agent/AGENTIC%20REINFORCED%20POLICY%20OPTIMIZATION.md)
+### [First Return, Entropy-Eliciting Explore](../../Research/Papers/Reasoning/First Return, Entropy-Eliciting Explore.md)
 
+### [AGENTIC REINFORCED POLICY OPTIMIZATION](../../Research/Papers/Agent/AGENTIC REINFORCED POLICY OPTIMIZATION.md)
 
+### [CURE：Critical-Token-Guided Re-concatenation for Entropy-collapse Prevention](../../Research/Papers/Reasoning/CURE：Critical-Token-Guided Re-concatenation for Entropy-collapse Prevention.md)
 
+### [ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM](../../Research/Papers/Reasoning/ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM.md)
 
+### [GTPO and GRPO-S：Token and Sequence-Level Reward Shaping with Policy Entropy](../../Research/Papers/Reasoning/GTPO and GRPO-S：Token and Sequence-Level Reward Shaping with Policy Entropy.md)
 
+### [EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity](../../Research/Papers/Reasoning/EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity.md)
+### [GTPO：Trajectory-Based Policy Optimization in Large Language Models](../../Research/Papers/Reasoning/GTPO：Trajectory-Based Policy Optimization in Large Language Models.md)
+
+### [SSRL：SELF-SEARCH REINFORCEMENT LEARNING](../../Research/Papers/Agent/SSRL：SELF-SEARCH REINFORCEMENT LEARNING.md)
+利用熵来判断是依赖自己的内部知识还是依赖于外部工具。
+
+## 如何缓解熵坍塌？
+1. clip-higher
+2. on-policy
+3. entropy loss
+4. 
 ## 参考
 
 [小作坊的强化之路](https://zhuanlan.zhihu.com/p/1925691663654850602)

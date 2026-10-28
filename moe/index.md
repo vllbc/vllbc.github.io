@@ -1,6 +1,6 @@
 # MoE
 
-MoE 的思想类似于集成学习中的 [Ensemble Learning](../../Machine%20Learning/集成学习/Ensemble%20Learning.md)。MoE 作用于原本 transformer 模型的 MLP 层，即：
+MoE 的思想类似于集成学习中的 [Ensemble Learning](../../Foundation/机器学习/集成学习/Ensemble Learning.md)。MoE 作用于原本 transformer 模型的 MLP 层，即：
 
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250724160736.png)
 图片来自于Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity 论文。

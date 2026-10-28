@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training">
+  <meta property="og:description" content="MOPD：Multi-Teacher On-Policy Distillation [!info] TL;DR 核心问题：经领域 RL 训练后的 LLM 在单领域很强，但如何把多个领域（Math / Code / IF / SWE）专家融合成一个统一模型？ 核心方法：Multi-Teacher On-Policy Distillation —— 三阶段流水线（General SFT → 各领域 RL 并行得 teacher → 多 teacher 蒸馏）。学生自己 rollout（on-policy），每个 prompt 路由到对应 domain teacher，teacher prefill 给 per-token log-prob，用 reverse KL 让学生模仿。 关键结果：在 Qwen3-30B-A3B 上 normalized score 0.937（vs RL Teacher 1.000、Mix-RL 0.882、Cascade RL 0.775、Param-Merge 0.328–0.857）。跨 domain 极差仅 0.044，最均匀。已在 MiMo-V2-Flash (309B) 生产训练中部署。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-07-29T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-07-29T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="LLM-RL">
+    <meta property="article:tag" content="Distillation">
+    <meta property="article:tag" content="Multi-Teacher">
+    <meta property="article:tag" content="Post-Training">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training">
+  <meta name="twitter:description" content="MOPD：Multi-Teacher On-Policy Distillation [!info] TL;DR 核心问题：经领域 RL 训练后的 LLM 在单领域很强，但如何把多个领域（Math / Code / IF / SWE）专家融合成一个统一模型？ 核心方法：Multi-Teacher On-Policy Distillation —— 三阶段流水线（General SFT → 各领域 RL 并行得 teacher → 多 teacher 蒸馏）。学生自己 rollout（on-policy），每个 prompt 路由到对应 domain teacher，teacher prefill 给 per-token log-prob，用 reverse KL 让学生模仿。 关键结果：在 Qwen3-30B-A3B 上 normalized score 0.937（vs RL Teacher 1.000、Mix-RL 0.882、Cascade RL 0.775、Param-Merge 0.328–0.857）。跨 domain 极差仅 0.044，最均匀。已在 MiMo-V2-Flash (309B) 生产训练中部署。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" /><link rel="prev" href="https://blog.vllbc.top/%E4%BB%8Egpt-2%E5%88%B0kimi-k3/" /><link rel="next" href="https://blog.vllbc.top/distributed-training/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, LLM-RL, distillation, multi-teacher, post-training","wordcount":  2783 ,
+        "url": "https:\/\/blog.vllbc.top\/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training\/","datePublished": "2026-07-29T00:00:00+00:00","dateModified": "2026-07-29T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/llm-rl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>LLM-RL</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2026-07-29">2026-07-29</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 2783 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 6 分钟&nbsp;<span id="/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" class="leancloud_visitors" data-flag-title="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><h1 id="mopdmulti-teacher-on-policy-distillation">MOPD：Multi-Teacher
+On-Policy Distillation</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心问题</strong>：经领域 RL 训练后的 LLM
+在单领域很强，但如何把多个领域（Math / Code / IF /
+SWE）专家融合成一个统一模型？ <strong>核心方法</strong>：Multi-Teacher
+On-Policy Distillation —— 三阶段流水线（General SFT → 各领域 RL 并行得
+teacher → 多 teacher 蒸馏）。学生<strong>自己
+rollout</strong>（on-policy），每个 prompt <strong>路由到对应 domain
+teacher</strong>，teacher prefill 给 per-token log-prob，用
+<strong>reverse KL</strong> 让学生模仿。 <strong>关键结果</strong>：在
+Qwen3-30B-A3B 上 normalized score <strong>0.937</strong>（vs RL Teacher
+1.000、Mix-RL 0.882、Cascade RL 0.775、Param-Merge 0.328–0.857）。跨
+domain 极差仅 0.044，最均匀。已在 <strong>MiMo-V2-Flash (309B)</strong>
+生产训练中部署。</p>
+</blockquote>
+<h2 id="阅读地图">阅读地图</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" checked="" />§1
+问题与动机</label></li>
+<li><label><input type="checkbox" checked="" />§2
+四种已有范式与不足</label></li>
+<li><label><input type="checkbox" checked="" />§3 MOPD
+三阶段流水线</label></li>
+<li><label><input type="checkbox" checked="" />§4 反向 KL
+的两种实现</label></li>
+<li><label><input type="checkbox" checked="" />§5
+关键实验结果</label></li>
+<li><label><input type="checkbox" checked="" />§6 关键发现：same-origin
+/ PG vs Top-K / 多轮迭代</label></li>
+</ul>
+<hr />
+<h2 id="问题为什么要融合多领域专家">§1
+问题：为什么要融合多领域专家？</h2>
+<p>经领域 RL 训练后的 LLM
+在单领域很强（math、code、instruction-following、SWE 各自
+SOTA），但<strong>如何把多个领域的能力合并到一个模型里</strong>，仍然是开放的工业难题。论文一针见血地指出：</p>
+<blockquote>
+<p>[!quote] 论文核心论点 Existing paradigms trade off learning
+efficiency, peak capability, and stability. &gt;
+现有方法在<strong>学习效率 / 峰值能力 /
+训练稳定性</strong>三者间做取舍，没有兼顾的方案。</p>
+</blockquote>
+<p>背后的具体矛盾：领域 RL 让模型在某个 domain 走得很远，但<strong>跨
+domain 的优化信号会互相干扰</strong>——简单的”把数据混起来继续 RL”会引发
+see-saw effect，某个能力涨了、另一个能力就掉。</p>
+<h2 id="四种已有范式为什么不够">§2 四种已有范式为什么不够？</h2>
+<table>
+<colgroup>
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 42%" />
+</colgroup>
+<thead>
+<tr>
+<th>范式</th>
+<th>做法</th>
+<th>主要缺点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Mix-RL</strong></td>
+<td>把所有 domain 的 prompt 混合到一个数据集联合 RL</td>
+<td>跨 domain 信号互相干扰，<strong>see-saw
+effect</strong>（顾此失彼）</td>
+</tr>
+<tr>
+<td><strong>Cascade RL</strong></td>
+<td>依次训练各 domain（一个接一个）</td>
+<td>早期能力<strong>灾难性遗忘</strong>，稳定性风险被放大</td>
+</tr>
+<tr>
+<td><strong>Off-Policy SFT</strong></td>
+<td>在 teacher 的 rollout 上做 SFT</td>
+<td><strong>exposure bias</strong>——学生分布与 teacher
+失配，推理时学生走出 teacher 没覆盖的路径就翻车</td>
+</tr>
+<tr>
+<td><strong>Param-Merge</strong></td>
+<td>权重平均 / Task Arithmetic</td>
+<td>训练不稳定，<strong>通常达不到任一 teacher 的水平</strong></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>[!warning] 一个具体的失败数字 在 Qwen3-30B-A3B
+上，<strong>Param-Merge（简单平均）的 normalized score 仅
+0.328</strong>，远低于任一 teacher（= 1.0）。即使改进为 Task
+Arithmetic，也只能到 0.857，仍有 0.143 的 headroom 吃不到。</p>
+</blockquote>
+<p>四种方案覆盖了”数据视角 / 时序视角 / 监督视角 /
+参数视角”，但都没做到让一个模型在多 domain 上<strong>同时逼近各自的
+teacher</strong>。</p>
+<h2 id="mopd-流水线三阶段">§3 MOPD 流水线（三阶段）</h2>
+<pre class="mermaid"><code>flowchart LR
+    A[&quot;Stage 1&lt;br/&gt;General SFT&lt;br/&gt;通用 SFT 训练&quot;] --&gt; B[&quot;Stage 2&lt;br/&gt;Per-domain RL&lt;br/&gt;各领域并行 RL&quot;]
+    B --&gt; T1[&quot;Math Teacher&quot;]
+    B --&gt; T2[&quot;Code Teacher&quot;]
+    B --&gt; T3[&quot;IF Teacher&quot;]
+    B --&gt; T4[&quot;SWE Teacher&quot;]
+    T1 --&gt; C[&quot;Stage 3&lt;br/&gt;MOPD Distillation&lt;br/&gt;多 teacher 蒸馏&quot;]
+    T2 --&gt; C
+    T3 --&gt; C
+    T4 --&gt; C
+    C --&gt; D[&quot;统一 Student&lt;br/&gt;多能力模型&quot;]</code></pre>
+<p><strong>关键设计</strong>： - <strong>Stage 1 通用
+SFT</strong>：得到一个共享起点，让后续各 domain RL 不至于完全分叉 -
+<strong>Stage 2 各 domain RL 并行</strong>：recipe 解耦、风险隔离（一个
+domain 训崩不影响其他） - <strong>Stage 3 on-policy 蒸馏</strong>： -
+<strong>学生自己 rollout</strong>（不是用 teacher 的 rollout）→ 没有
+exposure bias - 每个 prompt <strong>路由到对应 domain teacher</strong> →
+teacher 用 prefill 给 per-token log-prob - 训练目标 = <strong>reverse
+KL</strong>（学生分布向 teacher 看齐）</p>
+<blockquote>
+<p>[!note] 为什么 routing + on-policy 重要 routing
+保证<strong>信号归属明确</strong>（math prompt 的 loss 只来自 math
+teacher，不被 code teacher 干扰）；on-policy
+保证<strong>分布匹配</strong>（学生在训练时探索的路径就是推理时会走的路径）。</p>
+</blockquote>
+<h2 id="反向-kl-的两种实现">§4 反向 KL 的两种实现</h2>
+<h3 id="通用-reverse-kl-形式">4.1 通用 reverse-KL 形式</h3>
+<p><span
+class="math display">\[\mathcal{L}_{\mathrm{rev\text{-}KL}}=\mathbb{E}_{x,y\sim\pi_{\theta}}\Big[\tfrac{1}{|y|}\sum_{t}\sum_{v}\pi_{\theta}(v)\log\tfrac{\pi_{\theta}(v)}{\pi_{\phi_{d}}(v)}\Big]\]</span></p>
+<p>反向 KL = <strong>teacher 在 student 分布下的期望</strong>。Student
+选择哪些 token，teacher 就评估那些 token 的概率比。这与 forward
+KL（teacher 在 teacher 分布下的期望，mode-covering）相反——reverse KL 是
+<strong>mode-seeking</strong>，鼓励 student “<strong>敢于走 teacher
+走过的路径</strong>”，但不支持 student 探索 teacher 之外的路。</p>
+<h3 id="两种等价实现">4.2 两种等价实现</h3>
+<blockquote>
+<p>[!example]+ 两种 loss 形式（折叠查看完整推导）</p>
+<p><strong>Policy-Gradient 形式</strong> (Eq. 4) —— 需要完整 teacher
+分布 <span
+class="math display">\[\hat{A}^{\mathrm{clip}}_{\mathrm{MOPD},t}=\mathrm{clip}\big(\log\pi_{\phi_{d}}(y_t)-\log\pi_{\theta}(y_t),\,
+-A_{\max},\, +A_{\max}\big)\]</span> <span
+class="math display">\[\mathcal{L}^{\mathrm{PG}}_{\mathrm{MOPD}}(\theta)=-\mathbb{E}_{x,y}\Big[\tfrac{1}{|y|}\sum_{t}\hat{A}^{\mathrm{clip}}_{\mathrm{MOPD},t}\log\pi_{\theta}(y_t)\Big]\]</span></p>
+<p><strong>Top-K 形式</strong> (Eq. 5) —— 只用 teacher 的 top-k token
+<span
+class="math display">\[\mathcal{L}^{\mathrm{TopK}}_{\mathrm{MOPD}}(\theta)=\mathbb{E}_{x,y}\Big[\tfrac{1}{|y|}\sum_{t}\sum_{v\in\mathcal{T}^{d}_{t}}\big[\pi_{\theta}(v)\log\tfrac{\pi_{\theta}(v)}{\pi_{\phi_{d}}(v)}-\pi_{\theta}(v)+\pi_{\phi_{d}}(v)\big]\Big]\]</span></p>
+<p><strong>核心区别</strong>： - PG 形式需要完整 <span
+class="math inline">\(\pi_{\phi_d}(\cdot)\)</span> 分布（显存开销大） -
+Top-K 形式只用 teacher 的 top-k token（<span
+class="math inline">\(\mathcal{T}^d_t\)</span>），加
+<strong>bias-correction 项</strong> <span
+class="math inline">\(\pi_{\phi_d}(v) - \pi_\theta(v)\)</span> 保证
+<span class="math inline">\(\pi_\theta = \pi_{\phi_d}\)</span> 时 loss
+最小——显存友好 - 同源 teacher 下两者差距很小（PG 0.937 vs Top-K
+0.909）</p>
+</blockquote>
+<h2 id="关键实验结果qwen3-30b-a3b">§5 关键实验结果（Qwen3-30B-A3B）</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>Norm. Score</th>
+<th>vs RL Teacher</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RL Teacher（任一）</td>
+<td><strong>1.000</strong></td>
+<td>—</td>
+<td>各 domain teacher 的参考上界</td>
+</tr>
+<tr>
+<td>Mix-RL</td>
+<td>0.882</td>
+<td>−0.118</td>
+<td>see-saw</td>
+</tr>
+<tr>
+<td>Cascade RL</td>
+<td>0.775</td>
+<td>−0.225</td>
+<td>遗忘最严重</td>
+</tr>
+<tr>
+<td>Off-Policy Finetune</td>
+<td>0.824</td>
+<td>−0.176</td>
+<td>exposure bias</td>
+</tr>
+<tr>
+<td>Param-Merge (Avg)</td>
+<td>0.328</td>
+<td>−0.672</td>
+<td>简单权重平均，几乎全废</td>
+</tr>
+<tr>
+<td>Param-Merge (Task Arith.)</td>
+<td>0.857</td>
+<td>−0.143</td>
+<td>线性算术，仍有 headroom</td>
+</tr>
+<tr>
+<td><strong>MOPD (本文)</strong></td>
+<td><strong>0.937</strong></td>
+<td><strong>−0.063</strong></td>
+<td><strong>headroom 吃得最多</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>统一性（uniform profile）</strong>：MOPD 跨 Math / IF / SWE
+三个 domain 分数极差仅 <strong>0.044</strong>，而 Cascade RL 极差达
+0.41——MOPD 是<strong>唯一跨 domain 均匀</strong>的方案。</p>
+<p><strong>样本效率</strong>：在 IF / SWE 上，MOPD 比 Mix-RL
+<strong>节省约 5× 样本</strong>。</p>
+<p><strong>大规模验证</strong>：在 <strong>MiMo-V2-Flash (309B)</strong>
+上，MOPD 在 Math / Code / IF / SWE / Tool Use 大多数 benchmark
+上<strong>持平或超过</strong> teacher。</p>
+<h2 id="关键发现论文核心-insight">§6 关键发现（论文核心 insight）</h2>
+<blockquote>
+<p>[!tip] 关键发现 &amp; 工程优势 <strong>三大 insight</strong>： 1.
+<strong>必须 same-origin teacher</strong>：把 Math teacher 换成
+Qwen3-235B-A22B（5× 初始 KL：0.19 vs 同源
+0.04），训练<strong>渐进退化</strong>，Top-K
+形式甚至<strong>灾难性发散</strong>。多 teacher 蒸馏对 teacher-student
+的”亲缘关系”非常敏感。 2. <strong>PG vs Top-K 同源 teacher
+下差距很小</strong>：Norm. score 0.937 vs 0.909（4.8
+个百分点）。显存允许时优先 PG；Top-K 是省 memory 的等价替代。 3.
+<strong>多轮迭代持续提升</strong>：Iter-2 normalized 到
+<strong>0.986</strong>（比 Iter-1 +0.049），说明学生作为新一轮 teacher
+还能继续压榨性能。</p>
+<p><strong>论文没说但值得注意的工程优势</strong>： - <strong>Dense
+per-token supervision</strong> → 低方差、高样本效率（解释了 5× sample
+saving） - <strong>Recipe 解耦</strong> → Stage 2 各 domain
+独立，故障不会污染其他 domain - <strong>可直接 deploy
+到生产训练</strong> → MiMo-V2-Flash 309B 已经在用</p>
+</blockquote>
+<hr />
+<h2 id="我的批注">我的批注</h2>
+<ul>
+<li>⚡ <strong>亮点</strong>：把”routing + on-policy + reverse
+KL”三件事打包成一个高度工程化、且<strong>直接 deploy 到 309B
+生产训练</strong>的框架；这种”方法 + 系统 +
+生产验证”三位一体的论文非常少见</li>
+<li>❓ <strong>疑问</strong>：Top-K 形式在 cross-origin teacher
+下<strong>灾难性发散</strong>——是梯度方向错还是 KL
+估计的方差爆炸？需要看附录 §4.4 的稳定性分析</li>
+<li>❓ <strong>疑问</strong>：Iter-2 把学生当新 teacher
+继续蒸馏，会不会引入<strong>能力放大但分布偏移</strong>的问题？论文没有给”为什么会收敛”的理论分析</li>
+<li>🔗 <strong>相关笔记</strong>：
+<ul>
+<li>[[Research/Papers/LLM-RL/Group Sequence Policy Optimization]] ——
+GSPO 也是 on-policy 思路，可与 MOPD 的 on-policy 设计做对比</li>
+<li>[[Research/Papers/LLM-RL/GVPO：Group Variance Policy Optimization
+for Large Language Model Post-Training]] —— 同属 post-training 优化</li>
+<li>[[Research/Papers/tech-report]] —— MiMo-V2-Flash
+技术报告（如果有）应该会更详细地介绍 309B 的训练细节</li>
+</ul></li>
+</ul>
+<h2 id="行动项">行动项</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />读论文 §4.4.1–4.4.3 关于 same-origin
+teacher 的消融，理解 cross-origin 退化的根因</label></li>
+<li><label><input type="checkbox" />查 MiMo-V2-Flash 技术报告，看
+production 训练中 MOPD 的具体超参和 scaling 行为</label></li>
+<li><label><input type="checkbox" />思考：能否把 MOPD 的 routing +
+on-policy 思路推广到 <strong>pre-train + SFT + RLHF 多源</strong>
+的混合蒸馏？</label></li>
+<li><label><input type="checkbox" />复现：用 Qwen3-30B-A3B + 两个 domain
+teacher，跑小规模 MOPD 验证 normalized score 的 headroom
+收敛</label></li>
+</ul>
+<hr />
+<h2 id="相关论文自动聚合">相关论文（自动聚合）</h2>
+<pre class="dataview"><code>TABLE date, title
+FROM #LLM-RL
+WHERE !contains(file.name, &quot;MOPD&quot;)
+SORT date DESC
+LIMIT 5</code></pre>
+<hr />
+<p><strong>元数据</strong></p>
+<ul>
+<li>arXiv: <a
+href="https://arxiv.org/abs/2606.30406">2606.30406v1</a></li>
+<li>出版：2026 年 6 月</li>
+<li>类别：cs.CL, cs.LG</li>
+<li>作者：Wenhan Ma, Jianyu Wei, Liang Zhao, Hailin Zhang, Bangjun Xiao,
+Lei Li, Qibin Yang, Bofei Gao, Yudong Wang, Rang Li, Jinhao Dong,
+Zhifang Sui, Fuli Luo</li>
+<li>单位：Xiaomi MiMo 团队 + 清华大学</li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-07-29</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" data-title="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training" data-hashtags="Reading,LLM-RL,distillation,multi-teacher,post-training"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" data-title="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" data-title="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/mopdmulti-teacher-on-policy-distillation-for-capability-integration-in-llm-post-training/" data-title="MOPD：Multi-Teacher On-Policy Distillation for Capability Integration in LLM Post-Training"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/llm-rl/">LLM-RL</a>,&nbsp;<a href="/tags/distillation/">Distillation</a>,&nbsp;<a href="/tags/multi-teacher/">Multi-Teacher</a>,&nbsp;<a href="/tags/post-training/">Post-Training</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/%E4%BB%8Egpt-2%E5%88%B0kimi-k3/" class="prev" rel="prev" title="从 GPT-2 到 Kimi K3：大模型架构如何演进"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>从 GPT-2 到 Kimi K3：大模型架构如何演进</a>
+            <a href="/distributed-training/" class="next" rel="next" title="Training extremely large neural networks across thousands of GPUs">Training extremely large neural networks across thousands of GPUs<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

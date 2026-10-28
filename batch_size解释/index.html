@@ -4,36 +4,34 @@
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="robots" content="noodp" />
-        <title>batch_size解释 - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/">
+        <title>batch_size 解释 - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/">
   <meta property="og:site_name" content="vllbc02&#39;s blogs">
-  <meta property="og:title" content="batch_size解释">
-  <meta property="og:description" content="batch_size的复杂性来自于tp、dp、sp，引用一下浅入理解verl中的batch_size的解释：
-vllm &#43; fsdp 训推时，如果每张卡都是一个 DP，事情会简单很多。但 verl 中有两个功能不满足这一条件，一是 rollout 时让 vllm 开启 TP，二是在 fsdp 中使用 ulysses（SP）。verl 中数据分发使用的是 dispatch mode 这一机制，比如 fsdp workers 主要使用 Dispatch.DP_COMPUTE_PROTO这个 mode，它是在 worker group 的层次上进行数据分发以及结果收集的。由于这个层次是没有 TP/SP 概念的，所以它仅在 one GPU one DP 时才是正确的。那么为了正确支持 TP/SP，就需要对数据做一些前后处理。">
+  <meta property="og:title" content="batch_size 解释">
+  <meta property="og:description" content="batch_size 的复杂性来自 TP、DP、SP 三个维度的交织。本文先讲清楚「一个 batch 是怎么从 global 流到一张 GPU 的」,再讲两条 micro-batch 切分路径(静态/动态),最后展开动态路径背后的 use_dynamic_bsz、_balance_batch、all_reduce(MAX) 同步等关键机制。">
   <meta property="og:locale" content="zh_CN">
   <meta property="og:type" content="article">
     <meta property="article:section" content="posts">
     <meta property="article:published_time" content="2025-07-16T00:00:00+00:00">
-    <meta property="article:modified_time" content="2025-07-16T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-06-04T00:00:00+00:00">
     <meta property="article:tag" content="Coding">
     <meta property="article:tag" content="Verl">
     <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
-  <meta name="twitter:title" content="batch_size解释">
-  <meta name="twitter:description" content="batch_size的复杂性来自于tp、dp、sp，引用一下浅入理解verl中的batch_size的解释：
-vllm &#43; fsdp 训推时，如果每张卡都是一个 DP，事情会简单很多。但 verl 中有两个功能不满足这一条件，一是 rollout 时让 vllm 开启 TP，二是在 fsdp 中使用 ulysses（SP）。verl 中数据分发使用的是 dispatch mode 这一机制，比如 fsdp workers 主要使用 Dispatch.DP_COMPUTE_PROTO这个 mode，它是在 worker group 的层次上进行数据分发以及结果收集的。由于这个层次是没有 TP/SP 概念的，所以它仅在 one GPU one DP 时才是正确的。那么为了正确支持 TP/SP，就需要对数据做一些前后处理。">
+  <meta name="twitter:title" content="batch_size 解释">
+  <meta name="twitter:description" content="batch_size 的复杂性来自 TP、DP、SP 三个维度的交织。本文先讲清楚「一个 batch 是怎么从 global 流到一张 GPU 的」,再讲两条 micro-batch 切分路径(静态/动态),最后展开动态路径背后的 use_dynamic_bsz、_balance_batch、all_reduce(MAX) 同步等关键机制。">
 <meta name="application-name" content="vllbc02">
 <meta name="apple-mobile-web-app-title" content="vllbc02">
 <meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
         <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" /><link rel="prev" href="https://blog.vllbc.top/mha/" /><link rel="next" href="https://blog.vllbc.top/ring-all-reduce/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" /><link rel="prev" href="https://blog.vllbc.top/britebootstrapping-reinforced-thinking-process-to-enhance-language-model-reasoning/" /><link rel="next" href="https://blog.vllbc.top/ring-all-reduce/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
         <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
         <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
     {
         "@context": "http://schema.org",
         "@type": "BlogPosting",
-        "headline": "batch_size解释",
+        "headline": "batch_size 解释",
         "inLanguage": "zh-CN",
         "mainEntityOfPage": {
             "@type": "WebPage",
@@ -43,8 +41,8 @@ vllm &#43; fsdp 训推时，如果每张卡都是一个 DP，事情会简单很�
                             "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
                             "width":  3200 ,
                             "height":  2048 
-                        }],"genre": "posts","keywords": "coding, verl","wordcount":  1953 ,
-        "url": "https:\/\/blog.vllbc.top\/batch_size%E8%A7%A3%E9%87%8A\/","datePublished": "2025-07-16T00:00:00+00:00","dateModified": "2025-07-16T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+                        }],"genre": "posts","keywords": "coding, verl","wordcount":  6527 ,
+        "url": "https:\/\/blog.vllbc.top\/batch_size%E8%A7%A3%E9%87%8A\/","datePublished": "2025-07-16T00:00:00+00:00","dateModified": "2026-06-04T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
             "@type": "Organization",
             "name": "xxxx","logo": {
                     "@type": "ImageObject",
@@ -157,32 +155,40 @@ vllm &#43; fsdp 训推时，如果每张卡都是一个 DP，事情会简单很�
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
 <script>hljs.initHighlightingOnLoad();</script><main class="main">
-                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">batch_size解释</h1><div class="post-meta">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">batch_size 解释</h1><div class="post-meta">
             <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/verl/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Verl</a>&nbsp;<a href="/categories/coding/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Coding</a></span></div>
-            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-16">2025-07-16</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 1953 字&nbsp;
-                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 4 分钟&nbsp;<span id="/batch_size%E8%A7%A3%E9%87%8A/" class="leancloud_visitors" data-flag-title="batch_size解释">
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-07-16">2025-07-16</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 6527 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 14 分钟&nbsp;<span id="/batch_size%E8%A7%A3%E9%87%8A/" class="leancloud_visitors" data-flag-title="batch_size 解释">
                         <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
                     </span>&nbsp;</div>
-        </div><div class="content" id="content"><p>batch_size的复杂性来自于tp、dp、sp，引用一下<a
-href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的batch_size</a>的解释：</p>
+        </div><div class="content" id="content"><p>batch_size 的复杂性来自 TP、DP、SP 三个维度的交织。本文先讲清楚「一个
+batch 是怎么从 global 流到一张 GPU 的」,再讲两条 micro-batch
+切分路径(静态/动态),最后展开动态路径背后的
+<code>use_dynamic_bsz</code>、<code>_balance_batch</code>、<code>all_reduce(MAX)</code>
+同步等关键机制。</p>
+<p>引用<a
+href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的batch_size</a>的解释:</p>
 <blockquote>
-<p>vllm + fsdp 训推时，如果每张卡都是一个 DP，事情会简单很多。但 verl
-中有两个功能不满足这一条件，一是 rollout 时让 vllm 开启 TP，二是在 fsdp
-中使用 ulysses（SP）。verl 中数据分发使用的是 dispatch mode
-这一机制，比如 fsdp workers
-主要使用 <code>Dispatch.DP_COMPUTE_PROTO</code>这个 mode，它是在 worker
-group 的层次上进行数据分发以及结果收集的。由于这个层次是没有 TP/SP
-概念的，所以它仅在 one GPU one DP 时才是正确的。那么为了正确支持
-TP/SP，就需要对数据做一些前后处理。</p>
+<p>vllm + fsdp 训推时, 如果每张卡都是一个 DP, 事情会简单很多。但 verl
+中有两个功能不满足这一条件, 一是 rollout 时让 vllm 开启 TP, 二是在 fsdp
+中使用 ulysses (SP)。verl 中数据分发使用的是 dispatch mode 这一机制,
+比如 fsdp workers 主要使用 <code>Dispatch.DP_COMPUTE_PROTO</code> 这个
+mode, 它是在 worker group
+的层次上进行数据分发以及结果收集的。由于这个层次是没有 TP/SP 概念的,
+所以它仅在 one GPU one DP 时才是正确的。那么为了正确支持 TP/SP,
+就需要对数据做一些前后处理。</p>
 </blockquote>
-<p>这一点在<a
-href="DataProto.md">DataProto</a>也有提到，具体的实现就是<code>all_gather_data_proto</code>函数。</p>
-<p>TP需要在TP rank上all-gather来保证各个tp
-rank的输入相同，然后再将输出split返回当前rank的部分，保持和输入一致。</p>
-<p>SP与 TP 一样，在 SP group 上进行 allgather 来保证各个 SP rank
-的输入相同（ulysses 的需要）；对输出进行 split 并返回当前 rank
-对应的部分。</p>
-<p>在fsdp_worker中，初始化阶段对batch_size进行了处理：</p>
+<p>这一点在 <a href="DataProto.md">DataProto</a> 也有提到,
+具体的实现就是 <code>all_gather_data_proto</code> 函数。</p>
+<ul>
+<li>TP 需要在 TP rank 上 all-gather 来保证各个 tp rank 的输入相同,
+然后再将输出 split 返回当前 rank 的部分, 保持和输入一致。</li>
+<li>SP 与 TP 一样, 在 SP group 上进行 allgather 来保证各个 SP rank
+的输入相同 (ulysses 的需要); 对输出进行 split 并返回当前 rank
+对应的部分。</li>
+</ul>
+<h2 id="fsdp_worker-初始化时的-batch_size-处理">fsdp_worker 初始化时的
+batch_size 处理</h2>
 <div class="sourceCode" id="cb1"><pre
 class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="co"># normalize config</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">self</span>._is_actor:</span>
@@ -218,56 +224,708 @@ class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a hr
 <span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="va">self</span>._is_ref <span class="kw">and</span> <span class="va">self</span>.config.ref.log_prob_micro_batch_size <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
 <span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a>    <span class="va">self</span>.config.ref.log_prob_micro_batch_size <span class="op">//=</span> <span class="va">self</span>.device_mesh.size() <span class="op">//</span> <span class="va">self</span>.ulysses_sequence_parallel_size</span>
 <span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>    <span class="va">self</span>.config.ref.log_prob_micro_batch_size_per_gpu <span class="op">=</span> <span class="va">self</span>.config.ref.log_prob_micro_batch_size</span></code></pre></div>
-<p>前面创建了fsdp_devicmesh（dp）、ulysses_device_mesh（dp和sp）以及在初始化rollout中创建了rollout_device_mesh（dp和tp）。具体可以查看<a
-href="../../LLM/大模型分布式/device_mesh.md">device_mesh</a>。</p>
+<p>前面创建了 fsdp_devicmesh(dp)、ulysses_device_mesh(dp 和 sp)
+以及在初始化 rollout 中创建了 rollout_device_mesh(dp 和
+tp)。具体可以查看 <a
+href="../../分布式训练/device_mesh.md">device_mesh</a>。</p>
 <h2 id="rollout">Rollout</h2>
-<p>注意verl
-v0.5.0的实现中，所有的prompts直接由driver重复然后再dispatch，而不是先dispatch然后再交给Worker重复样本。这样做的目的是如果先分片的话，有可能batch_size小于world_size（对我来说基本不可能），导致不能正确切分，如果是先repeat的话就可以了。</p>
-<p>因此对于Rollout： -
-全局：<code>train_batch_size * n</code>个prompts，输出<code>train_batch_size * n</code>个prompts
-+ responses。 -
-单卡：输入<code>train_batch_size * n / world_size</code>个prompts，进行前处理为<span
-class="math inline">\(\frac{train\_batch\_size * n}{world\_size} *
-tp\_size\)</span>个prompts，然后进行推理，得到<span
-class="math inline">\(\frac{train\_batch\_size * n}{world\_size} *
-tp\_size\)</span>个prompts+responses，再进行后处理，输出<code>train_batch_size * n / world_size</code>个prompts+responses。</p>
+<p>注意 verl v0.5.0 的实现中, 所有的 prompts 直接由 driver 重复然后再
+dispatch, 而不是先 dispatch 然后再交给 Worker
+重复样本。这样做的目的是如果先分片的话, 有可能 batch_size 小于
+world_size (对我来说基本不可能), 导致不能正确切分, 如果是先 repeat
+的话就可以了。</p>
+<p>因此对于 Rollout: -
+<strong>全局</strong>:<code>train_batch_size * n</code> 个 prompts, 输出
+<code>train_batch_size * n</code> 个 prompts + responses。 -
+<strong>单卡</strong>: 输入
+<code>train_batch_size * n / world_size</code> 个 prompts, 进行前处理为
+<span class="math inline">\(\frac{train\_batch\_size \cdot
+n}{world\_size} \cdot tp\_size\)</span> 个 prompts, 然后进行推理, 得到
+<span class="math inline">\(\frac{train\_batch\_size \cdot
+n}{world\_size} \cdot tp\_size\)</span> 个 prompts+responses,
+再进行后处理, 输出 <code>train_batch_size * n / world_size</code> 个
+prompts+responses。</p>
 <h2 id="actor">Actor</h2>
-<p>与Actor有关的参数为<code>ppo_mini_batch_size</code>（决定一批experience的更新次数）、<code>rollout.log_prob_micro_batch_size_per_gpu</code>（计算old_logp）、<code>ref.log_prob_micro_batch_size_per_gpu</code>（计算ref_logp）、<code>micro_batch_size_per_gpu</code>（直接指定单卡上的batch_size）。</p>
-<p>重点看ppo_mini_batch_size用于update_policy的处理，其它的都大同小异：</p>
+<p>与 Actor 有关的参数为 <code>ppo_mini_batch_size</code>(决定一批
+experience
+的更新次数)、<code>rollout.log_prob_micro_batch_size_per_gpu</code>(计算
+old_logp)、<code>ref.log_prob_micro_batch_size_per_gpu</code>(计算
+ref_logp)、<code>micro_batch_size_per_gpu</code>(直接指定单卡上的
+batch_size)。</p>
+<p>重点看 ppo_mini_batch_size 用于 update_policy 的处理,
+其它的都大同小异:</p>
 <ul>
-<li>全局：<code>train_batch_size * n</code>大小的batch，包含了部分计算好的experience。</li>
-<li>单卡：输入为<code>train_batch_size * n / world_size</code>，经过前处理为<code>train_batch_size * rollout_n * sp_size / world_size</code>。这和fsdp_worker初始化时的ppo_mini_batch_size一致，即</li>
+<li><strong>全局</strong>:<code>train_batch_size * n</code> 大小的
+batch, 包含了部分计算好的 experience。</li>
+<li><strong>单卡</strong>: 输入为
+<code>train_batch_size * n / world_size</code>, 经过前处理为
+<code>train_batch_size * rollout_n * sp_size / world_size</code>。这和
+fsdp_worker 初始化时的 ppo_mini_batch_size 一致, 即</li>
 </ul>
 <div class="sourceCode" id="cb2"><pre
 class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.config.actor.ppo_mini_batch_size <span class="op">*=</span> <span class="va">self</span>.config.rollout.n</span>
-<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.config.actor.ppo_mini_batch_size <span class="op">//=</span> <span class="va">self</span>.device_mesh.size() <span class="op">//</span> <span class="va">self</span>.ulysses_sequence_parallel_size</span></code></pre></div>
-<p>这样的话对于一批experience的更新次数，就等于你传入的train_batch_size
-//
-mini_batch_size。对于<code>micro_batch_size_per_gpu</code>参数来说，可以直接指定单卡的bs。对于传入<code>micro_batch_size</code>再计算的方式，verl已经废弃了。</p>
-<h2 id="ppo流程">ppo流程</h2>
-<p><img
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="va">self</span>.config.actor.ppo_mini_batch_size <span class="op">//=</span> <span class="va">self</span>.device_mesh.size() <span class="op">//</span> <span class="va">self</span>.ulysses_sequence_parallel_size</span></code></pre></div>
+<p>这样的话对于一批 experience 的更新次数, 就等于你传入的
+<code>train_batch_size // mini_batch_size</code>。对于
+<code>micro_batch_size_per_gpu</code> 参数来说, 可以直接指定单卡的
+bsz。对于传入 <code>micro_batch_size</code> 再计算的方式, verl
+已经废弃了。</p>
+<h2 id="ppo-流程">ppo 流程</h2>
+<figure>
+<img
 src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250613212728.png"
-alt="image.png" /> 从图中可以得到的是ppo_mini_batch_size是全局的prompt
-batch，而ppo_micro_batch_per_gpu是每一个gpu上的prompt+response
-batch，所以由此可以得到梯度累计的steps为 ppo_mini_batch_size * n *
-sp_size // world_size //
-micro_batch_per_gpu。即micro_batch_per_gpu代表梯度累计的bs。</p>
-<h2 id="参考">参考</h2>
-<p><a
-href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的batch_size</a></p>
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>从图中可以得到的是 <code>ppo_mini_batch_size</code> 是<strong>全局的
+prompt batch</strong>, 而 <code>ppo_micro_batch_per_gpu</code>
+是<strong>每一个 GPU 上的 prompt+response batch</strong>,
+所以由此可以得到梯度累计的 steps 为
+<code>ppo_mini_batch_size * n * sp_size // world_size // micro_batch_per_gpu</code>。即
+<code>micro_batch_per_gpu</code> 代表梯度累计的 bsz。</p>
+<hr />
+<h1 id="两条-micro-batch-切分路径">两条 micro-batch 切分路径</h1>
+<p>上面四节都把 batch 视为按”条数”切分, 但实际 verl
+训练侧有<strong>两条切分路径</strong>, 由 <code>use_dynamic_bsz</code>
+二选一:</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>路径</th>
+<th>触发参数</th>
+<th>切分依据</th>
+<th>平衡目标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>路径 A: 静态切分</td>
+<td><code>use_dynamic_bsz=False</code> (默认)</td>
+<td><code>micro_batch_size_per_gpu</code> 条样本</td>
+<td>不做平衡</td>
+</tr>
+<tr>
+<td>路径 B: 动态切分</td>
+<td><code>use_dynamic_bsz=True</code></td>
+<td><code>max_token_len_per_gpu</code> 个 token</td>
+<td>KK 算法平衡 token 总数</td>
+</tr>
+</tbody>
+</table>
+<h2 id="三层-batch-概念">三层 batch 概念</h2>
+<p>先看清”batch size”这个词在不同位置的含义, 数据从一步训练流到一张 GPU
+经过三层:</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604161958-fig1.png"
+alt="verl 三层 batch + 两层 KK 平衡" />
+<figcaption aria-hidden="true">verl 三层 batch + 两层 KK
+平衡</figcaption>
+</figure>
+<p>verl 在数据流上做了<strong>两层 KK 平衡</strong>: - <strong>第 1 层
+(默认开, <code>trainer.balance_batch=True</code>)</strong>: single
+controller 跨 DP rank 全局重排, 在 <code>_balance_batch</code> 中做一次
+KK。 - <strong>第 2 层 (要开 <code>use_dynamic_bsz</code>)</strong>:
+每个 rank 内切 micro-batch 时再做一次 KK, 按 token 预算打包。</p>
+<h2 id="路径-a-静态切分-默认">路径 A: 静态切分 (默认)</h2>
+<p>关键参数: <code>ppo_micro_batch_size_per_gpu</code> /
+<code>log_prob_micro_batch_size_per_gpu</code>。逻辑非常简单,
+按<strong>样本条数</strong>等分。</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="co"># verl/workers/engine/utils.py</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> use_dynamic_bsz:</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    ...</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="cf">else</span>:</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    total_data_size <span class="op">=</span> <span class="bu">len</span>(data)</span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    micro_batch_size_per_gpu <span class="op">=</span> data[<span class="st">&quot;micro_batch_size_per_gpu&quot;</span>]</span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> total_data_size <span class="op">%</span> (force_group_size <span class="op">*</span> micro_batch_size_per_gpu) <span class="op">==</span> <span class="dv">0</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    micro_batches <span class="op">=</span> tu.chunk_tensordict(</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>        data, total_data_size <span class="op">//</span> (micro_batch_size_per_gpu <span class="op">*</span> force_group_size)</span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
+<p>特性: - <strong>条数固定</strong>: 每个 micro-batch 恰好
+<code>micro_batch_size_per_gpu</code> 条样本, 无论它们多长。 -
+<strong>显存不可控</strong>: 极端情况一个 micro-batch 全是长样本, token
+总数远超预期, OOM。 - <strong>DP 间天然对齐</strong>: 每张卡的
+micro-batch 数完全一致, FSDP/Megatron 的集合通信节奏天然同步。 -
+<strong>失衡浪费算力</strong>: 短样本 padding 到 batch 里最长那条,
+长样本拉低吞吐, GPU 利用率低。</p>
+<h2 id="路径-b-动态切分-use_dynamic_bsztrue">路径 B: 动态切分
+(<code>use_dynamic_bsz=True</code>)</h2>
+<p>关键参数: <code>ppo_max_token_len_per_gpu</code>。不再按条数切,
+而是<strong>给每张卡一个 token 预算</strong>, 由算法去打包。</p>
+<p>入口代码:</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co"># verl/workers/engine/utils.py — prepare_micro_batches()</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> use_dynamic_bsz:</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">assert</span> <span class="st">&quot;max_token_len_per_gpu&quot;</span> <span class="kw">in</span> data.keys()</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    max_token_len_per_gpu <span class="op">=</span> data[<span class="st">&quot;max_token_len_per_gpu&quot;</span>]</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    max_token_len <span class="op">=</span> max_token_len_per_gpu <span class="op">*</span> sp_size   <span class="co"># SP 倍率</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>    micro_batches, batch_idx_list <span class="op">=</span> rearrange_micro_batches(</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>        data, max_token_len<span class="op">=</span>max_token_len,</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>        dp_group<span class="op">=</span>dp_group,</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>        same_micro_num_in_dp<span class="op">=</span>same_micro_num_in_dp,   <span class="co"># 关键</span></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>        ...</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>    )</span></code></pre></div>
+<p><strong>三步切分流程</strong>:</p>
+<p><strong>步骤 1</strong>: 算每张卡至少要切几个 micro-batch。</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>total_seqlen     <span class="op">=</span> attention_mask.<span class="bu">sum</span>()</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>num_micro_batches <span class="op">=</span> ceil(total_seqlen <span class="op">/</span> max_token_len)</span></code></pre></div>
+<p><strong>步骤 2</strong> (dynamic 模式独有): DP 维度同步 micro-batch
+数。</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> dist.is_initialized() <span class="kw">and</span> same_micro_num_in_dp <span class="kw">and</span> dp_group <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    num_micro_batches <span class="op">=</span> torch.tensor([num_micro_batches], device<span class="op">=</span>...)</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    dist.all_reduce(num_micro_batches, op<span class="op">=</span>dist.ReduceOp.MAX, group<span class="op">=</span>dp_group)</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    num_micro_batches <span class="op">=</span> num_micro_batches.cpu().item()</span></code></pre></div>
+<p><strong>步骤 3</strong>: 用 Karmarkar-Karp 算法把样本按工作量平均分进
+num_micro_batches 个桶。</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 工作量估算: 模拟 attention FLOPs ≈ 12·h²·L + 2·h·L²</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>workload <span class="op">=</span> <span class="dv">24576</span> <span class="op">*</span> seqlen <span class="op">+</span> seqlen <span class="op">**</span> <span class="dv">2</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>partitions <span class="op">=</span> karmarkar_karp(workload, k_partitions<span class="op">=</span>num_micro_batches, equal_size<span class="op">=</span><span class="va">False</span>)</span></code></pre></div>
+<blockquote>
+<p><strong>为什么 <code>all_reduce(MAX)</code> 不可省</strong>: DP 各
+rank 拿到的样本长度分布不同 → 各自算出的 <code>num_micro_batches</code>
+不一样 → FSDP forward 循环里调用 <code>all_gather</code> 的次数不一样 →
+集合通信永远配不上对, 直接 NCCL hang。verl 用 MAX 把所有 rank
+拉齐到全局最大值, 短的 rank 通过把样本切成更稀疏的桶来对齐 (不是补空
+padding)。</p>
+</blockquote>
+<hr />
+<h1
+id="balance_batch-进-dynamic_bsz-之前的全局-kk-重排"><code>_balance_batch</code>:
+进 dynamic_bsz 之前的全局 KK 重排</h1>
+<p>第 03 节的 dynamic_bsz 只管 rank 内的 micro-batch 切分。那 rank
+之间的总 token 数谁负责? 答案是: 在 dynamic_bsz 进各 rank 之前, verl 在
+single controller 上先做了一次全局 KK 重排, 叫
+<code>_balance_batch</code>。由 <code>trainer.balance_batch=True</code>
+默认开启。</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="co"># verl/trainer/ppo/ray_trainer.py — _balance_batch()</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>global_seqlen_lst <span class="op">=</span> batch.batch[<span class="st">&quot;attention_mask&quot;</span>].<span class="bu">sum</span>(<span class="op">-</span><span class="dv">1</span>)</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>workload_lst <span class="op">=</span> calculate_workload(global_seqlen_lst)</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>dp_size <span class="op">=</span> <span class="va">self</span>._get_dp_size(<span class="va">self</span>.actor_rollout_wg, <span class="st">&quot;actor&quot;</span>)</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="co"># equal_size=True: 每个 rank 拿到等条数样本</span></span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>global_partition_lst <span class="op">=</span> get_seqlen_balanced_partitions(</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>    workload_lst, k_partitions<span class="op">=</span>dp_size, equal_size<span class="op">=</span><span class="va">True</span></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a><span class="co"># 把 batch 按 KK 给的分组重排, 再 chunk 出去</span></span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>global_idx <span class="op">=</span> torch.tensor([j <span class="cf">for</span> partition <span class="kw">in</span> global_partition_lst <span class="cf">for</span> j <span class="kw">in</span> partition])</span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a>batch.reorder(global_idx)</span></code></pre></div>
+<p><strong>这层和 dynamic_bsz 的关键区别</strong>:</p>
+<ul>
+<li><strong><code>equal_size=True</code></strong>: 每个 rank
+必须拿到等条数样本 (PPO 后续 mini-batch 数对齐需要), KK
+在这个硬约束下做平衡。</li>
+<li><strong>只重排顺序, 不重切样本</strong>: 原样本不变, 只是 chunk
+时被分到不同 rank。</li>
+<li><strong>对 workload 而非 token 数平衡</strong>: 用
+<code>12·h²·L + 2·h·L²</code> 估算 attention FLOPs,
+让长样本被特别”重视”。</li>
+<li><strong>每个 mini-batch 跑一次</strong>, rollout 完成后、进 forward
+前。</li>
+</ul>
+<h2 id="演示-16-条样本下发到-4-个-dp-rank">演示: 16 条样本下发到 4 个 DP
+rank</h2>
+<p>同一组 16 条不同长度样本, 按原顺序 chunk vs 经过
+<code>_balance_batch</code> 重排后再 chunk。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604161958-fig2.png"
+alt="_balance_batch 效果对比" />
+<figcaption aria-hidden="true">_balance_batch 效果对比</figcaption>
+</figure>
+<p>可以看到 KK 重排后, 各 rank 的总 token 数从原来最大 21,500 / 最小
+11,800 (极差 1.82×) 压到了 17,300 / 15,800 (极差 1.09×)。</p>
+<p><strong>限制</strong>: <code>equal_size=True</code> 让 KK
+不能完全自由, 比如”单条特别长的样本”总会落到某个 rank 上、把那个 rank 的
+token 总数推高。这是为什么 log 里
+<code>balanced_max - balanced_min</code> 不会真的变成 0, 只是从原始的
+~10% 极差压到 ~3-5%。</p>
+<p>log 里 <code>global_seqlen/min,max</code>
+是<strong>未重排时</strong>的统计;
+<code>global_seqlen/balanced_min,balanced_max</code> 是<strong>KK
+重排后</strong>的统计。在自己的训练 metric 里直接对比这两组数字就能看
+<code>_balance_batch</code> 在你的数据上有多大效果。</p>
+<hr />
+<h1 id="use_dynamic_bsz-数据流">use_dynamic_bsz 数据流</h1>
+<h2 id="参数定义与作用">参数定义与作用</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ulysses_sequence_parallel_size</code></td>
+<td>Ulysses 序列并行大小, 将序列切分到多个 GPU 上并行计算</td>
+</tr>
+<tr>
+<td><code>use_dynamic_bsz</code></td>
+<td>动态批处理, 根据 token 总数动态划分 micro batch, 平衡各 batch
+的计算量</td>
+</tr>
+<tr>
+<td><code>use_remove_padding</code></td>
+<td>移除 padding, 将多个序列的有效 token 拼接成一个连续序列, 配合
+flash_attn_varlen 使用</td>
+</tr>
+<tr>
+<td><code>ppo_mini_batch_size</code></td>
+<td>PPO 训练时每个 mini batch 的样本数</td>
+</tr>
+<tr>
+<td><code>ppo_micro_batch_size_per_gpu</code></td>
+<td>每个 GPU 上的 micro batch 大小 (梯度累积的基本单位)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="compute_log_prob-阶段-推理-计算-log-prob">compute_log_prob 阶段
+(推理 / 计算 log prob)</h2>
+<pre><code>输入数据 (DataProto)
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Step 1: 划分 Micro Batches                               │
+│  ├─ if use_dynamic_bsz:                                  │
+│  │    使用 rearrange_micro_batches() 按 token 总数动态划分  │
+│  │    max_token_len = meta_info[&quot;max_token_len&quot;] * sp_size│
+│  │    返回重排后的 micro_batches 和 indices                │
+│  └─ else:                                                │
+│       按固定 micro_batch_size 均匀切分                     │
+└──────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Step 2: 对每个 Micro Batch 进行前向计算                   │
+│  └─ _forward_micro_batch()                               │
+│      ├─ if use_remove_padding:                           │
+│      │    ├─ unpad_input(): 移除 padding, 得到连续 token   │
+│      │    ├─ if use_ulysses_sp:                          │
+│      │    │    ├─ ulysses_pad(): 填充到 sp_size 整数倍     │
+│      │    │    └─ ulysses_pad_and_slice_inputs():        │
+│      │    │        切分序列到各 SP rank                    │
+│      │    ├─ 模型前向 (flash_attn_varlen)                 │
+│      │    ├─ if use_ulysses_sp:                          │
+│      │    │    └─ gather_outpus_and_unpad(): 聚合并去除填充│
+│      │    └─ pad_input(): 恢复原始 batch 形状              │
+│      └─ else (不使用 remove_padding):                     │
+│           └─ 标准前向计算                                  │
+└──────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Step 3: 合并结果                                         │
+│  ├─ concat 所有 micro batch 的 log_probs                  │
+│  └─ if use_dynamic_bsz:                                  │
+│       使用 get_reverse_idx() 恢复原始顺序                  │
+└──────────────────────────────────────────────────────────┘</code></pre>
+<h2 id="update_policy-阶段-ppo-训练">update_policy 阶段 (PPO 训练)</h2>
+<pre><code>输入数据 (DataProto, batch_size = N)
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Step 1: 划分 Mini Batches                                │
+│  num_mini_batches = N / ppo_mini_batch_size              │
+│  dataloader = data.chunk(num_mini_batches)               │
+└──────────────────────────────────────────────────────────┘
+       │
+       ▼
+  for epoch in ppo_epochs:
+    for mini_batch in dataloader:
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Step 2: 划分 Micro Batches (梯度累积)                     │
+│  ├─ if use_dynamic_bsz:                                  │
+│  │    使用 rearrange_micro_batches() 按 token 总数动态划分  │
+│  │    max_token_len = ppo_max_token_len_per_gpu * sp_size │
+│  └─ else:                                                │
+│       gradient_accumulation = ppo_mini_batch_size /      │
+│                               ppo_micro_batch_size_per_gpu│
+│       micro_batches = mini_batch.split(                  │
+│                         ppo_micro_batch_size_per_gpu)    │
+└──────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Step 3: 梯度累积                                         │
+│  optimizer.zero_grad()                                   │
+│  for micro_batch in micro_batches:                       │
+│      ├─ _forward_micro_batch() (同上, 含 SP 和 rmpad)     │
+│      ├─ 计算 policy_loss                                 │
+│      ├─ if use_dynamic_bsz:                              │
+│      │    loss = policy_loss * (len(data) /              │
+│      │                          ppo_mini_batch_size)     │
+│      └─ else:                                            │
+│           loss = policy_loss / gradient_accumulation     │
+│      loss.backward()                                     │
+│  optimizer.step()                                        │
+└──────────────────────────────────────────────────────────┘</code></pre>
+<h2 id="关键关系图">关键关系图</h2>
+<pre><code>                    ┌─────────────────────────────────────┐
+                    │         Total Batch (N samples)      │
+                    └─────────────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │     ppo_mini_batch_size 划分       │
+                    │   (PPO 每次更新使用的样本数)         │
+                    └─────────────────┬─────────────────┘
+                                      │
+              ┌───────────────────────┼───────────────────────┐
+              │                       │                       │
+        Mini Batch 1            Mini Batch 2            Mini Batch K
+              │                       │                       │
+              └───────────────────────┼───────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │  use_dynamic_bsz ?                 │
+                    └─────────────────┬─────────────────┘
+                           ┌──────────┴──────────┐
+                           │                     │
+                      Yes (动态)             No (固定)
+                           │                     │
+              ┌────────────┴────────────┐   ┌────┴────┐
+              │ rearrange_micro_batches │   │  split  │
+              │ 按 max_token_len 划分    │   │ 按固定  │
+              │ (平衡各 batch token 数)  │   │ micro   │
+              │                         │   │ batch   │
+              │ max_token_len =         │   │ size    │
+              │ ppo_max_token_len_per_gpu│   │         │
+              │ * ulysses_sp_size       │   │         │
+              └────────────┬────────────┘   └────┬────┘
+                           │                     │
+                           └──────────┬──────────┘
+                                      │
+                              Micro Batches
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │  use_remove_padding ?              │
+                    └─────────────────┬─────────────────┘
+                           ┌──────────┴──────────┐
+                           │                     │
+                      Yes (移除)             No (保留)
+                           │                     │
+              ┌────────────┴────────────┐        │
+              │ unpad_input()           │        │
+              │ 移除 padding, 拼接有效   │        │
+              │ token 成连续序列         │        │
+              └────────────┬────────────┘        │
+                           │                     │
+                    ┌──────┴──────┐              │
+                    │ ulysses_sp? │              │
+                    └──────┬──────┘              │
+                    ┌──────┴──────┐              │
+                    │             │              │
+                Yes (SP)      No (单卡)          │
+                    │             │              │
+           ┌────────┴────────┐    │              │
+           │ ulysses_pad +   │    │              │
+           │ slice_inputs    │    │              │
+           │ 切分序列到各 rank│    │              │
+           └────────┬────────┘    │              │
+                    │             │              │
+                    └──────┬──────┘              │
+                           │                     │
+                           └──────────┬──────────┘
+                                      │
+                              Model Forward
+                                      │
+                    ┌─────────────────┴─────────────────┐
+                    │  后处理: gather + unpad + revert   │
+                    └────────────────────────────────────┘</code></pre>
+<hr />
+<h1 id="静态-vs-动态-micro-batch-切分对比">静态 vs 动态 micro-batch
+切分对比</h1>
+<p>假设这张 GPU 拿到 8 条样本, token 长度依次为
+<code>[800, 6500, 1200, 4000, 9000, 2500, 1500, 7500]</code>, 共 33,000
+token。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604161958-fig3.png"
+alt="同一组 8 条样本的两种 micro-batch 切法" />
+<figcaption aria-hidden="true">同一组 8 条样本的两种 micro-batch
+切法</figcaption>
+</figure>
+<p><strong>观察</strong>: - <strong>静态切分</strong> (按条数 2): 4
+个桶, token 数 [7300, 5200, 11500, 9000], 极差 2.21×, 其中 mb3 已经接近
+budget 13312。预算线再低一点就会触发 OOM。 - <strong>动态切分</strong>
+(按 token 预算 13312): 3 个桶, token 数 [11300, 11200, 10500], 极差
+1.08×, 每桶都接近 budget, 没有浪费也没有 OOM 风险。</p>
+<hr />
+<h1 id="dp-维度同步-从各算各的到整齐划一">DP 维度同步:
+从「各算各的」到「整齐划一」</h1>
+<p>动态模式下, 4 张卡各自算出来的 <code>num_micro_batches</code>
+大概率不一样。verl 用 <code>all_reduce(MAX)</code> 把它们拉齐, 否则 FSDP
+集合通信对不上号会直接 hang。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260604161958-fig4.png"
+alt="DP 维度同步演示" />
+<figcaption aria-hidden="true">DP 维度同步演示</figcaption>
+</figure>
+<p><strong>关键事实澄清</strong>:「拉齐」靠的<strong>不是补 dummy
+padding</strong>, 而是让短的 rank 把自己手里的样本切成更多、更稀疏的桶 —
+代码里的硬约束是 <code>assert num_micro_batches &lt;= num_groups</code>,
+每个桶至少 1 条真实样本, 没有空 batch。短 rank 后续 forward
+循环里跑的是<strong>稀疏的真样本</strong>而非 padding。</p>
+<p><strong>遗留隐患</strong>: verl 在进 dynamic_bsz
+之前其实<strong>还有一层全局 KK 平衡 (<code>_balance_batch</code>, 由
+<code>trainer.balance_batch=True</code> 默认开)</strong>,
+会先重排样本让各 rank 总 token 数尽量接近 (log 里
+<code>global_seqlen/balanced_min/max</code> 就是它的产物)。但它有
+<code>equal_size=True</code> 的硬约束 (每 rank 等条数),
+且只平衡总和不平衡每个 micro-batch
+的工作量。所以单条特别长的样本仍可能让某 rank 的某个 micro-batch 慢得多,
+触发 NCCL watchdog timeout (<a
+href="https://github.com/verl-project/verl/issues/5750">issue #5750</a>
+的根因之一)。</p>
+<hr />
+<h1 id="关键代码逻辑">关键代码逻辑</h1>
+<h2 id="动态批处理-use_dynamic_bsz">动态批处理
+(<code>use_dynamic_bsz</code>)</h2>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 核心函数: rearrange_micro_batches()</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a><span class="co"># 使用 Karmarkar-Karp 算法平衡各 micro batch 的 token 总数</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>max_token_len <span class="op">=</span> ppo_max_token_len_per_gpu <span class="op">*</span> ulysses_sequence_parallel_size</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>micro_batches, indices <span class="op">=</span> rearrange_micro_batches(batch, max_token_len)</span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Loss 缩放 (保证梯度正确)</span></span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>loss <span class="op">=</span> policy_loss <span class="op">*</span> (<span class="bu">len</span>(data) <span class="op">/</span> ppo_mini_batch_size)</span></code></pre></div>
+<h2 id="移除-padding-use_remove_padding">移除 Padding
+(<code>use_remove_padding</code>)</h2>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 移除 padding</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>input_ids_rmpad, indices, cu_seqlens, <span class="op">*</span>_ <span class="op">=</span> unpad_input(input_ids.unsqueeze(<span class="op">-</span><span class="dv">1</span>), attention_mask)</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># 模型使用 flash_attn_varlen 进行计算</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>output <span class="op">=</span> <span class="va">self</span>.actor_module(input_ids<span class="op">=</span>input_ids_rmpad, attention_mask<span class="op">=</span><span class="va">None</span>, ...)</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="co"># 恢复原始形状</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>full_log_probs <span class="op">=</span> pad_input(hidden_states<span class="op">=</span>log_probs.unsqueeze(<span class="op">-</span><span class="dv">1</span>), indices<span class="op">=</span>indices, batch<span class="op">=</span>batch_size, seqlen<span class="op">=</span>seqlen)</span></code></pre></div>
+<h2 id="序列并行-ulysses_sequence_parallel_size-1">序列并行
+(<code>ulysses_sequence_parallel_size &gt; 1</code>)</h2>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 填充并切分输入</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>input_ids_rmpad, position_ids_rmpad, pad_size <span class="op">=</span> ulysses_pad_and_slice_inputs(</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    input_ids_rmpad, position_ids_rmpad, sp_size<span class="op">=</span><span class="va">self</span>.ulysses_sequence_parallel_size</span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a><span class="co"># 模型前向后聚合结果</span></span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a>log_probs <span class="op">=</span> gather_outpus_and_unpad(log_probs, gather_dim<span class="op">=</span><span class="dv">0</span>, unpad_dim<span class="op">=</span><span class="dv">0</span>, padding_size<span class="op">=</span>pad_size)</span></code></pre></div>
+<h2 id="梯度累积关系">梯度累积关系</h2>
+<div class="sourceCode" id="cb15"><pre
+class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="co"># 固定 batch size 模式</span></span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>gradient_accumulation <span class="op">=</span> ppo_mini_batch_size <span class="op">//</span> ppo_micro_batch_size_per_gpu</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>loss <span class="op">=</span> policy_loss <span class="op">/</span> gradient_accumulation</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a><span class="co"># 动态 batch size 模式</span></span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a>loss <span class="op">=</span> policy_loss <span class="op">*</span> (<span class="bu">len</span>(data) <span class="op">/</span> ppo_mini_batch_size)  <span class="co"># 按实际样本数比例缩放</span></span></code></pre></div>
+<h2 id="参数配合使用的典型场景">参数配合使用的典型场景</h2>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>use_dynamic_bsz</th>
+<th>use_remove_padding</th>
+<th>ulysses_sp</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>基础训练</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>固定 batch size, 标准 attention</td>
+</tr>
+<tr>
+<td>长序列优化</td>
+<td>❌</td>
+<td>✅</td>
+<td>❌</td>
+<td>移除 padding 减少无效计算</td>
+</tr>
+<tr>
+<td>负载均衡</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>动态划分 batch 平衡各 GPU 计算量</td>
+</tr>
+<tr>
+<td>长序列 + 负载均衡</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>推荐配置, 效率最高</td>
+</tr>
+<tr>
+<td>超长序列</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>序列并行支持超长序列训练</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="参数生效速查表">参数生效速查表</h1>
+<p>遇到”我设了这个参数怎么没用”的时候回来看一眼。</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>参数</th>
+<th><code>use_dynamic_bsz=False</code></th>
+<th><code>use_dynamic_bsz=True</code></th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>*.ppo_micro_batch_size_per_gpu</code></td>
+<td>生效</td>
+<td>忽略</td>
+<td>每卡 micro-batch 的样本条数</td>
+</tr>
+<tr>
+<td><code>*.log_prob_micro_batch_size_per_gpu</code></td>
+<td>生效</td>
+<td>忽略</td>
+<td>compute_log_prob / ref_log_prob 用</td>
+</tr>
+<tr>
+<td><code>actor.ppo_max_token_len_per_gpu</code></td>
+<td>忽略</td>
+<td>生效</td>
+<td>actor 训练 micro-batch 的 token 上限</td>
+</tr>
+<tr>
+<td><code>ref / rollout.log_prob_max_token_len_per_gpu</code></td>
+<td>忽略</td>
+<td>生效</td>
+<td>前向算 logprob 时的 token 上限</td>
+</tr>
+<tr>
+<td><code>critic.ppo_max_token_len_per_gpu</code></td>
+<td>忽略</td>
+<td>生效</td>
+<td>critic 用 dynamic 时才生效</td>
+</tr>
+<tr>
+<td><code>data.max_prompt_length / max_response_length</code></td>
+<td>生效</td>
+<td>生效</td>
+<td>跟 dynamic_bsz 无关, 是单条样本的硬上限</td>
+</tr>
+<tr>
+<td><code>rollout.max_model_len / max_num_batched_tokens</code></td>
+<td>生效</td>
+<td>生效</td>
+<td>vLLM 引擎参数, 跟训练侧切分无关</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h1 id="总结">总结</h1>
+<ol type="1">
+<li><p><strong>batch size 概念分层</strong>: 全局
+<code>train_batch_size</code> → 每个 DP rank 上的
+<code>ppo_mini_batch_size</code> (per-GPU shard) → 每个 rank 内的
+micro-batch。RL 训练里不同位置说”batch_size”往往指不同含义, 跟 TP/SP/DP
+维度乘在一起。</p></li>
+<li><p><strong>两条切分路径</strong>: <code>use_dynamic_bsz=False</code>
+走静态 (按条数等分); <code>use_dynamic_bsz=True</code> 走动态 (按 token
+预算 + KK 算法)。后者能避免长样本 OOM 和短样本 padding 浪费,
+但代价是实现复杂。</p></li>
+<li><p><strong>两层 KK 平衡</strong>: <code>_balance_batch</code> 负责
+rank 之间的总 token 平衡 (<code>equal_size=True</code>); dynamic_bsz
+负责每个 rank 内 micro-batch 的 token 平衡
+(<code>equal_size=False</code>)。两层叠加才能让各 rank 的每个
+micro-batch 都接近 workload。</p></li>
+<li><p><strong>DP 同步关键</strong>: dynamic_bsz 必须配
+<code>all_reduce(MAX)</code> 把 <code>num_micro_batches</code> 拉齐,
+否则 FSDP 的 <code>all_gather</code> 循环次数不一致, 直接 NCCL
+hang。这是 dynamic 模式最容易踩的坑, 对应多个 <a
+href="https://github.com/verl-project/verl/issues/5750">issue
+#5750</a>、<a
+href="https://github.com/verl-project/verl/issues/3873">#3873</a>、<a
+href="https://github.com/verl-project/verl/issues/12">#12</a> 等 hang
+问题。</p></li>
+<li><p><strong>推荐配置</strong>: <code>use_dynamic_bsz=True</code> +
+<code>use_remove_padding=True</code>,
+处理变长序列时效率最高。如果需要支持超长序列 (单条超过单卡能容纳的长度),
+再叠 <code>ulysses_sequence_parallel_size &gt; 1</code>。</p></li>
+<li><p><strong>Loss 缩放差异</strong>:</p>
+<ul>
+<li>固定 batch size:
+<code>loss = policy_loss / gradient_accumulation</code></li>
+<li>动态 batch size:
+<code>loss = policy_loss * (len(data) / ppo_mini_batch_size)</code> —
+按实际样本数比例缩放, 等价于”按权重”对每个 micro-batch
+的梯度归一化。</li>
+</ul></li>
+</ol>
+<hr />
+<h1 id="参考">参考</h1>
+<ul>
+<li><a
+href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的batch_size</a></li>
+<li><a
+href="https://syt-nju.github.io/files/visual-reading/verl-batch-balance-dynamic-bsz/">batch
+size 是怎么被切开的 (syt-nju)</a> —
+本文”两条切分路径”、“_balance_batch”、“DP
+同步”、“参数生效速查表”四节主要整理自这篇博客</li>
+<li><a
+href="https://verl.readthedocs.io/en/latest/perf/perf_tuning.html">Performance
+Tuning Guide — verl docs</a></li>
+<li><a href="https://github.com/verl-project/verl/issues/5750">issue
+#5750 — NCCL timeout during compute_log_prob</a></li>
+<li><a href="https://github.com/verl-project/verl/issues/3873">issue
+#3873 — DAPO+Megatron+SGLang hang</a></li>
+<li><a href="https://github.com/verl-project/verl/pull/5110">PR #5110 —
+upcast seq_len_effective to int64</a></li>
+<li><a href="https://github.com/verl-project/verl/issues/6073">issue
+#6073 — VLM nested tensor jagged 翻转</a></li>
+<li><a href="https://github.com/verl-project/verl/issues/12">issue #12 —
+Hangs during vllm rollout</a></li>
+<li>[[DataProto]] — 数据分发与 dispatch mode</li>
+<li>[[device_mesh]] — DP/TP/SP 维度</li>
+</ul>
 </div><div class="post-footer" id="post-footer">
     <div class="post-info">
         <div class="post-info-line">
             <div class="post-info-mod">
-                <span>更新于 2025-07-16</span>
+                <span>更新于 2026-06-04</span>
             </div></div>
         <div class="post-info-line">
             <div class="post-info-md"><span>
                             <a class="link-to-markdown" href="/batch_size%E8%A7%A3%E9%87%8A/index.md" target="_blank">阅读原始文档</a>
                         </span></div>
             <div class="post-info-share">
-                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size解释" data-hashtags="coding,verl"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size解释"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size解释"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size解释"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size 解释" data-hashtags="coding,verl"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-hashtag="coding"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size 解释"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size 解释"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/batch_size%E8%A7%A3%E9%87%8A/" data-title="batch_size 解释"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
             </div>
         </div>
     </div>
@@ -279,7 +937,7 @@ href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的ba
         </section>
     </div>
 
-    <div class="post-nav"><a href="/mha/" class="prev" rel="prev" title="MHA"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>MHA</a>
+    <div class="post-nav"><a href="/britebootstrapping-reinforced-thinking-process-to-enhance-language-model-reasoning/" class="prev" rel="prev" title="BRiTE：Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>BRiTE：Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning</a>
             <a href="/ring-all-reduce/" class="next" rel="next" title="ring-all-reduce">ring-all-reduce<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
 </div>
 <div id="comments"><div id="valine" class="comment"></div><noscript>
@@ -288,7 +946,7 @@ href="https://zhuanlan.zhihu.com/p/1925295185891430869">浅入理解verl中的ba
 
     </div>
             </main><footer class="footer">
-        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2025</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
         </div>
     </footer></div>
 

@@ -1,6 +1,8 @@
 # WEB AGENTS WITH WORLD MODELS ：LEARNING AND LEVERAGING ENVIRONMENT DYNAMICS IN WEB NAVIGATION
 
 
+![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250801152857.png)
+
 
 这篇名为《Web Agents with World Models: Learning and Leveraging Environment Dynamics in Web Navigation》（[https://arxiv.org/abs/2410.13232](https://arxiv.org/abs/2410.13232)）的论文，由延世大学的研究团队撰写，并计划在 ICLR 2025 会议上发表。它直面了当前大型语言模型（LLM）在构建自主网页代理（Web Agents）时遇到的一个核心瓶颈：**缺乏对环境动态的理解，即没有“世界模型”（World Model）**。
 

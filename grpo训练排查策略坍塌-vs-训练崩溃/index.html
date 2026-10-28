@@ -1,0 +1,3135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>GRPO训练排查：策略坍塌 vs 训练崩溃 - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="GRPO训练排查：策略坍塌 vs 训练崩溃">
+  <meta property="og:description" content="GRPO 训练排查：策略坍塌 vs 训练崩溃 [!info] TL;DR 核心思想：GRPO 训出问题先分类——策略坍塌（policy collapse，算法层：GRPO 目标函数的内在倾向，什么都没做错也会往那个方向走）和训练崩溃（training crash，工程层：两侧概率不一致、loss mask 写错、bf16 精度不够，是 bug 不是超参问题）是两种病，排查路径完全不同，混着查等于两边都查不干净。 最大收获：排查顺序是固定的——先排工程层（bug 是 0/1 的，能被穷尽排除），排干净再动算法层；且二分法按时间尺度切并不严谨，复杂情况要按信号链四问（前提关系）来切。 一句话方法论：抓崩溃前后各 10~20 条 rollout 人工读——3 分钟完成的分类，读曲线要半小时还可能分错。 监控补篇（第 2 篇，09-01 并入）：GRPO 无 critic，唯一信号来自组内相对优势——信号健康度可直接观测、必须观测。平均熵只是报警器；pass@k 取 k=group size 免费算但有四个缺口，且必须配各自调优的 temperature；题内多样性与跨题可区分度是能反向走的两个量，只测前者会漏掉最典型的”高熵模板化”坍塌——补一个一次前向的检索准确率即可堵上。 信号健康度补篇（第 3 篇，09-02 并入）：50% 零方差报警线是错的——占比是 G 与题集难度的函数，要比对预测基线；clip 上界下界分开计、按 advantage 符号解读；两侧引擎 logprob 差 mean&lt;0.001 健康、&gt;0.01 停训（阈值只适用 mean 不适用 max）；长度爆涨先按对错拆再定性；预警看 ESS ratio，确认看 grad norm。 策略坍塌五条 root cause（第 4 篇，09-02 并入）：σ 归一化不是 bug 也不该一刀切关——单样本权重主要由组内稀罕度而非信号可靠性决定；少数派 advantage 上界 ≈ (G-1)/√G（G=16 时 3.75，不是无限）；Dr. GRPO 去 σ 是按各自 σ 缩放不是乘常数（因此同 lr A/B 会误判”方法无效”）；DAPO 动态采样和 Dr. GRPO 去 σ 处理不同区间（p=0/1 vs 极端但非零方差），先拆零方差构成（全对/全错）再决定。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2026-08-31T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-09-15T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="RLHF">
+    <meta property="article:tag" content="GRPO">
+    <meta property="article:tag" content="Troubleshooting">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="GRPO训练排查：策略坍塌 vs 训练崩溃">
+  <meta name="twitter:description" content="GRPO 训练排查：策略坍塌 vs 训练崩溃 [!info] TL;DR 核心思想：GRPO 训出问题先分类——策略坍塌（policy collapse，算法层：GRPO 目标函数的内在倾向，什么都没做错也会往那个方向走）和训练崩溃（training crash，工程层：两侧概率不一致、loss mask 写错、bf16 精度不够，是 bug 不是超参问题）是两种病，排查路径完全不同，混着查等于两边都查不干净。 最大收获：排查顺序是固定的——先排工程层（bug 是 0/1 的，能被穷尽排除），排干净再动算法层；且二分法按时间尺度切并不严谨，复杂情况要按信号链四问（前提关系）来切。 一句话方法论：抓崩溃前后各 10~20 条 rollout 人工读——3 分钟完成的分类，读曲线要半小时还可能分错。 监控补篇（第 2 篇，09-01 并入）：GRPO 无 critic，唯一信号来自组内相对优势——信号健康度可直接观测、必须观测。平均熵只是报警器；pass@k 取 k=group size 免费算但有四个缺口，且必须配各自调优的 temperature；题内多样性与跨题可区分度是能反向走的两个量，只测前者会漏掉最典型的”高熵模板化”坍塌——补一个一次前向的检索准确率即可堵上。 信号健康度补篇（第 3 篇，09-02 并入）：50% 零方差报警线是错的——占比是 G 与题集难度的函数，要比对预测基线；clip 上界下界分开计、按 advantage 符号解读；两侧引擎 logprob 差 mean&lt;0.001 健康、&gt;0.01 停训（阈值只适用 mean 不适用 max）；长度爆涨先按对错拆再定性；预警看 ESS ratio，确认看 grad norm。 策略坍塌五条 root cause（第 4 篇，09-02 并入）：σ 归一化不是 bug 也不该一刀切关——单样本权重主要由组内稀罕度而非信号可靠性决定；少数派 advantage 上界 ≈ (G-1)/√G（G=16 时 3.75，不是无限）；Dr. GRPO 去 σ 是按各自 σ 缩放不是乘常数（因此同 lr A/B 会误判”方法无效”）；DAPO 动态采样和 Dr. GRPO 去 σ 处理不同区间（p=0/1 vs 极端但非零方差），先拆零方差构成（全对/全错）再决定。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" /><link rel="prev" href="https://blog.vllbc.top/rsirecursive-self-improvement-%E5%88%86%E7%B1%BB%E5%9B%BE%E8%B0%B1/" /><link rel="next" href="https://blog.vllbc.top/cpt-%E7%BB%A7%E7%BB%AD%E9%A2%84%E8%AE%AD%E7%BB%83%E7%AC%94%E8%AE%B0/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "GRPO训练排查：策略坍塌 vs 训练崩溃",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, RLHF, GRPO, troubleshooting","wordcount":  38645 ,
+        "url": "https:\/\/blog.vllbc.top\/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83\/","datePublished": "2026-08-31T00:00:00+00:00","dateModified": "2026-09-15T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">GRPO训练排查：策略坍塌 vs 训练崩溃</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/rlhf/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>RLHF</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2026-08-31">2026-08-31</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 38645 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 78 分钟&nbsp;<span id="/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" class="leancloud_visitors" data-flag-title="GRPO训练排查：策略坍塌 vs 训练崩溃">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><h1 id="grpo-训练排查策略坍塌-vs-训练崩溃">GRPO 训练排查：策略坍塌 vs
+训练崩溃</h1>
+<blockquote>
+<p>[!info] TL;DR <strong>核心思想</strong>：GRPO
+训出问题先分类——<strong>策略坍塌</strong>（policy collapse，算法层：GRPO
+目标函数的内在倾向，什么都没做错也会往那个方向走）和<strong>训练崩溃</strong>（training
+crash，工程层：两侧概率不一致、loss mask 写错、bf16 精度不够，是 bug
+不是超参问题）是两种病，排查路径完全不同，混着查等于两边都查不干净。
+<strong>最大收获</strong>：排查顺序是固定的——<strong>先排工程层</strong>（bug
+是 0/1
+的，能被穷尽排除），排干净再动算法层；且二分法按时间尺度切并不严谨，复杂情况要按<strong>信号链四问</strong>（前提关系）来切。
+<strong>一句话方法论</strong>：抓崩溃前后各 10~20 条 rollout
+<strong>人工读</strong>——3 分钟完成的分类，读曲线要半小时还可能分错。
+<strong>监控补篇（第 2 篇，09-01 并入）</strong>：GRPO 无
+critic，唯一信号来自组内相对优势——<strong>信号健康度可直接观测、必须观测</strong>。平均熵只是报警器；pass@k
+取 k=group size 免费算但有四个缺口，且必须配各自调优的
+temperature；<strong>题内多样性与跨题可区分度是能反向走的两个量</strong>，只测前者会漏掉最典型的”高熵模板化”坍塌——补一个一次前向的检索准确率即可堵上。
+<strong>信号健康度补篇（第 3 篇，09-02 并入）</strong>：50%
+零方差报警线是错的——占比是 G 与题集难度的函数，要比对预测基线；clip
+上界下界分开计、按 advantage 符号解读；两侧引擎 logprob 差 mean&lt;0.001
+健康、&gt;0.01 停训（阈值只适用 mean 不适用
+max）；长度爆涨先按对错拆再定性；<strong>预警看 ESS ratio，确认看 grad
+norm</strong>。 <strong>策略坍塌五条 root cause（第 4 篇，09-02
+并入）</strong>：σ 归一化不是 bug
+也不该一刀切关——<strong>单样本权重主要由组内稀罕度而非信号可靠性决定</strong>；少数派
+advantage 上界 ≈ (G-1)/√G（G=16 时 3.75，不是无限）；Dr. GRPO 去 σ
+是按各自 σ 缩放不是乘常数（因此同 lr A/B 会误判”方法无效”）；DAPO
+动态采样和 Dr. GRPO 去 σ <strong>处理不同区间</strong>（p=0/1 vs
+极端但非零方差），先拆零方差构成（全对/全错）再决定。</p>
+<p><strong>clip 的不对称与稀有 token（第 5 篇，09-08
+并入）</strong>：默认 [0.8, 1.2] 在 log
+空间<strong>不对称</strong>——下侧 (<code>log 0.8 ≈ -0.223</code>) 比上侧
+(<code>log 1.2 ≈ +0.182</code>) 多 ~22%，先撞下界；几何对称点 ε =
+√(1−ε_low)/(1+ε_high) ≈ 0.236（DAPO 用 0.28 是工程近似）；<strong>低概率
+token 撞上界是 softmax
+局部几何的必然</strong>（<code>log r ≈ (1−p)·Δ</code> 一阶近似，p=0.05
+时 19× 灵敏）；稀有 token 需要约 7.3 次有效更新才能从 0.05 升到
+0.3，普通 token 不到 1 次；<strong>clip 命中梯度归零要 ratio 与
+advantage 同号</strong>才会发生（异号时梯度本身就小）；调 clip
+不是”开紧/松”，是<strong>调几何</strong>（5.1 几何对称 / 5.2 控制熵 /
+5.3 扫描看 clip_frac_by_sign 与有效 step
+比）；<strong>熵下降不能单独作为调 clip 的依据</strong>——必须配随机
+reward 基线对照（系统下降才归因于
+clip，组间下降是熵的自然衰减）；截断样本（loss mask）与 clip
+是两件事——前者控制样本层（不鼓励长答），后者控制 token
+层（防止大更新），统计要分开。</p>
+<p><strong>训练崩溃的分层排查（第 6 篇，09-15
+并入）</strong>：崩溃的诊断与策略坍塌正交——后者是算法层内在倾向，前者是工程层
+0/1 bug（概率口径不一致、mask 写错、数值精度不够、optimizer state
+不匹配），<strong>没有”更合适的学习率”只有写对和写错</strong>。核心原则<strong>“前一层不通过，后一层曲线没有解释意义”</strong>——按”读
+20 条 rollout → 概率一致性 → 梯度累积 → mask → 数值精度 → 优化器与超参 →
+奖励”顺序查。<strong>第 1 步锁第一个出错 step</strong>（最后正常 /
+首个异常 / 异常后一步三态保存，比单看崩溃后曲线截图价值大）。<strong>1
+步最小一致性测试</strong>：冻结权重、关 dropout、固定
+RNG，<strong>同一批 token 跑 A（训练侧）/ B（同侧再跑）/
+C（推理侧）</strong>——A=B 验训练框架可重复、A=C
+验两侧概率一致；硬判据是<strong>未训先大面积撞
+clip</strong>（权重没动就报策略更新）= 必须停训修口径。<strong>1.5
+步梯度累积等价性</strong>：N 条一次反向 vs 1 条累积 N 次比，方向不同或
+norm 差 accumulation/world size 整数倍 = 缩放错。<strong>2 步 mask
+要打逐 token 表</strong>（position / token 文本 / 来源 / attention mask
+/ loss mask / 是否有 reward），运行时断言 loss mask 之和 = completion
+token 数。<strong>3 步沿数值路径找第一个 NaN/Inf</strong>——bf16 下两
+logprob 相减会量化成 0；<strong>log-ratio clamp 必须在 exp
+之前</strong>（先 exp 后 clamp 反向 0 × Inf = NaN，clamp 不是 PPO clip
+替代品）。<strong>4 步前 4 层通过后才动 optimizer 和
+reward</strong>——同时记裁剪前/后 grad norm、|Δθ|/|θ|、ratio
+P95/P99、upper/lower clip fraction，按形状分流（grad clip 每步都中 =
+根因未解；checkpoint 恢复即崩 = 回到更早且匹配的 checkpoint
+重放）。面试信号：候选人说”先要最后正常 step / 第一异常 batch / 原始
+rollout / ratio / mask”才像真排过；上来就读 lr 和 KL 是看板习惯。</p>
+</blockquote>
+<p>原文：刘明（LLMCat，亚马逊高级数据科学家）“LLM
+面试官笔记”系列。本笔记覆盖第 1 篇《如何排查 GRPO 训练问题》（<a
+href="https://mp.weixin.qq.com/s/4rUkZ02-nTbydwhzy8wAuw">公众号</a> ｜
+<a href="https://zhuanlan.zhihu.com/p/2077405199711334949">知乎</a>）+
+第 2 篇《如何监控模型的多样性》（<a
+href="https://zhuanlan.zhihu.com/p/2077475761078924748">知乎</a>）+ 第 3
+篇《怎么监控训练信号的健康度》（2026-08-31 发布，知乎未索引到独立链接）+
+第 4 篇《策略坍塌五条 root cause：除以 σ》（2026-09-02
+发布，知乎未索引到独立链接）+ 第 5 篇《clip 的不对称与稀有
+token》（2026-09-04 发布，知乎未索引到独立链接）+ 第 6
+篇《训练崩溃：分层排查》（2026-09-07
+发布，知乎未索引到独立链接；“两侧引擎概率不一致的量级”待发布，见
+[[#系列追踪]]）。</p>
+<h2 id="笔记地图">笔记地图</h2>
+<ul class="task-list">
+<li><label><input
+type="checkbox" />[[#排查流程全景|排查流程全景]]</label></li>
+<li><label><input
+type="checkbox" />[[#排查前的三个基础要求|排查前的三个基础要求]]</label></li>
+<li><label><input type="checkbox" />[[#二分法：策略坍塌 vs
+训练崩溃|二分法]]</label></li>
+<li><label><input
+type="checkbox" />[[#二分法的边界：转化与信号链|二分法的边界（转化 &amp;
+信号链四问）]]</label></li>
+<li><label><input type="checkbox" />[[#最常见的错误排查：降 lr|降 lr
+陷阱]]</label></li>
+<li><label><input type="checkbox" />[[#快速判断：读 rollout 原文|读
+rollout 原文]]</label></li>
+<li><label><input
+type="checkbox" />[[#四条原则（总结）|四条原则]]</label></li>
+<li><label><input type="checkbox" />[[#策略坍塌的五条 root cause（系列第
+4 篇）：除以 σ|策略坍塌 root cause（第 4 篇）]]</label></li>
+<li><label><input type="checkbox" />[[#一、先确定问题发生在哪一步|五条
+root cause 全景]]</label></li>
+<li><label><input type="checkbox" />[[#二、从一组具体分数看 σ
+到底改变了什么|σ 归一化的代价（少数派放大）]]</label></li>
+<li><label><input type="checkbox" />[[#三、去掉 σ 的本质|去掉
+σ（Dr. GRPO）的本质]]</label></li>
+<li><label><input
+type="checkbox" />[[#四、过滤零方差组的目的|过滤零方差组（DAPO
+动态采样）]]</label></li>
+<li><label><input type="checkbox" />[[#五、去掉 σ
+和过滤零方差组怎么配合|两者怎么配合（不同区间）]]</label></li>
+<li><label><input
+type="checkbox" />[[#六、脱敏实验记录|脱敏实验记录]]</label></li>
+<li><label><input type="checkbox" />[[#clip 的不对称与稀有 token（系列第
+5 篇）：为什么低概率 token 更容易撞上界|clip 不对称与稀有 token（第 5
+篇）]]</label></li>
+<li><label><input type="checkbox" />[[#一、clip 到底在裁什么|clip
+到底在裁什么]]</label></li>
+<li><label><input type="checkbox" />[[#1.1 log-ratio 的几何不对称|①
+log-ratio 几何不对称（22% 偏置）]]</label></li>
+<li><label><input type="checkbox" />[[#1.2 0.25 几何对称点|② 几何对称点
+ε 表]]</label></li>
+<li><label><input type="checkbox" />[[#二、低概率 token
+为什么更容易撞上界|低概率 token 撞上界的必然性]]</label></li>
+<li><label><input type="checkbox" />[[#2.1 真实更新计算|① softmax
+真实更新计算]]</label></li>
+<li><label><input type="checkbox" />[[#2.2 被上界裁掉的 token
+概率低，能说明什么|② 撞上界的 token 是稀有 + 想增]]</label></li>
+<li><label><input type="checkbox" />[[#三、稀有 token 的问题|稀有 token
+的学习路径（7.3 次有效更新）]]</label></li>
+<li><label><input type="checkbox" />[[#四、命中 clip
+后，什么梯度被丢掉了|clip 真正截断的是同号极端]]</label></li>
+<li><label><input type="checkbox" />[[#五、如何调整上下界|调 clip
+是调几何（5.1 / 5.2 / 5.3）]]</label></li>
+<li><label><input
+type="checkbox" />[[#六、为什么”熵在下降”不能单独作为调参依据|熵降不能单独调
+clip（随机 reward 基线）]]</label></li>
+<li><label><input type="checkbox" />[[#七、截断样本 vs clip|截断样本 vs
+clip（mask 与 clip 统计分开）]]</label></li>
+<li><label><input type="checkbox" />[[#训练崩溃的分层排查（系列第 6
+篇）：从便宜的 0/1 检查开始|训练崩溃分层排查（第 6 篇）]]</label></li>
+<li><label><input type="checkbox" />[[#零、先锁定”第一个出问题的
+step”|零、锁定首个异常 step（三态保存）]]</label></li>
+<li><label><input type="checkbox" />[[#一、第 1
+步：先证明新旧概率可以比较|第 1 步 概率一致性（A/B/C
+三次计算）]]</label></li>
+<li><label><input type="checkbox" />[[#1.1 最小一致性测试|①
+最小一致性测试（未训先撞 clip 必停训）]]</label></li>
+<li><label><input type="checkbox" />[[#1.2 权重同步不能只看”调用成功”|②
+权重同步三类检查]]</label></li>
+<li><label><input type="checkbox" />[[#二、第 1.5
+步：验证梯度加工流水线|第 1.5 步 梯度累积等价性]]</label></li>
+<li><label><input type="checkbox" />[[#2.1 梯度累积等价性测试|① 累积 vs
+一次反向]]</label></li>
+<li><label><input type="checkbox" />[[#2.2
+用简单目标测试”梯度能否到达参数”|② 普通 NLL
+能到参的底线测试]]</label></li>
+<li><label><input type="checkbox" />[[#三、第 2 步：逐 token 检查 mask
+和数据边界|第 2 步 逐 token mask 检查]]</label></li>
+<li><label><input type="checkbox" />[[#3.1 不要只看 mask 的 shape|① 逐
+token 表]]</label></li>
+<li><label><input type="checkbox" />[[#3.2
+多轮和工具调用最容易静默出错|② 多轮/工具 mask 易错]]</label></li>
+<li><label><input type="checkbox" />[[#3.3 截断样本要同时检查三处|③
+截断样本的三处开关]]</label></li>
+<li><label><input type="checkbox" />[[#四、第 3 步：沿着数值路径找第一个
+NaN/Inf|第 3 步 数值路径查 NaN/Inf]]</label></li>
+<li><label><input type="checkbox" />[[#4.1 关键差值和指数运算使用 fp32|①
+fp32 归约/相减/指数]]</label></li>
+<li><label><input type="checkbox" />[[#4.2 先限制 log-ratio，再取指数|②
+clamp 必须在 exp 之前]]</label></li>
+<li><label><input type="checkbox" />[[#4.3 几种”限制”不要混在一起|③ 四种
+clip/clamp 不能凭数值猜]]</label></li>
+<li><label><input type="checkbox" />[[#4.4 不要用 log(softmax(x) + eps)
+掩盖问题|④ 不用 log(softmax+eps) 掩盖问题]]</label></li>
+<li><label><input type="checkbox" />[[#五、前四层通过后，才进入优化器和
+reward|第 4 步 优化器与 reward]]</label></li>
+<li><label><input type="checkbox" />[[#5.1 第 4
+步：判断是不是更新步子太大|① 更新步子形状分流]]</label></li>
+<li><label><input type="checkbox" />[[#5.2 回滚时把故障证据一起留下|②
+回滚留证据]]</label></li>
+<li><label><input type="checkbox" />[[#5.3 第 5 步：沿 reward 到
+advantage 的路径检查|③ reward→advantage 路径]]</label></li>
+<li><label><input type="checkbox" />[[#5.4 reward hacking
+不能只靠一条曲线确诊|④ hacking 单变量对照]]</label></li>
+<li><label><input
+type="checkbox" />[[#六、把整套排查压缩成一张决策表|六、决策表（避免跨层解释）]]</label></li>
+<li><label><input type="checkbox" />[[#监控看板（系列第 2
+篇）：信号健康度可直接观测|监控看板（第 2 篇）]]</label></li>
+<li><label><input type="checkbox" />[[#1. token
+entropy：只是个粗糙报警器|① token entropy（报警器）]]</label></li>
+<li><label><input type="checkbox" />[[#2.
+组内去重率：熵坍塌最直观的表现|② 组内去重率]]</label></li>
+<li><label><input type="checkbox" />[[#3. pass@k：最关键，但有四个缺口|③
+pass@k（四缺口 + temperature 陷阱）]]</label></li>
+<li><label><input type="checkbox" />[[#4.
+高不确定性位置的熵：补救平均熵的稀释|④ 条件熵（补稀释）]]</label></li>
+<li><label><input type="checkbox" />[[#5.
+跨输入可区分度：本篇最重要的一节|⑤
+跨题可区分度（检索准确率）]]</label></li>
+<li><label><input
+type="checkbox" />[[#多样性组小结：五组指标|多样性组小结]]</label></li>
+<li><label><input type="checkbox" />[[#信号健康度组（系列第 3
+篇）：更工程，也更容易被指标名字骗|信号健康度组（第 3
+篇）]]</label></li>
+<li><label><input type="checkbox" />[[#1. 零方差 group 占比：50%
+报警线是错的|⑥ 零方差组占比（50% 阈值是错的）]]</label></li>
+<li><label><input type="checkbox" />[[#2. 重要性比与 clip
+fraction：别把两个方向合并成一个人|⑦ 重要性比 / clip
+fraction]]</label></li>
+<li><label><input type="checkbox" />[[#3. 两侧引擎的 logprob
+差：最容易被忽略，也最致命|⑧ 两侧引擎 logprob 差]]</label></li>
+<li><label><input type="checkbox" />[[#4. 长度、grad norm、reward
+分项：已经表现出来的结果|⑨ 长度 / grad norm / reward 分项]]</label></li>
+<li><label><input type="checkbox" />[[#5. ESS：batch
+里有多少样本真正起了作用|⑩ ESS（预警）]]</label></li>
+<li><label><input
+type="checkbox" />[[#信号健康度组小结：按一条顺序看|观看顺序小结]]</label></li>
+<li><label><input type="checkbox" />[[#我的批注|批注 &amp;
+行动项]]</label></li>
+<li><label><input type="checkbox" />[[#系列追踪|系列追踪]]</label></li>
+</ul>
+<h2 id="排查流程全景">排查流程全景</h2>
+<pre class="mermaid"><code>flowchart TD
+    A[&quot;训练出问题：reward 异常&quot;] --&gt; B[&quot;第一步：抓崩溃前后各 10~20 条 rollout 人工读&quot;]
+    B --&gt; C[&quot;先查工程层（0/1 的 bug）&lt;br/&gt;两侧 logprob 一致性 → loss mask → 精度&quot;]
+    C -- &quot;排除干净&quot; --&gt; D[&quot;再查算法层&lt;br/&gt;改优势估计 / 裁剪 / 奖励设计&quot;]
+    B -- &quot;输出同质化、像模板&quot; --&gt; D
+    D --&gt; E[&quot;还没定位？按信号链四问逐层切&quot;]
+    E --&gt; F[&quot;① 梯度和我认为的 match 吗&quot;]
+    F --&gt; G[&quot;② reward 在测我以为的东西吗&quot;]
+    G --&gt; H[&quot;③ 几条样本在决定更新&quot;]
+    H --&gt; I[&quot;④ 策略还在看题吗&quot;]</code></pre>
+<blockquote>
+<p>[!note]- 为什么顺序是”先工程、后算法”？
+工程层问题<strong>要么有要么没有</strong>（0/1），适合快速穷尽排除；策略坍塌是
+GRPO
+目标函数的内在倾向——“你什么都没做错，它也会往那个方向走”，不存在”修好”一说，只能设计上缓解。混着查
+= 两边都查不干净。</p>
+</blockquote>
+<h2 id="排查前的三个基础要求">排查前的三个基础要求</h2>
+<p>不管从哪个角度切入排查，真正要关心的是三件事：</p>
+<ol type="1">
+<li><strong>先分类再动手</strong>。策略坍塌和训练崩溃解决方式差异很大，不可混为一谈。</li>
+<li><strong>要有 observability
+意识</strong>。你有没有监控、监控了什么？更关键的：改了某配置指标动了，怎么知道是配置起了作用，还是恰好这批数据不一样？</li>
+<li><strong>分析每个方案的代价</strong>。直接叠各种 PO（DAPO /
+XXPO）不是专业做法——每个 trick
+都有适用前提，叠在一起用，连哪个在起作用都分不出来。</li>
+</ol>
+<h2 id="二分法策略坍塌-vs-训练崩溃">二分法：策略坍塌 vs 训练崩溃</h2>
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 44%" />
+<col style="width: 42%" />
+</colgroup>
+<thead>
+<tr>
+<th></th>
+<th>策略坍塌（算法层）</th>
+<th>训练崩溃（工程层）</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>典型现象</td>
+<td>reward 还在缓慢涨，输出越来越像模板</td>
+<td>某个 step 之后 reward 断崖到 0</td>
+</tr>
+<tr>
+<td>曲线特征</td>
+<td>entropy 单调下降；pass@1 微涨、pass@k 明显掉</td>
+<td>grad norm 突然 10x 尖刺</td>
+</tr>
+<tr>
+<td>输出特征</td>
+<td>同一 prompt 采 16 条几乎一模一样</td>
+<td>复读、乱码、中英混杂、<code>!!!!!!</code></td>
+</tr>
+<tr>
+<td>发生时间</td>
+<td>训练中后期，渐进</td>
+<td>突发，往往能定位到具体 step</td>
+</tr>
+<tr>
+<td>root cause</td>
+<td>优化目标 / 信号设计</td>
+<td>工程一致性（概率不一致、mask 覆盖写错、bf16 精度不够）</td>
+</tr>
+<tr>
+<td>解决方式</td>
+<td>改优势估计、改裁剪、改奖励</td>
+<td>查 logprob 一致性、查 mask、查精度</td>
+</tr>
+</tbody>
+</table>
+<p>训练崩溃这类问题<strong>调超参永远调不好</strong>——它压根不是超参问题，而是
+bug。</p>
+<h2 id="二分法的边界转化与信号链">二分法的边界：转化与信号链</h2>
+<p>现实世界是复杂的，二分法只是粗略总结、不严谨，<strong>不能只看表格定位问题</strong>。</p>
+<h3 id="两类问题会互相转化">两类问题会互相转化</h3>
+<p>一个常见链路：</p>
+<pre><code>熵先一路掉到底 → 每个位置只剩一个答案 → 输出退化成复读 → reward 断崖式暴跌</code></pre>
+<p>最后一步看到的结果很容易被归因为训练崩溃，但病根在第一步的策略坍塌。反过来，坍塌的成因里往往混着
+reward 设计、一批数据被反复用多轮——这些也不是纯算法问题。</p>
+<p>所以排查姿态要变：不是”确定它是哪类”，而是<strong>先按训练崩溃去查工程，排除干净之后才轮到策略坍塌类</strong>。面试中能主动指出这两类会互相转化，是很大的加分项。</p>
+<h3 id="时间尺度-root-cause">时间尺度 ≠ root cause</h3>
+<p>“渐进 vs 突发”和”算法层 vs 工程层”<strong>并不一一对应</strong>：</p>
+<blockquote>
+<p>[!example]- 两个反例（表象与病根错位） <strong>反例
+1：有效样本数退化</strong>——渐进式（几十步的过程），符合策略坍塌”渐进 +
+中后期”的表象，但病根在工程/系统层（异步、数据陈旧）。要查的是工程层，不是优化目标。</p>
+<p><strong>反例 2：多轮工具调用崩溃</strong>——属于训练崩溃，表现为突发
+grad norm
+爆炸，但病根在信号设计：工具返回的内容把分布带偏、逐轮复合。不是 mask
+或精度问题。</p>
+</blockquote>
+<h3 id="进阶切法信号链四问">进阶切法：信号链四问</h3>
+<p>按<strong>信号链</strong>区分，四层之间是<strong>前提关系</strong>，不是并列关系：</p>
+<table>
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 20%" />
+<col style="width: 26%" />
+<col style="width: 43%" />
+</colgroup>
+<thead>
+<tr>
+<th>层</th>
+<th>问题</th>
+<th>查什么</th>
+<th>不通过的后果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>①</td>
+<td>梯度和我认为的 match 吗</td>
+<td>两侧 logprob 一致性、loss mask 覆盖范围、梯度累积等价性</td>
+<td>后面三层的所有观测都没有意义</td>
+</tr>
+<tr>
+<td>②</td>
+<td>reward 在测我以为的东西吗</td>
+<td>分项拆解、验证器的 false negative、与训练不同源的 held-out</td>
+<td>③④ 在精确地优化一个错的东西</td>
+</tr>
+<tr>
+<td>③</td>
+<td>这一步的更新由几条样本决定</td>
+<td>有效样本数、零方差组占比</td>
+<td>——</td>
+</tr>
+<tr>
+<td>④</td>
+<td>策略还在看题吗</td>
+<td>组内去重、跨输入的可区分度、pass@k</td>
+<td>——</td>
+</tr>
+</tbody>
+</table>
+<p>这个切分给出了二分法给不出的<strong>依赖结构</strong>——因为”渐进和突发”之间没有前提关系。多数情况二分法够用；复杂情况按四问切。</p>
+<h2 id="最常见的错误排查降-lr">最常见的错误排查：降 lr</h2>
+<p>缺经验的候选人标准回答：“训练崩溃之后，把 lr 从 xxx 降到 yyy
+就好了。”</p>
+<ul>
+<li>降 lr 确实”有效”：它把<strong>所有事情</strong>都拖慢了，包括 bug
+本身——原来几百 step 就爆，现在几千 step 才爆。</li>
+<li>如果训练本来只跑几千
+step，你会<strong>以为问题解决了</strong>。这不是修好，是把爆炸推迟到了你的视野之外。</li>
+<li>同类回答：加大 grad clip 力度、拉长 warmup、翻倍 batch
+size——都能让曲线变好看，因为都在降低单步实际更新量。</li>
+</ul>
+<blockquote>
+<p>[!warning] 判断标准 修复手段是「让每一个 step 走得更小」→
+大概率没定位到根因，只是把它<strong>稀释</strong>了。</p>
+<p>但降 lr
+当<strong>诊断手段</strong>完全没问题：这是个合理的二分实验——信任域问题随
+lr 线性缓解，bug 不会。</p>
+</blockquote>
+<h2 id="快速判断读-rollout-原文">快速判断：读 rollout 原文</h2>
+<p>抓崩溃前后各 10~20 条
+rollout，人工一条条读。三类问题在原文里一眼可见：</p>
+<ol type="1">
+<li><strong>reward
+hacking</strong>：结构完整、格式漂亮，但内容在绕开真正的任务——该解题的地方在复述题干、该给答案的地方给了模板化的推理过程。</li>
+<li><strong>大量截断</strong>：回答在句子中间断掉、JSON
+没闭合、推理写到一半没了。</li>
+<li><strong>乱码 /
+复读</strong>：<code>!!!!!!</code>、同一个短语重复几十遍、中英混杂到读不通。</li>
+</ol>
+<p>而这三类在 reward 曲线上可能都只表现为”掉到
+0”。<strong>从曲线上看，不如直接看原文。</strong></p>
+<h2 id="四条原则总结">四条原则（总结）</h2>
+<ol type="1">
+<li><strong>先分类，再动手</strong>。坍塌和崩溃的排查路径完全不同；顺序固定：先排工程层（0/1），排干净再动算法层。</li>
+<li><strong>分类法本身要能被质疑</strong>。二分是按时间尺度切的，有用但不严谨；按信号链切（梯度对不对
+→ reward 在测什么 → 几条样本在决定 →
+还看不看题）更严格，因为四层之间是前提关系。</li>
+<li><strong>降 lr
+是诊断，不是解释</strong>。任何「让每一步走得更小」的手段，都只是在稀释根因。</li>
+<li><strong>读原文在读曲线之前</strong>。3
+分钟人工阅读能完成的分类，曲线上要花半小时，还可能分错。</li>
+</ol>
+<h2 id="策略坍塌的五条-root-cause系列第-4-篇除以-σ">策略坍塌的五条 root
+cause（系列第 4 篇）：除以 σ</h2>
+<blockquote>
+<p>[!info] 第 4 篇核心 上一篇里”训练 reward 涨、pass@1 涨但 pass@16 跌破
+base”——这是策略坍塌的典型现象。本篇追其中一个具体问题：<strong>一组回答已经打完分，这些分数是怎么变成更新权重的？</strong>
+主线分析 σ 归一化（GRPO 默认 advantage 公式里的除以
+σ）具体改变了什么、代价是什么。</p>
+<p>五条 root cause
+对应训练流程的不同环节、破坏不同东西：<strong>不要看到坍塌就直接上
+clip-higher</strong>——改错地方等于白改。</p>
+</blockquote>
+<h3 id="一先确定问题发生在哪一步">一、先确定问题发生在哪一步</h3>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>信号链环节</th>
+<th>可能的问题</th>
+<th>破坏了什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>给回答打分</td>
+<td>reward 太粗</td>
+<td>大量 group 全对/全错，组内无可比信息</td>
+</tr>
+<tr>
+<td>reward → advantage</td>
+<td><strong>除以 σ</strong></td>
+<td>接近全对/全错时少数派获大单样本权重</td>
+</tr>
+<tr>
+<td>advantage → 参数更新</td>
+<td>clip 不对称</td>
+<td>低概率、探索的 token 更易被裁（第 5 篇）</td>
+</tr>
+<tr>
+<td>限制策略漂移</td>
+<td>KL 配置</td>
+<td>太强学不动；实现错误时无真实约束</td>
+</tr>
+<tr>
+<td>重复使用 rollout</td>
+<td>数据变旧</td>
+<td>当前策略已变，却反复学旧策略的产物</td>
+</tr>
+</tbody>
+</table>
+<p>reward 已让多数 group 没方差时问题在 clip 之前；ratio
+混进陈旧数据时单改 σ 也解决不了。本篇主线是第二行：reward
+已有高低之分，但<strong>经过组内标准化后，更新权重是否符合我们对信号可靠性的判断</strong>。σ
+归一化不是坍塌的唯一原因，也不是看到坍塌就该关闭的开关。</p>
+<p>标准 GRPO advantage：</p>
+<p><span class="math display">\[\hat{A}_i = \frac{r_i -
+\mu}{\sigma}\]</span></p>
+<p>直觉：正数提高该回答 token
+的概率，负数压低；绝对值越大对本次更新影响越大。<strong>减均值</strong>负责”谁比同组平均更好”，<strong>除以
+σ</strong>负责”这组差异按多大音量进入训练”——但 σ
+只知道分数有多分散，<strong>不知道这些分差究竟代表可靠能力，还是偶然采样和
+reward 噪声</strong>。</p>
+<h3 id="二从一组具体分数看-σ-到底改变了什么">二、从一组具体分数看 σ
+到底改变了什么</h3>
+<p>二值 reward（对=1、错=0）最能说明问题。设组内 10 条：9 对 1
+错，μ=0.9，σ=0.3。</p>
+<p>仅减均值：每条正确回答分差 = +0.1；唯一错误 =
+−0.9。少数派离均值最远，单样本权重已经更大；正负和仍为 0。</p>
+<p>除以 σ 后整体放大：每条正确 = +0.1/0.3 ≈ +0.33；唯一错误 = −0.9/0.3 =
+−3.00。少数派拿到最大绝对权重。</p>
+<p>不同 p 下的放大（用总体 σ，便于观察）：</p>
+<table>
+<thead>
+<tr>
+<th>组内正确率 p</th>
+<th>正确回答 A</th>
+<th>错误回答 A</th>
+<th>被重点放大的样本</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.5</td>
+<td>+1.00</td>
+<td>−1.00</td>
+<td>平衡</td>
+</tr>
+<tr>
+<td>0.9</td>
+<td>+0.33</td>
+<td>−3.00</td>
+<td>少数的错误回答</td>
+</tr>
+<tr>
+<td>0.1</td>
+<td>+3.00</td>
+<td>−0.33</td>
+<td>少数的正确回答</td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260907171231.jpg"
+alt="除以 σ 后，组内少数派拿到最大权重：难题里偶然答对的 A 随 p 趋近 0 放大，简单题里偶然答错的 A 随 p 趋近 1 放大（原文配图）" />
+<figcaption aria-hidden="true">除以 σ
+后，组内少数派拿到最大权重：难题里偶然答对的 A 随 p 趋近 0
+放大，简单题里偶然答错的 A 随 p 趋近 1 放大（原文配图）</figcaption>
+</figure>
+<p><strong>核心洞察：单样本权重主要由”在组内有多稀少”决定，而不是由”我们对其有多确信”决定</strong>。难题里唯一答对的可能是真探索、也可能只是猜中；简单题里唯一答错可能暴露稳定缺陷、也可能只是采样失误——σ
+归一化无法区分，只按组内分数的位置分配权重。</p>
+<h4 id="通用公式">2.1 通用公式</h4>
+<p>二值 reward 下 σ = √[p(1−p)]，所以：</p>
+<p><span class="math display">\[A_{对} = \frac{1-p}{\sqrt{p(1-p)}} =
+\sqrt{\frac{1-p}{p}}, \qquad A_{错} = -\sqrt{\frac{p}{1-p}}\]</span></p>
+<p>结论：p 越接近 0，正确回答 A 越大；p 越接近 1，错误回答 A 越大；p≈0.5
+时两侧平衡。</p>
+<p>少数派绝对权重也可写成 <span
+class="math inline">\(\sqrt{(1-p)/p}\)</span>（错误 <span
+class="math inline">\(-\sqrt{p/(1-p)}\)</span>）。同一标准化两个观察角度：</p>
+<ul>
+<li><strong>题与题之间</strong>：接近全对/全错的 group σ
+越小，原始分差被换算到更大尺度。</li>
+<li><strong>一道题内部</strong>：少数派离均值最远，单样本绝对权重最大。</li>
+</ul>
+<p>最终风险取决于这些少数派样本是否可靠：reward
+准确时大权重可能有用；reward 有噪声时它会把偶然胜出推得很重。</p>
+<h4 id="上限由-group-size-决定不是无限">2.2 上限由 group size
+决定，不是无限</h4>
+<p>公式在 p→0/1 时看似发散，但 group size G 有限。极端是 1 少数派 +
+(G−1) 多数派：</p>
+<ul>
+<li><strong>无偏 std</strong>（主流框架）：少数派上界 <span
+class="math inline">\(|A_{min}| \le
+(G-1)/\sqrt{G}\)</span>——<strong>G=16 → 3.75，G=8 → 2.47</strong>。</li>
+<li><strong>总体 std</strong>：少数派上界约 <span
+class="math inline">\(\sqrt{G-1}\)</span>。</li>
+</ul>
+<p>放大明显但不是无限大——G 决定的硬上限；ε
+只会把数值压小，<strong>不能突破它</strong>。</p>
+<p>这条上界对<strong>连续 reward 同样成立</strong>（均值和 σ
+来自同一组，无论 reward 是连续值还是分项加权和，单样本权重仍受 G
+限制）。</p>
+<p><strong>连续 reward 的额外风险</strong>：σ
+归一化<strong>抹掉了原始分差的绝对大小</strong>。一组回答总分都在
+0.5000、唯一一条 0.5001——差异可能是打分器噪声，但 σ
+同样很小时除以之后仍可能得到接近 3 的 advantage。多个 reward
+加权后，正确性得分全相同时，<strong>最后一点方差可能只来自标点/长度/某个弱
+reward 分项</strong>——σ 归一化仍把它扩展成正常强度信号。</p>
+<blockquote>
+<p>[!warning] 真正该监控的两件事 ① 标准化后的 advantage 有多大； ②
+标准化<strong>之前</strong>的 reward range、σ、以及各 reward
+分项的方差。</p>
+<p>只看前者，看不出模型正在追逐一丁点分数噪声。</p>
+</blockquote>
+<h3 id="三去掉-σ-的本质dr.-grpo">三、去掉 σ 的本质（Dr. GRPO）</h3>
+<p>Dr. GRPO：advantage 只减组均值、不除以 σ——<span
+class="math inline">\(A_i = r_i - \mu\)</span>，落在 <span
+class="math inline">\([r_{min}-\mu,\ r_{max}-\mu]\)</span> 内，二值
+reward 下即 <span class="math inline">\([-1, +1]\)</span>。在 9 对 1
+错的例子里：<span class="math inline">\(A_{对} = +0.1\)</span>，<span
+class="math inline">\(A_{错} = -0.9\)</span>，权重从 ±0.33 / ±3.00 回到
++0.1 / −0.9。</p>
+<p><strong>去掉 σ
+并不会让正负权重相等，也不会消除少数派效应</strong>（少数派仍离均值最远）。它真正改变的是：<strong>这道题不再因为
+σ 小而被强行拉到统一尺度</strong>。但同时改变了两件事：</p>
+<ol type="1">
+<li>不同 prompt 不再各自被强行缩放到相近方差，原始 reward
+分差重新决定更新强度；</li>
+<li>二值 reward 下接近全对/全错的 group
+会明显变弱，<strong>整体有效更新幅度通常也下降</strong>。</li>
+</ol>
+<p>不考虑 ε 时，同一个 group 的两种 advantage 满足：</p>
+<p><span class="math display">\[\hat{A}_{去\sigma} = \sigma \cdot
+\hat{A}_{原}\]</span></p>
+<p>也就是说，<strong>去掉 σ 不是给所有样本乘一个常数，而是按各自 σ
+缩放</strong>——σ 小的 group 被压得更多，σ 大的被压得较少。</p>
+<p>这造成容易误判的 A/B：</p>
+<ul>
+<li>保留 σ 的 run 学得快，但可能更容易放大少数派噪声；</li>
+<li>去掉 σ 的 run
+学得慢，看上去像方法无效，<strong>其实一部分只是整体更新变弱了</strong>。</li>
+</ul>
+<blockquote>
+<p>[!tip] 至少跑三条对照曲线 1. 原始 σ 归一化； 2. 去掉 σ，保持原 lr；
+3. 去掉 σ，<strong>同时按观测到的平均 σ 适当补偿 lr</strong>。</p>
+<p>第三条不是机械地乘常数——全局 lr 无法完全抵消每个 group 不同的
+σ。这条对照只帮<strong>分离”权重结构变了”与”整体步子变小了”</strong>两个效应；具体补多少仍要结合
+grad norm、KL、实际参数更新量判断。</p>
+</blockquote>
+<h4 id="σ-归一化的价值">3.1 σ 归一化的价值</h4>
+<p>归一化在做<strong>逐 prompt 的自适应缩放</strong>：不管原始分差是
+0.001 还是 1，都尽量换算到相近尺度，让不同 prompt
+给出接近强度的训练信号。</p>
+<p>但 reward 方差小有<strong>两种完全不同的含义</strong>：</p>
+<ul>
+<li>分差小但排序可靠 → 值得学；</li>
+<li>分差小是因为大家几乎一样，剩下只是 reward 噪声或次要分项。</li>
+</ul>
+<p>σ
+归一化<strong>无法区分两者</strong>。去掉它会降低第二类噪声的影响，但也会让”差距小却可靠”的偏好信号变弱。<strong>这是
+trade-off，不是一次没代价的 bug 修复</strong>。</p>
+<h4 id="σ-和长度归一化的区别">3.2 σ 和长度归一化的区别</h4>
+<p>Dr. GRPO 还删了回答长度归一化 <span class="math inline">\(1/\lvert
+o_i \rvert\)</span>。两项对应不同偏置：</p>
+<ul>
+<li><strong>除以 σ</strong>：改变不同难度题和组内少数派的权重 →
+difficulty bias。</li>
+<li><strong>除以回答长度</strong>：让长回答的单位 token
+惩罚更轻，尤其减弱长错误回答的负 advantage → length bias。</li>
+</ul>
+<p>论文把长度失控归因于 <span class="math inline">\(1/\lvert o_i
+\rvert\)</span> 而<strong>不是
+σ</strong>，两项一起删除但没单独消融。遇到错误回答越来越长时，<strong>先检查
+loss 是否按回答长度做了归一化</strong>。</p>
+<h3 id="四过滤零方差组的目的dapo-动态采样">四、过滤零方差组的目的（DAPO
+动态采样）</h3>
+<p>一组 G 条全对或全错时 σ=0，无论是否除以 σ advantage 都是
+0——<strong>去掉 σ 只能处理”仍有方差但正确率极端”的
+group，处理不了严格的全对/全错</strong>。</p>
+<p>DAPO dynamic sampling 走另一条路：丢掉零方差
+group、继续采样直到凑够指定数量的有效 group，让 batch 里每个 group
+都至少含两种
+reward。提升了训练数据利用率，<strong>但不是没有成本</strong>。</p>
+<h4 id="代价一生成开销取决于数据难度">4.1
+代价一：生成开销取决于数据难度</h4>
+<p>零方差少时，重采样可被流水线隐藏；<strong>六七成 group
+都是全对或全错</strong>时，补齐 batch
+要生成大量额外回答。所以不要直接照搬论文时间开销结论——需要同时记录：零方差组比例、为补齐
+batch 实际生成了多少 group、生成能否与训练并行。</p>
+<h4 id="代价二训练目标的权重变了">4.2 代价二：训练目标的权重变了</h4>
+<p>零方差 group
+本来就没任务梯度，问题不在”删掉了什么信号”，而在”删掉后用什么补进来”。例：普通采样一次得
+10 个 group，只有 4 个有高低分；动态采样补到 10 个有效 group → 每 step
+看到的有效比较更多、更新通常更强。</p>
+<p>但<strong>不同 prompt 被保留的概率并不相同</strong>：</p>
+<ul>
+<li>中等难度题更易同时采到对和错 → 更频繁进入 batch；</li>
+<li>几乎全对/全错的题要反复重采样 → 一直进不来。</li>
+</ul>
+<p>训练数据因此被<strong>重新加权</strong>。至于零梯度 token 是否仍占
+loss 归一化分母，要看框架 reduce
+方式——这影响动态采样把更新放大多少，<strong>但不改变核心事实：每步训练的
+prompt 分布已经变了</strong>。</p>
+<h4 id="代价三已掌握的能力更容易被看不见">4.3
+代价三：已掌握的能力更容易被看不见</h4>
+<p>常见说法”全对题被过滤、模型没梯度、最后遗忘”因果不准确——全对 group
+在原始 GRPO 里 advantage 也是 0，本就没任务梯度。</p>
+<p>真正的变化是：<strong>补满有效 group
+后，中等题/难题在每步更新中占比提高</strong>。模型持续沿这些题的方向移动，可能<strong>逐渐离开已掌握的能力区域</strong>。</p>
+<p>更麻烦的是：动态采样让 batch 表面一直满着，<strong>看不出底层有效
+prompt
+池正在缩小</strong>。需要单独保留一个<strong>已掌握题目的回归集</strong>，定期检查简单能力是否退化。</p>
+<blockquote>
+<p>[!note]- 作者自承 “我个人通过机制推断，我自己其实没有复现出来过’训练
+reward 上涨、简单集准确率同步下降’的完整曲线。正是因为训练 batch
+看不见被过滤的简单题，所以我们才需要额外回归集来验证，而不是直接把退化当成既定事实。”</p>
+<p>几十道题的小回归集只能做报警器，不能做精确量尺——样本太少时几个点的上下波动未必有意义。</p>
+</blockquote>
+<h4 id="零方差很多时先分清是全对还是全错">4.4
+零方差很多时，先分清是全对还是全错</h4>
+<p>相同零方差占比，处理方向可能完全相反：</p>
+<ul>
+<li><strong>全对为主</strong>：数据对当前模型太简单 →
+应增难度/区分度。</li>
+<li><strong>全错为主</strong>：可能是验证器过严 / false
+negative，或题目超出模型能力 → 应先检查判题，再考虑
+SFT/课程/中间难度。</li>
+</ul>
+<p>只看到”零方差占 70%“不能决定换不换数据，关键是<strong>这 70%
+由全对还是全错组成</strong>。给全错 group
+注入一条可信的满分参考回答可以人为制造组内比较，但<strong>改变了采样分布和训练目标，不能当作无偏修复</strong>。全对
+group 需要反方向的对照样本，不能注入同样的满分。</p>
+<h3 id="五去掉-σ-和过滤零方差组怎么配合">五、去掉 σ
+和过滤零方差组怎么配合</h3>
+<p>两个方法常被说成同一问题的两种解法，<strong>其实处理不同区域</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>group 状态</th>
+<th>去掉 σ</th>
+<th>过滤零方差组</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>全对或全错（p=0/1）</td>
+<td>无作用（分子=0）</td>
+<td>有作用：移出重采样</td>
+</tr>
+<tr>
+<td>接近全对/全错但仍有方差</td>
+<td>有作用：压低少数派极端权重</td>
+<td>不命中</td>
+</tr>
+<tr>
+<td>正确率接近 0.5</td>
+<td>主要改变整体尺度</td>
+<td>通常不命中</td>
+</tr>
+</tbody>
+</table>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260907171232.jpg"
+alt="两个手段解决的是不同区间：去掉 σ 与过滤零方差组互补、不重叠、也不是同一旋钮的两端（原文配图）" />
+<figcaption aria-hidden="true">两个手段解决的是不同区间：去掉 σ
+与过滤零方差组互补、不重叠、也不是同一旋钮的两端（原文配图）</figcaption>
+</figure>
+<p>两个例子记住：</p>
+<ul>
+<li>p=1：所有回答都对，advantage 分子全是 0 → 去不去 σ
+都没区别，只有过滤/换题/引入对照才能得到比较信号。</li>
+<li>p=0.9：仍有错误回答，过滤不处理；二值 reward 下，去掉 σ
+把错误回答权重从 −3.00 降回 −0.9。</li>
+</ul>
+<p>DAPO 选动态采样、Dr. GRPO 选去掉
+σ——<strong>不是对同一个开关意见相反，而是瞄准两个不同的失效区间</strong>。</p>
+<blockquote>
+<p>[!tip] 实践落地顺序 1. 先统计零方差 group
+的构成：全对多少、全错多少； 2. 再看非零方差 group
+的正确率分布，是否大量集中在 0.1、0.9 两端； 3. 全对多 →
+优先调数据难度；全错多 → 先检查验证器和 base 能力； 4. 两端但非零方差的
+group 多 → A/B 去掉 σ，并同时做 lr 补偿对照； 5.
+确实需要动态采样时，同时监控额外生成成本和简单题回归集。</p>
+<p>面试追问这个组合很常见——能说清”p=0/1 时去掉 σ 没用、p≈1
+时过滤没用”，比背方法名更能说明候选人理解了实现。</p>
+</blockquote>
+<h3 id="六脱敏实验记录">六、脱敏实验记录</h3>
+<blockquote>
+<p>“我有一次观察到明显的坍塌。下一轮同时做了三项修改：刷新参考策略、减小
+KL 系数、把训练题型混得更杂。第二轮没有再次出现同样的坍塌。”</p>
+</blockquote>
+<p>这个结果<strong>只能说明</strong>：换了一整套配方以后现象消失了。<strong>不能说明</strong>三项里哪一项有效，更不能证明三项都有效——<strong>没有做单变量消融</strong>。</p>
+<p>如果要提假设，作者更怀疑<strong>题型混合度</strong>起了主要作用：题型更杂
+→ 更多 group 能产生 reward 方差 →
+有效信号不再只集中在少数题型。但仍是机制推测。</p>
+<p>刷新参考策略和减小 KL
+都会<strong>放松对策略漂移的限制</strong>，从直觉上甚至未必有利于保留多样性。因此<strong>不能因为第二轮没塌就把这两项写成”抗坍塌配方”</strong>——验证原因仍需分别
+A/B。</p>
+<h3 id="总结">总结</h3>
+<p>策略坍塌不只是”熵变低”——是训练把概率越来越集中到少数路径，同时丢掉原本存在的其他解法。要修它，先判断是哪一环让比较信号失真。</p>
+<ul>
+<li><strong>σ 归一化</strong>把每个 prompt 的 reward
+分差重新缩放。接近全对/全错时，少数派离均值最远 →
+拿到最大单样本权重。<strong>权重不是无限的</strong>：无偏
+std、极端比例下上界 ≈ (G−1)/√G（G=16 → 3.75）。该上限对连续 reward
+同样成立。</li>
+<li><strong>连续 reward
+的额外风险</strong>：标准化抹掉原始分差的绝对大小——一点打分器噪声或无关
+reward 分项的细小差别也会被扩展成正常强度
+advantage。监控<strong>必须同时看标准化前</strong>的 reward range / σ /
+各分项。</li>
+<li><strong>去掉 σ</strong>（Dr. GRPO）的本质是保留原始 reward
+分差：分差小的 group 少更新，分差大的多更新。能压低难度两端 group
+的极端权重，但通常也会降低总体更新幅度——A/B
+时需把”权重结构变了”和”整体步子变小了”分开观察。</li>
+<li><strong>过滤零方差 group</strong>（DAPO
+动态采样）解决另一件事：全对/全错时根本没有比较信号。能提高有效 batch
+比例，却增加生成开销、重新加权 prompt
+分布、并让有效题池的收缩更难被看见。</li>
+<li>实际不是”去 σ 和动态采样二选一”，<strong>而是先看 group
+落在哪个区间</strong>：严格零方差、接近零方差但仍有少数派，还是中间难度。不同区间不同修法、不同代价。</li>
+</ul>
+<h2
+id="clip-的不对称与稀有-token系列第-5-篇为什么低概率-token-更容易撞上界">clip
+的不对称与稀有 token（系列第 5 篇）：为什么低概率 token
+更容易撞上界</h2>
+<blockquote>
+<p>[!info] 第 5 篇核心 默认 clip 区间 [0.8, 1.2] 在数值上看似对称，在
+log 空间却<strong>不对称</strong>——下侧宽度
+(<code>log 0.8 ≈ -0.223</code>) 比上侧 (<code>log 1.2 ≈ +0.182</code>)
+多 ~22%；更要紧的是这与<strong>低概率 token
+的几何形态</strong>叠加在一起：低概率 token
+对更新更敏感，先撞的不是”对称侧”而是 softmax
+局部几何规定的那一侧。修法不是”开紧/松”，是<strong>调几何</strong>。同时提醒：<strong>熵在下降本身不能作为调
+clip 的依据</strong>——必须配随机 reward
+基线对照，否则容易把熵的自然衰减误判为 clip 过紧。</p>
+</blockquote>
+<h3 id="一clip-到底在裁什么">一、clip 到底在裁什么</h3>
+<p>GRPO 的重要性比 <span
+class="math inline">\(r_t(\theta)=\frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{\text{old}}}(a_t|s_t)}\)</span>，clip
+的标准实现是 PPO-style：</p>
+<p><span class="math display">\[L^{\text{CLIP}}(\theta) =
+\mathbb{E}_t\Big[\min\big(r_t(\theta)\cdot A_t,\;
+\text{clip}(r_t(\theta),\, 1-\varepsilon_{\text{low}},\,
+1+\varepsilon_{\text{high}})\cdot A_t\big)\Big]\]</span></p>
+<p><span class="math inline">\(\min\)</span>
+把<strong>两个量</strong>取小：</p>
+<ul>
+<li><strong>未裁剪项</strong>：<span class="math inline">\(r_t \cdot
+A_t\)</span>，梯度无限制</li>
+<li><strong>裁剪项</strong>：<span
+class="math inline">\(\text{clip}(r_t, 1{-}\varepsilon_{\text{low}},
+1{+}\varepsilon_{\text{high}}) \cdot
+A_t\)</span>，超出区间后用区间端点代替</li>
+</ul>
+<p><code>min</code> 在不同符号下的行为如下表（默认 <span
+class="math inline">\([\varepsilon_{\text{low}},
+\varepsilon_{\text{high}}] = [0.2, 0.2]\)</span>，即 clip 区间 <span
+class="math inline">\([0.8, 1.2]\)</span>）：</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th><span class="math inline">\(r_t\)</span> 位置</th>
+<th><span class="math inline">\(A_t\)</span> 符号</th>
+<th>未裁剪项</th>
+<th>裁剪项</th>
+<th><code>min</code> 取谁</th>
+<th>梯度</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline">\(r_t &lt; 0.8\)</span></td>
+<td><span class="math inline">\(A_t &gt; 0\)</span>（想增）</td>
+<td><span class="math inline">\(0.8 \cdot A_t\)</span></td>
+<td><span class="math inline">\(r_t \cdot A_t &lt; 0.8 A_t\)</span></td>
+<td>裁剪项（<span class="math inline">\(r_t A_t\)</span>）</td>
+<td>仍计算</td>
+</tr>
+<tr>
+<td><span class="math inline">\(r_t &lt; 0.8\)</span></td>
+<td><span class="math inline">\(A_t &lt; 0\)</span>（想减）</td>
+<td><span class="math inline">\(r_t \cdot A_t &gt; 0.8
+A_t\)</span>（<span class="math inline">\(A_t\)</span> 负、<span
+class="math inline">\(r_t\)</span> 小 → 乘积偏 0）</td>
+<td><span class="math inline">\(0.8 \cdot A_t\)</span></td>
+<td>裁剪项（<span class="math inline">\(0.8 A_t\)</span>）</td>
+<td>仍计算</td>
+</tr>
+<tr>
+<td><span class="math inline">\(r_t &gt; 1.2\)</span></td>
+<td><span class="math inline">\(A_t &gt; 0\)</span></td>
+<td><span class="math inline">\(r_t \cdot A_t &gt; 1.2 A_t\)</span></td>
+<td><span class="math inline">\(1.2 \cdot A_t\)</span></td>
+<td>裁剪项（<span class="math inline">\(1.2 A_t\)</span>）</td>
+<td>仍计算</td>
+</tr>
+<tr>
+<td><span class="math inline">\(r_t &gt; 1.2\)</span></td>
+<td><span class="math inline">\(A_t &lt; 0\)</span>（想降）</td>
+<td><span class="math inline">\(1.2 \cdot A_t\)</span>（负得更大）</td>
+<td><span class="math inline">\(r_t \cdot A_t &lt; 1.2
+A_t\)</span>（负得更小）</td>
+<td>未裁剪项（<span class="math inline">\(r_t A_t\)</span>）</td>
+<td>仍计算</td>
+</tr>
+<tr>
+<td><span class="math inline">\(0.8 \le r_t \le 1.2\)</span></td>
+<td>任意</td>
+<td>未裁剪项与裁剪项相等</td>
+<td>—</td>
+<td>未裁剪项</td>
+<td>无 clip 干扰</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>[!warning] 关键修正 <strong>clip
+命中梯度不会归零</strong>——只是上限用区间端点代替。真正梯度归零要
+<code>min</code> 取到的项<strong>作为常数</strong>对待——这只在 <span
+class="math inline">\(r_t\)</span>
+落在区间<strong>外</strong>且<strong>与 <span
+class="math inline">\(A_t\)</span> 同号</strong>时发生（表中第 1、3
+行）。</p>
+<ul>
+<li><span class="math inline">\(A_t &gt; 0\)</span>、<span
+class="math inline">\(r_t &lt; 0.8\)</span>：想增但增不动 →
+<strong>真被截断</strong>，梯度为 0</li>
+<li><span class="math inline">\(A_t &lt; 0\)</span>、<span
+class="math inline">\(r_t &gt; 1.2\)</span>：想减但减不动 →
+<strong>真被截断</strong>，梯度为 0</li>
+<li><span class="math inline">\(A_t &lt; 0\)</span>、<span
+class="math inline">\(r_t &lt; 0.8\)</span>（第 2
+行）：未裁剪项已经很小，clip 后只是用 <span class="math inline">\(0.8
+A_t\)</span> 替代，<strong>梯度照算</strong></li>
+<li><span class="math inline">\(A_t &gt; 0\)</span>、<span
+class="math inline">\(r_t &gt; 1.2\)</span>（第 4
+行）：未裁剪项更大，“clip 限制”被绕开，<strong>梯度照算</strong></li>
+</ul>
+</blockquote>
+<p>把”上界/下界被裁”理解为”概率被绑死”是错的——<code>min</code>
+的非对称性意味着 clip
+实际只在<strong>期望方向与运动方向相反</strong>时起作用。这也是为什么很多实现报告
+<code>clip_frac</code> 很高、loss 仍在下降：因为命中里很大一部分是第 2/4
+行（梯度照算）。</p>
+<h4 id="log-ratio-的几何不对称">1.1 log-ratio 的几何不对称</h4>
+<p>![<a
+href="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260908160131.jpg">Pasted
+image 20260908160131.jpg</a>]</p>
+<blockquote>
+<p>图 1：默认 [0.8, 1.2] 在 ratio 空间看起来对称，<strong>转到 log
+空间并不对称</strong>——下侧宽度比上侧多 ~22%。</p>
+</blockquote>
+<p>数值 0.8 和 1.2 距 1 的”距离”相同（都差 0.2），但
+<code>log(0.8) ≈ -0.223</code>、<code>log(1.2) ≈ +0.182</code>：</p>
+<ul>
+<li>下界宽度：<span class="math inline">\(|\log 0.8| \approx
+0.223\)</span></li>
+<li>上界宽度：<span class="math inline">\(|\log 1.2| \approx
+0.182\)</span></li>
+<li>比例：<span class="math inline">\(0.223 / 0.182 \approx
+1.225\)</span> ——下界宽度比上界<strong>多 ~22.5%</strong></li>
+</ul>
+<p>更一般的，若区间为 <span
+class="math inline">\([1{-}\varepsilon_{\text{low}},\;
+1{+}\varepsilon_{\text{high}}]\)</span>：</p>
+<p><span
+class="math display">\[\frac{\log(1/(1-\varepsilon_{\text{low}}))}{\log(1+\varepsilon_{\text{high}})}
+=
+\frac{-\log(1-\varepsilon_{\text{low}})}{\log(1+\varepsilon_{\text{high}})}\]</span></p>
+<p>Taylor 展开：<span class="math inline">\(-\log(1-x) \approx x + x^2/2
++ x^3/3 + \cdots\)</span>，<span class="math inline">\(\log(1+x) \approx
+x - x^2/2 + x^3/3 - \cdots\)</span>。当 <span
+class="math inline">\(\varepsilon_{\text{low}} =
+\varepsilon_{\text{high}} = \varepsilon\)</span> 时，比值 <span
+class="math inline">\(\approx 1 + \varepsilon +
+O(\varepsilon^2)\)</span>——<strong>总是略大于 1</strong>。即默认设置在
+log 空间就是”下宽上窄”，下界更难命中（ratio 需下降 22% 才到下界，上升
+18% 就到上界）。</p>
+<h4 id="几何对称点">1.2 0.25 几何对称点</h4>
+<p>真正的几何对称是两侧 log 距离相等：</p>
+<p><span class="math display">\[-\log(1-\varepsilon_{\text{low}}) =
+\log(1+\varepsilon_{\text{high}})\]</span></p>
+<p><span class="math display">\[\Rightarrow \varepsilon_{\text{high}} =
+\frac{\varepsilon_{\text{low}}}{1-\varepsilon_{\text{low}}}\]</span></p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th><span class="math inline">\(\varepsilon_{\text{low}}\)</span></th>
+<th>对称所需 <span
+class="math inline">\(\varepsilon_{\text{high}}\)</span></th>
+<th>区间</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.20</td>
+<td>0.25</td>
+<td>[0.80, 1.25]</td>
+</tr>
+<tr>
+<td>0.25</td>
+<td>0.333…</td>
+<td>[0.75, 1.333]</td>
+</tr>
+<tr>
+<td>0.28（DAPO）</td>
+<td>0.389</td>
+<td>[0.72, 1.389]</td>
+</tr>
+<tr>
+<td>0.32</td>
+<td>0.471</td>
+<td>[0.68, 1.471]</td>
+</tr>
+</tbody>
+</table>
+<p>DAPO 的 [0.72, 1.389] 不是 0.28
+对称点而是<strong>经验选</strong>——作者说”为防止熵坍塌扩了上界”，是有意保留的几何不对称。</p>
+<h3 id="二低概率-token-为什么更容易撞上界">二、低概率 token
+为什么更容易撞上界</h3>
+<p>重要性比的灵敏度随 token 概率下降而放大。一阶近似：</p>
+<p>设参数更新 <span class="math inline">\(\theta \to \theta + \eta
+\nabla_\theta \log \pi_\theta(a_t|s_t)\)</span>，对数概率增量</p>
+<p><span class="math display">\[\Delta \log \pi_\theta(a_t|s_t) \approx
+\eta \cdot \|\nabla\|^2 \cdot (1 - p_t)\]</span></p>
+<p>其中 <span class="math inline">\(p_t =
+\pi_{\theta_{\text{old}}}(a_t|s_t)\)</span>。因此重要性比变化</p>
+<p><span class="math display">\[\log r_t \approx \log
+\pi_\theta(a_t|s_t) - \log \pi_{\theta_{\text{old}}}(a_t|s_t) \approx
+(1-p_t) \cdot \eta \cdot \|\nabla\|^2\]</span></p>
+<table>
+<thead>
+<tr>
+<th><span class="math inline">\(p_t\)</span></th>
+<th>一阶近似系数 <span class="math inline">\((1-p_t)\)</span></th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.05</td>
+<td>0.95</td>
+<td>灵敏度近满</td>
+</tr>
+<tr>
+<td>0.30</td>
+<td>0.70</td>
+<td>仍高</td>
+</tr>
+<tr>
+<td>0.60</td>
+<td>0.40</td>
+<td>中等</td>
+</tr>
+<tr>
+<td>0.90</td>
+<td>0.10</td>
+<td>已稳定</td>
+</tr>
+</tbody>
+</table>
+<p><strong>直觉</strong>：softmax 概率低的 token 对 logits
+变化<strong>敏感</strong>——一个微小梯度就能把它推过 clip 边界。概率高的
+token
+已经接近饱和，<strong>几乎不可能被同幅度更新撞出上界</strong>。</p>
+<h4 id="真实更新计算">2.1 真实更新计算</h4>
+<p>实际更新受 <span class="math inline">\(\text{softmax}(z)\)</span>
+局部几何约束。设 logits <span class="math inline">\(z\)</span> 对应目标
+token <span class="math inline">\(a\)</span>，<span
+class="math inline">\(z_a\)</span> 上升 <span
+class="math inline">\(\delta\)</span>，其他 logits 不变：</p>
+<p><span class="math display">\[\pi_\theta(a|s) = \frac{e^{z_a +
+\delta}}{e^{z_a + \delta} + \sum_{j \ne a} e^{z_j}} =
+\frac{e^\delta}{e^\delta + (1-p)/p}\]</span></p>
+<p>因此</p>
+<p><span class="math display">\[r =
+\frac{\pi_\theta(a)}{\pi_{\theta_{\text{old}}}(a)} = \frac{p\,
+e^\delta}{p\, e^\delta + (1-p)} = \frac{p}{p +
+(1-p)\,e^{-\delta}}\]</span></p>
+<p>这个函数在 <span class="math inline">\(p\)</span> 小、<span
+class="math inline">\(\delta &gt; 0\)</span> 时迅速超过 1.2：</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th><span class="math inline">\(p\)</span></th>
+<th><span class="math inline">\(\delta = 0.5\)</span></th>
+<th><span class="math inline">\(\delta = 1.0\)</span></th>
+<th><span class="math inline">\(\delta = 2.0\)</span></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.05</td>
+<td><span class="math inline">\(r \approx
+1.27\)</span>（<strong>撞上界</strong>）</td>
+<td><span class="math inline">\(r \approx 1.59\)</span></td>
+<td><span class="math inline">\(r \approx 2.41\)</span></td>
+</tr>
+<tr>
+<td>0.30</td>
+<td><span class="math inline">\(r \approx 1.15\)</span></td>
+<td><span class="math inline">\(r \approx 1.34\)</span></td>
+<td><span class="math inline">\(r \approx 1.81\)</span></td>
+</tr>
+<tr>
+<td>0.60</td>
+<td><span class="math inline">\(r \approx 1.06\)</span></td>
+<td><span class="math inline">\(r \approx 1.15\)</span></td>
+<td><span class="math inline">\(r \approx 1.34\)</span></td>
+</tr>
+<tr>
+<td>0.90</td>
+<td><span class="math inline">\(r \approx 1.01\)</span></td>
+<td><span class="math inline">\(r \approx 1.02\)</span></td>
+<td><span class="math inline">\(r \approx 1.05\)</span></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>[!tip] 一句话总结 <strong>clip 上界被撞 = 低概率 token + 正 advantage
++ 同号更新</strong>——三个条件都要满足。前两个是数据/算法给的，第三个由
+logits 局部曲率决定。低概率 token + 正 advantage 在 GRPO
+中<strong>系统性频繁</strong>（少数派 token
+通常是新出现的解法），所以”撞上界”几乎是个<strong>结构性现象</strong>，不是偶发。</p>
+</blockquote>
+<h4 id="被上界裁掉的-token-概率低能说明什么">2.2 被上界裁掉的 token
+概率低，能说明什么</h4>
+<p>被上界裁掉意味着：</p>
+<ol type="1">
+<li><strong>该 token
+在老策略下是小概率事件</strong>——它本来出现就少</li>
+<li><strong>新策略想把它推上去</strong>——大概率是新出现的有效解法</li>
+<li><strong>被 clip
+阻止继续推</strong>——意味着这个方向<strong>学不到更多</strong></li>
+</ol>
+<p>后果是<strong>稀有但可能正确的 token 学不动</strong>。但这未必是
+bug——多数时候稀有 token
+稀有是有原因的（拼写错、句法奇怪、对解题无用），clip
+阻止它们过度放大反而是想要的。</p>
+<h3 id="三稀有-token-的问题">三、稀有 token 的问题</h3>
+<p>稀有 token 想从概率 0.05 长到 0.3，假设每次有效更新提升对数概率
+0.3（合理估计）：</p>
+<p><span class="math display">\[\Delta p \approx (1-p) \cdot \Delta \log
+p \approx (1-0.05) \cdot 0.3 = 0.285\]</span></p>
+<p>一次有效更新 p 从 0.05 到
+0.33——但这是<strong>理想情况</strong>，实际还要 clip 介入、还要
+advantage 不为 0。<strong>保守估计</strong>每次有效更新提升 <span
+class="math inline">\(p\)</span> 约 0.03~0.04，要 7~10 次。</p>
+<p>更现实的估计是反过来想：0.05 → 0.3 需要 <span
+class="math inline">\(p\)</span> 增长 6 倍，即 <span
+class="math inline">\(\log p\)</span> 增长 <span
+class="math inline">\(\log 6 \approx 1.79\)</span>。按一次有效更新给
+0.25 计，<strong>约 7.3 次有效更新</strong>。</p>
+<p>对比：0.6 → 0.9，<span class="math inline">\(\log p\)</span> 增长
+<span class="math inline">\(\log 1.5 \approx 0.405\)</span>——不到 2
+次有效更新。<strong>频次 token 撞上界只是单步误差，稀有 token
+撞上界是断它整个学习路径</strong>。</p>
+<h3 id="四命中-clip-后什么梯度被丢掉了">四、命中 clip
+后，什么梯度被丢掉了</h3>
+<p>回到 PPO min 公式：</p>
+<p><span class="math display">\[L^{\text{CLIP}} = \min\big(r_t A_t,\;
+\text{clip}(r_t, 1{-}\varepsilon, 1{+}\varepsilon) A_t\big)\]</span></p>
+<p>梯度</p>
+<p><span class="math display">\[\frac{\partial L^{\text{CLIP}}}{\partial
+\theta} = \begin{cases} A_t \cdot \frac{\partial r_t}{\partial \theta}
+&amp; \text{若} \min \text{取未裁剪项} \\ 0 &amp; \text{若} \min
+\text{取裁剪项且裁剪项常数化} \\ \text{端点梯度} &amp; \text{若} \min
+\text{取裁剪项且端点代入} \end{cases}\]</span></p>
+<p><strong>真正梯度归零</strong>只在第 2 种情况——“裁剪项常数化”。这要求
+<code>min</code> <strong>取裁剪项</strong>（即 <span
+class="math inline">\(r_t\)</span> 在区间外 + <span
+class="math inline">\(r_t A_t\)</span> <strong>大于</strong>裁剪后的
+<span class="math inline">\(A_t\)</span>
+端点值），<strong>且</strong>梯度对 <span
+class="math inline">\(r_t\)</span> 求导后常数化。</p>
+<p>由 §一表分析：</p>
+<ul>
+<li><span class="math inline">\(A_t &gt; 0\)</span>、<span
+class="math inline">\(r_t &gt; 1.2\)</span>：第 4 行——<code>min</code>
+取未裁剪项（<span class="math inline">\(1.2
+A_t\)</span>），<strong>梯度照算</strong>！</li>
+<li><span class="math inline">\(A_t &lt; 0\)</span>、<span
+class="math inline">\(r_t &lt; 0.8\)</span>：第 2 行——<code>min</code>
+取裁剪项（<span class="math inline">\(0.8
+A_t\)</span>），<strong>梯度照算</strong>（<span
+class="math inline">\(0.8 A_t\)</span> 仍是 <span
+class="math inline">\(A_t\)</span> 的常数倍）</li>
+<li><span class="math inline">\(A_t &gt; 0\)</span>、<span
+class="math inline">\(r_t &lt; 0.8\)</span>：第 1 行——<code>min</code>
+取未裁剪项（<span class="math inline">\(r_t
+A_t\)</span>），<strong>梯度照算</strong>（被允许继续减）</li>
+<li><span class="math inline">\(A_t &lt; 0\)</span>、<span
+class="math inline">\(r_t &gt; 1.2\)</span>：第 3 行——<code>min</code>
+取未裁剪项（<span class="math inline">\(r_t
+A_t\)</span>），<strong>梯度照算</strong>（被允许继续加）</li>
+</ul>
+<p><strong>修正</strong>：</p>
+<ul>
+<li>真正的”截断”只发生在 <span class="math inline">\(A_t &gt; 0\)</span>
+且 <span class="math inline">\(r_t &gt;
+1.2\)</span>（想增但截断）——上界</li>
+<li>真正的”截断”只发生在 <span class="math inline">\(A_t &lt; 0\)</span>
+且 <span class="math inline">\(r_t &lt;
+0.8\)</span>（想减但截断）——下界</li>
+</ul>
+<p>也就是说 clip <strong>真正阻止的是 ratio 往 advantage
+同方向走过头</strong>，<strong>不会阻止 ratio 往 advantage
+反方向走</strong>（反方向走本身对 loss 是有利的——<code>min</code>
+取更小的 <span class="math inline">\(r_t
+A_t\)</span>，未裁剪项本来就更小，clip 不会更小）。</p>
+<blockquote>
+<p>[!warning] clip 命中方向 简化为：<strong>clip 截断与 <span
+class="math inline">\(A_t\)</span> 同号的 ratio
+极端</strong>——想涨不让涨太多，想跌不让跌太多。不会截断 ratio 与 <span
+class="math inline">\(A_t\)</span> 异号的极端（那是 loss
+主动选的小项）。</p>
+</blockquote>
+<h3 id="五如何调整上下界">五、如何调整上下界</h3>
+<p>调整 clip 不是”开紧”或”松”，是<strong>调几何</strong>：</p>
+<h4 id="调成几何对称">5.1 调成几何对称</h4>
+<p>把 [0.8, 1.2] 换成 [0.84,
+1.16]——<code>log 0.84 ≈ -0.174</code>，<code>log 1.16 ≈ +0.148</code>，<strong>比值
+1.18</strong>（原 1.22）。想要完全对称，按 §1.2 表换 [0.75, 1.25] 或
+[0.8, 1.25]。</p>
+<p>适合场景：怀疑 clip 下界比上界更限制某些 token
+类别；想消除”先撞下界”的不对称。</p>
+<h4 id="控制熵">5.2 控制熵</h4>
+<p>若想<strong>鼓励探索</strong>（避免熵坍塌），放宽上界（如 DAPO 的
+[0.72, 1.389]，把上界调到
+~1.4），让概率上升更自由；<strong>鼓励利用</strong>（已坍塌想回拉），压紧上下界，让所有大幅更新都被截断——但代价是有效
+step 比例降低。</p>
+<h4 id="扫描时看什么">5.3 扫描时看什么</h4>
+<p>调完 clip 不要只看 reward 曲线——看：</p>
+<ul>
+<li><strong><code>clip_frac_by_sign</code></strong>：上界被裁次数 /
+下界被裁次数 / 总裁次数，分开计</li>
+<li><strong>有效 step
+比例</strong>（<code>unclipped_step / total_step</code>）：clip
+命中后还有多少 step 在更新</li>
+<li><strong><code>A_t &gt; 0</code> 时 clip_frac 与
+<code>A_t &lt; 0</code> 时 clip_frac</strong>——两者都高说明 clip
+在限制学习；一边高说明单边过紧</li>
+</ul>
+<p>不是看 <code>clip_frac</code>
+一个数——一个聚合数把上下界合并就把诊断信息丢了。</p>
+<h3
+id="六为什么熵在下降不能单独作为调参依据">六、为什么”熵在下降”不能单独作为调参依据</h3>
+<p>![<a
+href="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260908160132.jpg">Pasted
+image 20260908160132.jpg</a>]</p>
+<blockquote>
+<p>图 2：random reward baseline 控制实验——熵下降必须和随机 reward
+基线比较才能归因于 clip。</p>
+</blockquote>
+<p>直觉：<strong>训练过程中熵本来就在下降</strong>——softmax
+概率越来越集中在高 reward 路径上，是 RL 训练的固有倾向。clip
+只影响”熵下降的速度”，不影响”熵是否下降”。</p>
+<p>所以：</p>
+<ul>
+<li>看到熵在下降 → <strong>不能</strong>断定”clip 过紧限制了探索”</li>
+<li>看到熵稳定 → <strong>不能</strong>断定”clip 设置完美”</li>
+<li>看到熵暴涨 → 反而可能是真问题（policy 远离 reference、KL 失控）</li>
+</ul>
+<p>判断 clip 对熵的实际影响：<strong>配随机 reward 基线</strong>——同一份
+rollout 数据，reward
+随机打乱（破掉相关性但保留分布），看熵下降曲线。如果随机 reward
+下熵也在类似速率下降，说明熵下降<strong>不归因于 clip
+设置</strong>；只有”真 reward 下熵降速明显更快”才有调 clip 的依据。</p>
+<blockquote>
+<p>[!tip] 实战做法 在训练脚本里同时跑一组
+<code>random_reward_baseline</code>——同一个 prompt 同一组回答，reward
+随机打乱。两条熵曲线对比：差距 = clip 与 reward 的耦合效应；平行 =
+熵下降是熵本身的演化。</p>
+</blockquote>
+<h3 id="七截断样本-vs-clip">七、截断样本 vs clip</h3>
+<p>容易混淆的两个机制：</p>
+<ul>
+<li><strong>截断样本（loss
+mask）</strong>：训练样本层，把超长/不合规的回答整个 mask 掉（不参与
+loss 计算）</li>
+<li><strong>clip</strong>：token 层，对单个 token 的更新做幅度限制</li>
+</ul>
+<h4 id="mask-不会鼓励长回答">7.1 mask 不会鼓励长回答</h4>
+<p>loss mask
+的语义是”这个回答不参与训练”——<strong>不是”截断到某长度”</strong>。如果用
+mask 把超过 4096 token 的回答 mask
+掉，模型<strong>不会学到</strong>”回答短一点就能拿到
+reward”——只会学到”长回答不进入 loss 也不被鼓励”。</p>
+<p>要让模型学短答，奖励设计里需要<strong>显式惩罚长度</strong>（如
+Dr. GRPO 的长度归一化），而不是靠 mask。</p>
+<h4 id="mask-vs-advantage-的统计口径">7.2 mask vs advantage
+的统计口径</h4>
+<p>mask 后留在 batch 里的样本：</p>
+<ul>
+<li><strong>比例变了</strong>：原本 100 条 mask 掉 20 条 → 有效 batch 80
+→ 有效样本减少</li>
+<li><strong>样本分布变了</strong>：被 mask
+掉的可能恰好是”答得长但对了”的样本 → 留下”短答”的比例上升 →
+<strong>统计意义上”短答更受鼓励”</strong>——这是 mask
+的副作用，不是设计意图</li>
+<li><strong>advantage 计算未变</strong>：GRPO 在 prompt 内归一化——同一
+prompt 内 mask 与否不影响 advantage</li>
+</ul>
+<p>统计时要分开：</p>
+<ul>
+<li><strong>截断率</strong>：被 mask 掉的样本 / 总样本 → 监控 mask
+副作用</li>
+<li><strong>clip_frac</strong>：clip 命中的 token / 总 token → 监控 clip
+副作用</li>
+<li><strong>两件事不要合并</strong>——它们影响的是不同环节（数据层 vs
+优化层）</li>
+</ul>
+<h3 id="总结-1">总结</h3>
+<ul>
+<li>默认 [0.8, 1.2] <strong>数值对称、log 不对称</strong>，下侧宽
+~22%——任何调参前先意识到这个偏置。</li>
+<li><strong>低概率 token 撞上界是 softmax
+几何必然</strong>——<code>(1-p)</code>
+系数放大灵敏度，不是偶发；要判断”是不是 bug”看 token
+是否稀有且正确。</li>
+<li><strong>clip 真正截断的是 ratio 与 advantage
+同号的极端</strong>——异号时 clip
+被绕开（未裁剪项更小）。<code>clip_frac</code> 高但 loss
+仍在降，多半命中的是异号情形。</li>
+<li>调 clip 是<strong>调几何</strong>：5.1 几何对称 / 5.2
+控制熵（宽上界鼓励探索，紧上下界鼓励利用）/ 5.3 扫描看
+<code>clip_frac_by_sign</code> 与有效 step 比。</li>
+<li><strong>熵下降本身不能作为调 clip 的依据</strong>——配随机 reward
+基线对照：差距 = clip 与 reward 耦合效应；平行 = 熵自然衰减。</li>
+<li><strong>截断样本（mask）与 clip
+是两件事</strong>——前者样本层（不鼓励长答是 mask
+副作用而非设计意图），后者 token 层；统计分开计，不要合并。</li>
+</ul>
+<h2
+id="训练崩溃的分层排查系列第-6-篇从便宜的-01-检查开始">训练崩溃的分层排查（系列第
+6 篇）：从便宜的 0/1 检查开始</h2>
+<blockquote>
+<p>[!info] 第 6 篇核心
+前面几篇（1、4、5）讲<strong>策略坍塌</strong>——reward
+可能还在涨，但回答逐渐变单一，是算法层”目标函数的内在倾向”，什么都没做错也会往那个方向走。这一篇讲<strong>训练崩溃</strong>——另一种更突然的故障，是工程层
+0/1 的 bug（概率口径不一致、mask 写错、数值精度不够、optimizer state
+不匹配），<strong>没有”更合适的学习率”，只有写对和写错</strong>。常见表现：reward
+断崖 → 0；KL/grad norm/ratio 突然跳高；输出变复读/乱码/截断；loss/梯度出
+NaN/Inf；从某 checkpoint
+继续训练又在相似位置崩。<strong>最浪费时间的做法是立刻扫学习率</strong>——崩溃的根因通常在概率、mask、数值路径上。</p>
+</blockquote>
+<p>![<a
+href="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260915092949.jpg">Pasted
+image 20260915092949.jpg</a>]</p>
+<blockquote>
+<p>图 1：训练崩溃的分层排查顺序——从读
+rollout、概率一致性、梯度累积开始，再查
+mask、精度、超参和奖励。判断标准简单：<strong>“前一层不通过，后一层的曲线就没有解释意义”</strong>——例如
+ratio 分子分母不是同一套概率口径时，clip fraction / KL / lr
+扫描全部失去原义。因此<strong>先做便宜、结论接近”通过/不通过”的检查</strong>，最后才讨论需要权衡的超参和
+reward。</p>
+</blockquote>
+<pre class="mermaid"><code>flowchart TD
+    A[&quot;0 读 20 条 rollout&lt;br/&gt;直接分 hack / 截断 / 乱码&quot;] --&gt; B[&quot;1 两侧概率一致性&lt;br/&gt;A=B 验训练框架可重复&lt;br/&gt;A=C 验两侧一致&quot;]
+    B --&gt; C[&quot;1.5 梯度累积&lt;br/&gt;等价性 + 单样本 NLL 能到参&quot;]
+    C --&gt; D[&quot;2 mask 与数据边界&lt;br/&gt;逐 token 表 / 工具 token / padding&quot;]
+    D --&gt; E[&quot;3 数值精度&lt;br/&gt;fp32 归约 / log 空间 clamp&quot;]
+    E --&gt; F[&quot;4 优化器与超参&lt;br/&gt;lr / grad clip / optimizer state&quot;]
+    F --&gt; G[&quot;5 奖励函数&lt;br/&gt;离群值 / hacking 单变量对照&quot;]
+    A -. &quot;前一层不通过&lt;br/&gt;后一层曲线没解释意义&quot; .-&gt; B
+    B -. &quot;未训先撞 clip = 必停训修口径&quot; .-&gt; C
+    C -. &quot;norm 差整数倍 = 缩放错&quot; .-&gt; D
+    D -. &quot;loss mask 之和 ≠ completion 数 = mask 错&quot; .-&gt; E
+    E -. &quot;第一个非有限值 = 上游 log-ratio 已爆&quot; .-&gt; F
+    F -. &quot;grad clip 每步都中 = 根因未解&quot; .-&gt; G</code></pre>
+<h3 id="零先锁定第一个出问题的-step">零、先锁定”第一个出问题的
+step”</h3>
+<p><strong>不要只保存崩溃后的曲线截图</strong>——真正有价值的是三份状态：</p>
+<ol type="1">
+<li><strong>最后一个正常 step</strong>（baseline）</li>
+<li><strong>第一个出现异常的 step</strong>（事发点）</li>
+<li><strong>异常之后的一个 step</strong>（确认是否持续）</li>
+</ol>
+<p>把这三个 step 的以下信息<strong>全部落盘</strong>：</p>
+<ul>
+<li>prompt、完整 rollout 和截断标记</li>
+<li>reward 总分及<strong>每个分项</strong></li>
+<li>old/current logprob、log-ratio 和 ratio
+<strong>分位数</strong>（P50/P95/P99/max）</li>
+<li>attention mask、loss mask 和有效 token 数</li>
+<li>clip fraction、KL、<strong>裁剪前和裁剪后</strong>的 grad norm</li>
+<li>batch ID、随机种子、checkpoint 和 optimizer state</li>
+</ul>
+<p>然后<strong>先读二十条左右的原始输出</strong>，不要急着看均值。直接现象到优先排查点的快速映射：</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>直接看到的现象</th>
+<th>优先跳到哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>复读 / 乱码 / 语言突然变化</td>
+<td>概率一致性或数值精度（第 1 / 3 步）</td>
+</tr>
+<tr>
+<td>大量回答同时撞 max length</td>
+<td>mask、长度处理和 reward（第 2 / 5 步）</td>
+</tr>
+<tr>
+<td>回答看起来正常，但 reward 全变成 0</td>
+<td>verifier 或 reward 数据（第 5 步）</td>
+</tr>
+<tr>
+<td>只有少数固定样本触发异常</td>
+<td>脏数据、异常 reward 或 mask（第 2 / 5 步）</td>
+</tr>
+<tr>
+<td>没有异常文本，但参数更新突然放大</td>
+<td>梯度管线、精度或优化器（第 1.5 / 3 / 4 步）</td>
+</tr>
+</tbody>
+</table>
+<p>如果可以复现，再做一次最重要的区分：</p>
+<ul>
+<li><strong>同一个 batch 每次都在同一位置失败</strong> →
+优先查数据、mask、reward、确定性数值错误</li>
+<li><strong>换 batch 也总在相近 global step 失败</strong> →
+优先查学习率调度、optimizer state、数据陈旧、累计漂移</li>
+<li><strong>失败位置完全随机</strong> →
+再考虑异步权重同步、未初始化值、非确定 kernel 或硬件问题</li>
+</ul>
+<blockquote>
+<p>[!tip] 这一步的目标
+不是马上找到根因，而是把”整个训练坏了”<strong>缩小成一个可以反复重放的最小故障窗口</strong>——有了这个窗口，才能做控制变量实验（改一个变量、重放、比较），否则每跑一次都是噪音。</p>
+</blockquote>
+<h3 id="一第-1-步先证明新旧概率可以比较">一、第 1
+步：先证明新旧概率可以比较</h3>
+<p>GRPO/PPO 的重要性比</p>
+<p><span class="math display">\[r_t(\theta) = \frac{\pi_\theta(a_t|q,
+o_{&lt;t})}{\pi_{\theta_{\text{old}}}(a_t|q, o_{&lt;t})}\]</span></p>
+<p>分子是<strong>当前训练策略</strong>的概率，分母是<strong>生成 rollout
+时旧策略</strong>的概率。这个比值有一个基本前提：<strong>两边除了参数版本，其他计算口径必须一致</strong>。</p>
+<p>需要对齐或明确记录：</p>
+<ul>
+<li>token IDs、chat template、特殊 token</li>
+<li>prompt 与 completion 的边界</li>
+<li>position IDs 和 attention mask</li>
+<li>推理引擎返回的是<strong>原始模型 logprob</strong>，还是经过
+temperature / top-p / 重复惩罚等采样处理后的 logprob</li>
+<li>权重版本、LoRA 合并方式、tied embeddings</li>
+<li>量化、MoE router、推理 / 训练 kernel 的实现差异</li>
+</ul>
+<p>如果两边口径不同，ratio
+中混入的就不只是”策略更新”，还包含<strong>两套实现造成的额外 policy
+mismatch</strong>。对训练者来说像测量误差；但从算法上说，真正生成 token
+的行为分布已经和训练侧假定的 <span
+class="math inline">\(\pi_{\text{old}}\)</span>
+不同——<strong>无论怎么命名，都不能把它静默当成一次正常的参数更新</strong>。</p>
+<h4 id="最小一致性测试">1.1 最小一致性测试</h4>
+<p><strong>冻结权重</strong>，不做 optimizer step，关闭 dropout、固定
+batch 组织；如有随机算子，每次前向恢复到同一 RNG
+state。然后对<strong>同一批完整 token 序列</strong>做三次计算：</p>
+<ol type="1">
+<li>在<strong>训练框架</strong>中前向一次，得到 logprob A</li>
+<li>不改权重，再在<strong>训练框架</strong>中前向一次，得到 logprob
+B</li>
+<li>用<strong>生成 rollout 的推理引擎</strong>计算同一批 token，得到
+logprob C（<strong>尽量读取采样处理之前的原始
+logprob</strong>；接口只能返回处理后值时，必须单独记下这些处理，不能和训练侧直接混比）</li>
+</ol>
+<p>分别比较：</p>
+<ul>
+<li><strong>A vs B</strong>：检查训练框架自身是否可重复</li>
+<li><strong>A vs C</strong>：检查推理侧和训练侧是否一致</li>
+</ul>
+<p>至少记录 <code>mean</code> / <code>P99</code> / <code>max</code> 的
+<span class="math inline">\(|\Delta \log p|\)</span>，并按 token
+位置、序列长度、常见/低频 token
+拆分。<strong>不要只看平均值</strong>——少数异常 token 才可能是 ratio
+和梯度爆炸的起点。</p>
+<blockquote>
+<p>[!warning] 不要照抄全行业阈值 先在确认干净的配置上量出
+baseline，再看故障 run
+是否明显偏离。这里有两个<strong>不同</strong>的判据：</p>
+<ul>
+<li><strong>A vs B</strong>：参数和实现都没变，<span
+class="math inline">\(\exp(A - B)\)</span> 应非常接近 1；不接近 1 →
+查随机性、输入、训练框架自身的可重复性</li>
+<li><strong>A vs C</strong>：两套实现可以有小的数值差，但差异应接近干净
+baseline，且<strong>不应让大量 token 的 ratio 在尚未更新时就撞到 PPO
+clip</strong></li>
+</ul>
+<p><strong>真正的硬判据</strong>不是要求两套后端逐 bit 相同，而是——</p>
+<blockquote>
+<p>权重完全没变时，实现差异不能被训练目标误认为一次明显的策略更新；<strong>如果尚未训练，ratio
+就已经大面积撞 clip，应先停止调参并修正概率口径</strong>。</p>
+</blockquote>
+</blockquote>
+<h4 id="权重同步不能只看调用成功">1.2 权重同步不能只看”调用成功”</h4>
+<p>很多同步问题不会报错。建议至少增加三类检查：</p>
+<ul>
+<li>同步完成后<strong>随机抽几层参数</strong>，比较训练侧源权重和推理侧目标权重的
+checksum 或数值摘要</li>
+<li>固定一个 prompt，先保存训练侧当前权重的<strong>首 token
+logits</strong>，再检查同步后的推理侧是否接近</li>
+<li>把生成时的 <strong>policy version 写进 rollout
+元数据</strong>，训练时确认 old logprob
+确实来自该版本，并限制数据陈旧程度</li>
+</ul>
+<blockquote>
+<p>[!warning] 不要走极端 不能”只要版本不同就拒绝”——PPO/GRPO
+本来就允许当前策略和生成数据的旧策略不同，否则也不需要 importance
+ratio。真正要拒绝的是<strong>版本来源不明、old logprob
+与生成权重对不上、或者超过系统允许陈旧范围</strong>的数据。</p>
+</blockquote>
+<p><strong>LoRA merge、共享输入输出
+embedding、分片参数、量化副本</strong>尤其容易出现”流程执行了，但某部分权重没更新”的情况。</p>
+<h3 id="二第-1.5-步验证梯度加工流水线">二、第 1.5
+步：验证梯度加工流水线</h3>
+<p><strong>logprob 算对了，并不代表参数最终收到了正确梯度</strong>。逐
+token loss 还要经过：</p>
+<ol type="1">
+<li>token/sequence 聚合</li>
+<li>micro-batch 缩放</li>
+<li>gradient accumulation</li>
+<li>data-parallel rank 间归约</li>
+<li>grad clip 和 optimizer step</li>
+</ol>
+<p>任意一层<strong>多除或少除一次 batch size、漏掉一个
+micro-batch</strong>，都会改变实际更新幅度。曲线可能看起来”只是学习率不合适”，但怎么扫都不稳定。</p>
+<h4 id="梯度累积等价性测试">2.1 梯度累积等价性测试</h4>
+<p>固定同一批 <span class="math inline">\(N\)</span>
+条样本和相同参数，关闭 dropout
+或固定每次前向的随机数，并保持样本顺序、mask、有效 token
+完全一致。然后比较两种执行方式：</p>
+<ul>
+<li>一次把 <span class="math inline">\(N\)</span> 条样本作为一个 batch
+反向</li>
+<li>每次放 1 条，累积 <span class="math inline">\(N\)</span>
+次后再更新</li>
+</ul>
+<p>比较时<strong>不要只盯某个参数的绝对误差</strong>。更有用的是：</p>
+<ul>
+<li>两次 loss 是否采用同一种 denominator（如都除以有效 token
+总数，而不是一边按样本求均值、另一边按全部 token 求均值）</li>
+<li>梯度总 norm 的<strong>相对差</strong></li>
+<li>梯度向量 <strong>cosine similarity</strong></li>
+<li>一次 optimizer step 后<strong>参数 delta</strong>的相对差</li>
+</ul>
+<p>fp32 单卡下应非常接近；bf16、分布式归约、不同 kernel
+会带来更大舍入误差，不适合机械规定”必须小于 <span
+class="math inline">\(10^{-6}\)</span>“。<strong>如果方向明显不同、或
+norm 恰好差 accumulation steps / world size / 有效 token
+数这类整数倍，通常就是缩放或归约写错了</strong>。</p>
+<h4 id="用简单目标测试梯度能否到达参数">2.2
+用简单目标测试”梯度能否到达参数”</h4>
+<blockquote>
+<p>[!warning] 常用但不稳妥的测试 “拿几条 RL 样本，要求 PPO loss 降到
+0”——<strong>不是稳妥的通用测试</strong>，因为 clip
+本来就会让一部分样本提前进入零梯度区。</p>
+</blockquote>
+<p>更干净的办法是<strong>暂时绕开 reward、ratio 和
+clip</strong>，用一个小的确定性监督目标：</p>
+<ul>
+<li>固定 4~8 条 prompt-completion</li>
+<li>只对 completion token 计算普通 NLL</li>
+<li>使用 fp32、小模型或少量可训练参数</li>
+<li>重复训练，确认 loss 能稳定下降并接近过拟合</li>
+</ul>
+<p>如果这个测试都失败，<strong>优先检查参数冻结、loss
+mask、梯度累积、分布式归约、学习率和 optimizer
+step</strong>——此时没必要继续检查 GRPO 特有的超参。</p>
+<p>但<strong>这个测试只证明”普通监督 loss 的梯度能到达参数”，不能证明
+GRPO 特有的 advantage、ratio、clip、policy loss
+都写对了</strong>。基础链路通过以后，还要分别为这些模块做小规模数值对照。</p>
+<h3 id="三第-2-步逐-token-检查-mask-和数据边界">三、第 2 步：逐 token
+检查 mask 和数据边界</h3>
+<p>这里至少有两种 mask：</p>
+<ul>
+<li><strong>attention mask</strong>：模型在前向时能不能看见这个位置</li>
+<li><strong>loss mask</strong>：这个位置是否作为训练目标产生梯度</li>
+</ul>
+<p>模型可以”看见但不学习”某些 token。例如在纯 policy loss
+中，工具返回、环境
+observation、用户输入都需要<strong>作为上下文被看见</strong>，但<strong>不应作为模型生成的目标</strong>。如果额外混入了
+SFT 等辅助目标，则要为不同目标分别定义
+mask，不能共用一张表含糊带过。</p>
+<h4 id="不要只看-mask-的-shape">3.1 不要只看 mask 的 shape</h4>
+<p>最有效的检查方式，是把一条真实样本<strong>逐 token
+打印成表</strong>：</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>position</th>
+<th>token 文本</th>
+<th>来源</th>
+<th>attention mask</th>
+<th>loss mask</th>
+<th>是否有 reward/advantage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0…prompt 末尾</td>
+<td>system/user</td>
+<td>输入</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>completion</td>
+<td>assistant</td>
+<td>模型生成</td>
+<td>1</td>
+<td>1</td>
+<td>1</td>
+</tr>
+<tr>
+<td>tool result</td>
+<td>environment</td>
+<td>环境返回</td>
+<td>1</td>
+<td>0</td>
+<td>0</td>
+</tr>
+<tr>
+<td>padding</td>
+<td>pad</td>
+<td>补齐</td>
+<td>0</td>
+<td>0</td>
+<td>0</td>
+</tr>
+</tbody>
+</table>
+<p>再加几条<strong>运行时断言</strong>：</p>
+<ul>
+<li><code>loss_mask.sum() == 真正参与训练的 completion token 数</code></li>
+<li>纯 policy loss 中，padding、prompt、environment token 的 loss mask
+必须为 0</li>
+<li>EOS 是否训练，要和生成停止规则一致</li>
+<li>每个被 mask 的样本都要有明确原因和计数</li>
+</ul>
+<h4 id="多轮和工具调用最容易静默出错">3.2
+多轮和工具调用最容易静默出错</h4>
+<p>在最常见的 agent 训练设置中，工具返回的 token 通常应满足：</p>
+<ul>
+<li>attention mask = 1（模型要读取工具结果继续决策）</li>
+<li>loss mask = 0（不应学习”假装自己是工具”）</li>
+</ul>
+<p><strong>自定义 rollout 时，不能假设通用 attention mask
+会自动推导出正确的 loss mask</strong>——必须沿着 loss
+构造代码确认最终使用的布尔 mask。</p>
+<h4 id="截断样本要同时检查三处">3.3 截断样本要同时检查三处</h4>
+<p>回答撞到 max length 后，至少要明确：</p>
+<ol type="1">
+<li>它的 reward 如何定义</li>
+<li>它是否参与组内 reward mean/std</li>
+<li>它的 token 是否进入 policy loss</li>
+</ol>
+<p>这三个开关<strong>不是一回事</strong>。只在 loss 中 mask
+掉样本、却仍让它的 0 reward 参与 advantage
+统计，会<strong>继续改变同组其他回答的权重</strong>。反过来，如果在统计前排除，<strong>有效
+group size 和零方差比例也会变化</strong>。</p>
+<h3 id="四第-3-步沿着数值路径找第一个-naninf">四、第 3
+步：沿着数值路径找第一个 NaN/Inf</h3>
+<p><strong>不要只在 optimizer step
+后检查参数</strong>。应该沿计算顺序<strong>逐层加 finite
+assertion</strong>——哪个张量最先出现非有限值，根因通常就在它之前一两步。</p>
+<h4 id="关键差值和指数运算使用-fp32">4.1 关键差值和指数运算使用
+fp32</h4>
+<p>bf16 适合大矩阵乘法，但<strong>有效位数有限</strong>。GRPO
+中最敏感的往往不是单个大数，而是<strong>两个接近的 logprob
+相减</strong>：</p>
+<p><span class="math display">\[\Delta \log p = \log \pi_\theta(a_t) -
+\log \pi_{\theta_{\text{old}}}(a_t)\]</span></p>
+<p>如果两边先以低精度存储，小差异可能被量化成
+0，或出现明显相对误差。实践中至少应确保：</p>
+<ul>
+<li>log-softmax 的<strong>归约</strong>使用 fp32</li>
+<li>gather 出来的 selected-token logprob 在做差前<strong>转成
+fp32</strong></li>
+<li>log-ratio、KL 估计和 exp 前的保护逻辑在 fp32 中执行</li>
+</ul>
+<p><strong>不等于</strong>要求整个模型的 logits 永久以 fp32
+保存——重点是把精度放在<strong>归约、相减、指数</strong>这些敏感环节。</p>
+<h4 id="先限制-log-ratio再取指数">4.2 先限制 log-ratio，再取指数</h4>
+<p>ratio 的计算是</p>
+<p><span class="math display">\[r = \exp(\Delta \log p)\]</span></p>
+<p>如果 <span class="math inline">\(\Delta \log p\)</span> 已经大到让
+exp 溢出，ratio 会先变成 Inf。<strong>之后再 clamp
+ratio，前向结果看似回到有限值，反向仍可能遇到</strong>：</p>
+<ul>
+<li>0 × Inf = NaN</li>
+<li>或 clamp 的局部梯度为 0 配合 exp 的反向乘以 Inf</li>
+</ul>
+<p><strong>正确顺序是：先在 log 空间 clamp，再取 exp</strong>。</p>
+<p>![<a
+href="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260915092950.jpg">Pasted
+image 20260915092950.jpg</a>]</p>
+<blockquote>
+<p>图 2：先 exp 后 clamp → 反向 0 × Inf =
+NaN，<strong>数值拉回来了，梯度已经坏了</strong>；先 clamp log 空间再
+exp → 梯度仍有限。<strong>这个 clamp
+是防止异常值把计算图炸掉的保险丝，不是 PPO clip
+的替代品</strong>。还要记录它的命中率——正常训练如果频繁撞到保险丝，应该回头查概率一致性和数据陈旧，而不是继续收紧它。</p>
+</blockquote>
+<h4 id="几种限制不要混在一起">4.3 几种”限制”不要混在一起</h4>
+<p>不同代码库里可能出现下面几类限制，<strong>作用位置和目的完全不同</strong>：</p>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>机制</th>
+<th>作用位置</th>
+<th>目的</th>
+<th>命中是否应该常见</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>log-ratio numerical clamp</td>
+<td>exp 之前</td>
+<td>防止溢出和非有限值</td>
+<td>正常应<strong>极少</strong></td>
+</tr>
+<tr>
+<td>PPO ratio clip</td>
+<td>objective 内的 <span
+class="math inline">\((1-\varepsilon_{\text{low}},
+1+\varepsilon_{\text{high}})\)</span></td>
+<td>根据 advantage 符号，限制 ratio 继续向有利方向变化所带来的收益</td>
+<td>训练中<strong>可正常命中</strong></td>
+</tr>
+<tr>
+<td>importance-weight cap</td>
+<td>importance weight</td>
+<td>直接限制过大权重对估计的影响</td>
+<td>取决于算法设计</td>
+</tr>
+<tr>
+<td>Dual-Clip PPO</td>
+<td>负 advantage 样本的 surrogate objective</td>
+<td>给负 advantage 下的极端目标值增加额外下界</td>
+<td>仅采用该算法时出现</td>
+</tr>
+</tbody>
+</table>
+<p>标准 PPO/GRPO
+不一定包含后两项；看到配置名时，应<strong>先确认公式和作用位置，不能只根据名字猜实现</strong>。</p>
+<blockquote>
+<p>[!warning] 数值”长得像”不能判断是哪一种 不能通过”参数值看起来像
+0.2、2 或
+20”来判断它属于哪一种，<strong>必须看它作用在计算图的哪个位置</strong>。</p>
+<p>举例：把 numerical clamp 误设成 <span class="math inline">\(\Delta
+\log p \in [-0.2, 0.2]\)</span>，<strong>等价于提前把 ratio 压进 <span
+class="math inline">\([\exp(-0.2), \exp(0.2)] \approx [0.819,
+1.221]\)</span></strong>——几乎贴着默认 PPO clip 区间，而且<strong>不看
+advantage 符号</strong>。这样会在 PPO objective
+之前先切一遍梯度，<strong>改变算法本身</strong>。</p>
+<p>相比之下，<span class="math inline">\([-20, 20]\)</span>
+这类较宽范围更像异常兜底。这里的 20 也不是 fp32
+指数溢出边界，更不是需要全行业统一遵守的常数——<strong>选择多宽要结合
+dtype、实现、正常 log-ratio
+分布和监控</strong>；关键是它不应成为日常限制策略更新的主要机制。</p>
+</blockquote>
+<h4 id="不要用-logsoftmaxx-eps-掩盖问题">4.4 不要用
+<code>log(softmax(x) + eps)</code> 掩盖问题</h4>
+<p>在正常数值范围内，数值稳定的 log-softmax 会<strong>直接计算
+logprob</strong>，不需要先把极小概率显式算出来。<strong>如果先做
+softmax</strong>，极小概率可能在有限精度下变成 0，再取 log 就会得到
+<span class="math inline">\(\log 0 = -\infty\)</span>。<strong>极端
+logits、输入中原本存在的 <span
+class="math inline">\(\pm\infty\)</span>、以及用于 padding
+的哨兵值仍需单独检查</strong>——不能因为用了 log-softmax
+就默认一定安全。</p>
+<p>因此<strong>正确顺序是直接使用数值稳定的
+log-softmax</strong>，而不是给概率统一加 eps。后者会：</p>
+<ul>
+<li>人为抬高极小概率对应的 logprob</li>
+<li>让新旧策略的 ratio 产生系统偏差</li>
+<li>把本来可以定位的概率不一致<strong>隐藏成错误梯度</strong></li>
+</ul>
+<p>padding 和无效位置如果使用 <span
+class="math inline">\(-\infty\)</span> 作为哨兵值，<strong>必须在做
+logprob 差、KL、reduce 之前用布尔 mask
+排除</strong>。不要让无效位置先参与算术，再指望最后乘 0 消掉——<span
+class="math inline">\(\infty \times 0\)</span> 仍可能得到 NaN。</p>
+<h3
+id="五前四层通过后才进入优化器和-reward">五、前四层通过后，才进入优化器和
+reward</h3>
+<p>走到这里，至少已经确认：<strong>概率口径可比较、梯度能正确累积、mask
+对齐、数值路径有限</strong>。现在才适合讨论”更新是否太激进”和”reward
+是否把模型带错了”。</p>
+<h4 id="第-4-步判断是不是更新步子太大">5.1 第 4
+步：判断是不是更新步子太大</h4>
+<p><strong>不要先背一个学习率数量级</strong>——相同 learning rate
+在不同模型规模、有效 token batch、gradient
+accumulation、优化器、advantage
+尺度下，<strong>实际参数更新可以差很多</strong>。</p>
+<p>每个 step 建议<strong>同时记录</strong>：</p>
+<ul>
+<li>裁剪前 grad norm</li>
+<li>裁剪后 grad norm，以及 grad clip 命中比例</li>
+<li>参数相对更新量 <span class="math inline">\(|\Delta\theta| /
+|\theta|\)</span></li>
+<li>KL、ratio 的 P50 / P95 / P99 / max</li>
+<li>upper / lower clip fraction</li>
+<li>rollout 被重复训练了多少个 epoch</li>
+</ul>
+<p>几种常见形状及下一步：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>现象</th>
+<th>更像什么</th>
+<th>下一步</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>grad norm、KL 和 ratio 分位数连续数十步一起抬升</td>
+<td>学习率、数据复用或 KL 约束不合适</td>
+<td>单独减小一个变量做复现</td>
+</tr>
+<tr>
+<td>只在一个固定 batch 突然尖刺</td>
+<td>reward 离群、异常序列或 mask</td>
+<td>重放该 batch，逐样本拆梯度</td>
+</tr>
+<tr>
+<td>grad clip 几乎每步都命中</td>
+<td>更新长期依赖保险丝</td>
+<td>查 advantage 尺度、loss denominator、学习率</td>
+</tr>
+<tr>
+<td>grad norm 正常但参数 delta 异常</td>
+<td>optimizer state、混合精度缩放或分片更新</td>
+<td>比较 optimizer 前后的参数与 state</td>
+</tr>
+<tr>
+<td>checkpoint 恢复后立刻再次崩溃</td>
+<td>故障状态、数据或恢复流程仍在</td>
+<td>回到更早且<strong>相互匹配</strong>的 model + optimizer
+checkpoint，重放相同数据</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>[!tip] grad clip 的定位 通常可以把 grad clip
+作为最后一道保护，但<strong>它不是算法成立的必要条件，也不能保证更新方向正确</strong>。<strong>如果每一步都靠
+grad clip 才不爆，说明根因还没有解决</strong>。</p>
+</blockquote>
+<h4 id="回滚时把故障证据一起留下">5.2 回滚时把故障证据一起留下</h4>
+<p>更稳妥的回滚流程是：</p>
+<ol type="1">
+<li>保存触发故障的 batch IDs、rollout、reward、随机种子</li>
+<li>保存崩溃前 checkpoint 与 optimizer state</li>
+<li>从更早 checkpoint 重放同一 batch</li>
+<li>修改一个变量，再次重放比较</li>
+</ol>
+<p><strong>临时 skip 一个 batch
+可以让训练继续，但不能作为长期修复</strong>。若总是跳过梯度最大的
+batch，训练数据会被系统性地重新加权；分布式训练中，各 rank 还必须对 skip
+决策保持一致。</p>
+<h4 id="第-5-步沿-reward-到-advantage-的路径检查">5.3 第 5 步：沿 reward
+到 advantage 的路径检查</h4>
+<p><strong>不要只看 reward 总分曲线</strong>。对第一个异常
+batch，按样本打印：</p>
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>样本</th>
+<th>reward 分项</th>
+<th>总 reward</th>
+<th>group mean/std</th>
+<th>advantage</th>
+<th>有效 token 数</th>
+</tr>
+</thead>
+<tbody>
+</tbody>
+</table>
+<p>重点检查：</p>
+<ul>
+<li>NaN / Inf / 解析失败 / verifier timeout 如何记分</li>
+<li>各 reward 分项的量纲是否一致</li>
+<li>是否有单个分项突然改变范围</li>
+<li>group 内 reward range / std 是否突然异常</li>
+<li>截断、格式失败、真正答错是否被混成同一个分数</li>
+<li>极高 / 极低 reward 对应的原始回答是否合理</li>
+</ul>
+<p>如果 advantage
+使用<strong>组内标准差归一化</strong>，那么在缩放系数为正、整组统一缩放、且归一化中的
+eps 可以忽略时，<strong>把整个 group 的 reward
+乘一个常数会在标准化中抵消</strong>——但实际实现通常带有
+eps，标准差很小时不一定完全抵消；如果乘的是<strong>负数</strong>，advantage
+的方向还会反转。</p>
+<p>单个异常 reward
+则<strong>不会</strong>被这种机制自动消掉——它会改变组内
+mean，通常也会改变 std，因此<strong>整组 advantage
+都需要重新计算</strong>；如果分数跨过了其他样本，还会改变排序。<strong>如果没有除以标准差</strong>，reward
+量纲变化会更直接地改变梯度尺度。排查时<strong>必须先确认代码实际使用的是哪种
+advantage</strong>，而不能只凭”做了 GRPO”来猜。</p>
+<h4 id="reward-hacking-不能只靠一条曲线确诊">5.4 reward hacking
+不能只靠一条曲线确诊</h4>
+<p>总 reward
+上涨、正确性不动，值得怀疑，但<strong>还不是确诊</strong>——训练早期模型可能先学会格式，正确性暂时没变化。</p>
+<p>更可靠的检查组合是：</p>
+<ol type="1">
+<li>人工阅读 reward 最高和增长最快的样本</li>
+<li>分开画 correctness、format、length 等分项</li>
+<li>使用<strong>独立 verifier</strong>或 held-out 规则复判</li>
+<li>看某个分项上涨时，任务准确率是否同步变化</li>
+<li>将可疑分项关闭或打乱，<strong>做单变量对照</strong></li>
+</ol>
+<p><strong>只有模型只学会触发某个打分规则、而独立正确率和人工判断没有改善</strong>，才能更有把握地叫
+reward hacking。</p>
+<h3
+id="六把整套排查压缩成一张决策表">六、把整套排查压缩成一张决策表</h3>
+<p>拿到一个崩溃 run 时，可以按下面的结果直接分流：</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>检查结果</th>
+<th>暂时结论</th>
+<th>下一步</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>在关闭随机性的复现测试中，<strong>权重没变但 ratio 已明显偏离
+1</strong></td>
+<td>概率口径或权重同步错误</td>
+<td><strong>停止训练</strong>，修第 1 层</td>
+</tr>
+<tr>
+<td>大 batch 与梯度累积结果方向不同</td>
+<td>loss 缩放或梯度归约错误</td>
+<td>修第 1.5 层</td>
+</tr>
+<tr>
+<td>token 表中本应排除的 prompt/tool/padding 进入 loss</td>
+<td>mask 错误</td>
+<td>修第 2 层</td>
+</tr>
+<tr>
+<td>第一个非有限值出现在 logprob / log-ratio / exp</td>
+<td>数值路径有问题，或上游已产生异常大的 log-ratio</td>
+<td>先修第 3 层，再追查异常值来源</td>
+</tr>
+<tr>
+<td>前四层通过，KL 与参数 delta 持续增长</td>
+<td>更新过激或 rollout 过旧</td>
+<td>做单变量超参实验</td>
+</tr>
+<tr>
+<td>只在固定样本或 reward 分项上尖刺</td>
+<td>数据、verifier 或 reward 错误</td>
+<td>重放并拆样本</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>[!tip] 决策表不是为了让 debug 整齐
+这张表的目的是<strong>避免跨层解释</strong>——概率计算没通过时，不解释
+entropy；mask 没通过时，不解释 reward hacking；数值已出现 Inf
+时，也不靠降低学习率把它暂时压住。</p>
+</blockquote>
+<p><strong>面试信号</strong>：作者会让候选人面对”reward
+突然归零”的案例，<strong>只说最先要看的几项原始数据</strong>。如果回答从学习率和
+KL 开始，通常说明他习惯读看板；如果<strong>先要最后正常 step / 第一异常
+batch / 原始 rollout / ratio /
+mask</strong>，才更像真正做过训练排查。</p>
+<h3 id="总结-2">总结</h3>
+<p>训练崩溃的排查可以归结为一句话：</p>
+<blockquote>
+<p><strong>先找到第一个错误的张量，再讨论最后一条异常的曲线。</strong></p>
+</blockquote>
+<p>实践顺序是：锁定首个异常 step → 验证新旧概率 → 验证梯度累积 → 逐
+token 检查 mask → 沿数值路径寻找第一个
+NaN/Inf；<strong>这些都通过以后，才调整 optimizer、clip、KL 和
+reward</strong>。</p>
+<p>这样做的价值不是”顺序更优雅”，而是<strong>每一层都有明确的通过条件</strong>。只有前一层成立，后一层指标才保留原来的解释意义。</p>
+<blockquote>
+<p>[!note]- 预告：第 7 篇 第 1
+步的展开——<strong>两侧引擎概率不一致的量级到底有多大、怎么诊断</strong>，以及
+<strong>MoE 上为什么这个问题天然更严重</strong>。</p>
+</blockquote>
+<h2 id="监控看板系列第-2-篇信号健康度可直接观测">监控看板（系列第 2
+篇）：信号健康度可直接观测</h2>
+<blockquote>
+<p>[!info] 第 2 篇核心 网上分享 GRPO 优化时通常直接分析
+clip-higher、dynamic sampling
+的价值，但更该问的是前一步：<strong>作者当时看到了什么，才决定用这个的？</strong>
+GRPO 没有 critic，唯一的学习信号来自同一个 prompt
+采出的一组回答间的相对优势——所以<strong>信号本身的健康度可以直接观测，也必须观测</strong>。一组里所有回答
+reward 都一样 = 这组压根没有信号，这件事在曲线上看得见，不需要猜。</p>
+<p>指标分两组：<strong>多样性组</strong>（模型还会几种解法、还在不在探索，本篇）+
+<strong>信号健康度组</strong>（第 3
+篇，见下文）。多样性组有个共同的陷阱：<strong>它们看起来在测同一件事，其实漏掉了一整个维度</strong>（跨题可区分度，见第
+5 节）。</p>
+</blockquote>
+<pre class="mermaid"><code>flowchart LR
+    M[&quot;GRPO 监控两组指标&quot;] --&gt; A[&quot;多样性组（第 2 篇）&lt;br/&gt;还会几种解法 / 还在不在探索&quot;]
+    M --&gt; B[&quot;信号健康度组（第 3 篇）&lt;br/&gt;更工程 · 更容易被指标名字骗&quot;]
+    A --&gt; A1[&quot;① token entropy&lt;br/&gt;粗糙报警器&quot;]
+    A --&gt; A2[&quot;② 组内去重率 / 编辑距离&lt;br/&gt;最直观&quot;]
+    A --&gt; A3[&quot;③ pass@k&lt;br/&gt;最关键 · k=group size 免费&quot;]
+    A --&gt; A4[&quot;④ 高不确定性位置的熵&lt;br/&gt;补平均熵的稀释&quot;]
+    A --&gt; A5[&quot;⑤ 跨题可区分度（检索准确率）&lt;br/&gt;一次前向 · 防高熵模板化&quot;]
+    B --&gt; B1[&quot;① 零方差组占比&lt;br/&gt;实测 vs 难度分布预测基线&quot;]
+    B --&gt; B2[&quot;② 重要性比 / clip fraction&lt;br/&gt;上界下界分开计&quot;]
+    B --&gt; B3[&quot;③ 两侧引擎 logprob 差&lt;br/&gt;mean / p99 / max&quot;]
+    B --&gt; B4[&quot;④ 长度 · grad norm · reward 分项&lt;br/&gt;按对错拆 / 裁剪前 / 拆分项&quot;]
+    B --&gt; B5[&quot;⑤ ESS ratio&lt;br/&gt;先于 grad norm 的预警&quot;]</code></pre>
+<h3 id="token-entropy只是个粗糙报警器">1. token
+entropy：只是个粗糙报警器</h3>
+<p>每个生成位置模型对整个词表输出一个概率分布，该分布的熵就是 token
+entropy（可对整条回答取平均）。</p>
+<ul>
+<li><strong>含义</strong>：熵高 = 还在犹豫，好几个候选词概率都不低；熵低
+= 已经确定。</li>
+<li><strong>正常</strong>：训练中<strong>缓慢下降</strong>——模型本来就在变得更确定，这是策略锐化该做的事。</li>
+<li><strong>危险信号</strong>：<strong>下降速度快且一路趋近
+0</strong>——每个位置只剩一个答案，采 16 条得 16
+条一样的，探索彻底停止。</li>
+</ul>
+<p>但它没有大家理解的那么有价值，三个原因：</p>
+<ol type="1">
+<li><strong>平均熵稳住了什么都证明不了</strong>——被格式 token 稀释（第 4
+节展开）。</li>
+<li><strong>熵下降本身不是问题</strong>。任何一次有效的 RL
+都会让熵下降，这就是策略在锐化；拿”熵在降”当坍塌证据是<strong>不可证伪的</strong>——它同时描述了健康训练。真正看的是<strong>下降速率</strong>
++ 同期 <strong>pass@k 有没有跟着掉</strong>。</li>
+<li><strong>掉到接近 0
+也不能直接确诊坍塌</strong>。熵低但对不同题还给不同推理 =
+在<strong>压缩</strong>不是坍塌，模型可能反而非常稳定；而最坏情况——对所有题写类似话术——熵反而是<strong>高</strong>的（第
+5 节展开）。</li>
+</ol>
+<blockquote>
+<p>[!warning] 熵不是越高越好
+熵过高时答案不稳定、难收敛，连输出格式都保不住。要维持的是一个<strong>目标区间</strong>，不是一个方向。</p>
+</blockquote>
+<p>定位：每 step
+都有、好观测，但<strong>顶多算粗糙报警器，不是判据</strong>。</p>
+<h3 id="组内去重率熵坍塌最直观的表现">2.
+组内去重率：熵坍塌最直观的表现</h3>
+<ul>
+<li><strong>做法</strong>：GRPO 每个 prompt 采一组（如 16
+条），组内去重看剩几条。</li>
+<li><strong>为什么比平均熵好</strong>：平均熵把上万个 token
+位置糊成一个数，很不敏感；“16 条去重只剩 2 条”一眼看懂。</li>
+<li><strong>危险信号</strong>：去重条数<strong>持续下降</strong>；降到
+2~3 条基本就是坍塌——GRPO
+的梯度来自组内比较，组内全一样就没有任何可比的东西。</li>
+<li><strong>更灵敏的版本</strong>：<strong>编辑距离的分布 /
+中位数</strong>。完全字符相同其实不多，更常见的是”结构一模一样、只有几个数字不同”，编辑距离中位数比去重条数更灵敏。</li>
+</ul>
+<h3 id="passk最关键但有四个缺口">3. pass@k：最关键，但有四个缺口</h3>
+<p><strong>定义与为什么最关键</strong>：</p>
+<ul>
+<li>pass@1 = 采一条就对的比例 = 最擅长的路走得多准；pass@k = k
+条里至少一条对 = <strong>总共还会几种解法</strong>。</li>
+<li>RL
+很容易把前者提上去、同时把后者压下去——它做的事就是把已有某条路径的概率推高，代价是别的路径被压没。</li>
+<li><strong>危险信号</strong>：pass@1 在涨、pass@k
+在跌，尤其<strong>跌破 base model</strong> → 这轮 RL
+没教新东西，只是把模型变窄了。</li>
+<li><strong>曲线形状</strong>：两条线都随 k
+上升，区别在<strong>形状</strong>——RL
+那条很快见顶（只会一条路，采再多也是同一条）；base
+那条一直往上爬（还留着好几种解法）。两线存在<strong>交叉点</strong>，位置取决于任务和模型，交叉点之后
+base 反而更高。</li>
+</ul>
+<p><strong>k 怎么取</strong>：</p>
+<ul>
+<li><strong>k = group size</strong>（如 16）：训练本来就要采，pass@16 从
+rollout 免费算出，每 step 都有——最常看的曲线。</li>
+<li>评测集另跑到 32 封顶：论文里 k
+到几百上千是把曲线画完整，日常没必要、成本线性涨。代价是<strong>只能看见比较严重的坍塌</strong>。</li>
+<li>反超可以出现在 pass@16：作者见过一次——16 条去重只剩 2 条、pass@1
+涨几个点、pass@16 低于 base、交叉点落在 8~16 之间。坍塌够狠时小 k
+就能看出来；<strong>反之不成立</strong>：pass@16 看不出差别 ≠
+没问题，只是没严重到这个预算能看见。</li>
+</ul>
+<p><strong>四个 gap（免费曲线的坑）</strong>：</p>
+<table>
+<colgroup>
+<col style="width: 14%" />
+<col style="width: 28%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>#</th>
+<th>缺口</th>
+<th>后果 / 对策</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>base 侧要额外跑</td>
+<td>“免费”只是 RL 侧</td>
+</tr>
+<tr>
+<td>2</td>
+<td>训练 prompt ≠ 评测集</td>
+<td>rollout 上的 pass@k 天然被污染、通常偏高</td>
+</tr>
+<tr>
+<td>3</td>
+<td>每个 step 的题不一样</td>
+<td>抖动大半来自<strong>题目难度组成</strong>而非策略变化；跨 step
+不可直接比，除非固定 probe 集</td>
+</tr>
+<tr>
+<td>4</td>
+<td>开了零方差组过滤会被系统性压低</td>
+<td>全对组被剔掉 →
+剩余子集正确率天然更低，且随全对组占比上升<strong>持续下漂</strong> →
+<strong>自己造出一条”像坍塌”的曲线</strong>。要算就在<strong>过滤之前</strong>算</td>
+</tr>
+</tbody>
+</table>
+<p><strong>实操</strong>：rollout 曲线只当<strong>同 batch
+内的相对信号</strong>看趋势；要和 base 比，固定一个几十道题的 probe
+集，隔段时间两个模型各按<strong>自己调好的 temperature</strong>
+各跑一次。</p>
+<blockquote>
+<p>[!warning] temperature 陷阱 两个模型的最优 temperature
+不一样，<strong>哪边更高没有普适规律</strong>（机制上：RL
+锐化后熵更低，要恢复同等有效熵得给 RL 加温度，base
+本来就散；但作者也遇到过反例，给不出原因）。 经验：<strong>只比 pass@k
+不扫 temperature =
+没比</strong>；两边各自扫一遍、各取最优点再比。用训练时的温度同时评两个模型，比较<strong>天然偏向
+RL</strong>——那个温度是 RL 训出来的工作点。</p>
+</blockquote>
+<h3 id="高不确定性位置的熵补救平均熵的稀释">4.
+高不确定性位置的熵：补救平均熵的稀释</h3>
+<ul>
+<li><strong>为什么平均熵弱</strong>：长回答里绝大多数 token
+是语法、连接词、格式符号，这些位置熵天然不低且基本不变；真正决定解题路径的是少数<strong>分叉
+token</strong>（选哪种方法、要不要回头验算、用哪个公式）。这几个 token
+全部确定化，对平均熵的影响可能<strong>不到
+1%</strong>，但<strong>序列级多样性已经死了</strong>。</li>
+<li><strong>改法</strong>：只统计 <strong>top-1
+概率低于阈值</strong>位置的熵，绕开格式 token 的稀释。</li>
+<li><strong>新问题</strong>：条件集随策略锐化不断收缩（策略越确定，“高不确定性”位置越少，极端时集合变空）→
+<strong>跨 step 不可直接比较</strong>。</li>
+<li><strong>三个解法</strong>：①
+固定位置集（冻结参考模型一次性选定，之后一直用）；②
+集合大小和数值<strong>一起报</strong>；③
+<strong>分位数替代绝对阈值</strong>（每个 batch 取熵最高的 20%
+位置，集合大小恒定）——最简单，很多框架已内置。</li>
+</ul>
+<h3 id="跨输入可区分度本篇最重要的一节">5.
+跨输入可区分度：本篇最重要的一节</h3>
+<p>前四个指标都只看”<strong>同一道题</strong>”，没看”<strong>换一道题</strong>”。<strong>“答案不重复”
+≠ “答案贴合题目”</strong>。</p>
+<ul>
+<li><strong>模型 A</strong>：同题采 16
+次答案几乎一样；但题一换，立刻换公式、换推理路径 →
+可能只是更确定、更简洁，<strong>不一定坍塌</strong>。</li>
+<li><strong>模型 B</strong>：同题采 16
+次措辞都不一样，看似很多样；但无论数学、代码还是逻辑题，都是同一套开场、自查、收尾
+→ <strong>看似热闹，实际已模板化</strong>。</li>
+</ul>
+<p>平均熵、组内去重、pass@k、条件熵都<strong>区分不了 A 和
+B</strong>——它们缺了另一个问题：<strong>换一道题，推理会不会跟着换？</strong></p>
+<p><strong>两个维度（互不替代）</strong>：</p>
+<ul>
+<li>题内多样性 = <span class="math inline">\(H(Z \mid
+X)\)</span>：固定一道题重复采样，能得到多少种不同答案</li>
+<li>跨题可区分度 = <span
+class="math inline">\(I(Z;X)\)</span>：换题之后，推理内容是否明显不同</li>
+</ul>
+<p><span class="math display">\[H(Z) = H(Z \mid X) + I(Z;X)\]</span></p>
+<p>（原文公式渲染丢失，按信息论恒等式补全。）总体变化既可能来自”同题多解”，也可能来自”不同题触发不同推理”；只盯前一部分，就会漏掉”所有题套同一模板”的坍塌。<strong>最反直觉的是高熵也会坍塌</strong>——每次都换几个词（熵不低、去重正常），但所有题沿用同一个推理骨架。</p>
+<p><strong>怎么测：检索准确率（让回答”找回自己的题目”）</strong></p>
+<ol type="1">
+<li>batch 里有 P 道题，每题都有已生成的回答；</li>
+<li>对每条回答分别计算：放回<strong>自己题目</strong>后的 logprob vs
+放到<strong>其他 P-1 道题</strong>后的 logprob；</li>
+<li>模型若真的看题组织推理，“回答 A + 题目 A”匹配分数应最高 →
+统计每条回答能否找回自己的题目 = <strong>检索准确率</strong>。</li>
+</ol>
+<ul>
+<li>准确率高：输入依赖还在；</li>
+<li>接近 <span
+class="math inline">\(1/P\)</span>（随机猜题水平）：模板化严重。</li>
+<li>成本：<strong>复用训练
+rollout，只补一次前向</strong>，不需重新采样。</li>
+</ul>
+<p><strong>为什么零方差组会加剧模板化</strong>：一组 reward
+全一样时，任务本身不给”这道题应该怎么改”的方向，但 <strong>KL、entropy
+bonus
+等正则项仍然产生更新</strong>——而且这些更新<strong>对所有输入通用</strong>。这一步模型收到的不是”题
+A 这样答、题 B
+那样答”，而是”不管什么题，统一往这个方向调一点”。零方差组多，这种输入无关更新反复累积，题目间原有差异被慢慢抹平。</p>
+<p><strong>两个反常组合</strong>（必须放一起看）：</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>组合</th>
+<th>诊断</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>熵低 + 检索准确率高</td>
+<td><strong>健康压缩</strong>：更确定了，但仍看题下菜</td>
+</tr>
+<tr>
+<td>熵高 + 检索准确率 ≈ 随机</td>
+<td><strong>隐蔽的模板坍塌</strong>：用词多变，但所有题同一骨架</td>
+</tr>
+</tbody>
+</table>
+<p>平均熵有时<strong>连报警方向都可能是反的</strong>。</p>
+<h3 id="多样性组小结五组指标">多样性组小结：五组指标</h3>
+<table>
+<colgroup>
+<col style="width: 17%" />
+<col style="width: 23%" />
+<col style="width: 29%" />
+<col style="width: 29%" />
+</colgroup>
+<thead>
+<tr>
+<th>指标</th>
+<th>测什么</th>
+<th>危险信号</th>
+<th>主要缺口</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>平均 token entropy</td>
+<td>还有多少不确定性</td>
+<td>快速下降趋近 0</td>
+<td>稳住≠没事；下降≠生病；≈0≠确诊；被格式 token 稀释</td>
+</tr>
+<tr>
+<td>组内去重率（/编辑距离）</td>
+<td>16 条里实际几条不一样</td>
+<td>持续降到 2~3 条</td>
+<td>严格去重不灵敏，看编辑距离中位数</td>
+</tr>
+<tr>
+<td>pass@k</td>
+<td>能力上限有没有变窄</td>
+<td>pass@1 涨、pass@k 跌破 base</td>
+<td>污染 / 跨 step 不可比 / 零方差过滤压低 / base
+要另跑；必须配各自调优的 temperature</td>
+</tr>
+<tr>
+<td>高不确定性位置的熵</td>
+<td>分叉 token 还活没活</td>
+<td>条件集收缩变空</td>
+<td>跨 step 不可比 → 用分位数（top 20%）</td>
+</tr>
+<tr>
+<td>检索准确率</td>
+<td>换题推理跟着换吗</td>
+<td>≈ 1/P</td>
+<td>只补一次前向；<strong>与题内多样性可能反向</strong></td>
+</tr>
+</tbody>
+</table>
+<p>第 2 篇收官四条：</p>
+<ol type="1">
+<li>平均熵成本最低也最弱——稳住什么都证明不了、掉到 0
+也不能确诊，只值得当随手报警线。</li>
+<li>pass@k 的 k 取 group size（免费），但要清楚免费曲线的四个缺口。</li>
+<li>报 pass@k 必须报 temperature，两边各自调优后再比。</li>
+<li>题内多样性和跨题可区分度是<strong>两个能反向走的量</strong>；只测前者的看板测不到”输出像模板”这个最典型的坍塌，补上只需一次前向。</li>
+</ol>
+<h2
+id="信号健康度组系列第-3-篇更工程也更容易被指标名字骗">信号健康度组（系列第
+3 篇）：更工程，也更容易被指标名字骗</h2>
+<blockquote>
+<p>[!info] 第 3 篇核心
+这一组比多样性组<strong>更工程、更容易被指标名字骗</strong>。全篇只回答五个问题：</p>
+<ol type="1">
+<li>这一批 rollout 里，有多少组根本没提供学习信号？（零方差组占比）</li>
+<li>模型更新后，离生成这些数据时的旧策略有多远？（重要性比 / clip
+fraction）</li>
+<li>采样引擎和训练框架算出来的概率是不是同一回事？（两侧 logprob
+差）</li>
+<li>长度、梯度和总 reward 的异常，分别该怎么拆？（结果类指标）</li>
+<li>表面上有几百条样本时，真正决定梯度的到底有几条？（ESS）</li>
+</ol>
+<p>前四个是在<strong>找故障</strong>，最后一个是在找<strong>故障出现前的预警</strong>。</p>
+</blockquote>
+<h3 id="零方差-group-占比50-报警线是错的">1. 零方差 group 占比：50%
+报警线是错的</h3>
+<p>零方差 group：同一 prompt 采出的那组回答 reward
+完全一样（全对或全错）。</p>
+<blockquote>
+<p>[!warning] 错误观点：「超过 50% 就报警」 零方差组占比会<strong>随
+group size <span class="math inline">\(G\)</span>
+自动变化</strong>。给定题集解题率分布，占比的期望是 <span
+class="math display">\[\mathbb{E}_{x}\left[p^{G} +
+(1-p)^{G}\right]\]</span> 例：某类题单条 50% 做对，采 4
+条时全对/全错并不稀奇；采 32 条时极难发生。题没变，只是 <span
+class="math inline">\(G\)</span> 变了，自然占比就大幅变化 → 固定 50%
+这条线在小 G 下<strong>一直报警</strong>，在大 G
+下<strong>一直沉默</strong>。</p>
+</blockquote>
+<p><strong>正确判据</strong>：实测占比对比<strong>题集难度分布预测出来的基线</strong>——把上面的期望算出来当基准，实测显著超出才叫异常。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260902092341.jpg"
+alt="零方差组的自然基线取决于 group size：同一条 50% 报警线无法跨 G 使用（原文配图）" />
+<figcaption aria-hidden="true">零方差组的自然基线取决于 group
+size：同一条 50% 报警线无法跨 G 使用（原文配图）</figcaption>
+</figure>
+<p>如果实测和预测<strong>吻合</strong> →
+问题不在训练动力学，而在<strong>题集难度分布</strong>：该换数据，不是该开过滤。这个指标有的框架已内置：<code>frac_reward_zero_std</code>，不用自己写。</p>
+<p><strong>危害深入（比”没信号”更糟）</strong>：</p>
+<ol type="1">
+<li><strong>稀释有效梯度</strong>：DAPO 式 token 级归一化把整个 batch 的
+loss 除以 <strong>token 总数</strong>——零 advantage token 对分子贡献为
+0，却留在分母里。1000 个 token 里 500 个来自零方差组 →
+有效梯度整体稀释，<strong>效果上像同时减小了 batch size 和
+lr</strong>。注意压低系数是<strong>零 advantage token 占比</strong>不是
+group 占比（全对组通常偏短、全错组通常偏长甚至撞截断），要估准得量 token
+级比例。</li>
+<li><strong>只剩回退正则</strong>：开了 KL loss / entropy bonus
+时，这些组不是完全没梯度，而是<strong>只剩一个把模型往参考策略拉回去的正则项</strong>，一点
+reward
+信号都没有——比单纯无效更糟：在用算力做纯回退，且方向与输入无关，会持续抹平题目间差异（第
+2 篇 §5 模板化机制的实锤）。</li>
+<li>（第 1 篇视角）组内无可比对象 → 没有学习信号。</li>
+</ol>
+<h3 id="重要性比与-clip-fraction别把两个方向合并成一个人">2. 重要性比与
+clip fraction：别把两个方向合并成一个人</h3>
+<p>GRPO 先采一批数据、再拿这批数据更新模型；做到第二、第三个更新 step
+时模型已经变了，回答却还是旧模型生成的。ratio
+量的是<strong>现在的模型和生成这条数据时的模型差了多少</strong>：</p>
+<p><span class="math display">\[\text{ratio} =
+\frac{\pi_{\theta}(\text{token})}{\pi_{old}(\text{token})}\]</span></p>
+<p>可以当成概率涨跌倍数读：1 = 没变，1.05 = 涨 5%，0.8 = 降
+20%。健康训练里大多数 token 的 ratio 应接近 1。</p>
+<ul>
+<li><strong>clip 在做什么</strong>：PPO/GRPO 把 ratio 强限在 <span
+class="math inline">\([1-\epsilon,\ 1+\epsilon]\)</span>（典型 <span
+class="math inline">\(\epsilon=0.2\)</span>），超出部分梯度不再生效，防一步走太远；<strong>clip
+fraction = 撞边界的 token 比例</strong>。</li>
+<li><strong>危险信号 ①</strong>：clip fraction 突然涨到 <strong>20%
+以上</strong> → 更新步子普遍太大，或数据已经太旧。</li>
+<li><strong>危险信号 ②</strong>：ratio 出现极端离群值（个别 token 到
+<span class="math inline">\(e^5\)</span>
+量级）——<strong>均值会完全藏住</strong>，要看分位数和最大值。</li>
+</ul>
+<blockquote>
+<p>[!warning] 上界和下界必须分开看 把两侧合成一个总 clip
+fraction，像只报”今天一共进出 100
+万人”却不说是流入还是流出——总量一样，方向可能完全相反。
+<strong>典型坍塌前兆：上界几乎不命中、下界大量命中</strong>——许多 token
+概率在往下掉，很少有 token
+能往上探索；一合并，这个结构就消失了。（作者个人总结，多数框架不内置，要自己写代码。）</p>
+</blockquote>
+<p><strong>读数前提</strong>：这两个计数在所有框架的实现里都<strong>按
+advantage 符号门控</strong>，且结构上必然如此——PPO 的 <span
+class="math inline">\(min\)</span> 决定了上界只在 <span
+class="math inline">\(\hat{A}&gt;0\)</span> 时可能命中、下界只在 <span
+class="math inline">\(\hat{A}&lt;0\)</span>
+时可能命中。“下界命中很多”可能是策略真在大面积压概率，也可能只是这个
+batch 里负 advantage 本来就更多——<strong>看上下界必须把正负 advantage
+的数量一起分析</strong>。</p>
+<h3 id="两侧引擎的-logprob-差最容易被忽略也最致命">3. 两侧引擎的 logprob
+差：最容易被忽略，也最致命</h3>
+<p>现代 RL 训练两套系统配合：推理引擎（vLLM /
+SGLang）生成，训练框架（FSDP /
+Megatron）算梯度。<strong>同一条序列、同一份权重，两套东西算出的 token
+概率并不完全一样</strong>（kernel、batch
+组织、量化方式不同）——像两把刻度略有偏差的尺子：一把量”旧概率”、一把量”新概率”，读数一除，以为看到的是模型变化，其实混着尺子本身的误差。</p>
+<p><strong>为什么致命</strong>：直接拿推理引擎返回的 logprob 当 <span
+class="math inline">\(\pi_{old}\)</span> → ratio
+的分子分母来自<strong>两个不同的实现</strong> →
+<strong>即使模型参数一个字没变，ratio 也不等于
+1</strong>，算法把这个偏差误读成策略已经漂移很远，并据此调整梯度。（第 1
+篇”训练崩溃”类的经典 root cause，这里给出量化手段。）</p>
+<p><strong>怎么量</strong>：同一批 token 分别送进两套引擎，算每个 token
+的 <span class="math inline">\(\lvert \Delta \log p
+\rvert\)</span>，至少看三个数：</p>
+<table>
+<colgroup>
+<col style="width: 36%" />
+<col style="width: 36%" />
+<col style="width: 27%" />
+</colgroup>
+<thead>
+<tr>
+<th>统计量</th>
+<th>看什么</th>
+<th>判据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mean</td>
+<td>整体误差是否普遍变大</td>
+<td><strong>&lt; 0.001 通常健康；接近/超过 0.01
+应停下检查</strong>；先用确认正常的配置跑出自己的
+baseline。<strong>是否停训主要看它</strong></td>
+</tr>
+<tr>
+<td>p99 / p99.9</td>
+<td>最异常的 1% / 0.1% token 是否越来越多、越来越重</td>
+<td>比单独看 max 稳定</td>
+</tr>
+<tr>
+<td>max</td>
+<td>最极端的单个 token 差多少</td>
+<td>定位具体异常样本；<strong>0.01 这条线只适用 mean 不适用
+max</strong>——健康训练也会偶发极端值，按它报警几乎每个 batch 都响</td>
+</tr>
+</tbody>
+</table>
+<p>均值为什么不够：一万个 token 里 9990 个差 0.001、10
+个差异巨大，均值仍可能很小、看似正常，但那 10 个 token 仍可能撞 clip
+边界、产生异常梯度——“整体是否一致”和”有没有少数危险
+token”要分开检查。</p>
+<h3 id="长度grad-normreward-分项已经表现出来的结果">4. 长度、grad
+norm、reward 分项：已经表现出来的结果</h3>
+<h4 id="长度爆涨别直接判-hack">4.1 长度爆涨别直接判 hack</h4>
+<p>看均值、p99，加上截断率。长度单调爆涨时，<strong>先把长度按对错拆开</strong>，分别画
+<span class="math inline">\(\mathbb{E}[\lvert o \rvert \mid
+\text{答对}]\)</span> 和 <span class="math inline">\(\mathbb{E}[\lvert o
+\rvert \mid \text{答错}]\)</span>：</p>
+<ul>
+<li><strong>两条一起涨、且答对那条涨得更快</strong> → 这才是长度 hack →
+查 reward 里哪个分项和篇幅正相关，<strong>改 reward</strong>。</li>
+<li><strong>只有答错那条在涨</strong> → 不是 hack，是 <span
+class="math inline">\(1/\lvert o_i \rvert\)</span>
+长度归一化的机械后果：错误样本的负 advantage
+被长度摊薄，写长一点能少罚一点 → <strong>改 loss
+聚合</strong>（token-level loss，或干掉 <span
+class="math inline">\(1/\lvert o_i \rvert\)</span>——DAPO 的小 trick
+就是这种场景才需要）。</li>
+</ul>
+<p>两种情况的解决方式<strong>相反</strong>。此时去加长度惩罚是错的方向，且不只是无效：组归一化下给错误答案加连续长度惩罚容易产生<strong>发散的
+advantage</strong>，结构上就容易把 reward 训崩。「单调爆涨就是长度
+hack」把现象和机制搞混了——爆涨只说明长度这个维度上有压力失衡，压力从哪来要拆开才知道。</p>
+<ul>
+<li>长度<strong>塌缩到几十个
+token</strong>：反方向，模型学到「别说长话」，通常是截断样本的处理方式出了问题。</li>
+<li><strong>截断率飙升</strong>要警惕：大量样本在撞 max_len，这些样本的
+reward 通常是废的。</li>
+</ul>
+<h4 id="grad-norm-要看裁剪前的">4.2 grad norm 要看裁剪前的</h4>
+<p>主流框架默认记的基本都是裁剪前的（裁剪函数的返回值本来就是缩放前那个
+norm）：wandb 上 <code>grad_norm: 8.3</code> 而配置
+<code>max_grad_norm=1.0</code> <strong>不是
+bug</strong>，是这一步梯度被整体缩小了 8.3 倍。自己写的时候<strong>先
+log
+再剪裁</strong>，否则从曲线上看不到尖刺到底有多大。<strong>危险信号：突然出现
+10 倍以上的尖刺。</strong></p>
+<h4 id="reward-必须按分项拆开">4.3 reward 必须按分项拆开</h4>
+<p>总 reward
+是最容易骗人的指标：格式分、长度分能单独把它顶上去，而真正在意的正确性分项可能一动不动——只看总分，会把「学会了排版」当成「学会了解题」。</p>
+<p>但别把训练早期误判成
+hacking：模型<strong>先学格式、后学正确性</strong>，「格式分涨、正确性平」是正常形状。真正要看的是这个状态<strong>持续了多久</strong>，以及正确性分项到
+plateau 之后有没有开始<strong>下滑</strong>。</p>
+<h3 id="essbatch-里有多少样本真正起了作用">5. ESS：batch
+里有多少样本真正起了作用</h3>
+<p>batch size
+只表示放进了多少样本，不保证每条对梯度的影响差不多。若少数几条的重要性权重特别大、其余几乎可忽略，名义上用了
+512 条，实际主要由那几条决定：</p>
+<p><span class="math display">\[ESS = \frac{\left(\sum_i
+w_i\right)^{2}}{\sum_i w_i^{2}}, \qquad \mathrm{Var}(\hat{g}) \approx
+\frac{\mathrm{Var}(g)}{ESS}\]</span></p>
+<p><span class="math inline">\(w_i\)</span>
+是重要性权重。公式不用死记，抓两种情况：权重均匀 → ESS 接近真实 batch
+size；权重集中在少数样本 → ESS 明显偏低。ESS = 8（batch
+512）<strong>不是说只剩 8
+条有非零梯度</strong>，而是从梯度估计稳定性看，这一步大致只相当于 8
+条权重均匀的样本。实操更常看 <strong>ESS ratio = ESS /
+batch_size</strong>，换 batch size 曲线仍可比。</p>
+<h4 id="为什么它比-grad-norm-更早">5.1 为什么它比 grad norm 更早</h4>
+<p>训练失稳通常有积累过程：<strong>重要性权重越来越集中 → KL 和 grad
+norm 开始异常 → 最后才反映到 reward 上</strong>。</p>
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/Pasted%20image%2020260902092342.jpg"
+alt="训练崩溃通常不是突然发生的：ESS ratio 下降 → KL 上升 → grad norm 尖刺 → reward 断崖（原文配图）" />
+<figcaption aria-hidden="true">训练崩溃通常不是突然发生的：ESS ratio
+下降 → KL 上升 → grad norm 尖刺 → reward 断崖（原文配图）</figcaption>
+</figure>
+<p>ESS ratio 的优势是<strong>逐步下降</strong>，往往能在 grad norm
+尖刺之前给出信号；grad norm
+尖刺更像一次明确的异常事件——看到它时，训练通常已进入需要止损定位的阶段。不必把图中先后顺序理解成每次严格成立，更准确的说法：<strong>ESS
+观察的是风险如何集中，grad norm
+观察的是这种集中是否已经产生了剧烈更新</strong>——前者适合预警，后者适合确认不稳。</p>
+<h4 id="ess-下降后先判断是哪种偏差">5.2 ESS
+下降后，先判断是哪种偏差</h4>
+<p>ratio 变得不均匀至少有两种来源，处理方式完全不同：</p>
+<ul>
+<li><strong>策略陈旧</strong>：生成回答后模型又更新了多次，当前策略与旧策略真实拉开距离
+→ 从更新次数、异步延迟、<code>ppo_epochs</code> 入手。</li>
+<li><strong>两侧引擎不一致</strong>：权重没变，只是采样引擎和训练框架算的
+logprob 不同 → 回到第 3 节检查。</li>
+</ul>
+<p>两种偏差最终都进 ratio、都拖低
+ESS。只看一条合并后的曲线，很容易把引擎误差当成”数据太旧”，<strong>错误地去调
+ppo_epochs</strong>。</p>
+<h3
+id="信号健康度组小结按一条顺序看">信号健康度组小结：按一条顺序看</h3>
+<p>这篇不适合背固定阈值，实用的是<strong>按顺序</strong>看训练信号：</p>
+<ol type="1">
+<li><strong>group 里有没有可比较的
+reward</strong>——零方差组没有任务梯度，但正常占比取决于 G
+和题集难度，不能用固定 50% 判断；</li>
+<li><strong>ratio 本身是否可信</strong>——两侧引擎可能给出不同
+logprob；整体一致性看 mean，少数异常 token 看 p99 / p99.9 / max；</li>
+<li><strong>梯度是否开始被少数样本控制</strong>——ESS ratio
+持续下降通常先于 grad norm 尖刺；解释之前先排除两侧引擎不一致；</li>
+<li><strong>长度、grad norm、reward
+分项</strong>——更接近已表现出来的结果：长度按对错拆、grad norm
+看裁剪前、reward 拆成分项。</li>
+</ol>
+<p>整套监控回答的其实是同一个问题：<strong>这一批数据提供了多少可信的比较信号，这些信号有没有被少数样本或工程误差带偏，最后又以什么形式反映到模型更新上。</strong></p>
+<blockquote>
+<p>[!note]- 预告：第 4 篇 策略坍塌的具体排查：五条 root
+cause，以及为什么「去掉 std 归一化」这个改动的代价被普遍低估。见
+[[#系列追踪]]。</p>
+</blockquote>
+<h2 id="我的批注">我的批注</h2>
+<ul>
+<li>⚡ “工程层 0/1、算法层内在倾向”这个排序依据很锋利：bug
+可以被穷尽排除，目标函数的倾向只能设计缓解——所以顺序天然是先 bug
+后倾向。</li>
+<li>⚡ 信号链四问的本质是把”静态分类”换成”依赖链”：第 1
+层不过关，后面观测全部作废。这比二分法抗混淆得多，也解释了为什么”渐进/突发”表象会骗人。</li>
+<li>⚡ 面试考察逻辑值得学习：不问八股，从”问题怎么发现的 →
+哪条曲线看到征兆 → 怎么决定改哪个 → 改完遇到什么新问题”逐层 dive
+deep，编造的经历答不了追问。</li>
+<li>✅ 上面的 ❓ 已解决（09-01 并入第 2
+篇，见上文监控看板）：组内去重率（直观数条数 /
+编辑距离中位数）、pass@k（k = group size 免费）、跨题可区分度 =
+检索准确率（复用 rollout 补一次前向，随机线为 1/P）。</li>
+<li>⚡ 零方差组有两条独立的危害路径：① 组内无可比 → 没有学习信号（第 1
+篇视角）；② 正则项（KL / entropy bonus）的输入无关更新反复累积 →
+模板化（第 2 篇视角）。DAPO 的 dynamic sampling 冲着 ①
+去，检索准确率监控防 ②。</li>
+<li>⚡
+“高熵坍塌”修正了我对坍塌的直觉：熵和去重率都正常、看板全绿，但所有题同一骨架——题内分布根本不变，所以只看题内分布的指标对它全盲。监控要防的是”指标都绿但模型已死”。</li>
+<li>⚡ temperature 是被评模型自身的属性，不是实验常量：用训练温度评 base
+是系统性偏向 RL
+的不公平比较。推广：任何对比实验里，一侧调优过的工作点参数必须对两侧各自重调。</li>
+<li>⚡ “50% 零方差报警线”是固定阈值思维的反面教材：占比是 G
+和题集难度分布的函数（<span
+class="math inline">\(\mathbb{E}[p^G+(1-p)^G]\)</span>），阈值必须换成”实测
+vs 预测基线”；实测吻合基线 → 该换数据，不是开过滤。</li>
+<li>⚡ 合并/平均是监控指标的头号敌人，第 3 篇连给三例：合并 clip
+fraction 藏住”上界不命中 + 下界大量命中”的坍塌前兆；mean |Δlogp|
+藏住少数危险 token；总 reward
+把”学会了排版”顶成”学会了解题”。对策统一：拆流向、看分位数、拆分项。</li>
+<li>⚡ 零方差组的危害集齐三层：① 组内无可比 → 无学习信号（第 1 篇）；②
+token 级归一化下稀释有效梯度 ≈ 同时减小 batch size 和 lr（注意是 token
+占比不是组占比）；③ 开 KL/entropy bonus
+时只剩输入无关的回退正则，持续抹平题目差异（第 2
+篇模板化机制的实锤）。</li>
+<li>⚡
+长度按对错拆是”先分类再动手”的又一实例：同是长度爆涨，答对涨更快是
+hack（改 reward），只有答错涨是 <span class="math inline">\(1/\lvert o_i
+\rvert\)</span> 归一化的机械后果（改 loss
+聚合）——解法相反，此时加长度惩罚还会因发散 advantage 把训练弄崩。</li>
+<li>⚡ ESS 与 grad norm 的分工一句话：“ESS 看风险怎么集中，grad norm
+看集中是否已产生剧烈更新”——预警看前者，确认看后者。</li>
+<li>🔗 token-level loss / 干掉 <span class="math inline">\(1/\lvert o_i
+\rvert\)</span> → [[dapo]] 的 loss 聚合方式</li>
+<li>⚡ σ
+归一化的核心机制是”<strong>单样本权重主要由组内稀罕度决定，不由信号可靠性决定</strong>”——这反转了通常直觉：“大权重
+= 重要信号”。在 GRPO σ 归一化下，“大权重 =
+组内位置极端”，含义完全不同。所以看到优势大不要默认它是好信号，要先问”它在组内有多孤立”。</li>
+<li>⚡ (G−1)/√G
+这个<strong>硬上限</strong>回答了一个反直觉直觉：advantage
+看起来能无限放大但其实是有限博弈；理解这条上界能一眼判断实验里出现的
+A=5/10 是不是超界——超界几乎一定是数据或 reward
+bug，不是训练动力学。</li>
+<li>⚡ <strong>“去掉 σ 不是乘常数”</strong> 是 Dr. GRPO A/B
+实验最常被误读的地方：表面看 lr 没变，实际每个 group 的等效 lr 都按自身
+σ 缩放了——σ 小的被压更多、σ 大的被压更少。“同 lr
+上去跑一遍”看到的”方法无效”，一部分就是这层结构性变化，不是权重本身错了。</li>
+<li>⚡ <strong>动态采样的最大盲点不在训练曲线，而在底层 prompt
+池缩小</strong>——batch
+表面永远满着，看不出哪些题已经被悄悄排挤出去。唯一可靠的探测方式是单独的”已掌握回归集”，且必须明白这只是报警器不是精确量尺。</li>
+<li>⚡ σ 与 <span class="math inline">\(1/\lvert o_i \rvert\)</span>
+是两条<strong>正交的偏置</strong>——difficulty bias vs length
+bias。Dr. GRPO 一起删了两个但没单独消融，所以”长度失控归因
+1/|o|“这件事的证据强度并不高。看到长度爆涨时排错顺序应是：length norm →
+σ → reward hack（按数据出现先后排，不是按怀疑程度）。</li>
+<li>🔗 动态采样 → [[dapo]]；Dr. GRPO 的去掉 σ → 第三方实现/讨论见
+[[grpo]] 笔记</li>
+<li>⚡ <strong>“clip 命中梯度归零”是个常见误传</strong>——PPO min 在
+<span class="math inline">\(r_t\)</span> 与 <span
+class="math inline">\(A_t\)</span> 异号时根本不截断（<code>min</code>
+取到的是更小的未裁剪项，clip 端点只是备选）。<strong>真正梯度归零只在
+<span class="math inline">\(r_t\)</span> 与 <span
+class="math inline">\(A_t\)</span> 同号且 <span
+class="math inline">\(r_t\)</span> 越界时</strong>——上界只在 <span
+class="math inline">\(\hat A&gt;0\)</span>、<span
+class="math inline">\(r_t&gt;1.2\)</span> 时真截断；下界只在 <span
+class="math inline">\(\hat A&lt;0\)</span>、<span
+class="math inline">\(r_t&lt;0.8\)</span> 时真截断。框架报告的
+<code>clip_frac</code> 高、loss
+仍在降的常见解释：命中里很多是异号情形（梯度照算）。</li>
+<li>⚡ 默认 [0.8, 1.2] 是<strong>数值对称、log
+不对称</strong>：<code>log 0.8 ≈ -0.223</code> 比
+<code>log 1.2 ≈ +0.182</code> 宽 ~22%。这个偏置平时不显，但叠加低概率
+token
+灵敏度放大（<code>log r ≈ (1-p)·Δ</code>），<strong>先撞下界</strong>几乎是必然——除非主动调成几何对称（[0.8,
+1.25] 或 [0.75, 1.25]）。</li>
+<li>⚡ 几何对称点公式 <code>ε_high = ε_low/(1-ε_low)</code>
+给了一个直接参考：DAPO 的 [0.72, 1.389] 不是 0.28 对称点（那是
+0.389）而是经验选——作者承认”有意保留不对称防止熵坍塌”，意味着 clip
+设计不是数学游戏而是经验偏置。</li>
+<li>⚡ “稀有 token 学不动”是被低估的副作用——0.05 → 0.3 需要 ~7.3
+次有效更新（<code>log 6 / 0.25</code>），但 clip
+会把多数更新截断在它<strong>刚刚冒头</strong>的瞬间。<strong>频次 token
+撞上界是单步误差，稀有 token 撞上界是断整个学习路径</strong>——遇到”某
+token 出现频次始终涨不上去”时优先怀疑 clip，而非数据。</li>
+<li>⚡ <strong>“熵在下降”是 RL 训练的固有倾向，不是 clip
+的判据</strong>。把熵下降归因于 clip 设置过紧是监控偷懒——必须配随机
+reward 基线（同一份 rollout，reward 打乱），两条曲线平行下降 =
+熵自然衰减（clip 无责）；差距 = clip 与 reward 的耦合效应（clip
+有责）。这条控制变量思路应该推广到所有”调 X 后看指标 Y”的实验。</li>
+<li>⚡ <strong>mask ≠ clip</strong>：loss mask 是样本层（不参与 loss
+也不是”截短到某长度”），不会让模型学到”答短点有奖励”——那是 mask
+的副作用而非设计意图。要短答奖励要显式长度惩罚（Dr. GRPO 的
+<code>1/|o|</code> 是 reward 设计，不是 mask）。统计时截断率与 clip_frac
+必须分开计，不要合并。</li>
+<li>⚡ 调 clip 不是”开紧/松”——是<strong>调几何</strong>：5.1
+几何对称（消除下界偏置）；5.2
+控制熵（宽上界鼓励探索，紧上下界鼓励利用）；5.3 扫描看
+<code>clip_frac_by_sign</code> 与有效 step 比，而不是看
+<code>clip_frac</code> 一个数。合并 clip_frac 又是第 3
+篇”合并是监控头号敌人”的第 N 个例子。</li>
+<li>⚡
+“<strong>训练崩溃没有更合适的学习率，只有写对和写错</strong>”——一句话定性策略坍塌与训练崩溃的边界：前者是算法层倾向（可调缓解），后者是工程层
+0/1
+bug（只能穷尽排除）。<strong>立刻扫学习率是训练崩溃排查最浪费时间的反应</strong>——因为根因通常在概率/mask/数值路径上，与
+lr 无关。</li>
+<li>⚡ <strong>“前一层不通过，后一层曲线没有解释意义”是第 6
+篇最锋利的诊断原则</strong>——同一句在多处复用：ratio 口径不一致时 clip
+fraction / KL / lr 扫描全部失效；mask 不对时 advantage 解读失效；数值已
+Inf
+时优化器调整失效。<strong>这套分层在每条具体排查动作前都要默念一次</strong>——避免”曲线绿就当没事，曲线红就当超参”的看板习惯。</li>
+<li>⚡ <strong>最小一致性测试 A/B/C
+是排查的硬起手</strong>——冻结权重、关 dropout、固定 RNG，<strong>同一批
+token 在训练侧跑两次 + 推理侧跑一次</strong>。<strong>A=B
+验训练框架可重复；A=C 验两侧概率一致</strong>。<strong>未训先大面积撞
+PPO
+clip</strong>（权重没动就报策略更新）是真正的硬判据——比任何阈值都直接：训练目标把实现差异误读为一次明显策略更新时，必须停训修口径。</li>
+<li>⚡ <strong>log-ratio clamp 必须在 exp 之前</strong>——先 exp 后 clamp
+→ 反向 0 × Inf =
+NaN，<strong>数值拉回来了梯度已经坏了</strong>。这个错误在 bf16
+下尤其隐蔽（前向 clamp 出来有限值，反向时才炸）。<strong>clamp
+是异常保险丝不是 PPO clip
+替代品</strong>；频繁撞到保险丝应该回头查概率一致性和数据陈旧，不是继续收紧它。</li>
+<li>⚡ <strong>“四种 clip/clamp 不能凭数值猜作用位置”是第 6
+篇的另一把手术刀</strong>——numerical clamp（exp 前，防溢出）、PPO ratio
+clip（objective 内，按 advantage 符号限制 ratio
+继续向有利方向）、importance-weight cap（限制权重本身）、Dual-Clip
+PPO（负 advantage 样本的额外下界）。<strong>数值”长得像
+0.2/2/20”完全不能判断是哪一种</strong>——错把 <code>clamp(±0.2)</code>
+当作 numerical clamp 实际就在 PPO
+之前先切一遍梯度，<strong>改变算法本身</strong>。</li>
+<li>⚡ <strong>“checkpoint 恢复即崩 = 回到更早且相互匹配的
+model+optimizer checkpoint
+重放”</strong>——这是回滚原则里最容易被忽略的一句：optimizer state（Adam
+的 m/v）必须和 model state 同步回滚，<strong>只回滚 model 不回滚
+optimizer 会留下更隐蔽的次生
+bug</strong>。“更早且匹配”是关键词，不是”更早”就够。</li>
+<li>⚡ <strong>“先要最后正常 step / 第一异常 batch / 原始 rollout /
+ratio / mask 才像真排过”</strong>——面试信号：上来就读 lr 和 KL
+是看板习惯。<strong>三态保存</strong>（最后正常 / 首个异常 /
+异常后一步）比单看崩溃后曲线截图价值大得多——有了这个最小故障窗口才能做控制变量实验（改一个变量、重放、比较），否则每跑一次都是噪音。</li>
+<li>🔗 零方差组 / 有效样本数 → [[dapo]] 的动态采样就是冲着这个去的</li>
+<li>🔗 熵坍塌 → [[entropy(reasoning)]]、[[CURE：Critical-Token-Guided
+Re-concatenation for Entropy-collapse Prevention]]</li>
+<li>🔗 多轮工具调用崩溃 → [[SimpleTIR：End-to-End Reinforcement Learning
+for Multi-Turn Tool-Integrated Reasoning]]、[[RAGEN：Understanding
+Self-Evolution in LLM Agents via Multi-Turn Reinforcement
+Learning]]</li>
+<li>🔗 GRPO 本体与实现 → [[grpo]]、两侧概率不一致的分布视角 → [[SFT、RL
+与 OPD：分布视角]]</li>
+</ul>
+<h3 id="自测面试官的追问链">自测：面试官的追问链</h3>
+<blockquote>
+<p>[!question]- “分享一个训练出问题的案例”——之后会被怎么追问？
+<strong>追问链</strong>：遇到的是策略坍塌还是训练崩溃？→
+当时看到的情况是什么、查到了什么？→ 在哪条曲线上看到征兆？→
+当时怎么决定改哪个？→ 改完之后又遇到了什么新问题？</p>
+<p><strong>红灯回答</strong>：“我用 DAPO / XXPO
+里某个优化解决了某个问题”，但答不上具体怎么发现的。</p>
+<p><strong>绿灯回答</strong>：讲具体案例，最后落到”组内 reward 没有方差
+/ 两侧算出来的概率对不上 /
+某个指标看着正常但其实没有意义”这类只有亲手排过才知道的细节。</p>
+</blockquote>
+<blockquote>
+<p>[!question]- 第 2 篇补充：怎么确认候选人真的自己搭过看板？
+作者几乎不直接问跨题可区分度这一节。但如果候选人讲完监控后<strong>自己主动提到”同一题内的多样性”和”跨题的可区分度”不是一回事</strong>，基本可以确认他真的搭过看板。同类细节还有：“pass@k
+要在零方差过滤之前算”“对比 base 必须各扫 temperature”“熵下降要结合
+pass@k 一起看”——都是亲手踩过坑才说得出的。</p>
+</blockquote>
+<blockquote>
+<p>[!question]- 第 3 篇补充：ESS 的两连追问 作者面 ESS
+不听公式，听两件事：① <strong>为什么它比 batch size
+更接近”真正参与梯度的样本数”</strong>——权重集中时 <span
+class="math inline">\(\mathrm{Var}(\hat{g}) \approx
+\mathrm{Var}(g)/ESS\)</span>，梯度估计的稳定性只等效于 ESS
+条权重均匀的样本；② <strong>ESS
+下降后如何区分策略陈旧和两侧引擎不一致</strong>——先查同权重下两侧
+logprob 差；把引擎误差误判成数据太旧，会错误地去调 ppo_epochs。</p>
+</blockquote>
+<blockquote>
+<p>[!question]- 第 4 篇补充：σ 归一化与动态采样的作用范围
+面试追问两个方法时最常听到的两种背法——背”Dr. GRPO 去掉 σ”和”DAPO
+动态采样”，但说不出各自瞄的区域。能讲清<strong>“p=0/1 时去掉 σ
+没用（分子本来就是 0），p≈1 时过滤零方差没用（条件不命中）”</strong>
+通常比背方法名更能说明理解了实现；进一步能说出<strong>“去掉 σ 是按各自 σ
+缩放不是乘常数”</strong>也基本能确认动手做过 A/B。</p>
+</blockquote>
+<blockquote>
+<p>[!question]- 第 5 篇补充：clip 真的截断了什么 面试追问 clip
+的两面镜子：① <strong>“clip 命中梯度归零”的常见误解</strong>——能讲清 PPO
+<code>min</code> 在 ratio 与 advantage
+异号时根本不截断（取的是更小的未裁剪项），真正归零只在同号越界时（<code>A&gt;0, r&gt;1.2</code>
+上界 / <code>A&lt;0, r&lt;0.8</code> 下界）——基本能确认读过 PPO
+论文且不只背公式；② <strong>“熵在下降”作为调 clip
+的依据</strong>——能主动说”必须配随机 reward
+基线对照，否则是把熵的自然衰减误判为 clip
+过紧”，说明理解了控制变量思路；③ <strong>mask 与 clip
+的边界</strong>——能区分”截断样本（数据层）“与”clip（token
+层）“是两件事、统计分开、且 mask 不会让模型学到”答短点有奖励”，比背
+DAPO/Dr. GRPO 的 trick 更能说明理解了实现。</p>
+</blockquote>
+<blockquote>
+<p>[!question]- 第 6 篇补充：训练崩溃排查的硬起手
+面试信号比方法更重要：候选人说”先要<strong>最后正常 step / 第一异常
+batch / 原始 rollout / ratio / mask</strong>”才像真排过；上来就读 lr 和
+KL 是看板习惯。具体方法层面能讲清三件事基本能确认动手做过：①
+<strong>A/B/C 最小一致性测试</strong>——冻结权重、关 dropout、固定
+RNG，<strong>同一批 token 在训练侧跑两次 +
+推理侧跑一次</strong>，<strong>未训先大面积撞 PPO clip =
+必停训修口径</strong>（硬判据不是阈值）；② <strong>log-ratio clamp
+必须在 exp 之前</strong>——能讲出”先 exp 后 clamp 反向 0 × Inf =
+NaN，数值拉回来了梯度已经坏了”，且区分”clamp 是异常保险丝不是 PPO clip
+替代品”；③ <strong>四种 clip/clamp
+不能凭数值猜作用位置</strong>——numerical clamp / PPO clip /
+importance-weight cap / Dual-Clip PPO，<strong>数值长得像 0.2 / 2 / 20
+都不能判断是哪一种</strong>，必须看作用图位置，错把
+<code>clamp(±0.2)</code> 当 numerical clamp 实际在 PPO
+之前先切一遍梯度改变算法本身。</p>
+</blockquote>
+<h2 id="行动项">行动项</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />对照 [[metrics总结]]
+检查当前训练监控是否覆盖信号链四问：logprob 一致性 / reward 分项 /
+零方差组占比 / pass@k</label></li>
+<li><label><input
+type="checkbox" />补两个便宜指标：组内去重率（升级为编辑距离中位数）+
+检索准确率（复用 rollout、补一次前向，对照 1/P 随机线）</label></li>
+<li><label><input type="checkbox" />pass@k 固定 k = group
+size，在零方差过滤<strong>之前</strong>算；跨 step 只看同 batch
+相对趋势；跨模型对比用固定 probe 集 + 各自扫 temperature</label></li>
+<li><label><input type="checkbox" />信号健康度组四件套：零方差组实测 vs
+难度分布预测基线（<code>frac_reward_zero_std</code>）；两侧引擎 |Δlogp|
+的 mean / p99 / max；上界下界 clip 分开计数（按 advantage
+符号解读）；ESS ratio</label></li>
+<li><label><input type="checkbox" />确认框架 grad norm
+记录的是裁剪前数值，且先 log 再 clip</label></li>
+<li><label><input type="checkbox" /><strong>σ
+归一化双指标</strong>：标准化的 A 有多大 + 标准化之前的 reward range / σ
+/ 各 reward 分项（连续 reward 的关键）</label></li>
+<li><label><input type="checkbox" />A/B 去掉 σ 时跑三条曲线（保留 / 去 σ
+同 lr / 去 σ 补偿
+lr），分离”权重结构变了”和”整体步子变小了”两个效应</label></li>
+<li><label><input type="checkbox" />零方差 group 拆解：全对多少 /
+全错多少（比例相同但处理方向相反）；比例高时分别看是数据太简单还是验证器过严</label></li>
+<li><label><input
+type="checkbox" />设”已掌握题目”回归集，定期检查简单能力是否退化（动态采样的代价；只能是报警器，不是精确量尺）</label></li>
+<li><label><input type="checkbox" />出现长度失控时<strong>先查</strong>
+loss 是否按回答长度归一化（<span class="math inline">\(1/\lvert o_i
+\rvert\)</span>），再去怀疑 σ</label></li>
+<li><label><input type="checkbox" />给 rollout 加定期落盘 +
+人工抽读流程（读原文在读曲线之前）</label></li>
+<li><label><input
+type="checkbox" />面试准备：整理一个自己经手的排查案例，按”追问链”自问自答一遍</label></li>
+<li><label><input type="checkbox" />clip
+上下界分开计：<code>clip_frac_upper</code> /
+<code>clip_frac_lower</code> / <code>unclipped_step_ratio</code>，且按
+advantage 符号门控解读（PPO min 决定的）</label></li>
+<li><label><input type="checkbox" />跑一组 <strong>random reward
+baseline</strong>：同一份 rollout、reward 打乱；对照真 reward
+的熵曲线——平行 = 熵自然衰减（clip 无责），差距 = 耦合效应（可调
+clip）</label></li>
+<li><label><input type="checkbox" />clip
+调参前<strong>单独扫一侧</strong>：先固定上界 1.2 扫下界 [0.6, 0.7, 0.8,
+0.84, 0.88]，再固定下界扫上界；不要同时调两侧</label></li>
+<li><label><input type="checkbox" />截断率与 clip_frac
+严格分两个指标：截断率（样本层 / 监控 mask 副作用）/ clip_frac（token 层
+/ 监控 clip 副作用），不要合并</label></li>
+<li><label><input type="checkbox" />稀有 token 监控：每个 prompt
+记录<strong>有效 step
+数</strong>（<code>unclipped_step_count</code>）——token
+概率涨不动时优先怀疑 clip 而非数据稀疏</label></li>
+<li><label><input type="checkbox" />给崩溃 run 跑一次 <strong>A/B/C
+最小一致性测试</strong>：冻结权重、关 dropout、固定 RNG，同一批 token
+在训练侧跑两次 + 推理侧跑一次；记录 mean / P99 / max
+|Δlogp|，<strong>未训先撞 PPO clip
+必停训修口径</strong>（硬判据）</label></li>
+<li><label><input type="checkbox" />权重同步加三类检查：随机抽几层
+checksum / 保存首 token logits 训练侧 vs 同步后推理侧对比 / rollout
+元数据记 policy version 并核对 old logprob 来源</label></li>
+<li><label><input type="checkbox" />沿计算路径加 finite
+assertion：logprob 差、log-ratio、exp、KL 估计、ratio 之后 clamp
+之前；第一个非有限值之前的张量是定位起点</label></li>
+<li><label><input type="checkbox" /><strong>log-ratio 数值 clamp 必须在
+exp 之前</strong>——代码 review
+时检查这个顺序；并记录命中率，频繁撞保险丝回头查概率一致性和数据陈旧</label></li>
+<li><label><input type="checkbox" />回滚时<strong>同时存</strong>崩溃前
+checkpoint + optimizer state + 故障 batch ID / rollout / reward /
+随机种子；从更早<strong>相互匹配</strong>的 (model, optimizer)
+checkpoint 重放，改一个变量再重放</label></li>
+<li><label><input type="checkbox" />给 reward 加分项独立
+log（correctness / format / length / verifier 各项）+ 独立 verifier /
+held-out 复判；只总分上涨不能确诊 hacking</label></li>
+<li><label><input type="checkbox" />延伸阅读：[[RL面试题2026]]；追系列第
+7 篇《两侧引擎概率不一致的量级 + MoE 的特殊性》（见
+[[#系列追踪]]）</label></li>
+</ul>
+<h2 id="系列追踪">系列追踪</h2>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 40%" />
+<col style="width: 40%" />
+</colgroup>
+<thead>
+<tr>
+<th>篇</th>
+<th>主题</th>
+<th>状态</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>如何排查 GRPO 训练问题（策略坍塌 vs 训练崩溃）</td>
+<td>✅ 本笔记上半部分 · <a
+href="https://zhuanlan.zhihu.com/p/2077405199711334949">知乎</a></td>
+</tr>
+<tr>
+<td>2</td>
+<td>如何监控模型的多样性</td>
+<td>✅ 本笔记下半部分 · <a
+href="https://zhuanlan.zhihu.com/p/2077475761078924748">知乎</a></td>
+</tr>
+<tr>
+<td>3</td>
+<td>怎么监控训练信号的健康度</td>
+<td>✅ 本笔记下半部分（多样性组之后）· 2026-08-31 发布</td>
+</tr>
+<tr>
+<td>4</td>
+<td>策略坍塌的五条 root cause（除以 σ）</td>
+<td>✅ 本笔记「排查之后、监控之前」· 2026-09-02 发布</td>
+</tr>
+<tr>
+<td>5</td>
+<td>clip 的不对称与稀有 token（默认 [0.8,1.2] log 空间下宽 ~22%，低概率
+token 撞上界是 softmax 必然；调几何而非开紧/松；熵降不能单独作为调 clip
+依据）</td>
+<td>✅ 本笔记「root cause 之后、监控看板之前」· 2026-09-04 发布</td>
+</tr>
+<tr>
+<td>6</td>
+<td>训练崩溃的分层排查（前一层不通过后一层没解释意义；最小一致性
+A/B/C；log-ratio clamp 必须在 exp 之前；4 种 clip/clamp
+不能凭数值猜）</td>
+<td>✅ 本笔记「clip 之后、监控看板之前」· 2026-09-07 发布</td>
+</tr>
+<tr>
+<td>7</td>
+<td>两侧引擎概率不一致的量级 + MoE 的特殊性</td>
+<td>⏳ 待发布</td>
+</tr>
+</tbody>
+</table>
+<p>作者（LLMCat，亚马逊高级数据科学家）其他相关文章：</p>
+<ul>
+<li>置顶 · GRPO 训练踩坑实录：63% → 96% tool selection（7B SubAgent 替代
+Mixtral 8x22B，20+ 版本迭代）</li>
+<li>LLM 算法面试官：怎么看待 GRPO/DAPO 换汤不换药？</li>
+<li>投标 Agent 训练复盘：2/4 渐进式训练 SFT→DPO→GRPO · 3/4 Reward
+设计（二元 → 多维 RM+GenRM）· 4/4 弃权：让模型了解自己的能力边界</li>
+<li>Search-R1 训练运维 Agent 复盘</li>
+<li>云上事故根因分析 Agent 训练复盘</li>
+<li>通用 Agent 开发笔记：拆解 Claude Code 与 Cursor 的设计与 prompt</li>
+</ul>
+<h2 id="相关笔记">相关笔记</h2>
+<pre class="dataview"><code>TABLE date AS 日期, tags
+FROM &quot;LLM Training/RLHF&quot;
+WHERE file.name != this.file.name
+SORT date DESC
+LIMIT 8</code></pre>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-09-15</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" data-title="GRPO训练排查：策略坍塌 vs 训练崩溃" data-hashtags="Reading,RLHF,GRPO,troubleshooting"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" data-title="GRPO训练排查：策略坍塌 vs 训练崩溃"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" data-title="GRPO训练排查：策略坍塌 vs 训练崩溃"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/grpo%E8%AE%AD%E7%BB%83%E6%8E%92%E6%9F%A5%E7%AD%96%E7%95%A5%E5%9D%8D%E5%A1%8C-vs-%E8%AE%AD%E7%BB%83%E5%B4%A9%E6%BA%83/" data-title="GRPO训练排查：策略坍塌 vs 训练崩溃"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/rlhf/">RLHF</a>,&nbsp;<a href="/tags/grpo/">GRPO</a>,&nbsp;<a href="/tags/troubleshooting/">Troubleshooting</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/rsirecursive-self-improvement-%E5%88%86%E7%B1%BB%E5%9B%BE%E8%B0%B1/" class="prev" rel="prev" title="RSI：Recursive Self-Improvement 分类图谱"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>RSI：Recursive Self-Improvement 分类图谱</a>
+            <a href="/cpt-%E7%BB%A7%E7%BB%AD%E9%A2%84%E8%AE%AD%E7%BB%83%E7%AC%94%E8%AE%B0/" class="next" rel="next" title="LLM 训练教程 · Ch12 端到端 CPT（继续预训练）">LLM 训练教程 · Ch12 端到端 CPT（继续预训练）<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

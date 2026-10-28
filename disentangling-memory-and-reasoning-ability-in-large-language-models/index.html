@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>Disentangling Memory and Reasoning Ability in Large Language Models - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="Disentangling Memory and Reasoning Ability in Large Language Models">
+  <meta property="og:description" content="这是去年的论文了，不过从中看到了如今search-r1的雏形，就是先提问然后调用外部工具（这里是知识大模型）给出解答，直到感觉自己信息已经掌握足够了，就进一步推理然后作答。只不过本文只是进行了sft。memory也就是掌握关键信息的环节。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-09-23T00:00:00+00:00">
+    <meta property="article:modified_time" content="2026-06-03T16:33:56+08:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Agent">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="Disentangling Memory and Reasoning Ability in Large Language Models">
+  <meta name="twitter:description" content="这是去年的论文了，不过从中看到了如今search-r1的雏形，就是先提问然后调用外部工具（这里是知识大模型）给出解答，直到感觉自己信息已经掌握足够了，就进一步推理然后作答。只不过本文只是进行了sft。memory也就是掌握关键信息的环节。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/" /><link rel="prev" href="https://blog.vllbc.top/h2rhierarchical-hindsight-reflection-for-multi-task-llm-agents/" /><link rel="next" href="https://blog.vllbc.top/deepdiveadvancing-deep-search-agents-with-knowledge-graphs-and-multi-turn-rl/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "Disentangling Memory and Reasoning Ability in Large Language Models",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/disentangling-memory-and-reasoning-ability-in-large-language-models\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Agent","wordcount":  6530 ,
+        "url": "https:\/\/blog.vllbc.top\/disentangling-memory-and-reasoning-ability-in-large-language-models\/","datePublished": "2025-09-23T00:00:00+00:00","dateModified": "2026-06-03T16:33:56+08:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">Disentangling Memory and Reasoning Ability in Large Language Models</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/agent/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Agent</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-09-23">2025-09-23</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 6530 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 14 分钟&nbsp;<span id="/disentangling-memory-and-reasoning-ability-in-large-language-models/" class="leancloud_visitors" data-flag-title="Disentangling Memory and Reasoning Ability in Large Language Models">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>这是去年的论文了，不过从中看到了如今search-r1的雏形，就是先提问然后调用外部工具（这里是知识大模型）给出解答，直到感觉自己信息已经掌握足够了，就进一步推理然后作答。只不过本文只是进行了sft。memory也就是掌握关键信息的环节。</p>
+<hr />
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image20251013162829295.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>这篇论文的精妙之处在于，它没有满足于像 <strong>链式思考
+(Chain-of-Thought, CoT)</strong> 那样仅仅引导模型“多想几步”，也没有像
+<strong>检索增强生成 (Retrieval-Augmented Generation, RAG)</strong>
+那样完全依赖外部知识库，而是巧妙地提出了一种全新的推理范式，旨在<strong>显式地解耦和分离模型自身的参数化记忆（Parametric
+Memory）调用与逻辑推理（Reasoning）过程</strong>。作者们通过引入两个特殊的可学习控制令牌（control
+tokens）——<code>&lt;memory&gt;</code> 和
+<code>&lt;reason&gt;</code>——成功地引导模型在生成答案的每一步都清晰地标示出自己正在执行的是“回忆一个事实”还是“进行一步推理”。</p>
+<p>为了实现这一目标，论文设计了一个非常聪明的两阶段流程。<strong>第一阶段是数据生成</strong>：他们使用一个强大的“教师模型”（如GPT-4o）来分析问题并生成解题步骤。但关键创新在于，他们要求这个教师模型对每一步进行分类，标记为需要事实知识的<code>[memory]</code>步骤，或需要逻辑推演的<code>[reason]</code>步骤。对于<code>[memory]</code>步骤，教师模型会进一步生成一个具体的问题（例如，对于“MMA和罗马角斗有关吗？”这个问题，一个memory步骤可能是“混合武术（MMA）的起源和特点是什么？”）。然后，另一个“知识模型”会为这些问题提供精准的事实答案。最后，这些经过验证的答案被重新填充到原始的解题步骤中，形成一份高质量、结构清晰、步骤明确的“解耦”训练数据集。这个过程，正如论文图1所示，将一个模糊的思考过程，转化为了一个结构化的行动序列。</p>
+<p><strong>第二阶段是模型训练</strong>：他们使用上述生成的高质量数据集，对一个“学生模型”（如LLaMA-3.1-8B）进行<strong>指令微调
+(Instruction
+Fine-tuning)</strong>。通过这种方式，学生模型不仅学会了如何解决问题，更重要的是，它学会了识别并使用<code>&lt;memory&gt;</code>和<code>&lt;reason&gt;</code>令牌来组织自己的“思路”。这使得模型的推理过程变得前所未有的透明和可解释。</p>
+<p>论文的实验结果极其有力。在<strong>StrategyQA</strong>、<strong>CommonsenseQA</strong>和<strong>TruthfulQA</strong>等多个知名基准测试中，他们的方法都显著优于传统的Zero-shot、CoT以及其他微调方法。最引人注目的成果出现在TruthfulQA数据集上，这是一个专门测试模型事实准确性的数据集。经过他们方法微调的LLaMA-3.1-8B模型，准确率达到了惊人的<strong>86.6%</strong>，甚至超过了体量远大于它、能力更强的闭源模型GPT-4o（使用CoT提示）的<strong>85.4%</strong>（见论文表1）。这证明，通过清晰地分离记忆和推理，一个中等规模的模型也能在特定任务上达到甚至超越顶级模型的性能。</p>
+<blockquote>
+<p><strong>表1：主要对比实验结果</strong>
+在TruthfulQA数据集上，我们的方法（Ours）增强的LLaMA-3.1-8B取得了86.6%的准确率，而GPT-4o在CoT设置下的准确率为85.4%。</p>
+</blockquote>
+<p>更深层次的分析揭示了该方法的内在优势。论文中的<strong>解耦分析（Decoupling
+Analysis）</strong>显示，他们的模型在区分“记忆”和“推理”步骤上的准确性远高于基线方法（见论文图2）。而在<strong>错误分析（Error
+Analysis）</strong>中，论文发现了一个关键现象：在模型答错的案例中，绝大多数错误来源于<strong>推理环节</strong>，而非记忆环节。例如，在StrategyQA数据集上，高达<strong>98.3%</strong>的错误被归因于推理失败，只有1.7%是由于知识回忆出错（见论文表7）。这一发现意义重大，它清晰地指出了未来提升模型能力的主攻方向：我们需要的不仅仅是给模型灌输更多知识，更关键的是提升它们运用这些知识进行复杂逻辑推理的能力。</p>
+<p>总而言之，这篇论文不仅仅是提出了一种提升模型性能的技术，更是为我们打开LLM这个“黑箱”、理解并优化其内在认知过程提供了一个全新的、强有力的框架。它将模糊的“思考”过程变成了可训练、可解释、可干预的结构化步骤，为构建更可靠、更可信的AI系统迈出了坚实的一步。</p>
+<hr />
+<p>接下来，我将按照您提出的六个问题，对论文进行更详细的解读。</p>
+<h3
+id="论文的研究目标是什么-想要解决什么实际问题这个问题对于行业发展有什么重要意义">1.
+论文的研究目标是什么？
+想要解决什么实际问题？这个问题对于行业发展有什么重要意义?</h3>
+<ul>
+<li><p><strong>核心研究目标</strong>:
+论文的核心目标是<strong>解耦（disentangle）</strong>大型语言模型在解决复杂问题时的两个核心认知能力：<strong>记忆回忆（memory
+recall）</strong>和<strong>逻辑推理（reasoning）</strong>。它希望将模型模糊、一体化的推理过程分解为一系列清晰、可识别的步骤。</p></li>
+<li><p><strong>想要解决的实际问题</strong>:</p>
+<ol type="1">
+<li><strong>不可解释性（The “Black Box” Problem）</strong>:
+当前LLMs的决策过程非常不透明。当模型给出一个错误答案时，我们很难判断是它“记错了知识”（记忆问题）还是“想错了逻辑”（推理问题）。这种不确定性极大地阻碍了模型在金融、医疗、法律等高风险领域的应用。</li>
+<li><strong>性能瓶颈</strong>:
+论文认为，记忆和推理的混淆会导致模型在处理长链条、多步骤问题时效率低下，容易出现<strong>知识遗忘（knowledge
+forgetting）</strong>——即在推理的后期忘记了早先回忆出的关键信息。</li>
+<li><strong>可靠性与可控性差</strong>:
+一个无法解释其推理过程的模型是难以信任的。用户无法验证其答案的来源和逻辑，也无法有效地纠正其错误。</li>
+</ol></li>
+<li><p><strong>对行业发展的重要意义</strong>:</p>
+<ul>
+<li><strong>构建可信AI（Trustworthy AI）</strong>:
+这是通往可靠、负责任AI的必经之路。通过让模型的“思考过程”透明化，我们可以审查其逻辑，定位错误根源，从而建立用户和监管机构的信任。</li>
+<li><strong>提升模型效率与准确性</strong>:
+清晰的结构有助于模型更好地组织信息流，减少逻辑断裂和事实遗忘，从而在复杂任务上取得更好的表现。</li>
+<li><strong>实现精准的模型调试与优化</strong>:
+当我们能明确区分记忆错误和推理错误后，就可以进行针对性的优化。例如，如果是记忆错误，可以通过知识编辑或RAG来修正；如果是推理错误，则需要训练模型更强的逻辑能力。这使得模型维护从“玄学”变成了“科学”。</li>
+</ul></li>
+</ul>
+<h3
+id="论文提出了哪些新的思路方法或模型跟之前的方法相比有什么特点和优势">2.
+论文提出了哪些新的思路、方法或模型？跟之前的方法相比有什么特点和优势？</h3>
+<ul>
+<li><strong>新的思路与方法</strong>:
+论文提出了一种名为<strong>“记忆-推理分解（Memory-Reasoning
+Decomposition）”</strong>的全新推理范式。其核心是一个包含两个阶段的流程：
+<ol type="1">
+<li><strong>基于LLM的结构化数据生成</strong>:
+<ul>
+<li><strong>双模型协作</strong>:
+使用一个强大的<strong>推理LLM</strong>来生成初步的推理步骤，并为每一步打上<code>&lt;memory&gt;</code>或<code>&lt;reason&gt;</code>的标签。然后，一个<strong>知识LLM</strong>负责核实并提供<code>&lt;memory&gt;</code>步骤所需的精确事实。</li>
+<li><strong>结构化输出</strong>:
+最终生成的数据集不仅包含问题和答案，还包含一系列带有明确认知标签（是记忆还是推理）的中间步骤。</li>
+</ul></li>
+<li><strong>基于控制令牌的模型微调</strong>:
+<ul>
+<li><strong>引入特殊令牌</strong>:
+将<code>&lt;memory&gt;</code>和<code>&lt;reason&gt;</code>作为可学习的特殊令牌加入到模型的词汇表中。</li>
+<li><strong>引导式学习</strong>:
+在微调过程中，模型被训练来预测这些令牌，从而学会自主地将复杂的任务分解为记忆调用和逻辑推理的序列。</li>
+</ul></li>
+</ol></li>
+<li><strong>与之前方法的比较、特点和优势</strong>:</li>
+</ul>
+<table>
+<colgroup>
+<col style="width: 17%" />
+<col style="width: 36%" />
+<col style="width: 45%" />
+</colgroup>
+<thead>
+<tr>
+<th>对比方法</th>
+<th>特点与局限性</th>
+<th>本文方法的优势</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>链式思考 (Chain-of-Thought, CoT)</strong></td>
+<td>通过”Let’s think step by
+step”等提示引导模型生成中间步骤，但步骤的性质是模糊的，没有结构。</td>
+<td><strong>结构化与可解释性</strong>:
+明确区分了每一步的认知类型，使得整个推理过程像一张清晰的“流程图”，而不仅仅是一段自由流动的文本。</td>
+</tr>
+<tr>
+<td><strong>检索增强生成 (RAG)</strong></td>
+<td>专注于从<strong>外部</strong>知识库检索信息来辅助生成，解决的是模型参数化知识不足或过时的问题。</td>
+<td><strong>激活内部知识</strong>:
+本文方法旨在更好地组织和利用模型<strong>内部</strong>的参数化知识，使其与推理能力高效协同，而非完全依赖外部数据。</td>
+</tr>
+<tr>
+<td><strong>规划令牌 (Planning Tokens)</strong></td>
+<td>引入特殊令牌来规划任务的宏观步骤（如“分解问题”、“执行计划”），侧重于任务执行流程。</td>
+<td><strong>认知层面的分解</strong>:
+本文的令牌作用于更底层的认知层面，区分的是“获取信息”和“处理信息”这两种基本思维活动，粒度更细，更贴近认知科学。</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>正如论文在引言中所指出的： &gt; Despite these advancements, existing
+inference frameworks often operate as an opaque process without
+explicitly separating knowledge retrieval and reasoning steps. This
+makes it unclear what specific knowledge the model utilizes and how it
+performs reasoning, leaving the decision-making process ambiguous.
+翻译：尽管取得了这些进步，现有的推理框架通常作为一个不透明的过程运行，没有明确区分知识检索和推理步骤。这使得我们不清楚模型利用了哪些具体知识以及它如何进行推理，导致决策过程含糊不清。</p>
+</blockquote>
+<p>本文方法正是为了解决这种“含糊不清”而设计的。</p>
+<h3
+id="论文通过什么实验来验证所提出方法的有效性实验是如何设计的实验数据和结果如何">3.
+论文通过什么实验来验证所提出方法的有效性？实验是如何设计的？实验数据和结果如何？</h3>
+<p>论文设计了一系列严谨的实验来全方位验证其方法的有效性。</p>
+<ul>
+<li><strong>实验设计</strong>:
+<ul>
+<li><strong>数据集</strong>: 选用了三个具有代表性的问答数据集：
+<ul>
+<li><strong>StrategyQA</strong>:
+测试需要多步、隐式推理策略的复杂问题。</li>
+<li><strong>CommonsenseQA</strong>: 专注于常识性知识的推理。</li>
+<li><strong>TruthfulQA</strong>:
+评估模型生成事实准确、避免常见误解的能力。</li>
+</ul></li>
+<li><strong>基线模型 (Baselines)</strong>: 设置了全面的对比基线，包括：
+<ul>
+<li><strong>Vanilla Baselines</strong>: Zero-shot（直接回答）和
+CoT（链式思考提示）。</li>
+<li><strong>Fine-tuned Baselines</strong>:
+标准的LoRA微调和加入了规划令牌（Planning-token）的微调方法。</li>
+</ul></li>
+<li><strong>评估方式</strong>:
+<ul>
+<li><strong>性能评估</strong>: 使用准确率（Accuracy）作为主要指标。</li>
+<li><strong>解耦效果评估</strong>:
+使用GPT-4o-mini作为评估器，判断模型生成的<code>&lt;memory&gt;</code>步骤是否真的是事实陈述，<code>&lt;reason&gt;</code>步骤是否真的是逻辑推理。</li>
+<li><strong>错误来源分析</strong>:
+使用GPT-4o对错误答案进行归因分析，判断错误是源于记忆还是推理。</li>
+</ul></li>
+</ul></li>
+<li><strong>关键实验数据和结果</strong>:
+<ol type="1">
+<li><p><strong>总体性能优越</strong>:
+在所有三个数据集上，论文提出的方法（在表1中标记为”Ours”）在各个体量的模型上都取得了最佳性能。</p>
+<ul>
+<li>在StrategyQA上，LLaMA-3.1-8B模型使用该方法达到<strong>78.0%</strong>的准确率，显著高于CoT的69.4%和Planning-token的76.7%。</li>
+<li>在TruthfulQA上，LLaMA-3.1-8B模型达到<strong>86.6%</strong>，超越了GPT-4o的85.4%。</li>
+</ul></li>
+<li><p><strong>卓越的解耦能力</strong>:
+实验证明，该方法能非常有效地分离记忆和推理。</p>
+<ul>
+<li>如图2所示，在三个数据集上，该方法在识别记忆步骤（例如StrategyQA上达到94%）和推理步骤（71%）的准确性上，都一致且显著地优于使用one-shot
+CoT提示的基线方法。</li>
+</ul>
+<p><em>图2：本文方法与One-shot
+CoT在三个数据集上的解耦性能对比。蓝色柱（Ours）在所有任务上均表现更优。</em></p></li>
+<li><p><strong>揭示了推理是主要瓶颈</strong>:
+错误分析（表7）提供了深刻的洞见。</p>
+<ul>
+<li>在StrategyQA和CommonsenseQA上，推理错误分别占总错误的<strong>98.3%</strong>和<strong>78.4%</strong>。这说明模型其实“知道”正确的事实，但无法正确地运用它们进行推理。</li>
+</ul></li>
+</ol></li>
+</ul>
+<h3
+id="结合大模型领域的当前学术理解未来在该研究方向上还有哪些值得进一步探索的问题和挑战">4.
+结合大模型领域的当前学术理解，未来在该研究方向上还有哪些值得进一步探索的问题和挑战？</h3>
+<p>这篇论文为“可解释与可控的LLM推理”开辟了一个充满机遇的新方向。未来的探索可以围绕以下几点展开：</p>
+<ul>
+<li><strong>更丰富的认知令牌 (Richer Cognitive Tokens)</strong>:
+<ul>
+<li><strong>挑战</strong>:
+目前只有<code>&lt;memory&gt;</code>和<code>&lt;reason&gt;</code>两个标签，这对于更复杂的认知活动（如提出假设、进行类比、验证结论）可能过于简化。</li>
+<li><strong>探索方向</strong>:
+能否设计一套更丰富的“认知指令集”，例如<code>&lt;hypothesize&gt;</code>（假设）,
+<code>&lt;verify&gt;</code>（验证）,
+<code>&lt;synthesize&gt;</code>（综合）等，从而让模型能够执行更复杂、更结构化的思考策略。</li>
+<li><strong>技术与投资机会</strong>:
+这可能催生出<strong>“AI认知架构设计”</strong>这一新领域，以及开发用于构建高度专业化、可审计的专家系统（如AI律师、AI科学家）的平台。</li>
+</ul></li>
+<li><strong>动态记忆与持续学习 (Dynamic Memory and Continual
+Learning)</strong>:
+<ul>
+<li><strong>挑战</strong>:
+本文方法主要关注如何利用模型已有的参数化知识。但现实世界的知识是不断更新的。</li>
+<li><strong>探索方向</strong>:
+能否将此框架与外部知识库（如RAG）或持续学习机制相结合？例如，当模型遇到一个<code>&lt;memory&gt;</code>步骤但其内部知识不足时，可以触发一次外部搜索。</li>
+<li><strong>技术与投资机会</strong>:
+面向企业的<strong>“知识生命周期管理平台”</strong>，能够动态地更新、修正和扩展企业专属大模型的知识库，并确保其推理过程的可靠性。</li>
+</ul></li>
+<li><strong>自适应推理深度 (Adaptive Reasoning Depth)</strong>:
+<ul>
+<li><strong>挑战</strong>:
+不同问题的复杂度不同，所需的推理步骤数量也不同。目前模型通常生成固定或相似长度的推理链。</li>
+<li><strong>探索方向</strong>:
+研究如何让模型学会“元认知”（metacognition），即根据问题的难度自主决定需要多少个<code>&lt;memory&gt;</code>和<code>&lt;reason&gt;</code>步骤，以在效率和效果之间取得最佳平衡。</li>
+<li><strong>技术与投资机会</strong>:
+开发<strong>“高效推理引擎”</strong>，能够智能分配计算资源，简单问题快速响应，复杂问题深入思考，从而降低大模型的使用成本。</li>
+</ul></li>
+</ul>
+<h3 id="退一步从批判的视角看这篇论文还存在哪些不足及缺失">5.
+退一步，从批判的视角看，这篇论文还存在哪些不足及缺失？</h3>
+<p>尽管这篇论文非常出色，但从批判性的角度看，仍存在一些值得讨论的方面：</p>
+<ul>
+<li><strong>对“教师模型”的严重依赖</strong>:
+<ul>
+<li><strong>不足</strong>:
+整个方法的基石——高质量的结构化训练数据——完全依赖于GPT-4o的生成能力。如果教师模型本身存在偏见、知识盲点或推理缺陷，这些问题将被直接“遗传”给学生模型。这种模式的上限受限于教师模型的能力。</li>
+<li><strong>待验证</strong>:
+论文通过Jaccard相似度分析来论证没有发生直接的知识蒸馏，但这并不能完全排除学生模型在模仿教师模型的“推理风格”或“思维模式”。性能的提升究竟多大程度上源于算法的优越性，多大程度上源于对更强模型行为的模仿，仍需更深入的分析。</li>
+</ul></li>
+<li><strong>记忆与推理的二元划分可能过于简化</strong>:
+<ul>
+<li><strong>不足</strong>:
+在人类认知中，记忆和推理往往是深度交织、相互影响的，其界限并不总是那么清晰。例如，“根据过往经验进行判断”既涉及记忆也涉及推理。将所有认知活动强制归类为二者之一，可能是一种过度简化。</li>
+<li><strong>待验证</strong>:
+对于那些记忆和推理高度耦合的任务，该框架的有效性如何？是否会出现模型难以抉择使用哪个令牌，从而导致性能下降的情况？</li>
+</ul></li>
+<li><strong>计算与延迟开销</strong>:
+<ul>
+<li><strong>不足</strong>:
+数据生成阶段需要两个大型LLM的多次调用，成本高昂。在推理阶段，生成一系列显式的中间步骤，相比于直接生成答案，可能会增加时延（latency），这对于实时应用（如聊天机器人）可能是一个挑战。</li>
+</ul></li>
+</ul>
+<h3
+id="我希望从这篇论文中找一些拿来即用的创新想法我应该从这篇论文中重点学什么">6.
+我希望从这篇论文中找一些拿来即用的创新想法，我应该从这篇论文中重点学什么？</h3>
+<p>这篇论文是创新思想的宝库，以下几点尤其值得您学习和借鉴：</p>
+<ul>
+<li><strong>核心启发：将“过程”本身作为学习目标</strong>:
+<ul>
+<li><strong>学什么</strong>:
+不要只关注模型最终输出的答案是否正确，更要关注<strong>产生答案的过程是否合理、可控</strong>。本文最大的创新就是将隐式的“思考过程”变成了显式的、可训练的“结构化输出”。</li>
+<li><strong>如何用</strong>:
+在您自己的项目中，思考是否可以定义一些中间步骤或结构，并训练模型来生成它们。例如，在代码生成任务中，可以要求模型先生成“功能描述”、“伪代码”，再生成最终代码。</li>
+</ul></li>
+<li><strong>方法论：用控制令牌（Control Tokens）引导复杂生成</strong>:
+<ul>
+<li><strong>学什么</strong>:
+使用可学习的特殊令牌来引导模型的生成行为，是一种极其强大且灵活的工具。这相当于给了你一个“遥控器”，可以在关键节点上指导模型的输出方向。</li>
+<li><strong>如何用</strong>:
+思考在您的任务中，哪些关键的、可复用的“模式”或“状态”可以被抽象为特殊令牌。例如，在对话系统中，可以设计<code>&lt;clarification_needed&gt;</code>（需澄清）、<code>&lt;empathetic_response&gt;</code>（共情回应）等令牌来控制对话风格和流程。</li>
+</ul></li>
+<li><strong>实践范式：“强模型生成数据，小模型学习范式”</strong>:
+<ul>
+<li><strong>学什么</strong>:
+利用强大的闭源模型（如GPT-4系列）来生成高质量、带有特定结构或标签的训练数据，然后用这些数据去微调一个更小、更可控的开源模型。这是一种兼顾性能、成本和灵活性的高效路径。</li>
+<li><strong>如何用</strong>:
+这是一个可以直接应用的策略。无论您的任务是数据增强、风格迁移还是训练一个特定技能的模型，都可以利用这一“生成-微调”范式。</li>
+</ul></li>
+<li><strong>补充背景知识</strong>:
+<ul>
+<li><strong>深入理解CoT和RAG</strong>:
+了解它们的工作原理、优势和局限性，这能帮助您更好地理解本文方法所处的技术生态位及其创新价值。</li>
+<li><strong>熟悉指令微调（Instruction Fine-tuning）</strong>:
+这是实现本文方法的关键技术。了解其原理、常见数据集（如Alpaca）和训练框架（如Axolotl,
+LLaMA-Factory）将非常有帮助。</li>
+<li><strong>了解LoRA等参数高效微调（PEFT）技术</strong>:
+论文中提到了使用LoRA进行训练，了解这些技术如何能以较低的计算成本微调大模型，对于实践至关重要。</li>
+</ul></li>
+</ul>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2026-06-03&nbsp;<a class="git-hash" href="https://github.com/vllbc/vllbc.github.io/commit/99cfa25263c73050d0bc668a65a69f594a279a0c" target="_blank" title="commit by vllbc(vllbc66@gmail.com) 99cfa25263c73050d0bc668a65a69f594a279a0c: reorganize vault to 8-category structure">
+                                    <i class="fas fa-hashtag fa-fw" aria-hidden="true"></i>99cfa25</a></span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/disentangling-memory-and-reasoning-ability-in-large-language-models/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/" data-title="Disentangling Memory and Reasoning Ability in Large Language Models" data-hashtags="Reading,Agent"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/" data-title="Disentangling Memory and Reasoning Ability in Large Language Models"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/" data-title="Disentangling Memory and Reasoning Ability in Large Language Models"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/disentangling-memory-and-reasoning-ability-in-large-language-models/" data-title="Disentangling Memory and Reasoning Ability in Large Language Models"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/agent/">Agent</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/h2rhierarchical-hindsight-reflection-for-multi-task-llm-agents/" class="prev" rel="prev" title="H2R：Hierarchical Hindsight Reflection for Multi-Task LLM Agents"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>H2R：Hierarchical Hindsight Reflection for Multi-Task LLM Agents</a>
+            <a href="/deepdiveadvancing-deep-search-agents-with-knowledge-graphs-and-multi-turn-rl/" class="next" rel="next" title="DeepDive：Advancing Deep Search Agents with Knowledge Graphs and Multi-Turn RL">DeepDive：Advancing Deep Search Agents with Knowledge Graphs and Multi-Turn RL<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

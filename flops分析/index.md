@@ -53,4 +53,4 @@ $$
 训练时间=\frac{8 * tokens数 *模型参数量}{GPU数 * GPU峰值flops*GPU利用率}
 $$
 
-也就是训练时的 flops / gpu 的 flops。8 是前向传播、后向传播、[Activation checkpointing](Activation%20checkpointing.md) 。前向传播系数为 1，后向传播是前向传播计算量的 2 倍，再加上在反向传播时需要前向传播一次，因此总系数为 4，1 个参数需要 2 次浮点数运算，这就是 8 怎么来的。 
+也就是训练时的 flops / gpu 的 flops。8 是前向传播、后向传播、[Activation checkpointing](Activation checkpointing.md) 。前向传播系数为 1，后向传播是前向传播计算量的 2 倍，再加上在反向传播时需要前向传播一次，因此总系数为 4，1 个参数需要 2 次浮点数运算，这就是 8 怎么来的。 

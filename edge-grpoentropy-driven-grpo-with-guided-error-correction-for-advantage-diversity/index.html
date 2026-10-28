@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="robots" content="noodp" />
+        <title>EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity - vllbc02&#39;s blogs</title><meta name="Description" content="vllbc&#39;s blog"><meta property="og:url" content="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/">
+  <meta property="og:site_name" content="vllbc02&#39;s blogs">
+  <meta property="og:title" content="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity">
+  <meta property="og:description" content="利用熵来给予不同的reward，变相的改变了优势值，类似于ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM
+image.png 首先，让我们对这篇论文进行一个全面的、高度浓缩的解读。
+这篇论文的核心目标是解决在利用强化学习（Reinforcement Learning, RL）提升大模型（LLM）推理能力时，一个常见于 GRPO (Group Relative Policy Optimization) 算法中的技术瓶颈——优势坍塌 (Advantage Collapse)。简单来说，GRPO通过比较模型对同一个问题生成的多个答案（一个“组”）的好坏来进行优化。但当一个问题太难，模型生成的所有答案都是错的（或者太简单，所有答案都对），它们会得到完全相同的奖励分数。这时，每个答案相对于“组平均水平”的“优势（Advantage）”就变成了零。策略优化的梯度依赖于这个“优势”值，一旦为零，模型就无法从这个样本中学习到任何东西，导致训练效率低下，尤其是在面对有价值的难题时。">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="posts">
+    <meta property="article:published_time" content="2025-08-19T00:00:00+00:00">
+    <meta property="article:modified_time" content="2025-08-19T00:00:00+00:00">
+    <meta property="article:tag" content="Reading">
+    <meta property="article:tag" content="Reasoning">
+    <meta property="article:tag" content="Entropy">
+    <meta property="og:image" content="https://blog.vllbc.top/images/logo.png">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://blog.vllbc.top/images/logo.png">
+  <meta name="twitter:title" content="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity">
+  <meta name="twitter:description" content="利用熵来给予不同的reward，变相的改变了优势值，类似于ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM
+image.png 首先，让我们对这篇论文进行一个全面的、高度浓缩的解读。
+这篇论文的核心目标是解决在利用强化学习（Reinforcement Learning, RL）提升大模型（LLM）推理能力时，一个常见于 GRPO (Group Relative Policy Optimization) 算法中的技术瓶颈——优势坍塌 (Advantage Collapse)。简单来说，GRPO通过比较模型对同一个问题生成的多个答案（一个“组”）的好坏来进行优化。但当一个问题太难，模型生成的所有答案都是错的（或者太简单，所有答案都对），它们会得到完全相同的奖励分数。这时，每个答案相对于“组平均水平”的“优势（Advantage）”就变成了零。策略优化的梯度依赖于这个“优势”值，一旦为零，模型就无法从这个样本中学习到任何东西，导致训练效率低下，尤其是在面对有价值的难题时。">
+<meta name="application-name" content="vllbc02">
+<meta name="apple-mobile-web-app-title" content="vllbc02">
+<meta name="referrer" content="no-referrer" /><meta name="theme-color" content="#ffffff"><meta name="msapplication-TileColor" content="#da532c"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+        <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="mask-icon" href="/safari-pinned-tab.svg" color="#5bbad5"><link rel="manifest" href="/site.webmanifest"><link rel="canonical" href="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" /><link rel="prev" href="https://blog.vllbc.top/ettrlbalancing-exploration-and-exploitation-in-llm-test-time-reinforcement-learning-via-entropy-mechanism/" /><link rel="next" href="https://blog.vllbc.top/curecritical-token-guided-re-concatenation-for-entropy-collapse-prevention/" /><link rel="stylesheet" href="/css/style.min.css"><link rel="preload" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css"></noscript><link rel="preload" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+        <noscript><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/animate.css@4.1.1/animate.min.css"></noscript><script type="application/ld+json">
+    {
+        "@context": "http://schema.org",
+        "@type": "BlogPosting",
+        "headline": "EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity",
+        "inLanguage": "zh-CN",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": "https:\/\/blog.vllbc.top\/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity\/"
+        },"image": [{
+                            "@type": "ImageObject",
+                            "url": "https:\/\/blog.vllbc.top\/images\/Apple-Devices-Preview.png",
+                            "width":  3200 ,
+                            "height":  2048 
+                        }],"genre": "posts","keywords": "Reading, Reasoning, entropy","wordcount":  5941 ,
+        "url": "https:\/\/blog.vllbc.top\/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity\/","datePublished": "2025-08-19T00:00:00+00:00","dateModified": "2025-08-19T00:00:00+00:00","license": "This work is licensed under a Creative Commons Attribution-NonCommercial 4.0 International License.","publisher": {
+            "@type": "Organization",
+            "name": "xxxx","logo": {
+                    "@type": "ImageObject",
+                    "url": "https:\/\/blog.vllbc.top\/images\/avatar.png",
+                    "width":  512 ,
+                    "height":  512 
+                }},"author": {
+                "@type": "Person",
+                "name": "vllbc"
+            },"description": ""
+    }
+    </script></head>
+    <body data-header-desktop="fixed" data-header-mobile="auto"><script>(window.localStorage && localStorage.getItem('theme') ? localStorage.getItem('theme') === 'dark' : ('auto' === 'auto' ? window.matchMedia('(prefers-color-scheme: dark)').matches : 'auto' === 'dark')) && document.body.setAttribute('theme', 'dark');</script>
+
+        <div id="mask"></div><div class="wrapper"><script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$','$$'], ['\\[', '\\]']],
+      processEscapes: true,
+      processEnvironments: true
+    },
+    options: {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
+    }
+  };
+
+  window.addEventListener('load', (event) => {
+      document.querySelectorAll("mjx-container").forEach(function(x){
+        x.parentElement.classList += 'has-jax'})
+    });
+
+</script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script type="text/javascript" id="MathJax-script" async
+  src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<header class="desktop" id="header-desktop">
+    <div class="header-wrapper">
+        <div class="header-title">
+            <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+        </div>
+        <div class="menu">
+            <div class="menu-inner"><a class="menu-item" href="/posts/"> 所有文章 </a><a class="menu-item" href="/tags/"> 标签 </a><a class="menu-item" href="/categories/"> 分类 </a><a class="menu-item" href="/about/"> 关于 </a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i>  </a><span class="menu-item delimiter"></span><span class="menu-item search" id="search-desktop">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-desktop">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-desktop" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-desktop" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-desktop">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </span><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                    <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+                </a></div>
+        </div>
+    </div>
+</header><header class="mobile" id="header-mobile">
+    <div class="header-container">
+        <div class="header-wrapper">
+            <div class="header-title">
+                <a href="/" title="vllbc02&#39;s blogs"><img
+        class="lazyload logo"
+        src="/svg/loading.min.svg"
+        data-src="/images/logo.png"
+        data-srcset="/images/logo.png, /images/logo.png 1.5x, /images/logo.png 2x"
+        data-sizes="auto"
+        alt="/images/logo.png"
+        title="/images/logo.png" width="32" height="32" />vllbc02</a>
+            </div>
+            <div class="menu-toggle" id="menu-toggle-mobile">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+        <div class="menu" id="menu-mobile"><div class="search-wrapper">
+                    <div class="search mobile" id="search-mobile">
+                        <input type="text" placeholder="搜索文章标题或内容..." id="search-input-mobile">
+                        <a href="javascript:void(0);" class="search-button search-toggle" id="search-toggle-mobile" title="搜索">
+                            <i class="fas fa-search fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <a href="javascript:void(0);" class="search-button search-clear" id="search-clear-mobile" title="清空">
+                            <i class="fas fa-times-circle fa-fw" aria-hidden="true"></i>
+                        </a>
+                        <span class="search-button search-loading" id="search-loading-mobile">
+                            <i class="fas fa-spinner fa-fw fa-spin" aria-hidden="true"></i>
+                        </span>
+                    </div>
+                    <a href="javascript:void(0);" class="search-cancel" id="search-cancel-mobile">
+                        取消
+                    </a>
+                </div><a class="menu-item" href="/posts/" title="">所有文章</a><a class="menu-item" href="/tags/" title="">标签</a><a class="menu-item" href="/categories/" title="">分类</a><a class="menu-item" href="/about/" title="">关于</a><a class="menu-item" href="https://github.com/vllbc/vllbc.github.io" title="GitHub" rel="noopener noreffer" target="_blank"><i class='fab fa-github fa-fw' aria-hidden='true'></i></a><a href="javascript:void(0);" class="menu-item theme-switch" title="切换主题">
+                <i class="fas fa-adjust fa-fw" aria-hidden="true"></i>
+            </a></div>
+    </div>
+</header><div class="search-dropdown desktop">
+        <div id="search-dropdown-desktop"></div>
+    </div>
+    <div class="search-dropdown mobile">
+        <div id="search-dropdown-mobile"></div>
+    </div>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/styles/base16/darcula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.4.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script><main class="main">
+                <div class="container"><article class="page single"><h1 class="single-title animate__animated animate__flipInX">EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity</h1><div class="post-meta">
+            <div class="post-meta-line"><span class="post-author"><a href="/" title="Author" rel="author" class="author"><i class="fas fa-user-circle fa-fw" aria-hidden="true"></i>vllbc</a></span>&nbsp;<span class="post-category">收录于 <a href="/categories/reasoning/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reasoning</a>&nbsp;<a href="/categories/reading/"><i class="far fa-folder fa-fw" aria-hidden="true"></i>Reading</a></span></div>
+            <div class="post-meta-line"><i class="far fa-calendar-alt fa-fw" aria-hidden="true"></i>&nbsp;<time datetime="2025-08-19">2025-08-19</time>&nbsp;<i class="fas fa-pencil-alt fa-fw" aria-hidden="true"></i>&nbsp;约 5941 字&nbsp;
+                <i class="far fa-clock fa-fw" aria-hidden="true"></i>&nbsp;预计阅读 12 分钟&nbsp;<span id="/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" class="leancloud_visitors" data-flag-title="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity">
+                        <i class="far fa-eye fa-fw" aria-hidden="true"></i>&nbsp;<span class=leancloud-visitors-count></span>&nbsp;次阅读
+                    </span>&nbsp;</div>
+        </div><div class="content" id="content"><p>利用熵来给予不同的reward，变相的改变了优势值，类似于<a
+href="ETTRL：BALANCING%20EXPLORATION%20AND%20EXPLOITATION%20IN%20LLM%20TEST-TIME%20REINFORCEMENT%20LEARNING%20VIA%20ENTROPY%20MECHANISM.md">ETTRL：BALANCING
+EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA
+ENTROPY MECHANISM</a></p>
+<hr />
+<figure>
+<img
+src="https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250819215103.png"
+alt="image.png" />
+<figcaption aria-hidden="true">image.png</figcaption>
+</figure>
+<p>首先，让我们对这篇论文进行一个全面的、高度浓缩的解读。</p>
+<p>这篇论文的核心目标是解决在利用<strong>强化学习</strong>（Reinforcement
+Learning, RL）提升大模型（LLM）推理能力时，一个常见于 <strong>GRPO
+(Group Relative Policy Optimization)</strong>
+算法中的技术瓶颈——<strong>优势坍塌 (Advantage
+Collapse)</strong>。简单来说，GRPO通过比较模型对同一个问题生成的多个答案（一个“组”）的好坏来进行优化。但当一个问题太难，模型生成的所有答案都是错的（或者太简单，所有答案都对），它们会得到完全相同的奖励分数。这时，每个答案相对于“组平均水平”的“优势（Advantage）”就变成了零。策略优化的梯度依赖于这个“优势”值，一旦为零，模型就无法从这个样本中学习到任何东西，导致训练效率低下，尤其是在面对有价值的难题时。</p>
+<p>为了攻克这个难题，作者们独创性地提出了 <strong>EDGE-GRPO</strong>
+算法，这是一个双管齐下的优雅框架。它包含两个关键创新点：</p>
+<ol type="1">
+<li><p><strong>引导式纠错 (Guided Error Correction,
+GEC)</strong>：这是一个在<strong>响应层面 (response-level)</strong>
+的干预策略。它不再天真地寄希望于模型能“自我反思”来纠正错误（论文用实验证明了这种方式效果很差），而是在模型生成了一组错误的答案后，以一定的概率，主动地将外部的、正确的参考答案“注入”或“替换”到这组答案中。这就像一位导师，在学生们都做错题时，直接给出正确解法作为示范。这种方法虽然简单，但却从根本上保证了答案组里的<strong>响应多样性
+(response
+diversity)</strong>，从而确保了奖励的差异性，直接避免了“优势坍塌”的发生。</p></li>
+<li><p><strong>熵驱动优势 (Entropy-Driven Advantage,
+EDA)</strong>：这是一个在<strong>信号层面 (signal-level)</strong>
+的精细化设计。仅仅避免优势为零还不够，作者们追求更高效的训练信号。他们引入了<strong>策略熵
+(policy entropy)</strong>
+作为衡量模型对其生成答案“自信程度”的指标（低熵代表高自信，高熵代表不确定）。论文敏锐地观察到，模型常常存在“自信地犯错”或“不自信地答对”的情况（见论文图3右侧）。EDA正是利用这一点，对原始的“优势”值进行调整。具体来说，对于<strong>正确但高熵（不自信）</strong>的答案，EDA会给予适度的奖励，鼓励探索；而对于<strong>错误但低熵（迷之自信）</strong>的答案，则会给予更严厉的惩罚。这使得训练信号变得异常丰富和精确，引导模型朝着“既正确又自信”的方向优化。</p></li>
+</ol>
+<blockquote>
+<p>正如论文在摘要中所述：</p>
+<p>In this work, we begin by analyzing the limitations of model
+reflection and investigating the policy entropy of responses at the
+fine-grained sample level. Based on our experimental findings, we
+propose the EDGE-GRPO algorithm, which adopts Entropy-Driven Advantage
+and Guided Error Correction to effectively mitigate the problem of
+advantage collapse.</p>
+</blockquote>
+<p>论文最令人印象深刻的成果在于其惊人的<strong>数据效率</strong>。如下图1所示，仅仅使用1000个（1K）训练样本，EDGE-GRPO就能将在Qwen2.5-Math-7B这样的基础模型上训练出的性能，提升到与其他使用数千甚至数万样本训练的开源模型（如Oat-Zero-7B,
+Eurus-2-7B-PRIME）相媲美的水平。这充分证明了其方法的有效性和先进性。</p>
+<p>接下来，我将按照您提出的六个问题，对论文进行更详细的剖析。</p>
+<h3
+id="论文的研究目标是什么想要解决什么实际问题这个问题对于行业发展有什么重要意义">1.
+论文的研究目标是什么？想要解决什么实际问题？这个问题对于行业发展有什么重要意义?</h3>
+<ul>
+<li><p><strong>研究目标</strong>：论文的核心研究目标是解决大型语言模型在进行基于GRPO算法的强化学习时所面临的<strong>优势坍塌
+(Advantage Collapse)</strong> 问题。</p></li>
+<li><p><strong>实际问题</strong>：</p>
+<ul>
+<li>在现实中，我们希望通过强化学习让模型学会解决复杂的推理问题（如数学、编程）。GRPO是一种很有前景的算法，因为它比传统的PPO算法资源消耗更少。</li>
+<li>然而，当模型面对一个难题，它可能会生成一组（例如8个）答案，但所有答案都是错误的。根据GRPO的规则，这些答案会获得相同的低分奖励（比如0分）。</li>
+<li>计算“优势”的公式为
+<code>A_i = r_i - mean(r_1, r_2, ..., r_G)</code>。如果所有
+<code>r_i</code>
+都相等，<code>mean</code>就等于<code>r_i</code>，于是所有的<code>A_i</code>都等于0。</li>
+<li>策略梯度更新正比于
+<code>A_i</code>，<code>A_i</code>为0意味着梯度消失，模型无法从这次宝贵的“试错”经验中学到任何东西。这导致了<strong>样本效率
+(sample efficiency)</strong>
+的急剧下降，大量有价值的、困难的训练数据被浪费掉了。</li>
+</ul></li>
+<li><p><strong>行业意义</strong>：</p>
+<ul>
+<li><strong>提升训练效率，降低成本</strong>：大模型的训练成本极其高昂。解决优势坍塌意味着能用更少的训练数据和更短的训练时间，达到同样甚至更好的模型性能。这直接关系到AI研发的成本控制和迭代速度。</li>
+<li><strong>增强模型解决难题的能力</strong>：优势坍ăpadă问题在难题上尤为突出。解决了它，模型就能更有效地从失败中学习，从而更好地攻克数学、科学、逻辑等复杂推理任务的边界，这是通往更高水平人工智能（如AGI）的关键一步。</li>
+<li><strong>推动RLHF/RLAIF的落地</strong>：强化学习（特别是从人类或AI反馈中学习）是当前优化大模型的核心技术之一。提高其稳定性和效率，能让这项技术更容易被广泛应用，催生出更强大、更安全的AI模型。</li>
+</ul></li>
+</ul>
+<h3
+id="论文提出了哪些新的思路方法或模型跟之前的方法相比有什么特点和优势">2.
+论文提出了哪些新的思路、方法或模型？跟之前的方法相比有什么特点和优势？</h3>
+<p>论文提出的核心方法是
+<strong>EDGE-GRPO</strong>，它由两个正交的模块构成，其整体框架如下图4所示。</p>
+<figure>
+<img
+src="https://storage.googleapis.com/static.aurelle.ai/904a085b-3816-4384-9642-1e96a4544d67.png"
+alt="Figure 4 from paper" />
+<figcaption aria-hidden="true">Figure 4 from paper</figcaption>
+</figure>
+<ul>
+<li><strong>新思路与方法</strong>：
+<ol type="1">
+<li><strong>引导式纠错 (Guided Error Correction, GEC)</strong> -
+<strong>在响应层面打破僵局</strong>
+<ul>
+<li><strong>特点</strong>：这是一种非常实用的<strong>数据增强</strong>或<strong>干预</strong>策略。当一组响应被判断为全错时，GEC会启动。它不是让模型自己“反思”（论文图2右侧的实验显示，强制模型反思的成功率极低，大部分低于5%），而是采取三种外部干预措施：
+<ul>
+<li><code>P = 0.5</code> 的概率：仅给出反思提示（如 “Wait! Something is
+wrong here.”），让模型重新生成。这保留了模型的自主性。</li>
+<li><code>P = 0.25</code>
+的概率：在给出提示的同时，直接注入正确的答案。</li>
+<li><code>P = 0.25</code>
+的概率：直接用一个高质量的参考解替换掉模型的错误答案。</li>
+</ul></li>
+<li><strong>优势</strong>：与之前依赖模型“自我救赎”的“模型反思”（Model
+Reflection）相比，GEC的优势是<strong>确定性</strong>和<strong>高效性</strong>。它能<em>保证</em>响应组中至少包含一些高质量的正面样本，从而从根本上杜绝了优势坍塌。它承认了模型能力的边界，并在模型“卡壳”时给予最直接有效的帮助。</li>
+</ul></li>
+<li><strong>熵驱动优势 (Entropy-Driven Advantage, EDA)</strong> -
+<strong>在信号层面精雕细琢</strong>
+<ul>
+<li><strong>特点</strong>：在GEC保证了优势不为零后，EDA进一步优化这个训练信号。它利用了<strong>策略熵</strong>
+<code>P</code> 来调整优势 <code>A</code>，核心公式为
+<code>A_new = A_i / P_i</code>（其中<code>P_i</code>是归一化后的熵）。</li>
+<li><strong>优势</strong>：相比之前的工作，EDA更加精细和有针对性。
+<ul>
+<li>有些工作主张<strong>最小化熵</strong>，认为低熵代表高准确率，但这可能扼杀模型的探索能力。</li>
+<li>有些工作主张<strong>最大化熵</strong>，以鼓励探索，但这可能导致模型在简单问题上也不够自信。</li>
+<li>EDA则采取了一种<strong>情境化</strong>的策略：
+<ul>
+<li><strong>正确且自信 (r &gt; mean(r),
+P低)</strong>：<code>A</code>为正，<code>P</code>小，<code>A_new</code>变得更大。<strong>大力奖励</strong>。</li>
+<li><strong>错误但自信 (r &lt; mean(r),
+P低)</strong>：<code>A</code>为负，<code>P</code>小，<code>A_new</code>的负值绝对值更大。<strong>严厉惩罚</strong>。</li>
+<li><strong>正确但不自信 (r &gt; mean(r),
+P高)</strong>：<code>A</code>为正，<code>P</code>大，<code>A_new</code>变小。<strong>温和奖励，容忍探索</strong>。</li>
+<li><strong>错误但不自信 (r &lt; mean(r),
+P高)</strong>：<code>A</code>为负，<code>P</code>大，<code>A_new</code>的负值绝对值变小。<strong>轻微惩罚</strong>。</li>
+</ul></li>
+<li>这种动态调整使得训练信号的“信噪比”更高，能更准确地引导模型优化。</li>
+</ul></li>
+</ul></li>
+</ol></li>
+</ul>
+<h3 id="论文通过什么实验来验证所提出方法的有效性">3.
+论文通过什么实验来验证所提出方法的有效性？</h3>
+<p>论文设计了全面且严谨的实验来验证EDGE-GRPO的有效性。</p>
+<ul>
+<li><strong>实验设计</strong>：
+<ul>
+<li><strong>基础模型</strong>：选择了两个不同参数规模的主流开源模型
+Qwen2.5-Math-1.5B 和 Qwen2.5-Math-7B。</li>
+<li><strong>训练数据</strong>：为了凸显数据效率，作者并未使用庞大的数据集，而是从
+DeepScaleR
+数据集中精选了1000个样本（<strong>DeepScaleR-Random-1K</strong>）。为了进一步测试模型在难题上的表现，他们还构建了一个更具挑战性的
+<strong>DeepScaleR-Hard-1K</strong> 数据集。</li>
+<li><strong>评估基准</strong>：使用了五个业界公认的、有挑战性的数学推理基准测试集：AIME,
+AMC, MATH, Minerva, OlympiadBench，总计1560个问题。</li>
+<li><strong>对比方法（Ablation
+Study）</strong>：为了证明每个模块的贡献，作者进行了一系列消融实验，对比了：
+<ol type="1">
+<li>Base：未经任何训练的基础模型。</li>
+<li>SFT：仅使用监督微调。</li>
+<li>Vanilla GRPO：标准的GRPO算法。</li>
+<li>+Force-R：在GRPO基础上加入强制反思。</li>
+<li>+Force-R &amp; EDA：在GRPO基础上加入强制反思和熵驱动优势。</li>
+<li>EDGE-GRPO：完整的算法（GEC + EDA）。</li>
+</ol></li>
+</ul></li>
+<li><strong>实验数据和结果</strong>：
+<ul>
+<li><strong>性能显著提升</strong>：如下表1（训练集为Random-1K），EDGE-GRPO在两个模型上都取得了最佳平均性能。例如在1.5B模型上，EDGE-GRPO
+(48.08) 远超 Vanilla GRPO (40.32)。在7B模型上，EDGE-GRPO (49.30)
+也超过了 Vanilla GRPO (46.47)。</li>
+</ul></li>
+</ul>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Model</th>
+<th style="text-align: left;">Method</th>
+<th style="text-align: left;">Avg (1560)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>Qwen2.5-Math-1.5B</strong></td>
+<td style="text-align: left;">Vanilla GRPO</td>
+<td style="text-align: left;">40.32</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>EDGE-GRPO</strong></td>
+<td style="text-align: left;"><strong>48.08</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Qwen2.5-Math-7B</strong></td>
+<td style="text-align: left;">Vanilla GRPO</td>
+<td style="text-align: left;">46.47</td>
+</tr>
+<tr>
+<td style="text-align: left;"></td>
+<td style="text-align: left;"><strong>EDGE-GRPO</strong></td>
+<td style="text-align: left;"><strong>49.30</strong></td>
+</tr>
+</tbody>
+</table>
+<pre><code>*   **优势坍塌问题的缓解**：论文图5可视化了训练过程中**组内优势方差（Intra-group advantage variance）**的变化。
+    &gt; As shown in Figure 5, Compared to the vanilla GRPO algorithm and the variant with enforced reflection, our method maintains a higher level of intra-group advantage variance during training, significantly alleviating the advantage collapse problem.
+    *   结果显示，Vanilla GRPO的优势方差很快衰减并趋近于零，而EDGE-GRPO则能持续维持在较高的水平，这直观地证明了它成功地缓解了优势坍塌。
+
+*   **在难题上效果更佳**：在更难的 DeepScaleR-Hard-1K 数据集上（见表2），EDGE-GRPO的优势更加明显。在7B模型上，Vanilla GRPO的性能为47.69，而EDGE-GRPO达到了**53.21**，提升巨大，说明该方法尤其擅长帮助模型攻克难关。</code></pre>
+<h3
+id="结合大模型领域的当前学术理解未来在该研究方向上还有哪些值得进一步探索的问题和挑战">4.
+结合大模型领域的当前学术理解，未来在该研究方向上还有哪些值得进一步探索的问题和挑战？</h3>
+<p>这是一个非常好的问题，这篇论文为我们打开了新的思路。</p>
+<ul>
+<li><strong>值得探索的问题和挑战</strong>：
+<ol type="1">
+<li><strong>GEC策略的智能化</strong>：目前GEC的干预概率（0.5, 0.25,
+0.25）是固定的超参数。未来能否设计一个<strong>动态GEC</strong>？例如，根据问题的难度、模型当前的能力水平，或者一个epoch中的不同阶段，自动调整干预的强度和方式。这可能需要一个“元控制器”（meta-controller）来学习最佳的干预策略。</li>
+<li><strong>EDA的信号源扩展</strong>：目前EDA仅使用了策略熵。未来可以探索融合更多维度的“内部反馈”信号，例如：
+<ul>
+<li><strong>语义熵</strong>：衡量一组答案在语义上的多样性，而不仅仅是token层面的概率。</li>
+<li><strong>时间/计算成本</strong>：将生成答案所花费的推理步数或计算量也作为信号，惩罚那些“又慢又错”的答案。</li>
+<li><strong>可信度校准</strong>：探索更复杂的模型不确定性估计方法，而不仅仅是策略熵，以获得更校准的置信度。</li>
+</ul></li>
+<li><strong>领域的泛化性</strong>：当前实验完全集中在<strong>数学推理</strong>领域。EDGE-GRPO在<strong>代码生成、长篇故事创作、科学文献问答</strong>等其他需要复杂推理的领域是否同样有效？这是一个亟待验证的关键问题。</li>
+<li><strong>对参考答案质量的依赖</strong>：GEC的有效性高度依赖于高质量的参考答案。在许多现实场景中，获取完美、唯一的参考答案是困难或昂贵的。如何设计一个对噪声或多样化参考答案更鲁棒的GEC版本，是一个重要的研究方向。</li>
+</ol></li>
+<li><strong>可能催生的新技术和投资机会</strong>：
+<ol type="1">
+<li><strong>高效能AI训练平台</strong>：基于EDGE-GRPO这类思想，可以开发出新一代的RLHF/RLAIF（从AI反馈中强化学习）平台。其核心卖点是“用最少的数据和算力，达到最好的效果”，这对于众多希望拥有自己专用模型的企业来说具有巨大的吸引力。</li>
+<li><strong>自动化课程学习（Automated Curriculum
+Learning）</strong>：GEC实际上是在为模型设计一个“课程”。这可以启发开发更智能的自动化课程学习系统，该系统能够评估模型的当前状态，并从庞大的数据池中挑选出最适合当前模型学习的“甜点”样本（既有挑战性又不过于困难），并动态调整反馈强度。</li>
+<li><strong>模型可解释性与调试工具</strong>：EDA通过分析模型的“自信度”来指导训练，这本身就提供了一个观察模型“内心世界”的窗口。围绕这个思路，可以开发出更先进的模型调试工具，帮助研究人员理解模型为什么会犯错，尤其是在它“迷之自信”的时候。</li>
+</ol></li>
+</ul>
+<h3 id="退一步从批判的视角看这篇论文还存在哪些不足及缺失">5.
+退一步，从批判的视角看，这篇论文还存在哪些不足及缺失？</h3>
+<p>尽管这篇论文非常出色，但从批判的角度看，仍有一些方面值得商榷和进一步完善。</p>
+<ul>
+<li><strong>潜在不足与缺失</strong>：
+<ol type="1">
+<li><strong>泛化性验证不足</strong>：这是最主要的一点。所有实验都局限于数学推理。数学问题答案相对客观、唯一，这使得GEC的“答案注入”策略非常有效。但在开放性问题（如“如何写一首关于秋天的诗？”）或需要权衡利弊的商业决策问题上，不存在唯一的“正确答案”。GEC的方法可能难以直接适用，其有效性需要打上一个问号。</li>
+<li><strong>对GEC的公平性讨论</strong>：GEC直接引入外部正确答案，有人可能会认为这在一定程度上是“开卷考试”，削弱了纯粹强化学习的色彩。论文的消融实验证明了其有效性，但未能完全厘清性能提升中，有多少归功于这种“有监督的纠正信号”，有多少归功于更优化的RL过程。</li>
+<li><strong>超参数敏感性分析缺失</strong>：论文中GEC的概率和EDA计算中的温度<code>T</code>都是固定值。这些超参数的选择是否对最终结果有很大影响？如果改变这些值，性能会如何变化？缺少这部分的敏感性分析，使得方法的可复现性和鲁棒性略显不足。</li>
+<li><strong>对参考数据的高要求</strong>：EDGE-GRPO的训练流程要求每个问题都配有高质量的参考解，这在现实世界的数据收集中可能是一个瓶颈。相比之下，一些无监督或弱监督的RL方法对数据的要求更低。</li>
+</ol></li>
+</ul>
+<h3
+id="我希望从这篇论文中找一些拿来即用的创新想法我应该从这篇论文中重点学什么">6.
+我希望从这篇论文中找一些拿来即用的创新想法，我应该从这篇论文中重点学什么？</h3>
+<p>当然，这篇论文充满了可以借鉴的智慧。</p>
+<ul>
+<li><strong>重点学习与启发</strong>：
+<ol type="1">
+<li><strong>“实用主义”的混合范式</strong>：最大的启发是<strong>不要拘泥于单一的技术范式</strong>。EDGE-GRPO完美地将<strong>监督学习（通过GEC注入正确答案）和强化学习（通过EDA优化策略）</strong>结合起来。当RL陷入困境时，不要犹豫使用更直接、更强的监督信号来“破局”。这种务实的混合思想在解决实际问题时非常强大。</li>
+<li><strong>“自上而下”的问题分解</strong>：作者将“训练效率低”这个大问题，清晰地分解为“响应层面”和“信号层面”两个子问题，并分别用GEC和EDA这两个正交的模块来解决。这种将复杂问题分解、分而治之的工程和研究思路值得学习。</li>
+<li><strong>从“模型行为学”中寻找信号</strong>：EDA的灵感来源于对模型“自信度错配”这一行为的细致观察。这启发我们，在设计算法时，可以更多地去分析模型的“行为特征”（比如不确定性、生成速度、注意力分布等），并尝试将这些特征转化为有价值的训练信号。</li>
+<li><strong>数据效率是核心竞争力</strong>：在算力成本日益高昂的今天，能够以1K数据量就达到或超过别人用数十K数据量才能达到的效果，这本身就是一种降维打击。在构思自己的项目时，应始终将“如何提升数据和计算效率”放在重要位置。</li>
+</ol></li>
+<li><strong>需要补充的背景知识</strong>：
+<ul>
+<li><strong>强化学习基础</strong>：特别是策略梯度（Policy
+Gradient）方法，理解“策略（Policy）”、“奖励（Reward）”、“优势函数（Advantage
+Function）”等核心概念。</li>
+<li><strong>PPO算法 (Proximal Policy
+Optimization)</strong>：这是当前LLM强化学习中最主流的算法之一，GRPO是其变体。理解PPO的裁切（clipping）目标函数和KL散度惩罚项，有助于理解GRPO的动机。</li>
+<li><strong>GRPO算法 (Group Relative Policy
+Optimization)</strong>：需要直接阅读GRPO的原始论文（<a
+href="https://alphaxiv.org/abs/2402.03300">Shao et
+al. 2024</a>），理解它如何通过组内排序来替代PPO中的值函数。</li>
+<li><strong>信息熵与策略熵</strong>：理解信息熵的基本概念，以及它在语言模型中如何体现为对下一个词选择的不确定性。</li>
+</ul></li>
+</ul>
+<p>希望这份详尽的解读能帮助您全面、深入地理解这篇论文的精髓。它确实是一项在LLM强化学习领域中，兼具理论洞察和实践价值的杰出工作。</p>
+</div><div class="post-footer" id="post-footer">
+    <div class="post-info">
+        <div class="post-info-line">
+            <div class="post-info-mod">
+                <span>更新于 2025-08-19</span>
+            </div></div>
+        <div class="post-info-line">
+            <div class="post-info-md"><span>
+                            <a class="link-to-markdown" href="/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/index.md" target="_blank">阅读原始文档</a>
+                        </span></div>
+            <div class="post-info-share">
+                <span><a href="javascript:void(0);" title="分享到 X" data-sharer="x" data-url="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" data-title="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity" data-hashtags="Reading,Reasoning,entropy"><i class="fab fa-x-twitter fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Facebook" data-sharer="facebook" data-url="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" data-hashtag="Reading"><i class="fab fa-facebook-square fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Hacker News" data-sharer="hackernews" data-url="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" data-title="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity"><i class="fab fa-hacker-news fa-fw" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 Line" data-sharer="line" data-url="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" data-title="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity"><i data-svg-src="https://cdn.jsdelivr.net/npm/simple-icons@14.9.0/icons/line.svg" aria-hidden="true"></i></a><a href="javascript:void(0);" title="分享到 微博" data-sharer="weibo" data-url="https://blog.vllbc.top/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/" data-title="EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity"><i class="fab fa-weibo fa-fw" aria-hidden="true"></i></a></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="post-info-more">
+        <section class="post-tags"><i class="fas fa-tags fa-fw" aria-hidden="true"></i>&nbsp;<a href="/tags/reading/">Reading</a>,&nbsp;<a href="/tags/reasoning/">Reasoning</a>,&nbsp;<a href="/tags/entropy/">Entropy</a></section>
+        <section>
+            <span><a href="javascript:void(0);" onclick="window.history.back();">返回</a></span>&nbsp;|&nbsp;<span><a href="/">主页</a></span>
+        </section>
+    </div>
+
+    <div class="post-nav"><a href="/ettrlbalancing-exploration-and-exploitation-in-llm-test-time-reinforcement-learning-via-entropy-mechanism/" class="prev" rel="prev" title="ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM"><i class="fas fa-angle-left fa-fw" aria-hidden="true"></i>ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM</a>
+            <a href="/curecritical-token-guided-re-concatenation-for-entropy-collapse-prevention/" class="next" rel="next" title="CURE：Critical-Token-Guided Re-concatenation for Entropy-collapse Prevention">CURE：Critical-Token-Guided Re-concatenation for Entropy-collapse Prevention<i class="fas fa-angle-right fa-fw" aria-hidden="true"></i></a></div>
+</div>
+<div id="comments"><div id="valine" class="comment"></div><noscript>
+                Please enable JavaScript to view the comments powered by <a href="https://valine.js.org/">Valine</a>.
+            </noscript></div></article>
+
+    </div>
+            </main><footer class="footer">
+        <div class="footer-container"><div class="footer-line" itemscope itemtype="http://schema.org/CreativeWork"><i class="far fa-copyright fa-fw" aria-hidden="true"></i><span itemprop="copyrightYear">2020 - 2026</span><span class="author" itemprop="copyrightHolder">&nbsp;<a href="/" target="_blank"></a></span></div>
+        </div>
+    </footer></div>
+
+        <div id="fixed-buttons"><a href="#" id="back-to-top" class="fixed-button" title="回到顶部">
+                <i class="fas fa-arrow-up fa-fw" aria-hidden="true"></i>
+            </a>
+        </div>
+
+        <div id="fixed-buttons-hidden"><a href="#" id="view-comments" class="fixed-button" title="查看评论">
+                <i class="fas fa-comment fa-fw" aria-hidden="true"></i>
+            </a>
+        </div><link rel="stylesheet" href="/lib/valine/valine.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/css/lightgallery-bundle.min.css"><script src="https://cdn.jsdelivr.net/npm/valine@1.5.3/dist/Valine.min.js"></script><script src="https://cdn.jsdelivr.net/npm/autocomplete.js@0.38.1/dist/autocomplete.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lunr@2.3.9/lunr.min.js"></script><script src="/lib/lunr/lunr.stemmer.support.min.js"></script><script src="/lib/lunr/lunr.zh.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lazysizes@5.3.2/lazysizes.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/lightgallery.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/thumbnail/lg-thumbnail.min.js"></script><script src="https://cdn.jsdelivr.net/npm/lightgallery@2.5.0/plugins/zoom/lg-zoom.min.js"></script><script src="https://cdn.jsdelivr.net/npm/clipboard@2.0.11/dist/clipboard.min.js"></script><script src="https://cdn.jsdelivr.net/npm/sharer.js@0.5.2/sharer.min.js"></script><script>window.config={"comment":{"valine":{"appId":"Gf5fGIr3qceViiX6xGtzaWwR-gzGzoHsz","appKey":"5FiaGPazjefFXh6wr3CtcX2d","avatar":"hide","el":"#valine","emojiCDN":"https://cdn.jsdelivr.net/npm/emoji-datasource-google@15.1.2/img/google/64/","emojiMaps":{"100":"1f4af.png","alien":"1f47d.png","anger":"1f4a2.png","angry":"1f620.png","anguished":"1f627.png","astonished":"1f632.png","black_heart":"1f5a4.png","blue_heart":"1f499.png","blush":"1f60a.png","bomb":"1f4a3.png","boom":"1f4a5.png","broken_heart":"1f494.png","brown_heart":"1f90e.png","clown_face":"1f921.png","cold_face":"1f976.png","cold_sweat":"1f630.png","confounded":"1f616.png","confused":"1f615.png","cry":"1f622.png","crying_cat_face":"1f63f.png","cupid":"1f498.png","dash":"1f4a8.png","disappointed":"1f61e.png","disappointed_relieved":"1f625.png","dizzy":"1f4ab.png","dizzy_face":"1f635.png","drooling_face":"1f924.png","exploding_head":"1f92f.png","expressionless":"1f611.png","face_vomiting":"1f92e.png","face_with_cowboy_hat":"1f920.png","face_with_hand_over_mouth":"1f92d.png","face_with_head_bandage":"1f915.png","face_with_monocle":"1f9d0.png","face_with_raised_eyebrow":"1f928.png","face_with_rolling_eyes":"1f644.png","face_with_symbols_on_mouth":"1f92c.png","face_with_thermometer":"1f912.png","fearful":"1f628.png","flushed":"1f633.png","frowning":"1f626.png","ghost":"1f47b.png","gift_heart":"1f49d.png","green_heart":"1f49a.png","grimacing":"1f62c.png","grin":"1f601.png","grinning":"1f600.png","hankey":"1f4a9.png","hear_no_evil":"1f649.png","heart":"2764-fe0f.png","heart_decoration":"1f49f.png","heart_eyes":"1f60d.png","heart_eyes_cat":"1f63b.png","heartbeat":"1f493.png","heartpulse":"1f497.png","heavy_heart_exclamation_mark_ornament":"2763-fe0f.png","hole":"1f573-fe0f.png","hot_face":"1f975.png","hugging_face":"1f917.png","hushed":"1f62f.png","imp":"1f47f.png","innocent":"1f607.png","japanese_goblin":"1f47a.png","japanese_ogre":"1f479.png","joy":"1f602.png","joy_cat":"1f639.png","kiss":"1f48b.png","kissing":"1f617.png","kissing_cat":"1f63d.png","kissing_closed_eyes":"1f61a.png","kissing_heart":"1f618.png","kissing_smiling_eyes":"1f619.png","laughing":"1f606.png","left_speech_bubble":"1f5e8-fe0f.png","love_letter":"1f48c.png","lying_face":"1f925.png","mask":"1f637.png","money_mouth_face":"1f911.png","nauseated_face":"1f922.png","nerd_face":"1f913.png","neutral_face":"1f610.png","no_mouth":"1f636.png","open_mouth":"1f62e.png","orange_heart":"1f9e1.png","partying_face":"1f973.png","pensive":"1f614.png","persevere":"1f623.png","pleading_face":"1f97a.png","pouting_cat":"1f63e.png","purple_heart":"1f49c.png","rage":"1f621.png","relaxed":"263a-fe0f.png","relieved":"1f60c.png","revolving_hearts":"1f49e.png","right_anger_bubble":"1f5ef-fe0f.png","robot_face":"1f916.png","rolling_on_the_floor_laughing":"1f923.png","scream":"1f631.png","scream_cat":"1f640.png","see_no_evil":"1f648.png","shushing_face":"1f92b.png","skull":"1f480.png","skull_and_crossbones":"2620-fe0f.png","sleeping":"1f634.png","sleepy":"1f62a.png","slightly_frowning_face":"1f641.png","slightly_smiling_face":"1f642.png","smile":"1f604.png","smile_cat":"1f638.png","smiley":"1f603.png","smiley_cat":"1f63a.png","smiling_face_with_3_hearts":"1f970.png","smiling_imp":"1f608.png","smirk":"1f60f.png","smirk_cat":"1f63c.png","sneezing_face":"1f927.png","sob":"1f62d.png","space_invader":"1f47e.png","sparkling_heart":"1f496.png","speak_no_evil":"1f64a.png","speech_balloon":"1f4ac.png","star-struck":"1f929.png","stuck_out_tongue":"1f61b.png","stuck_out_tongue_closed_eyes":"1f61d.png","stuck_out_tongue_winking_eye":"1f61c.png","sunglasses":"1f60e.png","sweat":"1f613.png","sweat_drops":"1f4a6.png","sweat_smile":"1f605.png","thinking_face":"1f914.png","thought_balloon":"1f4ad.png","tired_face":"1f62b.png","triumph":"1f624.png","two_hearts":"1f495.png","unamused":"1f612.png","upside_down_face":"1f643.png","weary":"1f629.png","white_frowning_face":"2639-fe0f.png","white_heart":"1f90d.png","wink":"1f609.png","woozy_face":"1f974.png","worried":"1f61f.png","yawning_face":"1f971.png","yellow_heart":"1f49b.png","yum":"1f60b.png","zany_face":"1f92a.png","zipper_mouth_face":"1f910.png","zzz":"1f4a4.png"},"enableQQ":true,"highlight":true,"lang":"zh-CN","pageSize":10,"placeholder":"如何评价这篇博文？","recordIP":true,"visitor":true}},"lightgallery":true,"search":{"highlightTag":"em","lunrIndexURL":"/index.json","lunrLanguageCode":"zh","lunrSegmentitURL":"/lib/lunr/lunr.segmentit.js","maxResultLength":10,"noResultsFound":"没有找到结果","snippetLength":50,"type":"lunr"}};</script><script src="/js/theme.min.js"></script></body>
+</html>

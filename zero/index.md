@@ -6,7 +6,7 @@
 
 ![image.png](https://cdn.jsdelivr.net/gh/vllbc/img4blog//image/20250805202834.png)
 
-这里的K具体是多少可以看[显存占用计算](../infra/显存占用计算.md)
+这里的K具体是多少可以看[显存占用计算](../Infra/显存占用计算.md)
 
 接下来逐个介绍各个stage zero。随着zero优化的深入，越来越节省显存，但通讯时间也大大增加，导致训练时间增加。
 ## zero1
