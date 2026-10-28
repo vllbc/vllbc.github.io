@@ -1,3 +1,0 @@
-# ReMAX（REINFORCE argmax）
-
-
