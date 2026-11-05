@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebThinker · 让推理模型在思考中途自己上网、边想边写</title>
+<meta name="description" content="WebThinker 把搜索、点链接、写章节、查大纲、改报告都做成模型在推理链里自己发出的工具调用，再用迭代在线 DPO 让模型学会用得更好；32B 模型在 GAIA 拿到 48.5、HLE 15.8，训练-免费版本已经超过 Search-o1。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：SVG 流程图里的通用文字 */
+.trace-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--text-muted);margin-top:10px;justify-content:center}
+.trace-legend code{font-size:11.5px;padding:1px 5px;border-radius:4px;background:var(--bg-soft)}
+.calc-out{font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.9}
+.calc-out b{color:var(--accent-deep)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">WebThinker</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Deep Research Agent · NeurIPS 2025 · arXiv 2504.21776</span>
+  <h1>WebThinker：让推理模型在思考的中途自己上网，边想边写</h1>
+  <p class="hero-sub">
+    RAG 把「先检索、再生成」写死成流水线，模型只能看到搜索引擎摘要。<strong>WebThinker</strong> 把搜索、点链接、写章节、查大纲、改报告全做成推理链里模型自己吐出的工具调用，搜索结果直接插回思考过程；再用<strong>迭代在线 DPO</strong> 教会它怎么用工具更划算。
+  </p>
+  <div class="meta">
+    <span>Xiaoxi Li, Jiajie Jin, Guanting Dong 等 · 中国人民大学 / BAAI / 华为泊松实验室</span>
+    <a href="https://arxiv.org/abs/2504.21776" target="_blank" rel="noopener">arXiv 2504.21776 ↗</a>
+    <a href="https://github.com/RUC-NLPIR/WebThinker" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    难点不在「能不能搜」，而在<strong>谁来决定搜什么、搜到哪一层、什么时候够了</strong>。预定义 RAG 让外部脚本决定，推理模型只是个下游消费者；WebThinker 把这套决策交还给模型本身的思维链。
+  </p>
+  <p>
+    它只有两个模式：解题模式下，模型调用 <em>Deep Web Explorer</em>——一个由同一类 LRM 驱动的子 agent，内部还能继续搜索、点击链接；写报告模式下，主模型用 <code>T<sub>draft</sub></code> / <code>T<sub>check</sub></code> / <code>T<sub>edit</sub></code> 边想边写，具体文字由「助手 LLM」（实验里是与骨干同尺寸的 Qwen2.5-Instruct）基于探索到的文档记忆去落地。
+  </p>
+  <p>
+    训练用的是<strong>自己采样 → 按三条规则排出偏好对 → 在线 DPO → 用新模型重新采样</strong>的闭环，两轮迭代。不加训练的 Base 版就已经全面超过 Search-o1，RL 版再把 GAIA 从 44.7 推到 48.5。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">48.5</div>
+      <div class="k">GAIA 平均 Pass@1（32B），Base 44.7，Search-o1 39.8</div>
+    </div>
+    <div class="metric">
+      <div class="v">15.8</div>
+      <div class="k">HLE 平均（32B），压过 o3-mini (High) 的 14.0</div>
+    </div>
+    <div class="metric">
+      <div class="v">8.1</div>
+      <div class="k">Glaive 报告平均分，Gemini2.0 Deep Research 7.9</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>问题不是「有没有外网」，而是「谁在思考里决定怎么用外网」</h2></div>
+  <p class="sec-sub">读完这节你应该明白：为什么一个只会被喂检索结果的推理模型，天花板在流程设计者手里。</p>
+
+  <p>LRM（如 QwQ-32B、DeepSeek-R1）的长链推理很强，但知识停在参数里。论文在 Table 1 里给了一组对照：QwQ-32B 直接作答，GPQA 平均 64.1，比 Qwen2.5-72B 的 49.5 高出一大截；可到了 GAIA 只有 <code>22.3</code>、WebWalkerQA 只有 <code>4.3</code>。推理能力不会自动换来前沿信息。</p>
+
+  <p>标准 RAG 把外部知识补进来，但论文 Figure 2 (a) 画的流水线是这样的：<strong>检索脚本固定发起搜索 → 拿回摘要 → 生成答案</strong>。模型从头到尾没机会说「这条摘要不够，我想点进去看原文」，也没机会说「这一节可以写了，先去写，后面缺数据再回来搜」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>推理链是自由的，工具调用却被外包给流程</h4></div>
+    <p>RAG 的每一步检索都由外部代码触发，检索和推理之间只有一次性的信息交接。于是<strong>搜索深度被固定、搜索时机被固定、写作时机也被固定</strong>。要突破，就得让「搜索 / 导航 / 写作」变成模型思维链里可以随时发出、随时收结果的动作。</p>
+  </div>
+
+  <p>换个说法：这篇论文要的不是更强的检索器，而是<strong>把研究动作内化进模型的一次生成过程</strong>——模型仍在续写同一个思维链，只是中途插入「我去查一下」。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路：流程做深了但写死，搜索自主了但只看到摘要</h2></div>
+  <p class="sec-sub">按论文 Table 1 / Table 2 的同口径数据看，多数 RAG 变体在需要真推理的 HLE 上几乎没有增益。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">RAG 工作流</span><h4>预定义的多步检索</h4></div>
+      <p>标准 RAG 只按原问题检索一次；Query Planning 先把问题拆子问题再检索；Iterative RAG 多轮补检索。作者把三者都接到 QwQ-32B 上。</p>
+      <p><strong>GAIA 有效：</strong>24.3 → 32.0 → <strong>35.0</strong>（Iterative），确实比直接作答的 22.3 好。</p>
+      <p><strong>HLE 几乎没动：</strong>7.2 → 9.6 → 9.6，与直接作答的 9.6 持平。释义见本节末尾的提示。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Search-o1</span><h4>把搜索嵌进推理</h4></div>
+      <p>Search-o1 让推理模型在思考中发出搜索，配合 Reason-in-Documents 模块把检索文档压缩后插回推理链，可以说是 WebThinker 最接近的先行者。</p>
+      <p><strong>明显优于 RAG：</strong>GAIA 39.8，HLE 10.8（Table 1 / Table 2，Search-o1-32B 评测数字）。</p>
+      <p><strong>但只调用搜索引擎、拿摘要：</strong>论文指出它没有页面级导航，无法顺着链接深入。</p>
+    </div>
+  </div>
+
+  <p>两个程序给出的最优路线合起来提示了缺口：<strong>搜索要自主（学 Search-o1），探索要更深（超过只读摘要），而且写作也要被纳入同一个思考过程</strong>——这三件事正好对应 WebThinker 的三个组件。</p>
+
+  <details>
+    <summary>为什么 Iterative RAG 在 HLE 上涨不动？<span class="sum-sub">论文自己的解释 + 一组值得注意的数字</span></summary>
+    <div class="details-body">
+      <p>论文 §4.4 的说法是：RAG 在 GAIA、WebWalkerQA 这类「找信息」任务上能提升，但在需要「推理与搜索深度融合」的 HLE 上增益不稳定。换句话说，问题变成「搜到这页之后，该不该相信、下一步该查什么」，这需要模型自己连续做判断，而不是外部脚本排好队。</p>
+      <p>另一个值得留意的现象：Table 1 里 GPQA 一列，RAG 迭代版对 QwQ-32B 只有 <code>65.2</code>，而 Search-o1 是 <code>67.2</code>、WebThinker Base 是 <code>68.7</code>。（本页推断：GPQA 是「Google-proof」题，多检索可能反而引入噪声——论文只给出上述数字，未对此作解释。）</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心方法：把搜索做成子 agent，把写作做成工具，都从同一条思维链里发出</h2></div>
+  <p class="sec-sub">三个组件对应三个能力：深度探索（Deep Web Explorer）、边想边写（Think-Search-and-Draft）、用得省（在线 DPO）。</p>
+
+  <h3>3.1 一次生成就被写成「推理链 × 工具输出」的交错乘积</h3>
+  <p>论文 Eq. 1 给了解题模式的目标分布：思维链 <code>R</code> 的每个 token，条件里除了之前的思考，还包含之前所有工具调用的输出；最后再生成答案 <code>y</code>。</p>
+
+  <div class="eq">
+    P(R, y | I, q, T) = <span class="hl-c">∏<sub>t≤|R|</sub> P(R<sub>t</sub> | R<sub>&lt;t</sub>, I, q, {O<sub>τ</sub>}<sub>τ&lt;t</sub>)</span> · ∏<sub>t≤|y|</sub> P(y<sub>t</sub> | y<sub>&lt;t</sub>, R, I, q)
+  </div>
+  <div class="eq-cap">Eq. 1 · <span class="hl-c">红色部分</span>就是 RAG 做不到的地方：当前思考依赖于已被插入的、真实发生的工具返回</div>
+
+  <p>实现上不靠特殊架构，全靠<strong>特殊 token</strong>：模型输出 <code>&lt;|begin_search_query|&gt;…&lt;|end_search_query|&gt;</code> 时生成暂停，系统执行搜索，把结果包在 <code>&lt;|begin_search_result|&gt;…&lt;|end_search_result|&gt;</code> 里插回上下文，模型继续往下想。整个研究过程是<strong>一次连续生成，加几次确定性插入</strong>。</p>
+
+  <h3>3.2 Deep Web Explorer：搜索工具的「内部」也是一个会思考的 agent</h3>
+  <p>主模型每发一次搜索，外面并不是直接调 Bing，而是把「原始问题 + 助手 LLM 生成的详细搜索意图 + top-10 网页正文」交给 Explorer（Eq. 3）。Explorer 自己有两种动作：直接调搜索引擎（拿标题、URL、摘要），或用 Crawl4AI 抓取某个链接的全文——长页面还会由助手 LLM 按「点击意图」摘要。它一直循环到自己认为信息够了，才输出一段 <strong>Final Information</strong> 还给主模型。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">两级自主</span><h4>主模型决定「查什么」，Explorer 决定「查到多深」</h4></div>
+    <p>这正是 Chapter 02 里 RAG 缺少的「多跳」。论文附录 D 的 GAIA 案例：主模型先搜 <em>Finding Nemo 主角鱼的非本土目击记录</em>，得到「Fred Howard Park, Florida」；再搜这个公园的邮编得到 34689。而 ASH 会议截稿案例里，Explorer 直接<strong>点开一个 PDF 链接</strong>把附带会议的截稿时间也找了出来——这需要页面内的导航动作，单靠搜索引擎摘要做不到。</p>
+  </div>
+
+  <h3>3.3 Autonomous Think-Search-and-Draft：写作与检索并发</h3>
+  <p>报告模式下，主模型多了三个写作工具，且都由「助手 LLM」（实验中与骨干同尺寸的 Qwen2.5-Instruct）在后台执行，<strong>不把整段文字塞回主推理链</strong>，以免打乱思考节奏：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">T<sub>draft</sub></span></div>
+      <p>给定章节名与写作要求，助手 LLM 从文档记忆 <code>M</code> 里取 top-k 文档写出这一节（Eq. 4）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">T<sub>check</sub></span></div>
+      <p>只返回当前报告的<strong>标题大纲</strong>，让主模型知道写到哪、还缺什么，而不是回灌全文。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">T<sub>edit</sub></span></div>
+      <p>按编辑指令让助手 LLM 输出整篇修改后的报告，修掉重复、补上遗漏。</p>
+    </div>
+  </div>
+
+  <p>所有探索过的网页都进入文档记忆 <code>M</code>。主模型的核心工作是<strong>编排</strong>：何时搜、搜到够了就写哪一节、什么时候回头检查、什么时候收尾（Eq. 5 里以 EOS 为终止）。</p>
+
+  <h3>3.4 自己动手：按符号逐步展开一次 GAIA 式解题</h3>
+  <p>下面把附录 D 的找到 Nemo 那条 GAIA 题的真实轨迹压缩成 8 步。红框标出的步骤里，工具输出是<strong>插回主思考链</strong>的（<code>S</code>/<code>I</code>）；蓝框是 Explorer 内部的动作；第 8 步只有最终答案 <code>A</code>。拖动进度，看每一步是谁在决定。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="wt-btns">
+      <button class="rule-btn active" data-step="8">完整轨迹<span class="r-sub">r S I r S I r A</span></button>
+      <button class="rule-btn" data-step="6">切到报告模式<span class="r-sub">r S W C E A</span></button>
+    </div>
+
+    <div class="slots s5" id="wt-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl" style="grid-column:1 / -1">
+        <label>步骤 <span class="v" id="wt-step-v">1 / 8</span></label>
+        <input type="range" id="wt-step" min="0" max="7" step="1" value="0">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" data-act="next">下一步</button>
+      <button class="act ghost" data-act="reset">回到开头</button>
+    </div>
+
+    <div class="readout" id="wt-readout">
+      <div class="r-head" id="wt-rhead">当前步骤</div>
+      <div id="wt-msg">拖动滑块或在下方点击「下一步」，逐步看主模型与 Explorer 的分工。</div>
+    </div>
+  </div>
+
+  <div class="trace-legend">
+    <span><code>r</code> 主模型思考</span>
+    <span><code>S</code> 主模型发起搜索</span>
+    <span><code>I</code> Explorer 返回信息</span>
+    <span><code>W</code> 写章节</span>
+    <span><code>C</code> 查大纲</span>
+    <span><code>E</code> 改报告</span>
+    <span><code>A</code> 最终答案</span>
+  </div>
+
+  <details>
+    <summary>第 8 步为什么只有一个 A？<span class="sum-sub">这段轨迹来自论文附录 D.1</span></summary>
+    <div class="details-body">
+      <p>附录 D.1 的 GAIA 案例里，主模型共发出 3 次搜索，前两次对应“找地点”和“找地点→查邮编”，第 3 次是重复确认「只有这一处目击」，随后给出邮编 <code>34689</code>。本模拟把第 3 次重复确认折叠进第 7 步（主模型收尾），因此轨迹是 8 个标记而非原始文本的全部来回。</p>
+      <p>切到「报告模式」演示的是 Section 3.4 的另一种交错形态：<code>r</code> 想 → <code>S</code> 搜 → <code>r</code> 判断够了 → <code>W</code> 写一节 → <code>C</code> 查大纲 → <code>E</code> 改… → <code>A</code> 结束。两种模式的工具集合不同，但都共享同一条思维链。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练：不写奖励模型，用三条规则排出偏好对，再做在线 DPO</h2></div>
+  <p class="sec-sub">工程上的关键约束是：验收信号只能来自最终答案对不对，于是「工具用得好不好」必须被编码成偏好规则。</p>
+
+  <p>训练数据来自六个数据集（SuperGPQA、WebWalkerQA Silver、OpenThoughts、NaturalReasoning、NuminaMath、Glaive），总量约 <code>3k</code>：先用 QwQ-32B 直接作答，只留下做错的题；每题再用 WebThinker-32B-Base 采 <code>n</code> 条轨迹。Glaive 另在每轮迭代采 <code>1.5k</code> 题做偏好构造。对同一题的两条轨迹 (<code>R<sub>i</sub></code>, <code>R<sub>j</sub></code>)，按<strong>优先级从高到低</strong>判：</p>
+
+  <div class="eq" style="text-align:left;font-size:14px;line-height:2.0">
+    <span class="hl-c">① 答案正确 / 报告质量</span> &gt; <span class="hl-a">② 工具调用更少</span> &gt; <span class="hl-b">③ 输出更短</span>（当 len<sub>j</sub> / len<sub>i</sub> &gt; γ 时）
+  </div>
+  <div class="eq-cap">规则解释见论文 §3.5；① 永远优先，②③ 只在都答对时才比较</div>
+
+  <p>然后直接套标准 DPO 损失（Eq. 6），<code>β</code> 控制偏离参考策略的程度。真正的「在线」在于闭环：</p>
+  <ul>
+    <li><strong>用当前 π<sub>θ</sub> 重新采样</strong>新轨迹（探索）；</li>
+    <li>对新轨迹再套规则 ①②③，得到新偏好集 <code>D′</code>；</li>
+    <li>令 <code>D ← D′</code>、<code>π<sub>ref</sub> ← π<sub>θ</sub></code>，回到训练。</li>
+  </ul>
+
+  <p>实验配置上，论文 §4.3 写明的硬数字是：主实验骨架 QwQ-32B，助手为同尺寸 Qwen2.5-Instruct，生成上限 <code>81,920</code> tokens，在线 DPO <strong>2 轮</strong>，训练序列长度 <code>32,768</code>，Bing 搜索 k=10。换到 DeepSeek-R1 家族时，先做<strong>冷启动 SFT</strong>（从 QwQ-32B 版 WebThinker 采的 <code>7.8k</code> 条轨迹），再走同样的 RL 流程——这是为了让 R1 系列先学会稳定的工具 token 格式。</p>
+
+  <h3>自己动手：偏好规则怎么在两条轨迹之间裁决</h3>
+  <p>两种轨迹的「长度比」<code>len<sub>j</sub>/len<sub>i</sub> &gt; γ</code> 时，更短的 i 胜出。拖动按钮切 γ，下面按<strong>规则优先级</strong>逐条判定（数值是示例，仅用于理解规则，不是论文数据）。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="pref-btns">
+      <button class="rule-btn" data-pair="0">A 对 vs B 对<span class="r-sub">都对，工具数不同</span></button>
+      <button class="rule-btn active" data-pair="1">A 对 vs C 错<span class="r-sub">一对一错</span></button>
+      <button class="rule-btn" data-pair="2">A 对 vs D 对<span class="r-sub">同工具数，长度不同</span></button>
+    </div>
+
+    <div class="slots s5" id="pref-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>轨迹长度 len<sub>i</sub> <span class="v" id="pref-li-out">2.0k</span></label>
+        <input type="range" id="pref-li" min="1" max="10" step="0.5" value="2">
+      </div>
+      <div class="ctrl">
+        <label>轨迹长度 len<sub>j</sub> <span class="v" id="pref-lj-out">3.2k</span></label>
+        <input type="range" id="pref-lj" min="1" max="10" step="0.5" value="3.2">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act" data-gamma="1.2">γ = 1.2</button>
+      <button class="act primary" data-gamma="1.5">γ = 1.5</button>
+      <button class="act" data-gamma="1.8">γ = 1.8</button>
+    </div>
+
+    <div class="readout" id="pref-readout">
+      <div class="r-head">裁决结果</div>
+      <div id="pref-msg"></div>
+      <div class="calc-out" id="pref-calc"></div>
+    </div>
+  </div>
+
+  <p>论文 Table 3 左栏给了这套迭代机制的对照：<strong>离线 DPO</strong>（用旧的偏好集一次性训练）在四个基准上的平均是 <code>43.2</code>（比不做训练的 42.1 高 1.1 点），而迭代在线 DPO 是 <code>45.4</code>，比 Base 的 42.1 高 <code>3.3</code> 点、比离线 DPO 高 <code>2.2</code> 点。可见「用新策略重新采样」不是可有可无的修饰：换回一次性离线偏好集，一半以上的训练增益就没了。同时也要注意，RL 相对 Base 的绝对增益是 3.3 点，而消融里去掉了 Explorer 会掉到 38.3——地基仍是 Explorer。</p>
+  <p style="font-size:13px;color:var(--text-soft)">注：论文 §4.7 正文把 RL 版平均误写为 44.9，与 Table 3 的 45.4 冲突，本节以 Table 3 为准。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次推理的完整数据流：主思考链 ↔ Explorer ↔ 文档记忆 ↔ 助手 LLM</h2></div>
+  <p class="sec-sub">下图重绘论文 Figure 3：两种模式共享 Explorer，报告模式额外接上三个写作工具和文档记忆。</p>
+
+  <figure>
+    <svg viewBox="0 0 840 470" role="img" aria-label="WebThinker 推理数据流：主推理链调用 Deep Web Explorer，报告模式下再调用写作工具和文档记忆">
+      <defs>
+        <marker id="wt-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+        <marker id="wt-arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#C04E2D"></path>
+        </marker>
+      </defs>
+
+      <!-- 主推理链 -->
+      <rect x="20" y="24" width="800" height="128" rx="12" fill="#FFFFFF" stroke="#1A1816" stroke-width="1.6"/>
+      <text x="40" y="50" font-family="Inter,Noto Sans SC,sans-serif" font-size="13" font-weight="700" fill="#1A1816">主推理 LRM（QwQ-32B / DeepSeek-R1）· 同一条思维链</text>
+
+      <rect x="40" y="112" width="84" height="24" rx="5" fill="#F5ECD8" stroke="#D4C4A6"/>
+      <text x="82" y="128" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#1A1816">r think</text>
+      <rect x="134" y="112" width="84" height="24" rx="5" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="176" y="128" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#7A2E16">S search</text>
+      <rect x="228" y="112" width="84" height="24" rx="5" fill="#DDE9EE" stroke="#2E5A6B"/>
+      <text x="270" y="128" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#2E5A6B">I info</text>
+      <rect x="322" y="112" width="84" height="24" rx="5" fill="#F5ECD8" stroke="#D4C4A6"/>
+      <text x="364" y="128" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#1A1816">r think</text>
+      <rect x="416" y="112" width="66" height="24" rx="5" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="449" y="128" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#7A2E16">EOS</text>
+      <text x="494" y="128" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#8C857B">→ 答案 / 完整报告</text>
+
+      <text x="40" y="84" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">解题模式：思考 → 搜索 → 拿到 Explorer 返回的信息 → 继续思考 → EOS</text>
+      <text x="40" y="102" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">报告模式：同一条链上还会穿插 T_draft / T_check / T_edit</text>
+
+      <!-- Explorer -->
+      <rect x="20" y="228" width="300" height="142" rx="12" fill="#FFFFFF" stroke="#2E5A6B" stroke-width="1.4"/>
+      <text x="40" y="254" font-family="Inter,Noto Sans SC,sans-serif" font-size="13" font-weight="700" fill="#2E5A6B">Deep Web Explorer</text>
+      <text x="40" y="274" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">LRM 驱动的子 agent，内部循环</text>
+      <rect x="40" y="288" width="122" height="26" rx="5" fill="#DDE9EE" stroke="#2E5A6B"/>
+      <text x="101" y="305" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#2E5A6B">Search API k=10</text>
+      <rect x="172" y="288" width="130" height="26" rx="5" fill="#DDE9EE" stroke="#2E5A6B"/>
+      <text x="237" y="305" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#2E5A6B">Click (Crawl4AI)</text>
+      <text x="40" y="338" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#8C857B">反复搜索 / 点链接，直到信息够了</text>
+      <text x="40" y="356" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#8C857B">→ 输出 Final Information</text>
+
+      <!-- 主 -> Explorer / Explorer -> 主 -->
+      <line x1="110" y1="152" x2="110" y2="228" stroke="#C04E2D" stroke-width="1.5" marker-end="url(#wt-arr-a)"/>
+      <text x="122" y="180" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#7A2E16">query + 意图</text>
+      <text x="122" y="195" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#7A2E16">+ top-10 正文</text>
+      <line x1="230" y1="228" x2="230" y2="152" stroke="#2E5A6B" stroke-width="1.5" marker-end="url(#wt-arr)"/>
+      <text x="242" y="182" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#2E5A6B">Final</text>
+      <text x="242" y="197" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#2E5A6B">Information</text>
+
+      <!-- 文档记忆 -->
+      <rect x="360" y="228" width="230" height="142" rx="12" fill="#DDEBDD" stroke="#3F6B4A" stroke-width="1.4"/>
+      <text x="380" y="254" font-family="Inter,Noto Sans SC,sans-serif" font-size="13" font-weight="700" fill="#3F6B4A">Document Memory M</text>
+      <text x="380" y="278" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">所有探索过的网页累积</text>
+      <text x="380" y="300" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">写作工具按需取 top-k</text>
+      <text x="380" y="322" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">作为事实依据</text>
+      <line x1="320" y1="300" x2="360" y2="300" stroke="#8C857B" stroke-width="1.4" marker-end="url(#wt-arr)"/>
+
+      <!-- 助手 LLM -->
+      <rect x="540" y="228" width="280" height="142" rx="12" fill="#FFFFFF" stroke="#1A1816" stroke-width="1.6"/>
+      <text x="558" y="254" font-family="Inter,Noto Sans SC,sans-serif" font-size="13" font-weight="700" fill="#1A1816">助手 LLM（Qwen2.5-Instruct）</text>
+      <text x="558" y="274" font-family="Noto Sans SC,sans-serif" font-size="12" fill="#6B6660">后台执行，不把全文回灌思维链</text>
+      <rect x="558" y="288" width="72" height="26" rx="5" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="594" y="305" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#7A2E16">T_draft</text>
+      <rect x="640" y="288" width="72" height="26" rx="5" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="676" y="305" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#7A2E16">T_check</text>
+      <rect x="722" y="288" width="72" height="26" rx="5" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="758" y="305" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" fill="#7A2E16">T_edit</text>
+      <text x="558" y="344" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#8C857B">T_check 只回大纲；T_edit 输出整篇</text>
+
+      <line x1="450" y1="152" x2="578" y2="228" stroke="#C04E2D" stroke-width="1.5" marker-end="url(#wt-arr-a)"/>
+      <text x="540" y="186" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#7A2E16">写 / 查 / 改 指令</text>
+      <line x1="690" y1="228" x2="520" y2="152" stroke="#8C857B" stroke-width="1.4" marker-end="url(#wt-arr)"/>
+      <text x="690" y="196" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#8C857B">大纲 / 报告</text>
+
+      <!-- 图例 -->
+      <rect x="20" y="400" width="14" height="14" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="40" y="412" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#6B6660">主模型直接发出</text>
+      <rect x="170" y="400" width="14" height="14" fill="#DDE9EE" stroke="#2E5A6B"/>
+      <text x="190" y="412" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#6B6660">Explorer 内部动作</text>
+      <rect x="330" y="400" width="14" height="14" fill="#DDEBDD" stroke="#3F6B4A"/>
+      <text x="350" y="412" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#6B6660">文档记忆</text>
+      <rect x="450" y="400" width="14" height="14" fill="#F5ECD8" stroke="#D4C4A6"/>
+      <text x="470" y="412" font-family="Noto Sans SC,sans-serif" font-size="11.5" fill="#6B6660">普通思考</text>
+    </svg>
+    <figcaption>
+      图 1：重绘自论文 Figure 3。红色 = 主模型直接发出的工具调用，蓝色 = Explorer 内部，绿色 = 文档记忆，黄色 = 普通思维 token。
+      <br><span class="fig-toggle" id="fig1-toggle">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail" id="fig1-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么 Explorer 要是 agent 而不是函数：</strong>一次简单搜索拿回的摘要经常缺关键细节（论文 GAIA 案例里邮编就不在摘要里），需要「再点进去看看」。把这一步交给子 agent，主模型不必在思维链里管理页面状态。</li>
+          <li><strong>为什么写作要外包：</strong>报告动辄数千字，如果直接写进主思维链，会挤占思考预算、打乱节奏。主模型发一句编辑指令，助手 LLM 用文档记忆去写，主模型拿到 <code>T<sub>check</sub></code> 返回的大纲即可判断进度。</li>
+          <li><strong>代价：</strong>一次主搜索实际是「10 页抓取 + Explorer 多轮推理 + 摘要」。附录 C 的 Write Section 指令要求「每段充分展开、必要时加表格」，这些都很耗 token——见 Chapter 07。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：不加训练就全面超过 Search-o1，RL 再把 HLE 拉过 o3-mini (High)</h2></div>
+  <p class="sec-sub">以下数字全部来自论文 Table 1、Table 2、Figure 4 和 Table 3，Pass@1，由 Qwen2.5-72B-Instruct 判对错。</p>
+
+  <div class="tabs" id="res-tabs">
+    <button class="tab active" data-res="gaia">GAIA（Avg）</button>
+    <button class="tab" data-res="web">WebWalkerQA（Avg）</button>
+    <button class="tab" data-res="hle">HLE（Avg）</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="chart" id="res-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>直接作答</span>
+      <span><i style="background:var(--c2)"></i>RAG 工作流</span>
+      <span><i style="background:var(--text-soft)"></i>Search-o1-32B</span>
+      <span><i style="background:var(--accent)"></i>WebThinker（本文）</span>
+    </div>
+    <div class="readout" id="res-note" style="margin-top:16px"></div>
+  </div>
+
+  <p>两个反直觉的发现：</p>
+  <ul>
+    <li><strong>Base 版就已经赢了：</strong>WebThinker-32B-Base 没做任何 RL，GAIA <code>44.7</code>、HLE <code>13.0</code>，已经全面超过 Search-o1 的 39.8 和 10.8。换句话说，框架（Explorer + 工具调用格式）本身贡献了一大块，RL 是在此之上的加速。</li>
+    <li><strong>提升幅度是「相对值」：</strong>论文 §4.4 报告 RL 相对 Base 在 GAIA 上 +8.5%、HLE 上 +21.5%。换成绝对点差：GAIA +3.8（44.7→48.5）、HLE +2.8（13.0→15.8），15.8/13.0 − 1 = +21.5%、48.5/44.7 − 1 ≈ +8.5%，都是相对提升。</li>
+  </ul>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法（32B 档）</th><th style="text-align:right">GPQA</th><th style="text-align:right">GAIA</th><th style="text-align:right">WebWalkerQA</th><th style="text-align:right">HLE</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>QwQ-32B 直接作答</td><td class="num">64.1</td><td class="num">22.3</td><td class="num">4.3</td><td class="num">9.6</td></tr>
+        <tr><td>RAG-QwQ-32B w/ Iterative RAG</td><td class="num">65.2</td><td class="num">35.0</td><td class="num">31.5</td><td class="num">9.6</td></tr>
+        <tr><td>Search-o1-32B</td><td class="num">67.2</td><td class="num">39.8</td><td class="num">34.1</td><td class="num">10.8</td></tr>
+        <tr><td>WebThinker-32B-Base（免训练）</td><td class="num">68.7</td><td class="num">44.7</td><td class="num">41.9</td><td class="num">13.0</td></tr>
+        <tr class="best"><td>WebThinker-32B-RL</td><td class="num">70.7</td><td class="num">48.5</td><td class="num">46.5</td><td class="num">15.8</td></tr>
+        <tr><td>o3-mini (High)，闭源参考</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">14.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-8px">来源：Table 1（GPQA/GAIA/WebWalkerQA）、Table 2（HLE）。o3-mini 与 WebThinker 不是同一评测设定下的完整对比，仅作参照。</p>
+
+  <h3>消融：哪一块最不能拆</h3>
+  <p>Table 3 左栏四基准平均（论文把四个平均称为 Avg.，并报告 RL 版为 45.4）：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>设置</th><th style="text-align:right">GPQA</th><th style="text-align:right">GAIA</th><th style="text-align:right">WebWalkerQA</th><th style="text-align:right">HLE</th><th style="text-align:right">Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>WebThinker-32B-RL</td><td class="num">70.7</td><td class="num">48.5</td><td class="num">46.5</td><td class="num">15.8</td><td class="num">45.4</td></tr>
+        <tr><td>换成离线 DPO</td><td class="num">69.2</td><td class="num">45.6</td><td class="num">44.0</td><td class="num">14.2</td><td class="num">43.2</td></tr>
+        <tr><td>不做训练（Base）</td><td class="num">68.7</td><td class="num">44.7</td><td class="num">41.9</td><td class="num">13.0</td><td class="num">42.1</td></tr>
+        <tr><td>去掉点击链接</td><td class="num">69.7</td><td class="num">42.7</td><td class="num">42.6</td><td class="num">15.2</td><td class="num">42.6</td></tr>
+        <tr><td>去掉 Deep Web Explorer</td><td class="num">63.6</td><td class="num">38.8</td><td class="num">38.5</td><td class="num">12.0</td><td class="num">38.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>拆掉 Explorer，平均掉到 <code>38.3</code>，比不做训练的 42.1 还低——说明 Explorer 是地基。只去掉「点链接」平均掉到 42.6、GAIA 从 48.5 掉到 42.7，可见页面导航不是锦上添花。</p>
+
+  <h3>报告生成：Glaive，DeepSeek-R1-671B 与 GPT-4o 打分取平均</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th style="text-align:right">全面性</th><th style="text-align:right">深入性</th><th style="text-align:right">事实性</th><th style="text-align:right">连贯性</th><th style="text-align:right">平均</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>RAG-Qwen2.5-72B</td><td class="num">5.7</td><td class="num">5.3</td><td class="num">6.4</td><td class="num">6.3</td><td class="num">5.9</td></tr>
+        <tr><td>RAG-DeepSeek-R1</td><td class="num">6.6</td><td class="num">6.4</td><td class="num">7.1</td><td class="num">7.1</td><td class="num">6.8</td></tr>
+        <tr><td>Grok3 DeeperSearch</td><td class="num">6.4</td><td class="num">6.1</td><td class="num">7.0</td><td class="num">6.5</td><td class="num">6.5</td></tr>
+        <tr><td>Gemini2.0 Deep Research</td><td class="num">8.1</td><td class="num">8.0</td><td class="num">7.7</td><td class="num">7.7</td><td class="num">7.9</td></tr>
+        <tr><td>WebThinker-32B-Base</td><td class="num">8.4</td><td class="num">8.2</td><td class="num">7.7</td><td class="num">7.8</td><td class="num">8.0</td></tr>
+        <tr class="best"><td>WebThinker-32B-RL</td><td class="num">8.3</td><td class="num">8.4</td><td class="num">7.7</td><td class="num">7.9</td><td class="num">8.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>注意 <strong>8.1 只是 32B 模型</strong>。Gemini2.0 Deep Research 是闭源系统，WebThinker 以 32B 骨干在四个维度上都不落下风。消融右栏还有一个信号：去掉「自主写报告」后平均掉到 <code>6.6</code>，是所有消融里跌幅最大的——边想边写是报告质量的主要来源，三个写作工具本身次之。</p>
+
+  <h3>换骨干：DeepSeek-R1 7B / 14B / 32B 同频提速</h3>
+  <p>论文 §4.6 与 Figure 5 报告，WebThinker-R1-7B 相对直接作答在 GAIA 上提升 <code>174.4%</code>、WebWalkerQA 上 <code>422.6%</code>；相对标准 RAG 分别是 <code>82.9%</code> 和 <code>161.3%</code>。用 Figure 5(a)/(b) 的柱子可复核：GAIA 7.8→31.1、13.8→31.1；WebWalkerQA 3.8→13.8、4.2→13.8，与这四个百分比吻合。这是本文少有的「小模型也吃得上」的证据。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：只能读文本、只认少数工具、推理长度翻倍</h2></div>
+  <p class="sec-sub">论文 §5 自己承认三条局限，附录里的评测设定又暴露出两条需要留意的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">论文自述 ①</span><h4>不能处理图像、视频</h4></div>
+    <p>模型文本输入文本输出，GAIA 只能用纯文本验证集 103 题，HLE 只能从 500 道纯文本样本中抽测。真实网页里大量信息在图表和图片中，这部分完全看不到。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">论文自述 ②</span><h4>工具集有限，扩展性未验证</h4></div>
+    <p>工具是预先定义的特殊 token（搜索、点击、写、查、改）。换成新工具（代码解释器、数据库 API）需要重新教模型输出格式，并且训练信号的唯一验收是最终答案，新工具是否必然「用得好」没有做验证。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">论文自述 ③</span><h4>没有 GUI 级交互</h4></div>
+    <p>Explorer 只做「点链接 / 按钮」，不理解表单填写、滚动加载、验证码这类真实网页交互，也没有对失败页面的恢复策略。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">读数据时注意 ④</span><h4>判分全靠 LLM，报告评估也没有人类评审</h4></div>
+    <p>问题对错由 Qwen2.5-72B-Instruct 判，报告质量由 DeepSeek-R1-671B 与 GPT-4o 打 listwise 分。附录 C.3.2 明确说不做人类评估（报告特征太明显、容易认出系统），并用随机排序缓解位置偏差——但裁判模型与骨干部分同源，仍可能有利好。8.3 与 8.1 这种差距落在打分误差带内。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">读数据时注意 ⑤</span><h4>推理 token 上限 81,920，训练长度只有 32,768</h4></div>
+    <p>每次主搜索都意味着抓 10 页、Explorer 多轮推理、助手 LLM 摘要；RL 训练又把序列压到 32,768。训练分布与推理分布之间的落差意味着，在解特别长的 WebWalkerQA 任务时，有多少次是被 <code>max 81920</code> 截断、有多少实际走完，论文没有单独报告。这种框架对推理成本是直接的放大。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>WebThinker 解决的是「谁来编排研究动作」，不是「研究质量的上限」。</strong>它的增益主要来自 Explorer 的深挖能力（消融里去掉就掉到 38.3）。任务一旦需要看图、填表、操作复杂网页，就得换成多模态骨干或 GUI 级浏览器工具，并不存在「接上新工具就自动学会用」的保证。</p>
+</section>
+
+<footer>
+  <div>基于论文原文（arXiv 2504.21776v2，NeurIPS 2025）整理。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2504.21776" target="_blank" rel="noopener">WebThinker: Empowering Large Reasoning Models with Deep Research Capability</a><br>
+    代码：<a href="https://github.com/RUC-NLPIR/WebThinker" target="_blank" rel="noopener">RUC-NLPIR/WebThinker</a><br>
+    笔记：<a href="/webthinkerempowering-large-reasoning-models-with-deep-research-capability/">WebThinker：Empowering Large Reasoning Models with Deep Research Capability</a><br>
+    <span style="display:inline-block;margin-top:6px">笔记勘误（未改动原文）：① 笔记写 “48.5，显著高于迭代式 RAG 的 35.0 和 Search-o1 的 39.8（见 Table 1）”——数字对，但 48.5 属于 WebThinker-32B-<strong>RL</strong>，Base 版是 44.7；且论文并未说 48.5 “显著高于” 两者之外的更多对比。② 笔记写 “WebThinker (Avg. 8.1) … 全面性 8.4、深入性 8.4”——8.1 与深入性 8.4 属于 RL 版，全面性 8.4 属于 Base 版；Gemini Deep Research 平均为 7.9，不是 8.0。③ 笔记写实验在 “4 个节点的 8 卡 H100-80GB” 上进行，论文正文与附录均未出现此描述。④ 笔记写 “在 HLE 上得 15.8，迭代 RAG 9.6、Search-o1 10.8”——数字对；但笔记未说明 HLE 是 500 道纯文本抽样、判分使用 Qwen2.5-72B-Instruct。</span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   交互 1：轨迹逐步展开 / 报告模式切换
+   ============================================================ */
+(function () {
+  var TRACE = {
+    sol: [
+      { sym: 'r', tag: '主模型 · 思考', text: '确认 Finding Nemo 主角是 clownfish（Amphiprion ocellaris），决定去 USGS 非本土物种库查目击记录。', who: 'main' },
+      { sym: 'S', tag: '主模型 · 搜索', text: '发出 <|begin_search_query|> USGS Amphiprion ocellaris nonnative sightings pre 2020 <|end_search_query|>。', who: 'main' },
+      { sym: 'I', tag: 'Explorer · 返回', text: 'Explorer 给出唯一目击：2018 年、Pinellas County 的 Fred Howard Park；但明确说搜索结果里没有邮编。', who: 'sub' },
+      { sym: 'r', tag: '主模型 · 思考', text: '地点有了，邮编缺失 → 再搜公园所在地的邮编。', who: 'main' },
+      { sym: 'S', tag: '主模型 · 搜索', text: '发出第二个搜索：Fred Howard Park St. Petersburg Florida zip code。', who: 'main' },
+      { sym: 'I', tag: 'Explorer · 返回', text: '返回 1700 Sunset Drive, Tarpon Springs, FL 34689。主模型再核对一遍“只有这一处”。', who: 'sub' },
+      { sym: 'r', tag: '主模型 · 收尾', text: '确认只此一例，按题目要求（多个才逗号分隔）准备只输出一个邮编。', who: 'main' },
+      { sym: 'A', tag: '最终答案', text: '\\boxed{34689}', who: 'ans' }
+    ],
+    rep: [
+      { sym: 'r', tag: '主模型 · 思考', text: '按研究计划：先查 FDM 打印的尺寸限制，再写引言。', who: 'main' },
+      { sym: 'S', tag: '主模型 · 搜索', text: '发起关于 3D 打印晶格结构基础约束的搜索。', who: 'main' },
+      { sym: 'I', tag: 'Explorer · 返回', text: '返回 FDM 打印材料与精度相关的要点，全部写入文档记忆 M。', who: 'sub' },
+      { sym: 'r', tag: '主模型 · 思考', text: '引言素材足够 → 直接请助手写第一节。', who: 'main' },
+      { sym: 'W', tag: '写作工具 T_draft', text: '助手 LLM 用 M 的 top-k 文档写出 “Introduction”。主模型不下发全文，立即继续思考。', who: 'sub' },
+      { sym: 'C', tag: '检查工具 T_check', text: '主模型查当前大纲：已有一节，下一节该写材料属性。', who: 'main' },
+      { sym: 'E', tag: '编辑工具 T_edit', text: '主模型发出编辑指令，助手 LLM 输出整篇修订后的报告。', who: 'sub' },
+      { sym: 'A', tag: '完成', text: '生成 EOS，报告结束。', who: 'ans' }
+    ]
+  };
+
+  var mode = 'sol';
+  var idx = 0;
+  var slider = document.getElementById('wt-step');
+  var slots = document.getElementById('wt-slots');
+  var msg = document.getElementById('wt-msg');
+  var rhead = document.getElementById('wt-rhead');
+  var stepv = document.getElementById('wt-step-v');
+  var btnsWrap = document.getElementById('wt-btns');
+
+  function render() {
+    var arr = TRACE[mode];
+    if (!arr) return;
+    if (idx > arr.length - 1) idx = arr.length - 1;
+    if (idx < 0) idx = 0;
+    if (slider) {
+      slider.max = String(arr.length - 1);
+      slider.value = String(idx);
+    }
+    if (stepv) stepv.textContent = (idx + 1) + ' / ' + arr.length;
+    if (slots) {
+      slots.innerHTML = '';
+      arr.forEach(function (s, i) {
+        var el = document.createElement('div');
+        el.className = 'slot' + (i <= idx ? ' hit' : '');
+        if (i > idx) el.style.opacity = '0.35';
+        var n = document.createElement('div');
+        n.className = 'slot-name';
+        n.textContent = '#' + (i + 1);
+        var v = document.createElement('div');
+        v.className = 'slot-val';
+        v.textContent = s.sym;
+        el.appendChild(n);
+        el.appendChild(v);
+        slots.appendChild(el);
+      });
+    }
+    var cur = arr[idx];
+    if (rhead) rhead.textContent = '步骤 ' + (idx + 1) + ' · ' + cur.tag;
+    if (msg) {
+      msg.innerHTML = '<strong>' + cur.tag + '</strong> —— ' + cur.text;
+    }
+  }
+
+  if (slider) {
+    slider.addEventListener('input', function () {
+      idx = parseInt(slider.value, 10) || 0;
+      render();
+    });
+  }
+  if (btnsWrap) {
+    var modeBtns = btnsWrap.querySelectorAll('.rule-btn');
+    Array.prototype.forEach.call(modeBtns, function (b) {
+      b.addEventListener('click', function () {
+        Array.prototype.forEach.call(modeBtns, function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        mode = b.getAttribute('data-step') === '6' ? 'rep' : 'sol';
+        idx = 0;
+        render();
+      });
+    });
+  }
+
+  var acts = document.querySelectorAll('#method .sim .act');
+  Array.prototype.forEach.call(acts, function (b) {
+    b.addEventListener('click', function () {
+      var a = b.getAttribute('data-act');
+      var arr = TRACE[mode];
+      if (!arr) return;
+      if (a === 'next') idx = Math.min(arr.length - 1, idx + 1);
+      else if (a === 'reset') idx = 0;
+      render();
+    });
+  });
+
+  if (slots) render();
+
+  /* 图 1 说明折叠 */
+  var tg = document.getElementById('fig1-toggle');
+  var det = document.getElementById('fig1-detail');
+  if (tg && det) {
+    tg.addEventListener('click', function () {
+      var open = det.classList.toggle('active');
+      tg.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+    });
+  }
+})();
+
+/* ============================================================
+   交互 2：偏好规则裁决
+   ============================================================ */
+(function () {
+  var PAIRS = [
+    { a: { label: 'A', ok: true, calls: 4, len: 2.0 }, b: { label: 'B', ok: true, calls: 6, len: 2.0 } },
+    { a: { label: 'A', ok: true, calls: 4, len: 2.0 }, b: { label: 'C', ok: false, calls: 5, len: 2.0 } },
+    { a: { label: 'A', ok: true, calls: 4, len: 2.0 }, b: { label: 'D', ok: true, calls: 4, len: 3.2 } }
+  ];
+  var liEl = document.getElementById('pref-li');
+  var ljEl = document.getElementById('pref-lj');
+  var liV = document.getElementById('pref-li-out');
+  var ljV = document.getElementById('pref-lj-out');
+  var slots = document.getElementById('pref-slots');
+  var msg = document.getElementById('pref-msg');
+  var calc = document.getElementById('pref-calc');
+  var pair = 1;
+  var gamma = 1.5;
+
+  function verdict() {
+    var p = PAIRS[pair];
+    var a = p.a, b = p.b;
+    var lenA = parseFloat(liEl.value) || 2;
+    var lenB = parseFloat(ljEl.value) || 3.2;
+    a.len = lenA;
+    b.len = lenB;
+
+    if (a.ok !== b.ok) {
+      var win = a.ok ? a : b;
+      var lose = a.ok ? b : a;
+      return { rule: '①', win: win.label, lose: lose.label, reason: (win.label + ' 答对，' + lose.label + ' 答错，① 优先于其他所有规则。') };
+    }
+    if (a.calls !== b.calls) {
+      var w2 = a.calls < b.calls ? a : b;
+      var l2 = a.calls < b.calls ? b : a;
+      return { rule: '②', win: w2.label, lose: l2.label, reason: '两者都答对，比较工具调用数：' + w2.label + '=' + w2.calls + ' < ' + l2.label + '=' + l2.calls + '，'+ w2.label + ' 胜出。' };
+    }
+    var ratio = lenB / lenA;
+    var shorter = lenA < lenB ? a : b;
+    var longer = lenA < lenB ? b : a;
+    if (ratio > gamma) {
+      return { rule: '③', win: shorter.label, lose: longer.label, reason: '都答对且工具数相同，长度比 ' + ratio.toFixed(2) + ' > γ=' + gamma.toFixed(1) + '，更短的 ' + shorter.label + ' 胜出。' };
+    }
+    return { rule: '无', win: null, lose: null, reason: '都答对、工具数相同、长度比 ' + ratio.toFixed(2) + ' ≤ γ=' + gamma.toFixed(1) + '，三条规则都不触发 → 这一对不产生偏好对。' };
+  }
+
+  function render() {
+    if (liV) liV.textContent = (parseFloat(liEl.value) || 2).toFixed(1) + 'k';
+    if (ljV) ljV.textContent = (parseFloat(ljEl.value) || 2).toFixed(1) + 'k';
+    var v = verdict();
+    if (slots) {
+      slots.innerHTML = '';
+      [PAIRS[pair].a, PAIRS[pair].b].forEach(function (t) {
+        var el = document.createElement('div');
+        el.className = 'slot' + (v.win === t.label ? ' hit' : '');
+        var n = document.createElement('div');
+        n.className = 'slot-name';
+        n.textContent = '轨迹 ' + t.label;
+        var s1 = document.createElement('div');
+        s1.className = 'slot-val';
+        s1.textContent = 'ok=' + (t.ok ? '✓' : '✗') + ' · calls=' + t.calls;
+        var s2 = document.createElement('div');
+        s2.className = 'slot-val';
+        s2.style.color = 'var(--text-soft)';
+        s2.textContent = 'len=' + t.len.toFixed(1) + 'k';
+        el.appendChild(n); el.appendChild(s1); el.appendChild(s2);
+        slots.appendChild(el);
+      });
+    }
+    if (msg) msg.innerHTML = '<strong>' + (v.win ? '规则 ' + v.rule + ' 适用：' + v.win + ' 被偏好' : '不产生偏好对') + '</strong> —— ' + v.reason;
+    if (calc) {
+      var p = PAIRS[pair];
+      var ratio = (parseFloat(ljEl.value) || 2) / (parseFloat(liEl.value) || 1);
+      calc.textContent = 'len_j / len_i = ' + ratio.toFixed(2) + '  ·  γ = ' + gamma.toFixed(1) + '  ·  规则阈值判定: ' + (ratio > gamma ? 'True' : 'False');
+    }
+  }
+
+  if (liEl && ljEl) {
+    liEl.addEventListener('input', render);
+    ljEl.addEventListener('input', render);
+  }
+  var pb = document.getElementById('pref-btns');
+  if (pb) {
+    var pbtns = pb.querySelectorAll('.rule-btn');
+    Array.prototype.forEach.call(pbtns, function (b) {
+      b.addEventListener('click', function () {
+        Array.prototype.forEach.call(pbtns, function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        pair = parseInt(b.getAttribute('data-pair'), 10) || 0;
+        render();
+      });
+    });
+  }
+  var gbtns = document.querySelectorAll('#train .sim .act[data-gamma]');
+  Array.prototype.forEach.call(gbtns, function (b) {
+    b.addEventListener('click', function () {
+      Array.prototype.forEach.call(gbtns, function (x) { x.classList.remove('primary'); });
+      b.classList.add('primary');
+      gamma = parseFloat(b.getAttribute('data-gamma')) || 1.5;
+      render();
+    });
+  });
+  if (slots) render();
+})();
+
+/* ============================================================
+   交互 3：结果柱状图（属于第 06 节，非核心交互，仅做数据切换）
+   ============================================================ */
+(function () {
+  var DATA = {
+    gaia: {
+      note: 'GAIA 纯文本验证集（103 题），Pass@1。Iterative RAG 从直接作答 22.3 提升到 35.0；WebThinker-RL 48.5，比 Search-o1 的相对提升约 21.9%（48.5/39.8 − 1）。',
+      groups: [
+        { k: '直接作答', v: 22.3, c: 'var(--c1)' },
+        { k: 'RAG 迭代', v: 35.0, c: 'var(--c2)' },
+        { k: 'Search-o1', v: 39.8, c: 'var(--text-soft)' },
+        { k: 'WT-Base', v: 44.7, c: 'var(--accent)' },
+        { k: 'WT-RL', v: 48.5, c: 'var(--accent)' }
+      ],
+      max: 60
+    },
+    web: {
+      note: 'WebWalkerQA 测试集（680 题）。直接作答 QwQ-32B 只有 4.3，RAG 迭代 31.5，Search-o1 34.1；Base 41.9，RL 46.5。WebWalkerQA 专门压测网页遍历——Table 3 里去掉「点链接」后是 42.6，只比整版 Base 的 41.9 高一点，远低于完整 RL 版的 46.5。',
+      groups: [
+        { k: '直接作答', v: 4.3, c: 'var(--c1)' },
+        { k: 'RAG 迭代', v: 31.5, c: 'var(--c2)' },
+        { k: 'Search-o1', v: 34.1, c: 'var(--text-soft)' },
+        { k: 'WT-Base', v: 41.9, c: 'var(--accent)' },
+        { k: 'WT-RL', v: 46.5, c: 'var(--accent)' }
+      ],
+      max: 60
+    },
+    hle: {
+      note: 'HLE 抽取 500 道纯文本题。RAG 迭代在 HLE 上和直接作答同为 9.6，没有额外增益（Query Planning 版也是 9.6）；Search-o1 10.8；WebThinker Base 13.0，RL 15.8，高于 o3-mini (High) 的 14.0（论文 Table 2 原文）。',
+      groups: [
+        { k: '直接作答', v: 9.6, c: 'var(--c1)' },
+        { k: 'RAG 迭代', v: 9.6, c: 'var(--c2)' },
+        { k: 'Search-o1', v: 10.8, c: 'var(--text-soft)' },
+        { k: 'WT-Base', v: 13.0, c: 'var(--accent)' },
+        { k: 'WT-RL', v: 15.8, c: 'var(--accent)' }
+      ],
+      max: 20
+    }
+  };
+
+  var chart = document.getElementById('res-chart');
+  var note = document.getElementById('res-note');
+  var tabsWrap = document.getElementById('res-tabs');
+  var current = 'gaia';
+
+  function render() {
+    var cfg = DATA[current];
+    if (!cfg) return;
+    if (note) note.innerHTML = cfg.note;
+    if (!chart) return;
+    chart.innerHTML = '';
+    cfg.groups.forEach(function (g) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = g.k;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.height = Math.max(3, Math.min(100, g.v / cfg.max * 100)) + '%';
+      fill.style.background = g.c;
+      track.appendChild(fill);
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = g.v.toFixed(1);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+  }
+
+  if (tabsWrap) {
+    var tabs = tabsWrap.querySelectorAll('.tab');
+    Array.prototype.forEach.call(tabs, function (t) {
+      t.addEventListener('click', function () {
+        Array.prototype.forEach.call(tabs, function (x) { x.classList.remove('active'); });
+        t.classList.add('active');
+        current = t.getAttribute('data-res');
+        render();
+      });
+    });
+  }
+  if (chart) render();
+})();
+</script>
+</body>
+</html>

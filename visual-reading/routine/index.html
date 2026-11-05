@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Routine · 把专家写好的流程塞进提示词，小模型也能稳跑多步工具调用</title>
+<meta name="description" content="Routine 把企业多步工具调用任务写成结构化流程脚本，规划与执行解耦；GPT-4o 准确率从 41.1% 升到 96.3%，Qwen3-14B 从 32.6% 升到 83.3%，再经 AI 优化加蒸馏可达 95.5%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 系统提示词模型 ---- */
+.sys{margin:18px 0}
+.sys-sec{border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);margin-bottom:8px;overflow:hidden;transition:all .2s ease}
+.sys-sec.active{border-color:var(--accent);background:var(--bg-surface);box-shadow:0 0 0 3px rgba(192,78,45,.10)}
+.sys-code{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.12em;color:var(--text-soft);padding:6px 14px 0;text-transform:uppercase}
+.sys-label{font-size:14px;font-weight:600;padding:2px 14px 4px}
+.sys-body{font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.6;padding:0 14px 12px;color:var(--text)}
+.sys-body .ln{display:flex;gap:10px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sys-body .ln .st{min-width:24px;color:var(--text-soft);white-space:pre;flex:none}
+.sys-body .ln.key{color:var(--accent-deep);font-weight:600}
+
+/* ---- Routine 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+.rt-step{font-family:inherit;cursor:pointer;min-width:0}
+.rt-tool{font-size:10.5px;word-break:break-all;line-height:1.4}
+
+@media (max-width:520px){
+  .sys-body{font-size:11px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Routine</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">Routine 结构</a>
+      <a href="#train">怎么训</a>
+      <a href="#arch">架构</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2507.14447 · 企业智能体</span>
+  <h1>Routine：把专家写好的流程塞进提示词，小模型也能稳跑多步工具调用</h1>
+  <p class="hero-sub">
+    通用大模型在企业里最常犯的错不是不会调工具，而是<strong>挑错工具</strong>：面对 25 个功能相近的工具和一条有依赖关系的多步任务，它既不懂公司流程，也没人给它一张明确的路线图。
+    Routine 把任务写成「第几步、做什么、用哪个工具」的结构化脚本，交给一个专职执行的小模型；流程知识还可以被蒸馏进权重。
+  </p>
+  <div class="meta">
+    <span>Guancheng Zeng 等 · Digital China AI Research · arXiv v2 (2025-07-22)</span>
+    <a href="https://arxiv.org/abs/2507.14447" target="_blank" rel="noopener">arXiv 2507.14447 ↗</a>
+    <span>无论文代码链接</span>
+    <a href="/routinea-structural-planning-framework-for-llm-agent-system-in-enterprise/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    企业多步任务的瓶颈是<strong>工具选择</strong>：无 Routine 时所有基线模型整体准确率都不到 50%，工具选择错误占全部错误的 <em>85% 以上</em>。规划能力不够的模型，塞进一张明确路线图就能补齐大半。
+  </p>
+  <p>
+    Routine 就是那张路线图：每步给出编号、名称、描述、输入输出和<strong>唯一一个工具名</strong>，分支写成「Branch X-n Step i」。规划与执行解耦——高能力模型把专家草稿整理成 Routine，轻量执行模型只管「调哪个工具、传什么参数」。
+  </p>
+  <p>
+    三种增强互相叠加：<strong>提示词里的 Routine</strong> 补外部流程知识，<strong>通用 Routine 跟随微调</strong> 练服从格式的肌肉记忆，<strong>场景蒸馏</strong> 把流程知识烘焙进权重。Qwen3-14B 三步走下来 32.6 → 83.3 → 92.7 → 98.0（Routine w/o Branch），在蒸馏测试集上到 95.5%，逼近 GPT-4o 的 96.3%。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">96.3<small> %</small></div>
+      <div class="k">GPT-4o + Routine w/ Branch<br>无 Routine 时 41.1</div>
+    </div>
+    <div class="metric">
+      <div class="v">83.3<small> %</small></div>
+      <div class="k">Qwen3-14B + Routine w/ Branch<br>无 Routine 时 32.6</div>
+    </div>
+    <div class="metric">
+      <div class="v">98.0<small> %</small></div>
+      <div class="k">Qwen3-14B 场景蒸馏 + w/o Branch<br>蒸馏测试集上 95.5</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>企业里的多步任务，卡的往往不是推理，而是工具选择</h2></div>
+  <p class="sec-sub">先分清「不会规划」和「不会选工具」——论文的数据说，后者才是主因。</p>
+
+  <p>
+    实验场景是一家员工超过 <code>8,000</code> 人的大企业里真实部署的 HR Agent：员工向它查询人员与部门信息。场景拆成 7 个子场景、7 条人工标注的 Routine，每条 4–7 个工具调用步骤，每步 1–3 个输入参数；参数之间有依赖，所以顺序不能乱。可用工具来自一个 MCP server，共 <code>25</code> 个功能各异的工具，覆盖数据查询、权限校验、模型生成等。
+  </p>
+
+  <p>
+    不提供任何计划时，模型必须自己从这 25 个工具里选、自己排顺序、自己填参数。论文 Table 2 的结果是：8 个基线模型（4 个闭源、4 个开源）<strong>整体准确率没有一个超过 50%</strong>。拆开看错误构成，结构错误很少（GPT-4o 的结构准确率是 100），参数准确率也有 97.3，唯独<strong>工具选择只有 42.2</strong>。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心判断</span><h4>85% 以上的错误出在「选哪个工具」</h4></div>
+    <p>论文明确写道：工具选择错误占全部错误的 85% 以上。也就是说，模型知道怎么输出合法 JSON、知道参数大概该填什么，但它在 25 个工具里挑不出一条正确的调用链——这恰恰是领域流程知识，不是通用推理。</p>
+    <p>另一层难点是流程本身：权限校验步骤不能漏、模型生成步骤要走专用工具、分支要看中间结果再决定。通用模型没有这些 SOP，规划自然写得七零八落。</p>
+  </div>
+
+  <p>
+    于是问题可以写得很具体：<strong>能不能把流程知识从规划这一步剥出来，变成一份执行模型必须照做的结构化脚本？</strong> 这正是 Routine 要回答的，也是前面几类做法卡住的地方。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前三类方案各差一口气：太自由、太中间、太贵</h2></div>
+  <p class="sec-sub">论文 Related Work 把 2023–2025 年的智能体实践归纳成这样几路，Routine 瞄准的是它们的交汇处。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">第一波</span><h4>完全自主</h4></div>
+      <p>AutoGPT 的任务列表、BabyAGI 的自动目标生成、AutoGen 的工具调用 DAG。证明了 LLM 能自主拆解与编排，但暴露出上下文管理低效、执行流程碎片化、步骤爆炸和循环调用导致的成本波动。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">第二波</span><h4>plan-then-act</h4></div>
+      <p>先出高层计划、再逐子任务选工具，例如 Manus 的 Planner / Executor / Verifier 三段式。保留了灵活性也约束了规划，但计划仍以<strong>非结构化或半结构化自然语言</strong>呈现，难以校验、调试和复用。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">替代路</span><h4>低代码平台</h4></div>
+      <p>流程天然稳定，但严重依赖人工搭建，工作流开发效率低，难以扩展到成百上千的业务流程；而且工具与模型之间的边界是写死的。</p>
+    </div>
+  </div>
+
+  <p>
+    还有一路是「模型侧」的努力：IFEval、ComplexBench、IOPO / TRACE、GuideBench 都在压测指令跟随。论文引用 ComplexBench 的发现——GPT-4 在<strong>链式结构与深层嵌套选择</strong>上准确率明显下降，结构感知和分布外泛化是短板。单纯加大模型或换更强的 prompt 工程，不能解决「它不知道公司第 3 步要调权限工具」这件事。
+  </p>
+
+  <p>
+    Routine 这个名字并非凭空而来：它最早出现在 <strong>OpenAI Cookbook</strong>，用来把指令拆成更小、可管理的任务以降低幻觉。论文在此基础上补齐了组件（输入输出、工具名、分支房号），并把重心放在「执行模型能不能稳定照做」上——它把 Routine 当作 LLM 规划与执行引擎之间的<strong>中间表示</strong>。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>六个组件、一套分支编号：让执行模型知道自己「现在在哪一步」</h2></div>
+  <p class="sec-sub">Routine 的全部「方法」就是一份格式约定；它的价值在于把这几个字段位置固定死，让每一步都能被追踪与校验。</p>
+
+  <p>Table 1 列出一个完整 Routine 的组件，带 * 的是可选项：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>组件</th><th>含义</th><th>必填</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>Step Number</code></td><td>该步骤在主流程中的序号</td><td>是</td></tr>
+        <tr><td><code>Step Name</code></td><td>步骤目的的精简概括</td><td>是</td></tr>
+        <tr><td><code>Step Description</code></td><td>详细指令、执行条件与目标</td><td>是</td></tr>
+        <tr><td><code>Input Description</code></td><td>执行本步所需参数说明</td><td>可选 *</td></tr>
+        <tr><td><code>Output Description</code></td><td>成功执行后产生的输出参数</td><td>可选 *</td></tr>
+        <tr class="best"><td><code>Step Tool</code></td><td>本步对应的函数工具，<strong>每步只调一个</strong></td><td>可选 *</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-8px">Table 1 · Routine 的组件。工具名标成可选，但消融（Table 3）显示去掉它几乎全员掉点：GPT-4o 是唯一例外（96.3 → 96.7）。</p>
+
+  <h3>分支不是另起一张表，而是编号</h3>
+  <p>相似场景的 Routine 常有重叠步骤，只在某一段分叉。论文的做法是在主流程里开分支步骤，用 <code>Branch X-n Step i</code> 命名——第 X 个主步骤的第 n 条分支里的第 i 步。执行模型据此判断自己在哪条分支、走到第几步；工作流在某步结束后要以「终止」描述出来。修改流程时，开发者可以快速插入、删除或编辑某一步。</p>
+
+  <div class="eq">
+    Step X. &lt;条件检查&gt;:
+    &nbsp; Branch X-1 Step 1. &lt;名称&gt; — 若 &lt;条件&gt;，用 &lt;工具&gt; 执行 &lt;描述&gt;<br>
+    &nbsp; Branch X-2 Step 1. &lt;名称&gt; — 若 &lt;另一条件&gt;，用 &lt;工具&gt; 执行 &lt;描述&gt;<br>
+    Step Y. &lt;名称&gt; — &lt;描述&gt;，用 &lt;工具&gt;
+    &nbsp; Step Z. &lt;名称&gt; — &lt;描述&gt;，用 &lt;工具&gt;，终止工作流
+  </div>
+  <div class="eq-cap">论文 §3.1.1 给出的分支写法；Appendix B.1 是一条 4 步的自然语言 Routine 实例（获取公告 → 下载手册 → 读 PDF → 比对文本）</div>
+
+  <p>
+    自然语言 Routine 只是外显形式。Appendix A.1 的生成 prompt 让规划模型先输出 JSON 列表（<code>step / name / description / tool / type</code>，<code>type</code> 取 <code>node</code>、<code>branch</code>、<code>branchnode</code> 或 <code>finish</code>），再转写成人可读的执行步骤。同一条 Routine 有两种形态，前者便于机器校验与入库，后者交给人审和模型阅读。
+  </p>
+
+  <p>
+    另一处结构性设计是「谁来收尾」：最后一步不让执行模型自己用自然语言回答，而是调用一个<strong>专用的汇总工具</strong>，该工具配有场景专属模板。这样汇总 prompt 与工具调用 prompt 互不干扰，执行模型始终只做一件事。
+  </p>
+</section>
+
+<!-- ================= 4. 怎么训/怎么算 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>两条训练管线叠加：练「照做」，再把流程烘焙进权重</h2></div>
+  <p class="sec-sub">Routine 是外部提示；要让小模型即使没有提示也稳，还需要数据合成与蒸馏。</p>
+
+  <h3>管线一：通用 Routine 跟随（练格式）</h3>
+  <p>
+    底料是 BUTTON 开源数据集：<code>8,000</code> 条单轮多步工具调用实例，覆盖多种常见任务。用 GPT-4o 按专门模板为每条实例生成结构化 Routine，再按标准执行 prompt 重新拼系统提示，随后做三步过滤：
+  </p>
+  <ul>
+    <li><strong>文本校验</strong>：丢弃空回复或输出异常条目；</li>
+    <li><strong>删掉自然语言总结步</strong>：汇总交给专用工具，训练样本只保留用户查询、工具调用和观察；</li>
+    <li><strong>长度与结构过滤</strong>：超过 8 个工具调用步骤的丢弃，含嵌套列表、字典等复杂结构的也丢弃。</li>
+  </ul>
+  <p>过滤后留下 <code>4,209</code> 条。这一步只教模型「读懂 Routine 语法并照做」，不教任何 HR 场景知识。</p>
+
+  <h3>管线二：场景蒸馏（把流程写进权重）</h3>
+  <p>
+    对 10 个无分支子场景各设计 5–6 个用户查询模板，用部门与员工信息填空，每个子场景约 50–60 条；清洗后得到 <code>537</code> 条用户查询，再用 LLM 生成语义等价的改写做数据增强。然后由 <strong>GPT-4o + Routine</strong> 作教师，对每一条蒸馏出完整的多步调用记录：每条 4–7 步，共 <code>3,108</code> 条标注的工具调用指令。另蒸馏 <code>200</code> 条用户查询（共 <code>1,148</code> 次工具调用）作为测试集。
+  </p>
+
+  <p>
+    教师执行时，Routine 在系统提示的 <code>&lt;routines&gt;</code> 标签里；工具返回的长结果不进上下文，只留一个键，由 <code>&lt;variables&gt;</code> 记账（见 05 节的变量内存）。学生模型因此看到的每条轨迹都是「专家流程 + 强模型执行」的干净样本。
+  </p>
+
+  <h3>微调配置：LoRA，四张 A10</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项</th><th>设置</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>训练框架</td><td>LLaMA-Factory + DeepSpeed ZeRO-3 + Flash Attention-2</td><td>§4.3.2</td></tr>
+        <tr><td>硬件</td><td>4 × NVIDIA A10（各 24GB）</td><td>§4.3.2</td></tr>
+        <tr><td>LoRA rank</td><td class="num">8</td><td>§4.3.2</td></tr>
+        <tr><td>batch / 梯度累积</td><td>每卡 1 条 × 4 步 = 有效 batch 16</td><td>§4.3.2</td></tr>
+        <tr><td>学习率 / warm-up</td><td><code>1.0e-4</code> / <code>0.1</code></td><td>§4.3.2</td></tr>
+        <tr><td>采样 checkpoint</td><td>按验证集选 epoch 3</td><td>§4.3.2</td></tr>
+        <tr><td>特殊 token</td><td><code>&lt;routines&gt;</code>、<code>&lt;variables&gt;</code> 等注册进词表</td><td>§4.3.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Qwen3 系列训练时<strong>没有开启推理模式</strong>：目标是跟随 Routine，不需要用 thinking 去推工具调用，省下推理 token。序列长度被调到超过实际输入长度，避免预处理时截断多步调用链。
+  </p>
+
+  <h3>评测：BFCL 的 AST 三级判定</h3>
+  <p>所有模型用 Berkeley Function-Calling Leaderboard（BFCL）的 FC 模式，按 AST 层级判定错误，再把 1,148 条样本拆成逐步的独立测试样本（每条带截至当前步的历史与当时的最新系统提示），并<strong>打乱工具列表顺序</strong>以排除位置偏置。三种配置对应 Routine 的有无与是否带分支：</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">No Routine</span></div><p style="font-size:13.5px">只给用户查询，模型自己规划。基线。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">Routine w/o Branch</span></div><p style="font-size:13.5px">给一条线性自然语言 Routine，考验指令跟随。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pa">Routine w/ Branch</span></div><p style="font-size:13.5px">同一 Routine 但含条件分支，考验按中间结果选路。</p></div>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">评测用的 Routine 只含编号、名称、描述、工具四件，不含输入输出描述；组件影响见 06 节 Table 3。整体准确率 = 所有步骤结构、工具、参数全部正确的样本比例，是最严的口径。</p>
+</section>
+
+<!-- ================= 5. 架构或流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>四个模块围着一个 Routine 转：规划写、记忆取、执行调、工具答</h2></div>
+  <p class="sec-sub">论文 Figure 2 的系统架构中，只有执行模块直接接触用户任务；另外两个「取巧」的地方是程序内存与变量内存。</p>
+
+  <figure>
+    <svg viewBox="0 0 760 470" role="img" aria-label="Routine 智能体系统架构：专家草稿经规划模块生成 Routine 存入程序内存；运行时按查询检索 Routine，连同变量内存与 MCP 工具列表进入执行模块；执行模块逐步发出工具调用，工具结果写入变量内存，最后调用汇总工具返回用户">
+      <defs>
+        <marker id="rt-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+
+      <!-- 离线 / 在线 分区 -->
+      <line x1="18" y1="40" x2="742" y2="40" class="pipe-line" stroke-dasharray="1 0"></line>
+      <text x="22" y="26" class="pipe-s pipe-m" font-weight="600">离线 · Routine 生产</text>
+      <text x="738" y="26" text-anchor="end" class="pipe-s pipe-m" font-weight="600">在线 · 每次用户任务</text>
+
+      <!-- 规划模块 -->
+      <rect x="18" y="56" width="210" height="96" rx="12" class="pipe-box"></rect>
+      <text x="123" y="80" text-anchor="middle" class="pipe-t" font-weight="600">规划模块 · 大模型</text>
+      <text x="123" y="102" text-anchor="middle" class="pipe-s">专家草稿 + 生成模板</text>
+      <text x="123" y="122" text-anchor="middle" class="pipe-s">拆子步骤 → 映射工具</text>
+      <text x="123" y="142" text-anchor="middle" class="pipe-s">→ 结构化 Routine</text>
+
+      <!-- 程序内存 -->
+      <rect x="268" y="56" width="210" height="96" rx="12" class="pipe-c2"></rect>
+      <text x="373" y="80" text-anchor="middle" class="pipe-t" font-weight="600">程序内存</text>
+      <text x="373" y="102" text-anchor="middle" class="pipe-s">Routine 库（长期）</text>
+      <text x="373" y="122" text-anchor="middle" class="pipe-s">按「Routine 描述 ↔ 查询」</text>
+      <text x="373" y="142" text-anchor="middle" class="pipe-s">相似度检索</text>
+      <path d="M228 104 L260 104" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+
+      <!-- 用户 -->
+      <rect x="548" y="56" width="194" height="52" rx="12" class="pipe-box"></rect>
+      <text x="645" y="78" text-anchor="middle" class="pipe-t" font-weight="600">HR 用户查询</text>
+      <text x="645" y="96" text-anchor="middle" class="pipe-s">+ 系统参数（如 user ID）</text>
+      <path d="M590 108 L590 150 L490 150" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+      <path d="M478 104 L540 104" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+      <text x="508" y="98" text-anchor="middle" class="pipe-s">召回 1 条</text>
+
+      <!-- 执行模块 -->
+      <rect x="268" y="186" width="210" height="132" rx="12" class="pipe-accent"></rect>
+      <text x="373" y="210" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">执行模块 · 小模型</text>
+      <text x="373" y="232" text-anchor="middle" class="pipe-s">只做：调哪个工具、传什么参数</text>
+      <text x="373" y="254" text-anchor="middle" class="pipe-s">系统提示四块：</text>
+      <text x="373" y="274" text-anchor="middle" class="pipe-s pipe-m">role · &lt;routines&gt; · &lt;variables&gt; · tools</text>
+      <text x="373" y="298" text-anchor="middle" class="pipe-s">一次只输出一个 tool_call</text>
+      <path d="M373 152 L373 178" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+
+      <!-- 变量内存 -->
+      <rect x="18" y="186" width="210" height="96" rx="12" class="pipe-c2"></rect>
+      <text x="123" y="210" text-anchor="middle" class="pipe-t" font-weight="600">变量内存</text>
+      <text x="123" y="232" text-anchor="middle" class="pipe-s">长参数 → 存库，上下文只留键</text>
+      <text x="123" y="252" text-anchor="middle" class="pipe-s">非持久，仅服务当前任务</text>
+      <path d="M228 226 L260 226" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+
+      <!-- 工具模块 -->
+      <rect x="268" y="352" width="210" height="96" rx="12" class="pipe-c1"></rect>
+      <text x="373" y="376" text-anchor="middle" class="pipe-t" font-weight="600">工具模块 · MCP Server</text>
+      <text x="373" y="398" text-anchor="middle" class="pipe-s">25 个工具：数据查询 /</text>
+      <text x="373" y="418" text-anchor="middle" class="pipe-s">权限校验 / 模型生成 / 汇总</text>
+      <path d="M373 318 L373 344" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+      <text x="384" y="336" class="pipe-s pipe-m">tool_call</text>
+      <path d="M300 350 L300 324" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+      <text x="252" y="340" class="pipe-s pipe-m">observation</text>
+
+      <!-- 回填变量 -->
+      <path d="M268 352 L123 352 L123 290" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+      <text x="150" y="368" class="pipe-s">长结果 → 变量键</text>
+
+      <!-- 汇总工具 -->
+      <rect x="548" y="352" width="194" height="96" rx="12" class="pipe-box"></rect>
+      <text x="645" y="376" text-anchor="middle" class="pipe-t" font-weight="600">汇总工具</text>
+      <text x="645" y="398" text-anchor="middle" class="pipe-s">场景专属模板</text>
+      <text x="645" y="418" text-anchor="middle" class="pipe-s">→ 最终回答给用户</text>
+      <path d="M478 400 L540 400" class="pipe-line" marker-end="url(#rt-arrow)"></path>
+      <path d="M645 156 L645 344" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#rt-arrow)"></path>
+      <text x="652" y="250" class="pipe-s">最后一步</text>
+    </svg>
+    <figcaption>
+      图 1：Routine 智能体系统的数据流（按论文 Figure 2 重绘）。青灰 = 外部工具，紫 = 两类内存，陶土红 = 系统核心的执行模块；虚线由用户直连汇总工具，因为执行模型本身不生成自然语言回答。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么规划离线、执行在线？</strong> Routine 的生成与优化是低频、重推理的工作，由领域专家给草稿、大模型整理；部署前 Routine 就写好并入库。运行时执行模块只需在固定路线上逐步选工具，高频但轻量。</li>
+          <li><strong>程序内存解决的是「选哪条 Routine」。</strong> 文库里有多个子场景的 Routine，全部塞进系统提示会推高推理成本并引入无关信息；系统按 Routine 描述与用户任务做相似度计算，只取出匹配的一条。论文没有公布相似度计算的细节与召回率。</li>
+          <li><strong>变量内存解决的是「参数太长」。</strong> 工具返回长文本时系统自动存库，模型在参数里只写对应的键，Memory Module 在真正调用前把键还原成值。它让上下文变短、token 变少，也减少了小模型在括号、引号、转义字符上的语法错误。</li>
+          <li><strong>为什么不让执行模型自己回答？</strong> 执行模型的 prompt 被工具调用指令占据；如果它还要生成总结，两套模板会互相干扰。交给专用汇总工具后，输出质量由汇总模板单独控制。</li>
+          <li><strong>MCP 的作用是把「怎么调」标准化。</strong> 工具的名称、参数类型、调用约束由协议统一描述，执行模块不必管理实现细节，新增工具或接入新系统不会改变执行逻辑，这让系统可扩展，也让执行模型只回答两个问题：调哪个、传什么。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <h3>自己动手：一条 5 步 Routine，看「丢工具名」和「长参数收进变量内存」分别伤在哪</h3>
+  <p>
+    下面是论文 Appendix B 的示例思路改写成的 5 步 Routine（获取公告 → 下载手册 → 读 PDF → 比对文本 → 汇总），4 个工具 + 1 个汇总工具。系统提示里的块数按下面开关变化；点任一步，看执行模型在该步的系统提示里还剩下什么。
+  </p>
+
+  <div class="sim" id="rt-sim">
+    <div class="sim-top" id="rt-modes">
+      <button class="rule-btn active" data-mode="full" type="button">完整 Routine<span class="r-sub">Routine + 变量内存</span></button>
+      <button class="rule-btn" data-mode="notool" type="button">丢掉工具名<span class="r-sub">Table 3 · w/o Tools</span></button>
+      <button class="rule-btn" data-mode="novar" type="button">关掉变量内存<span class="r-sub">长值直接进上下文</span></button>
+    </div>
+
+    <div class="sys-label" style="padding-left:0">执行模型在本步看到的系统提示（Routine 只列已走到与当前步）</div>
+    <div class="sys" id="sys-host" role="list" aria-label="执行模型系统提示的各个区块"></div>
+
+    <div id="rt-note" class="readout" style="margin-top:12px;margin-bottom:16px"><div class="r-head">这一帧的上下文账单</div><div id="rt-total"></div></div>
+
+    <div class="slots s5" id="rt-steps"></div>
+
+    <div class="readout" id="rt-readout">
+      <div class="r-head">当前选中</div>
+      <div id="rt-calc"></div>
+    </div>
+
+    <p class="fine">点击下方步骤卡切换当前步；切换上方模式会保留选中的步骤，便于对比同一步在三种配置下的账单。</p>
+  </div>
+
+  <details>
+    <summary>这个模拟简化了什么？<span class="sum-sub">点开看与真实实验的差异</span></summary>
+    <div class="details-body">
+      <p>示例流程取自论文 Appendix B 的 4 步自然语言 Routine（获取公告、下载手册、读 PDF、比对文本），页面多加了一个「生成公告摘要」步骤来演示变量内存的键。真实场景每条 Routine 4–7 步。</p>
+      <p>「上下文账单」是估算，不是论文数字：基线 3,000 token（角色规则 + 25 个工具描述 + 输出模板），Routine 每步约 9 token，变量键约 8 token，PDF 全文按 20k token、模型自写汇总按 1.2k token 计。论文明说减少 token 消耗，但没有报告这条流程的具体数字，所以页面只比较<strong>同一帧下三种模式的相对差值</strong>，并随当前步变化。</p>
+      <p>「丢掉工具名」几乎不省长度，但 Table 3 里它是单点掉分最大的改动（GPT-3.5 52.7 → 42.8，Qwen3-14B 83.3 → 71.9）：去掉的是信息，不是 token。GPT-4o 是唯一不受影响的模型（96.3 → 96.7）。</p>
+      <p>真实系统里变量内存由 Memory Module 在工具调用前后自动读写，执行模型只看到 <code>memory_xxx</code> 这样的键；模拟里把这一步显式画出来，方便看懂「长文本从哪里离开上下文」。</p>
+    </div>
+  </details>
+
+  <p>
+    图里还有一条容易被忽略的线：<strong>Procedure Memory 的检索精度是整条链路的前提</strong>。论文 Table 5 显示，哪怕只多放 1 条干扰 Routine，GPT-4o 的准确率就从 96.3 掉到 76.6，Qwen3-14B 从 83.3 掉到 63.2——这一点放到 07 节展开。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>同一张路线图，四种模型的提升方向完全不同</h2></div>
+  <p class="sec-sub">Table 2 最重要的不是「都涨了」，而是谁涨、涨在哪、什么时候反而没涨。</p>
+
+  <div class="tabs" id="rt-tabs">
+    <button class="tab active" data-model="gpt4o" type="button">GPT-4o（闭源）</button>
+    <button class="tab" data-model="qwen314" type="button">Qwen3-14B（开源原本）</button>
+    <button class="tab" data-model="qwen314c" type="button">Qwen3-14B · 通用跟随训练</button>
+    <button class="tab" data-model="qwen314s" type="button">Qwen3-14B · 场景蒸馏</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div id="rt-desc" class="readout" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="rt-chart"></div>
+    <div class="cx" id="rt-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>No Routine</span>
+      <span><i style="background:var(--c2)"></i>Routine w/ Branch</span>
+      <span><i style="background:var(--accent)"></i>Routine w/o Branch</span>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">四个观察，分别对应四类模型：</p>
+  <ul>
+    <li><strong>强模型（GPT-4o）：结构早就满分，短板就是工具选择。</strong> 工具选择 42.2 → 96.3，基本把整条缺口补平。带分支反而比线性略低（96.3 vs 97.0），论文解释：分支需要依据中间结果判断，本身会带来额外误差。</li>
+    <li><strong>弱模型（原始 Qwen3-14B）：Routine 是最大的增益来源。</strong> 工具选择 36.5 → 87.8，整体 32.6 → 83.6；参数准确率其实一直在 98 左右，说明它知道该填什么，只是不知道该调谁。</li>
+    <li><strong>通用跟随训练：有 Routine 更强，没 Routine 更弱。</strong> Qwen3-14B 线性 92.7、带分支 88.2，但 No Routine 反而是 33.2（原始模型 32.6）。论文的读法是：它被训成了一个更忠实的「执行者」，而规划者的能力没有被加强。</li>
+    <li><strong>场景蒸馏：把流程放进权重，连 No Routine 都行。</strong> Qwen3-14B 无 Routine 90.2，已经超过原始模型有 Routine 的 83.6；再给 Routine 是 97.5 / 98.0，逼近 GPT-4o。</li>
+  </ul>
+
+  <details>
+    <summary>完整 Table 2：8 个模型 × 3 种配置 × 4 个指标<span class="sum-sub">加训练变体共 16 行</span></summary>
+    <div class="details-body">
+      <div class="tbl-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th rowspan="2">模型</th><th rowspan="2">训练数据</th>
+              <th colspan="4" style="text-align:center">No Routine</th>
+              <th colspan="4" style="text-align:center">Routine w/ Branch</th>
+              <th colspan="4" style="text-align:center">Routine w/o Branch</th>
+            </tr>
+            <tr>
+              <th>结构</th><th>工具</th><th>参数</th><th>整体</th>
+              <th>结构</th><th>工具</th><th>参数</th><th>整体</th>
+              <th>结构</th><th>工具</th><th>参数</th><th>整体</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>GPT-3.5-Turbo</td><td>—</td><td class="num">99.8</td><td class="num">26.0</td><td class="num">95.3</td><td class="num">22.1</td><td class="num">99.8</td><td class="num">53.8</td><td class="num">98.2</td><td class="num">52.7</td><td class="num">99.9</td><td class="num">59.7</td><td class="num">98.1</td><td class="num">58.5</td></tr>
+            <tr><td>GPT-4-Turbo</td><td>—</td><td class="num">100</td><td class="num">44.6</td><td class="num">97.5</td><td class="num">43.5</td><td class="num">100</td><td class="num">99.1</td><td class="num">99.8</td><td class="num">99.0</td><td class="num">100</td><td class="num">98.7</td><td class="num">99.6</td><td class="num">98.3</td></tr>
+            <tr class="best"><td>GPT-4o</td><td>—</td><td class="num">100</td><td class="num">42.2</td><td class="num">97.3</td><td class="num">41.1</td><td class="num">100</td><td class="num">96.3</td><td class="num">99.9</td><td class="num">96.3</td><td class="num">100</td><td class="num">97.0</td><td class="num">99.9</td><td class="num">97.0</td></tr>
+            <tr><td>Claude-3.7-Sonnet</td><td>—</td><td class="num">97.7</td><td class="num">46.5</td><td class="num">96.6</td><td class="num">43.9</td><td class="num">100</td><td class="num">99.7</td><td class="num">99.7</td><td class="num">99.3</td><td class="num">99.2</td><td class="num">99.6</td><td class="num">99.3</td><td class="num">98.0</td></tr>
+            <tr><td>Qwen2.5-7B</td><td>—</td><td class="num">99.7</td><td class="num">15.6</td><td class="num">95.5</td><td class="num">14.9</td><td class="num">98.6</td><td class="num">51.4</td><td class="num">98.1</td><td class="num">49.7</td><td class="num">98.5</td><td class="num">57.9</td><td class="num">98.6</td><td class="num">56.3</td></tr>
+            <tr><td>Qwen2.5-14B</td><td>—</td><td class="num">99.3</td><td class="num">20.3</td><td class="num">96.5</td><td class="num">19.4</td><td class="num">97.8</td><td class="num">83.4</td><td class="num">96.9</td><td class="num">79.1</td><td class="num">98.4</td><td class="num">82.7</td><td class="num">97.2</td><td class="num">79.2</td></tr>
+            <tr><td>Qwen3-8B</td><td>—</td><td class="num">99.2</td><td class="num">37.3</td><td class="num">95.3</td><td class="num">35.3</td><td class="num">99.2</td><td class="num">83.9</td><td class="num">97.6</td><td class="num">81.3</td><td class="num">99.0</td><td class="num">84.8</td><td class="num">96.8</td><td class="num">81.3</td></tr>
+            <tr><td>Qwen3-14B</td><td>—</td><td class="num">94.1</td><td class="num">36.5</td><td class="num">94.9</td><td class="num">32.6</td><td class="num">96.0</td><td class="num">88.3</td><td class="num">98.3</td><td class="num">83.3</td><td class="num">97.0</td><td class="num">87.8</td><td class="num">98.2</td><td class="num">83.6</td></tr>
+            <tr><td>Qwen2.5-7B</td><td>Common</td><td class="num">93.6</td><td class="num">25.1</td><td class="num">95.2</td><td class="num">22.4</td><td class="num">97.6</td><td class="num">89.0</td><td class="num">98.6</td><td class="num">85.7</td><td class="num">96.9</td><td class="num">90.7</td><td class="num">98.7</td><td class="num">86.8</td></tr>
+            <tr><td>Qwen2.5-14B</td><td>Common</td><td class="num">91.1</td><td class="num">34.6</td><td class="num">98.1</td><td class="num">30.9</td><td class="num">97.2</td><td class="num">90.0</td><td class="num">98.4</td><td class="num">86.1</td><td class="num">97.6</td><td class="num">94.3</td><td class="num">98.8</td><td class="num">90.9</td></tr>
+            <tr><td>Qwen3-8B</td><td>Common</td><td class="num">95.3</td><td class="num">26.3</td><td class="num">93.4</td><td class="num">23.4</td><td class="num">96.3</td><td class="num">88.3</td><td class="num">97.2</td><td class="num">82.8</td><td class="num">97.4</td><td class="num">94.4</td><td class="num">97.2</td><td class="num">89.3</td></tr>
+            <tr><td>Qwen3-14B</td><td>Common</td><td class="num">97.3</td><td class="num">35.1</td><td class="num">97.2</td><td class="num">33.2</td><td class="num">98.2</td><td class="num">92.0</td><td class="num">97.7</td><td class="num">88.2</td><td class="num">99.0</td><td class="num">94.8</td><td class="num">98.8</td><td class="num">92.7</td></tr>
+            <tr><td>Qwen2.5-7B</td><td>Scenario</td><td class="num">99.7</td><td class="num">88.8</td><td class="num">99.1</td><td class="num">87.8</td><td class="num">99.7</td><td class="num">94.1</td><td class="num">99.7</td><td class="num">93.5</td><td class="num">99.7</td><td class="num">95.2</td><td class="num">99.5</td><td class="num">94.4</td></tr>
+            <tr><td>Qwen2.5-14B</td><td>Scenario</td><td class="num">99.8</td><td class="num">88.1</td><td class="num">99.4</td><td class="num">87.5</td><td class="num">100</td><td class="num">97.9</td><td class="num">99.6</td><td class="num">97.5</td><td class="num">99.8</td><td class="num">98.4</td><td class="num">99.8</td><td class="num">98.1</td></tr>
+            <tr><td>Qwen3-8B</td><td>Scenario</td><td class="num">100</td><td class="num">89.4</td><td class="num">99.4</td><td class="num">88.9</td><td class="num">99.8</td><td class="num">94.4</td><td class="num">99.3</td><td class="num">93.6</td><td class="num">99.9</td><td class="num">96.9</td><td class="num">99.3</td><td class="num">96.2</td></tr>
+            <tr><td>Qwen3-14B</td><td>Scenario</td><td class="num">99.7</td><td class="num">90.9</td><td class="num">99.4</td><td class="num">90.2</td><td class="num">99.7</td><td class="num">95.9</td><td class="num">99.9</td><td class="num">95.5</td><td class="num">99.7</td><td class="num">98.3</td><td class="num">99.9</td><td class="num">98.0</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Table 2 原表逐格录入。Common = 4,209 条通用 Routine 跟随数据微调；Scenario = 537 条场景蒸馏数据微调。「整体」要求结构、工具、参数三步全部正确；工具准确率只在结构正确的子集上算，参数准确率只在结构 + 工具都正确的子集上算，所以三者不能相乘回整体。</p>
+    </div>
+  </details>
+
+  <h3>消融一：工具名是 Routine 里最硬的字段</h3>
+  <p>在带分支 Routine 上逐个拆组件（Table 3），去掉工具名对多数模型是 5–15 个百分点的打击；加输入输出描述则对中等模型帮助最大。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">Baseline Routine</th><th style="text-align:right">+ I/O 参数描述</th><th style="text-align:right">去掉工具名</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-3.5-Turbo</td><td class="num">52.7</td><td class="num">61.1</td><td class="num">42.8</td></tr>
+        <tr class="best"><td>GPT-4o</td><td class="num">96.3</td><td class="num">97.5</td><td class="num">96.7</td></tr>
+        <tr><td>Qwen2.5-7B</td><td class="num">49.7</td><td class="num">60.6</td><td class="num">43.7</td></tr>
+        <tr><td>Qwen2.5-14B</td><td class="num">79.1</td><td class="num">84.2</td><td class="num">69.5</td></tr>
+        <tr><td>Qwen3-8B</td><td class="num">81.3</td><td class="num">81.3</td><td class="num">76.7</td></tr>
+        <tr><td>Qwen3-14B</td><td class="num">83.3</td><td class="num">81.5</td><td class="num">71.9</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-8px">Table 3 原表。GPT-4o 去掉工具名反而高 0.4 分，论文视为语义理解能力的个例；Qwen3 系列对 I/O 描述几乎不敏感，Qwen3-14B 甚至下降 1.8 分，论文猜测多余的描述会干扰模型。</p>
+
+  <h3>消融二：AI 优化的 Routine 已经够用，但强模型仍吃人工细节</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">User Draft</th><th style="text-align:right">AI Optimization</th><th style="text-align:right">Human Annotation</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-3.5-Turbo</td><td class="num">42.6</td><td class="num">52.9</td><td class="num">52.7</td></tr>
+        <tr><td>GPT-4o</td><td class="num">71.2</td><td class="num">90.9</td><td class="num">96.3</td></tr>
+        <tr><td>Qwen2.5-7B</td><td class="num">46.6</td><td class="num">50.4</td><td class="num">49.7</td></tr>
+        <tr><td>Qwen2.5-14B</td><td class="num">61.7</td><td class="num">82.3</td><td class="num">79.1</td></tr>
+        <tr><td>Qwen3-8B</td><td class="num">70.4</td><td class="num">73.8</td><td class="num">81.3</td></tr>
+        <tr><td>Qwen3-14B</td><td class="num">70.9</td><td class="num">76.7</td><td class="num">83.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-8px">Table 4 原表。用户草稿虽粗糙仍优于自主规划（GPT-4o 41.1 → 71.2）；AI 优化把 Qwen2.5-14B、GPT-3.5 拉到略高于人工标注。论文建议线上仍保留专家终审。</p>
+
+  <h3>消融三：多给一条干扰 Routine，强模型掉得最多</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">1 条（基线）</th><th style="text-align:right">2 条</th><th style="text-align:right">3 条</th><th style="text-align:right">5 条</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-3.5-Turbo</td><td class="num">52.7</td><td class="num">53.6</td><td class="num">54.7</td><td class="num">60.0</td></tr>
+        <tr><td>GPT-4o</td><td class="num">96.3</td><td class="num">76.6</td><td class="num">80.1</td><td class="num">88.6</td></tr>
+        <tr><td>Qwen2.5-7B</td><td class="num">49.7</td><td class="num">45.1</td><td class="num">45.0</td><td class="num">54.4</td></tr>
+        <tr><td>Qwen2.5-14B</td><td class="num">79.1</td><td class="num">55.8</td><td class="num">60.7</td><td class="num">71.3</td></tr>
+        <tr><td>Qwen3-8B</td><td class="num">81.3</td><td class="num">66.0</td><td class="num">66.9</td><td class="num">72.2</td></tr>
+        <tr><td>Qwen3-14B</td><td class="num">83.3</td><td class="num">63.2</td><td class="num">67.2</td><td class="num">79.9</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-8px">Table 5 原表。只有一条适用、其余为干扰，顺序随机打乱。论文的解释：2–3 条冲突 Routine 时模型会试图把它们<strong>拼在一起</strong>；条数再多，模型才转向「选一条」的机制，所以准确率回升。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>Routine 买的是确定性，账单写在「谁写流程」和「流程会变」上</h2></div>
+  <p class="sec-sub">适用边界几乎全部由论文自己的消融和局限节给出，不靠推演。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>流程仍要靠人起草，新工具一上就泛化不了</h4></div>
+    <p>论文 §6 明确承认：目前的规划模型主要依赖领域专家提供的草稿生成 Routine，执行模型主要靠指令微调与蒸馏适配。企业一旦引入新工具或流程变更，系统对新情况的泛化能力受限，自主性与适应性仍有提升空间。蒸馏带来的「无 Routine 也行」只对训过的场景成立。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>程序内存的检索精度决定上限</h4></div>
+    <p>Table 5 里，穷模型加一条干扰几乎不掉，强模型却从 96.3 掉到 76.6。原因是强模型本来能利用单一 Routine 的每一处细节，一旦上下文中出现另一条相似流程，它会被带偏。这对 Procedure Memory 提出了很高的精度要求，而论文并没有公开相似度检索的实现细节与召回表现。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>分支不是白送的</h4></div>
+    <p>对 GPT-4o、Claude-3.7、GPT-4-Turbo 这类强模型，带分支普遍低于线性（96.3 vs 97.0，99.3 vs 98.0，99.0 vs 98.3）。论文的结论是：分支逻辑应该建立在模型已有稳定工具调用能力的基础上，否则「先判断、再选路」会额外引入误差。7 条 Routine 中有 3 条带分支，拆开后可表示成 10 条无分支流程。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>一个场景、一种语言、一个教师</h4></div>
+    <p>全部实验都在一个企业 HR 场景、中文、GPT-4o 作教师。535 条蒸馏样本覆盖 10 个无分支子场景，训练只用 4 张 A10（24GB），LoRA 选择 epoch 3 按验证集定。换成流程更开放、工具接口更不规整的领域，或者换教师模型，论文没有给出可以直接外推的数字。</p>
+  </div>
+
+  <h3>什么时候别用 Routine</h3>
+  <ul>
+    <li><strong>任务开放、每次路径都不同：</strong>没有可复用的流程可抽，Routine 就退化成一张写死的路线图，反而限制探索。</li>
+    <li><strong>流程频繁变动：</strong>每变一次就要重写 Routine、甚至重新蒸馏，维护成本会盖过收益。</li>
+    <li><strong>Retrieval 做不准：</strong>Routine 库大到必须多路召回时，先解决「只给一条」的检索精度，再谈 Routine 本身（Table 5）。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    论文自己给出的下一步是两条：把 <strong>RL 框架</strong>接进工作流（含数据蒸馏与奖励建模），让规划模型学会生成 Routine、执行模型学会调工具，用指令微调冷启动再 RL 提升泛化；以及以 Routine 为中心的<strong>多智能体框架</strong>，由上层智能体协调多个专职智能体，用结构化 Routine 流与集中式交互协议降低每条计划的复杂度。一句话：<strong>Routine 解决的是「已知流程的稳定执行」，不是「未知流程的自动发现」。</strong>
+  </p>
+</section>
+
+<footer>
+  <div>Routine: A Structural Planning Framework for LLM Agent System in Enterprise · Guancheng Zeng, Xueyi Chen, Jiawang Hu 等 · Digital China AI Research · arXiv:2507.14447v2</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.14447" target="_blank" rel="noopener">arXiv:2507.14447</a><br>
+    笔记：<a href="/routinea-structural-planning-framework-for-llm-agent-system-in-enterprise/">Routine：A Structural Planning Framework for LLM Agent System in Enterprise</a><br>
+    数字出处：Table 1（组件）、Table 2（主结果）、Table 3–5（消融）；正文 §4.1（场景设定）、§4.2.3（蒸馏规模）、§4.3.2（LoRA 配置）、§5.3.3（多 Routine 分析）、§6（局限）。
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记表 3 写「Qwen3-14B 从 79.1% 降至 69.5%」——这是把表里 <strong>Qwen2.5-14B</strong> 的基线误当成 Qwen3-14B；原文 Qwen3-14B 是 <strong>83.3 → 71.9</strong>。<br>
+    2. 笔记表 4 写「AI 优化 Qwen3-14B 为 76.7%，接近人工标注 83.3%，在某些模型上超过」——76.7 正确，但 76.7 与 83.3 差 6.6 分，原文只说 Qwen3 系列「稳定提升」，超过人工标注的是 GPT-3.5-Turbo（52.9 vs 52.7）、Qwen2.5-7B（50.4 vs 49.7）、Qwen2.5-14B（82.3 vs 79.1）。<br>
+    3. 笔记说 Table 5「即使只增加一个干扰 Routine，性能也会大幅下降」——只对强模型成立：GPT-4o 96.3 → 76.6、Qwen3-14B 83.3 → 63.2；GPT-3.5-Turbo、Qwen2.5-7B 加了干扰反而略升或持平（52.7 → 53.6、49.7 → 45.1，后者 2 条时下降但 5 条时回升到 54.4）。<br>
+    4. 笔记称 GPT-4o + Routine「准确率升至 96.3%」——正确，但这是带分支配置；线性 Routine 下是 97.0，GPT-4-Turbo 带分支达 99.0。<br>
+    5. 笔记写 Qwen3-14B 蒸馏后「无 Routine 90.2%，再有 Routine 95.5%」——两个数都在 Table 2 中，但 95.5 是<strong>带分支</strong>配置，线性配置为 98.0；两者单位都是准确率。<br>
+    6. 笔记称场景「包含 25 个工具」——正确；笔记未提：7 条 Routine 中 3 条带分支，分解后等价于 10 条无分支流程，测试集由 200 条蒸馏查询拆成 1,148 个逐步样本。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 系统提示词模拟器
+   ============================================================ */
+(function () {
+  /* 脚本若在模拟器容器之前执行，绑定和首帧都推迟到 DOMContentLoaded */
+  var SIM_READY = false;
+  function bootSim() {
+    var sim = document.getElementById('rt-sim');
+    if (!sim || SIM_READY) return;
+    SIM_READY = true;
+
+    var modeBtns = document.querySelectorAll('#rt-modes .rule-btn');
+    modeBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        modeBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        mode = btn.getAttribute('data-mode');
+        render();
+      });
+    });
+
+    render();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootSim);
+  } else {
+    bootSim();
+  }
+
+  var TAGS = {
+    role: '<|im_start|>system',
+    routine: '<routines>',
+    var: '<variables>',
+    tools: '<tools>',
+    call: '<tool_call>'
+  };
+
+  var STEPS = [
+    {
+      id: '1', tool: 'fetch_latest_announcements', name: '获取公告',
+      desc: '从内部系统下载最新公告',
+      obs: '公告列表（4 条，短）'
+    },
+    {
+      id: '2', tool: 'download_file', name: '下载手册',
+      desc: '下载最新员工手册 PDF 供比对',
+      obs: 'file_path = /local/handbook.pdf'
+    },
+    {
+      id: '3', tool: 'read_pdf', name: '读取 PDF',
+      desc: '抽取手册全文',
+      obs: 'content 约 6.2 万字符（长文本）', raw: 20000
+    },
+    {
+      id: '4', tool: 'compare_texts', name: '比对文本',
+      desc: '逐字比对手册与公告差异',
+      obs: '{ "diff": "3 处差异" }', raw: 200
+    },
+    {
+      id: '5', tool: 'summarize_report', name: '生成公告摘要',
+      desc: '调用汇总工具输出结论，终止工作流',
+      obs: '若汇总工具不存在，执行模型就得自己写约 1.2k token 的结论', raw: 1200
+    }
+  ];
+
+  var BLOCKS = {
+    full: [
+      { key: 'role', label: '角色与规则', info: '训进词表' },
+      { key: 'routine', label: 'Routine', info: '每步一行，只列已走到与当前步' },
+      { key: 'var', label: '变量内存', info: '只留键' },
+      { key: 'tools', label: '工具列表（25 个）', info: '顺序已打乱' },
+      { key: 'call', label: '输出格式', info: 'tag + JSON' }
+    ],
+    notool: [
+      { key: 'role', label: '角色与规则', info: '训进词表' },
+      { key: 'routine', label: 'Routine', info: '只剩描述' },
+      { key: 'var', label: '变量内存', info: '只留键' },
+      { key: 'tools', label: '工具列表（25 个）', info: '顺序已打乱' },
+      { key: 'call', label: '输出格式', info: 'tag + JSON' }
+    ],
+    novar: [
+      { key: 'role', label: '角色与规则', info: '训进词表' },
+      { key: 'routine', label: 'Routine', info: '每步一行' },
+      { key: 'var', label: '变量内存', info: '关闭' },
+      { key: 'tools', label: '工具列表（25 个）', info: '顺序已打乱' },
+      { key: 'call', label: '输出格式', info: 'tag + JSON' },
+      { key: 'long', label: '长文本直接留在上下文', info: '每段 = 20k token', long: true }
+    ]
+  };
+
+
+  /* 每步一行；当前步用 → 标出，已完成的打 ✓，全部已出现过的步都列出 */
+  function routineRows(step, mode) {
+    var rows = [];
+    STEPS.slice(0, selected).forEach(function (s, i) {
+      var st = (i + 1 < selected) ? '✓ ' : '→ ';
+      if (mode === 'notool') {
+        rows.push({
+          tag: st + '步 ' + s.id + '：',
+          text: s.name + '：' + s.desc + '；',
+          key: (i + 1 === selected)
+        });
+        return;
+      }
+      var tail = (s.id === '5') ? '，汇总工具' : '，用 ' + s.tool;
+      rows.push({
+        tag: st + '步 ' + s.id + '：',
+        text: s.name + '：' + s.desc + tail,
+        key: (i + 1 === selected)
+      });
+    });
+    return rows;
+  }
+
+  function buildRows(blockKey, step, mode) {
+    if (blockKey === 'role') {
+      var r = [{ tag: '', text: '你是公司 HR，按 Routine 调用工具；', key: false }];
+      if (mode !== 'notool') {
+        r.push({ tag: '', text: '严格模仿 Routine，不添加未出现的调用；', key: false });
+        r.push({ tag: '', text: '出现分支时按条件判断；', key: false });
+      }
+      r.push({ tag: 'ID', text: 'USER_ID（系统参数）', key: false });
+      return r;
+    }
+    if (blockKey === 'routine') {
+      return routineRows(step, mode);
+    }
+    if (blockKey === 'var') {
+      if (mode === 'novar') {
+        return [{ tag: '', text: 'vars = {}  （关闭）', key: false }];
+      }
+      var isLong = step.id === '3' || step.id === '4';
+      var vr = [
+        { tag: '', text: isLong ? 'memory_VAR_report_text_001  = 键' : '当前无长变量', key: isLong },
+        { tag: '', text: isLong ? '真实值 → 存放于变量内存库' : '（工具返回值较短，直接留在历史）', key: false },
+        { tag: '', text: '非持久 · 仅本任务有效', key: false }
+      ];
+      return vr;
+    }
+    if (blockKey === 'tools') {
+      return [{ tag: '25 个', text: '名称 / 参数类型 / 调用约束（顺序已打乱）', key: false }];
+    }
+    if (blockKey === 'call') {
+      if (mode === 'notool') {
+        return [{ tag: '', text: TAGS.call + ' {…} ' + TAGS.call, key: false }];
+      }
+      return [
+        { tag: '', text: '一次只输出一个调用', key: false },
+        { tag: '', text: TAGS.call + 'name, arguments' + TAGS.call, key: false }
+      ];
+    }
+    if (blockKey === 'long') {
+      var rows = [];
+      for (var i = 0; i < 8; i++) {
+        rows.push({ tag: '+', text: (i === 0 ? '"欢迎阅读雇主员工手册……"' : '（PDF 正文第 ' + (i + 1) + ' 段）') , key: false });
+      }
+      return rows;
+    }
+    return [];
+  }
+
+  var mode = 'full';
+  var selected = 1;
+
+  /* 按「本步之前的历史 + 当前系统提示」估算输入 token。
+     示例流程取自论文 Appendix B（4 步）并加了一步汇总；行数与长文本体量都是示意值，
+     论文没有报告这条流程的 token，页面只比较相对差值，所有数字都随当前步和模式实时变化。 */
+  var BASE_TOKENS = 3000;          /* 角色规则 + 25 个工具的描述 + 输出格式模板 */
+  var ROUTINE_LINE = 9;            /* Routine 每一步约 9 token */
+  var VAR_KEY = 8;                 /* 上下文里只留 memory_xxx 键时占的 token */
+  var STEP_ENV = [
+    { obs: 14, raw: 0 },             /* 步 1：公告列表，短 */
+    { obs: 14, raw: 0 },             /* 步 2：文件路径，短 */
+    { obs: 14, raw: 20000 },         /* 步 3：PDF 全文，长 */
+    { obs: 14, raw: 200 },           /* 步 4：差异 JSON */
+    { obs: 14, raw: 1200 }           /* 步 5：不给汇总工具时模型得自己写结论 */
+  ];
+  var CALL_OVERHEAD = 0;           /* 「一次只输出一个 tool_call」这类指令行 */
+
+  function inputTokens(useRoutine, useVar) {
+    /* 返回 { baseline, hist, cur, total }，明细与总数出自同一处 */
+    var hist = 0;
+    for (var i = 0; i < selected; i++) {
+      hist += useVar ? VAR_KEY : STEP_ENV[i].raw;
+      hist += STEP_ENV[i].obs;
+    }
+    var cur = 0;
+    if (useRoutine) {
+      cur = selected * ROUTINE_LINE + CALL_OVERHEAD;
+    }
+    var total = BASE_TOKENS + hist + cur;
+    return { baseline: BASE_TOKENS, hist: hist, cur: cur, total: Math.round(total) };
+  }
+
+  function billing() {
+    var useVar = mode !== 'novar';
+    var base = inputTokens(true, useVar);
+    var noR = inputTokens(false, useVar);
+    var now = base.total;
+    var off = noR.total;
+    var ratio = (off - now) / off;
+    var tag, brk;
+    if (mode === 'full') {
+      tag = '提示词里的 Routine + 变量内存';
+      brk = '<strong>' + tag + '</strong>：同期无 Routine（模型自己规划）&asymp; ' + off + ' token，本帧 &asymp; ' + now;
+    } else if (mode === 'notool') {
+      tag = 'Routine 删掉工具名';
+      brk = '<strong>' + tag + '</strong>：&asymp; ' + now + ' token，与完整 Routine 几乎一样（' + (inputTokens(true, true).total - now) + ' token 之差，全部来自工具名那几个字）';
+    } else {
+      tag = '变量内存关闭';
+      brk = '<strong>' + tag + '</strong>：&asymp; ' + now + ' token，比完整 Routine 多 ' + (now - inputTokens(true, true).total);
+    }
+    var lines = [
+      ['当前 Routine：' + selected + ' 步', base.cur, mode === 'notool' ? '只少工具名' : '每步带工具名'],
+      ['历史：观察 + ' + (useVar ? '变量键' : '长文本全文'), base.hist, mode === 'novar' ? 'PDF 全文原样保留' : '长文本折叠为键']
+    ];
+    if (mode === 'novar' && selected >= 3) lines.push(['长文本超出变量内存的部分', (selected - 2) * 20000, '尚未进上下文，下一步就会']);
+
+    return {
+      now: now,
+      off: off,
+      diff: off - now,
+      ratio: ratio,
+      tag: tag,
+      brk: brk,
+      lines: lines,
+      alt: inputTokens(true, false).total
+    };
+  }
+
+  function render() {
+    var host = document.getElementById('sys-host');
+    if (!host) return;
+    var step = STEPS[selected - 1];
+    host.innerHTML = '';
+
+    BLOCKS[mode].forEach(function (b, bi) {
+      var sec = document.createElement('div');
+      sec.className = 'sys-sec' + (b.key === 'routine' ? ' active' : '');
+
+      var code = document.createElement('div');
+      code.className = 'sys-code';
+      code.textContent = TAGS[b.key] || (b.long ? '上下文溢出' : '—');
+
+      var label = document.createElement('div');
+      label.className = 'sys-label';
+      label.textContent = b.label;
+
+      var body = document.createElement('div');
+      body.className = 'sys-body';
+
+      var rows = buildRows(b.key, step, mode);
+      rows.forEach(function (r) {
+        var ln = document.createElement('div');
+        ln.className = 'ln' + (r.key ? ' key' : '');
+        var st = document.createElement('span');
+        st.className = 'st';
+        st.textContent = r.tag || '';
+        var tx = document.createElement('span');
+        tx.textContent = r.text;
+        ln.appendChild(st);
+        ln.appendChild(tx);
+        body.appendChild(ln);
+      });
+
+      var info = document.createElement('div');
+      info.className = 'sys-code';
+      info.style.padding = '4px 14px 8px';
+      info.style.textTransform = 'none';
+      info.style.letterSpacing = '0';
+      info.textContent = rows.length + ' 行 · ' + (b.info || '');
+
+      sec.appendChild(code);
+      sec.appendChild(label);
+      sec.appendChild(body);
+      sec.appendChild(info);
+      host.appendChild(sec);
+    });
+
+    var bill = billing();
+
+    var tot = document.getElementById('rt-total');
+    if (tot) {
+      var head;
+      if (bill.diff > 0) {
+        head = '比同期无 Routine 少 <strong>' + bill.diff + '</strong> token（' + (bill.ratio * 100).toFixed(1) + '%）';
+      } else if (bill.diff < 0) {
+        head = '比同期无 Routine 多 <strong>' + (-bill.diff) + '</strong> token（' + (-bill.ratio * 100).toFixed(1) + '%）';
+      } else {
+        head = '与同期无 Routine 持平';
+      }
+      var html = '<p>' + bill.brk + '。</p>' +
+        '<p style="font-size:13px;color:var(--text-muted)">' + head +
+        (mode === 'notool' ? '——省下的 token 可以忽略，丢掉的是「调哪个工具」' : '') + '</p><ul style="margin:6px 0 8px">';
+      bill.lines.forEach(function (l) {
+        html += '<li><span class="mono">' + l[1] + '</span> · ' + l[0] + ' <span style="color:var(--text-soft)">（' + l[2] + '）</span></li>';
+      });
+      html += '</ul>';
+      if (mode === 'novar') html += '<p style="font-size:13px">若打开变量内存，本帧会降到 &asymp; ' + bill.alt + ' token。</p>';
+      else html += '<p style="font-size:13px">若关掉变量内存，本帧会升到 &asymp; ' + bill.alt + ' token。</p>';
+      tot.innerHTML = html;
+    }
+
+    /* 步骤卡 */
+    var sh = document.getElementById('rt-steps');
+    if (sh) {
+      sh.innerHTML = '';
+      STEPS.forEach(function (s, i) {
+        var d = document.createElement('button');
+        d.type = 'button';
+        d.className = 'slot rt-step' + (i === selected - 1 ? ' hit' : '');
+        d.setAttribute('aria-label', '第 ' + s.id + ' 步 ' + s.name);
+
+        var nm = document.createElement('div');
+        nm.className = 'slot-name';
+        nm.textContent = s.id + ' · ' + s.name;
+
+        var tv = document.createElement('div');
+        tv.className = 'slot-val rt-tool';
+        tv.textContent = mode === 'notool' ? '（工具名未给出）' : s.tool;
+
+        var bar = document.createElement('div');
+        bar.className = 'bar';
+        var b1 = document.createElement('i');
+        b1.className = 'b1';
+        b1.style.width = '100%';
+        bar.appendChild(b1);
+
+        d.appendChild(nm);
+        d.appendChild(tv);
+        d.appendChild(bar);
+        d.addEventListener('click', function () {
+          selected = i + 1;
+          render();
+        });
+        sh.appendChild(d);
+      });
+    }
+
+    /* 读数 */
+    var calc = document.getElementById('rt-calc');
+    if (calc) {
+      var userVal = 'memory_VAR_report_text_001';
+      var fullLen = '约 6.2 万字符';
+      var html = '<p><strong>第 ' + step.id + ' 步</strong> ' + step.name +
+        ' · 本项目标工具 <span class="mono">' + (mode === 'notool' ? '（未给出）' : step.tool) + '</span></p>';
+      if (mode === 'novar') {
+        html += '<p>历史观察：' + step.obs + '。<span class="warn">变量内存关闭</span>：这段长结果以全文形式留在上下文里。</p>';
+        if (step.id !== '1' && step.id !== '2') {
+          html += '<p>下游步骤若需要把它作为参数传入，只能整段重复（' + fullLen + '），而不是引用 <span class="mono">' + userVal + '</span>。</p>';
+        } else {
+          html += '<p>本步结果尚不长；从第 3 步读取 PDF 开始，上下文会一步步被长文本撑大。</p>';
+        }
+      } else {
+        html += '<p>历史观察：' + step.obs + '</p>';
+        if (step.id === '1' || step.id === '2') {
+          html += '<p>结果较短，直接留在上下文；暂时没有变量键。</p>';
+        } else {
+          html += '<p>长结果已存入变量内存，上下文只留键 <span class="mono" style="color:var(--accent-deep)">' +
+            userVal + '</span>（' + fullLen + '）；需要时 Memory Module 在调用前还原。</p>';
+        }
+      }
+      if (mode === 'notool') {
+        html += '<p><span class="warn">工具名已删除</span>：模型要从「' + step.desc + '」这类描述反推该选哪个工具（Table 3）。</p>';
+      }
+      calc.innerHTML = html;
+    }
+  }
+
+})();
+
+/* ============================================================
+   2) Table 2 四个模型的整体准确率对比
+   ============================================================ */
+(function () {
+  var DATA = {
+    gpt4o: {
+      title: 'GPT-4o · 闭源强模型',
+      desc: '结构准确率一直是 100，参数 97.3；No Routine 下工具选择只有 42.2，整体 41.1。给 Routine 后工具选择到 96.3 / 97.0，缺口基本补平。带分支略低于线性，因为分支判断本身引入误差。',
+      struct: [100, 100, 100],
+      tool: [42.2, 96.3, 97.0],
+      param: [97.3, 99.9, 99.9],
+      overall: [41.1, 96.3, 97.0]
+    },
+    qwen314: {
+      title: 'Qwen3-14B · 开源原本',
+      desc: '参数准确率本来就在 94.9，工具选择却只有 36.5。Routine 把工具选择拉到 88.3 / 87.8，整体 32.6 → 83.3 / 83.6：最缺的那块恰好被补上。',
+      struct: [94.1, 96.0, 97.0],
+      tool: [36.5, 88.3, 87.8],
+      param: [94.9, 98.3, 98.2],
+      overall: [32.6, 83.3, 83.6]
+    },
+    qwen314c: {
+      title: 'Qwen3-14B · 通用 Routine 跟随训练',
+      desc: '只练了「照做」：线性 Routine 下整体 92.7，比原始模型高 9.1 分；但 No Routine 反而是 33.2（原始 32.6）。它成了更忠实的执行者，规划能力没有被加强。',
+      struct: [97.3, 98.2, 99.0],
+      tool: [35.1, 92.0, 94.8],
+      param: [97.2, 97.7, 98.8],
+      overall: [33.2, 88.2, 92.7]
+    },
+    qwen314s: {
+      title: 'Qwen3-14B · 场景蒸馏',
+      desc: '流程被写进权重：No Routine 整体 90.2，已经超过原始模型给 Routine 的 83.6。再叠 Routine 是 95.5 / 98.0，与 GPT-4o 的 96.3 / 97.0 同档。',
+      struct: [99.7, 99.7, 99.7],
+      tool: [90.9, 95.9, 98.3],
+      param: [99.4, 99.9, 99.9],
+      overall: [90.2, 95.5, 98.0]
+    }
+  };
+
+  var XS = ['No Routine', 'w/ Branch', 'w/o Branch'];
+  var COLORS = ['var(--c1)', 'var(--c2)', 'var(--accent)'];
+  var ROWS = [
+    { name: '结构', key: 'struct' },
+    { name: '工具', key: 'tool' },
+    { name: '参数', key: 'param' },
+    { name: '整体', key: 'overall' }
+  ];
+
+  function renderChart(key) {
+    var cfg = DATA[key];
+    var desc = document.getElementById('rt-desc');
+    if (desc) desc.innerHTML = '<div class="r-head">' + cfg.title + '</div>' + cfg.desc;
+
+    var chart = document.getElementById('rt-chart');
+    if (!chart) return;
+    chart.innerHTML = '';
+
+    ROWS.forEach(function (r) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var nm = document.createElement('div');
+      nm.className = 'cname';
+      nm.textContent = r.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      cfg[r.key].forEach(function (v, i) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = COLORS[i];
+        fill.style.height = Math.max(2, v) + '%';
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = v.toFixed(1);
+        track.appendChild(fill);
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+      row.appendChild(nm);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+
+    var x = document.getElementById('rt-x');
+    if (x) x.innerHTML = XS.map(function (s) { return '<span>' + s + '</span>'; }).join('');
+  }
+
+  var tabs = document.querySelectorAll('#rt-tabs .tab');
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      t.classList.add('active');
+      renderChart(t.getAttribute('data-model'));
+    });
+  });
+
+  renderChart('gpt4o');
+})();
+
+/* ============================================================
+   3) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

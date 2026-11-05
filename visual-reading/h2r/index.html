@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H²R · 把整任务经验拆成「做什么」和「怎么做」两本账</title>
+<meta name="description" content="H²R 把 LLM 智能体的经验记忆拆成高层规划记忆与低层执行记忆，用事后反思构建，测试时 Planner 与 Executor 各查一本，在 AlfWorld 与 PDDLGame 上超过 ExpeL。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-acc{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:12.5px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+
+/* ---- 记忆单元卡 ---- */
+.mu{border-left:3px solid var(--border-strong)}
+.mu.hi{border-left-color:var(--c2)}
+.mu.lo{border-left-color:var(--accent)}
+.mu .mu-label{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--text-soft);letter-spacing:.04em;margin-bottom:8px}
+.mu ul{margin:0;padding-left:18px}
+.mu li{margin-bottom:5px;font-size:14px;line-height:1.65}
+
+/* ---- 检索演示 ---- */
+.pool{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 4px}
+.pool-hi{justify-content:center}
+.pool-lo{justify-content:center}
+.mchip{
+  border:1.5px solid var(--border);background:var(--bg);border-radius:10px;
+  padding:8px 11px;font-size:12.5px;line-height:1.45;text-align:left;cursor:pointer;
+  font-family:inherit;color:var(--text);transition:all .18s ease;flex:0 0 auto;
+}
+.mchip:hover{border-color:var(--border-strong)}
+.mchip .ch-n{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft);display:block;margin-bottom:2px}
+.mchip .ch-s{display:block;color:var(--text-muted);font-size:11.5px}
+.mchip.hi-m.old-exp{background:var(--c2-soft);border-color:var(--c2)}
+.mchip.hi-m.share{background:var(--c2-soft);border-color:var(--c2);border-style:dashed}
+.mchip.hi-m.newl{background:var(--bg-surface);border-color:var(--border-strong);border-style:dashed}
+.mchip.lo-m.old{background:var(--accent-soft);border-color:var(--accent);opacity:.75}
+.mchip.lo-m.pos{background:var(--accent-soft);border-color:var(--accent)}
+.mchip.lo-m.unrel{background:var(--bg-soft);color:var(--text-soft)}
+.mchip .tagx{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--text-soft);margin-left:6px}
+.mchip.sel-h{border-color:var(--c2);border-style:dashed;background:var(--bg-surface)}
+.mchip.sel-l{border-color:var(--accent);border-style:dashed;background:var(--bg-surface)}
+.pool-cap{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-soft);text-align:center;margin-top:10px}
+
+/* ---- 指标网格 ---- */
+.mgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0 4px}
+.mcell{border:1px solid var(--border);border-radius:var(--radius);padding:10px 8px;background:var(--bg-surface);text-align:center;transition:all .2s ease}
+.mcell.on{border-color:var(--accent);background:var(--accent-soft)}
+.mcell .mn{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft);letter-spacing:.05em}
+.mcell .mv{font-family:"JetBrains Mono",monospace;font-size:21px;font-weight:600;color:var(--text);line-height:1.25;margin:3px 0 1px}
+.mcell .mb{font-size:10.5px;color:var(--text-soft)}
+.verdict{margin-top:14px}
+
+/* ---- 消融图 ---- */
+.ab{border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);padding:10px 12px;margin-bottom:8px}
+.ab-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}
+.ab-name{font-size:13.5px;font-weight:600}
+.ab-name small{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);font-weight:400;margin-left:6px}
+.ab-val{font-family:"JetBrains Mono",monospace;font-size:14px;font-weight:600}
+.ab .track{height:12px;background:var(--bg-soft);border-radius:100px;overflow:hidden;margin-top:6px}
+.ab .fill{height:100%;border-radius:100px;transition:width .35s ease}
+.ab-gap{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--accent-deep);margin:2px 0 10px 2px}
+
+@media (max-width:520px){
+  .mgrid{grid-template-columns:repeat(2,1fr)}
+  .mchip{font-size:11.5px;padding:7px 9px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">H²R</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">分层记忆</a>
+      <a href="#build">怎么建</a>
+      <a href="#pipeline">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent 记忆 · 经验反思 · arXiv 2025</span>
+  <h1>H²R：把一条整任务经验拆成「做什么」和「怎么做」两本账，检索时才不会互相污染</h1>
+  <p class="hero-sub">
+    现有多任务智能体把一次经验打包成一条记忆，新任务里哪怕只有一个子目标可复用，也会把无关的子目标一并检索进来。
+    这篇论文把记忆拆成<strong>高层规划记忆</strong>与<strong>低层执行记忆</strong>，用一套事后反思流程从轨迹里自动建起来，测试时 Planner 只查高层、Executor 只查低层。
+  </p>
+  <div class="meta">
+    <span>H²R: Hierarchical Hindsight Reflection for Multi-Task LLM Agents · 中山大学等</span>
+    <a href="https://arxiv.org/abs/2509.12810" target="_blank" rel="noopener">arXiv 2509.12810 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    问题的根不在「检索得不够准」，而在<strong>检索粒度和知识粒度不对齐</strong>：记忆单元是整任务的，需要复用的却只是一个子目标。论文把它命名为 <em>coarse-grained knowledge transfer</em>。
+  </p>
+  <p>
+    解法是<strong>两层账本</strong>：高层单元存「任务描述 + 成功子目标序列 + 规划洞察」，供 Planner 用；低层单元存「单个子目标 + 对应子轨迹 + 执行洞察」，供 Executor 用。任何子目标都能独立被检索、独立被复用。
+  </p>
+  <p>
+    账本不是人工写规则，而是<strong>事后反思</strong>自动生成：先让 Planner 回退成「直接输出任务」，再对成功 / 失败轨迹做对比，用 <em>add / modify / upvote / downvote</em> 四种操作维护一张固定大小的洞察池，最后把相关洞察<em>挂靠</em>到每个记忆单元上。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">80.5<small>%</small></div>
+      <div class="k">PDDLGame 成功率（Table 1）<br>ExpeL 72.2 · ReAct 66.7</div>
+    </div>
+    <div class="metric">
+      <div class="v">27.7<small>pt</small></div>
+      <div class="k">去掉高层记忆后的跌幅（Table 2）<br>80.5 → 52.8</div>
+    </div>
+    <div class="metric">
+      <div class="v">3<small> 集</small></div>
+      <div class="k">每个环境的 held-out 测试集数量（§V-A）<br>三次独立运行取平均</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>经验本身没错，错在把整条任务打包成一条记忆</h2></div>
+  <p class="sec-sub">读完后你能说清：为什么复用一条「整任务经验」会主动引入干扰。</p>
+
+  <p>LLM 智能体做多任务的通用套路是「经验库 + 检索」：把过去任务里学到的洞察抽出来存进记忆，遇到新任务就检索最相关的几条塞进 prompt。论文 §II-C 把现有做法归为这一类，Reflexion、Voyager、ExpeL 都是它的变体。</p>
+
+  <p>论文 §I 用一个例子点破问题所在：智能体学过「清洗平底锅并放到台面」，现在要「冷却生菜并放到台面」。两边共享的是「放到台面」这个子目标，但记忆是按整个任务存的——检索回来的是「清洗平底锅并放到台面」这一整条单元，里面大量内容都在讲「清洗平底锅」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>检索是最相关的，但携带的知识是最不相关的</h4></div>
+    <p>整任务记忆在检索阶段看起来没问题——新任务确实和旧任务相似。可一旦进了上下文，<strong>真正能复用的那一个子目标只占一小块</strong>，其余全是当前用不上的子目标。论文说这会「分散注意力、增加认知开销」（§I，引 [8]）。</p>
+    <p>这意味着单纯改进检索器解决不了它：<strong>要检索的东西本身粒度错了</strong>。</p>
+  </div>
+
+  <p>论文 §III 把这个设定形式化为 POMDP：智能体在训练任务集 𝒟<sub>train</sub> 上积累经验，然后要在没见过的 𝒟<sub>test</sub> 上表现好。核心挑战就是「遇到新任务时实现高效的知识迁移」。于是问题变成：<strong>记忆应该以什么粒度存储，才能让「相似」在检索时恰好等于「可复用」？</strong></p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有两条路：一条没记忆，一条有记忆但颗粒太粗</h2></div>
+  <p class="sec-sub">这是论文实验里的两个基线，也是它要跨过的两档。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">ReAct</span><h4>边想边做，不带记忆</h4></div>
+      <p>推理与行动交替的范式（§II-A），每一步只依据当前轨迹和环境反馈决定下一步。</p>
+      <p><strong>强项：</strong>通用、不需要任何工程化的记忆设施。</p>
+      <p><strong>盲区：</strong>每个新任务都从零摸索——即便和旧任务高度同构，也复用不了半点经验。Table 1 里它是两条线上最低的。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">ExpeL</span><h4>有记忆，但记忆是整任务的</h4></div>
+      <p>从成功与失败轨迹中抽取洞察，用 add / modify / upvote / downvote 维护一个洞察池（§II-C、§IV-B1）。</p>
+      <p><strong>强项：</strong>确实能跨任务积累，Table 1 相对 ReAct 大涨。</p>
+      <p><strong>盲区：</strong>论文认为它的经验单元是 <em>monolithic</em> 的——一条记忆代表整个任务，于是 §I 描述的那种「无关子目标混进来」的问题它没法避免。</p>
+    </div>
+  </div>
+
+  <p>值得注意的是，H²R 并没有另起炉灶：它的洞察抽取机制<strong>直接沿用 ExpeL 的那套四操作</strong>（§IV-B1 原文：<code>using the mechanism proposed in ExpeL</code>），连收集经验时用 Reflexion 分析失败轨迹也是「following the experience-gathering strategy of ExpeL」（§IV-B）。它改动的只有一件事——<strong>记忆的切分方式</strong>。这也让 Table 1 的对比变得干净：变量基本只剩粒度。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心方法：两本账本，各记各的粒度</h2></div>
+  <p class="sec-sub">读完后你能说出每一类记忆单元存了什么、在测试时被谁检索。</p>
+
+  <h3>单元结构（§IV-A、Fig. 1）</h3>
+  <div class="two-col">
+    <div class="card mu hi">
+      <div class="mu-label">ℳ_high · 高层规划记忆</div>
+      <h4>每个任务一个单元</h4>
+      <ul>
+        <li><strong>𝒳</strong>：任务描述</li>
+        <li><strong>𝒢</strong>：执行过程中实际达成的子目标序列</li>
+        <li><strong>ℐ_plan</strong>：与规划相关的洞察</li>
+      </ul>
+    </div>
+    <div class="card mu lo">
+      <div class="mu-label">ℳ_low · 低层执行记忆</div>
+      <h4>每个子目标一个单元</h4>
+      <ul>
+        <li><strong>g</strong>：子目标描述</li>
+        <li><strong>τ</strong>：该子目标对应的子轨迹</li>
+        <li><strong>ℐ_low</strong>：与执行相关的洞察</li>
+      </ul>
+    </div>
+  </div>
+  <p>两层都只存<strong>成功</strong>轨迹里得到的子目标序列，失败轨迹不单独成册，而是作为对比材料进入洞察抽取。低层单元只从成功轨迹里推断出的子目标来建，论文的理由是「保证低层记忆单元的可靠性」（§IV-B2）。</p>
+
+  <p>论文强调这和 RAG 的差别：这些单元<strong>来自智能体与环境的交互与事后反思，而不是事先给定的外部知识库</strong>（§IV-A）。</p>
+
+  <h3>怎么让 Planner 与 Executor 各用各的（§IV-C）</h3>
+  <p>测试时是标准的 Planner–Executor 拆分，记忆的接法很直接：</p>
+  <div class="eq">
+    <span class="hl-b">ℳ_high<sup>rel</sup></span> = top-k<sub>m∈ℳ_high</sub> sim(<span class="hl-b">𝒳</span>, 𝒳<sup>i</sup>)
+    &nbsp;&nbsp;&nbsp;
+    <span class="hl-c">ℳ_low<sup>rel</sup></span> = top-k<sub>m∈ℳ_low</sub> sim(<span class="hl-c">g</span>, g<sup>i</sup>)
+  </div>
+  <div class="eq-cap">Eq. 5 / Eq. 6 · 高层按任务描述查，低层按子目标描述查；sim 为预训练句向量编码器的余弦相似度，实现可用 FAISS</div>
+
+  <ul>
+    <li><strong>Planner</strong>：输入是任务、子目标规划历史、当前轨迹、检索到的高层记忆，输出下一个子目标。</li>
+    <li><strong>Executor</strong>：输入是任务、当前子目标、当前轨迹、检索到的<strong>低层</strong>记忆（原文：<code>draws exclusively on low-level memories</code>），输出原子动作，或两枚特殊信号——<code>a₊</code> 表示子目标完成、<code>a⁻</code> 表示子目标无效，两者都会让 Planner 重新规划。</li>
+  </ul>
+
+  <p>关键在于：检索对象变了。高层检索时对比的是<strong>任务</strong>，所以「冷却生菜放台面」会把「清洗平底锅放台面」整条任务拉回来，但它只带着子目标序列和规划洞察；当 Planner 说要执行「放到台面」时，Executor 检索的是低层库里的<strong>子目标</strong>，命中的是「放到台面」那一个单元，而「清洗平底锅」那批低层单元根本不会被检索到。</p>
+
+  <h3>自己点一下：同一条旧经验，两种粒度检索结果差在哪</h3>
+  <p>场景取自论文 §I 的例子。下面是一条旧任务的整任务经验；切换「整任务记忆 / 分层记忆」两种模式，点选新任务的子目标，看 Executor 实际拿到哪些内容。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="ret-btns">
+      <button class="rule-btn" data-mode="mono">整任务记忆<span class="r-sub">ExpeL 式的粗粒度单元</span></button>
+      <button class="rule-btn active" data-mode="hier">分层记忆<span class="r-sub">H²R · 高低两层分查</span></button>
+    </div>
+
+    <div class="pool-cap">ℳ_high · 高层（按任务描述检索）</div>
+    <div class="pool pool-hi" id="pool-hi"></div>
+    <div class="pool-cap">ℳ_low · 低层（按子目标检索）</div>
+    <div class="pool pool-lo" id="pool-lo"></div>
+
+    <div style="text-align:center;margin:18px 0 4px;font-size:13px;color:var(--text-muted)">当前要执行的子目标（点一个）</div>
+    <div class="actions" style="justify-content:center" id="sub-btns">
+      <button class="act primary" data-sub="place">① 放到台面</button>
+      <button class="act" data-sub="cool">② 冷却生菜</button>
+      <button class="act" data-sub="clean">③ 清洗平底锅</button>
+    </div>
+
+    <div class="mgrid" id="mgrid"></div>
+
+    <div class="readout" id="ret-readout">
+      <div class="r-head">检索结果</div>
+      <div id="ret-msg">先选一个子目标。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个演示用了什么、没用什么？<span class="sum-sub">简化说明</span></summary>
+    <div class="details-body">
+      <p>记忆单元的内容、高 / 低两层的划分、Planner 查高层 / Executor 查低层，都按论文 §IV 的描述构造；「放到台面」「冷却生菜」「清洗平底锅」三个子目标出自 §I 的引言例子。</p>
+      <p>指标栏里的<strong>不相关子目标子单元</strong>和<strong>无关规划洞察</strong>，是把 §I 所说的「整任务单元可能携带无关子目标知识」做成可数的代理量；检索命中情况则按 §IV-C 的「按子目标相似度取 top-k」规则演示。论文没有给出各类单元的统计数字，这里也不假装有。</p>
+      <p>真实的句子编码器、top-k 的 k 取值与 FAISS 检索都没有模拟——这一步只负责说明「粒度」如何决定 Executor 看到什么。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么建 ================= -->
+<section class="block" id="build">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么建：四次 LLM 调用把一条轨迹拆成两本账</h2></div>
+  <p class="sec-sub">读完后你能复述 Algorithm 1 的主循环，并知道每一步为什么放在这个位置。</p>
+
+  <h3>采集阶段先做一个反直觉的改动</h3>
+  <p>§IV-B 说：Planner 对任务内部结构了解有限，可能生成「贡献很小甚至阻碍进度」的子目标。所以在<strong>训练 / 采集经验阶段，高层 Planner 被约束成直接输出当前任务，不生成任何子目标</strong>；失败轨迹用 Reflexion 分析，沿用 ExpeL 的经验采集策略，目的是让同一任务下一次尝试更容易成功。采集到的是「带成功 / 失败标签的轨迹」，子目标结构留给事后反思去推。</p>
+
+  <h3>四个模块（Algorithm 1 主循环：第 2–16 行）</h3>
+  <div class="eq">
+    𝒢<sup>i</sup> ← <span class="hl-b">ℱ<sub>subgoal</sub></span>(𝒳<sup>i</sup>, τ<sup>i</sup>)
+    &nbsp;&nbsp;&nbsp;
+    ℐ<sub>high</sub> ← <span class="hl-b">ℱ<sub>high</sub></span>(𝒳<sup>i</sup>, τ<sub>+</sub><sup>i</sup>, τ<sub>−</sub><sup>i</sup>, 𝒢<sub>+</sub><sup>i</sup>, 𝒢<sub>−</sub><sup>i</sup>, ℐ<sub>high</sub>)
+  </div>
+  <div class="eq">
+    𝒯 ← <span class="hl-c">ℱ<sub>trajectory</sub></span>(𝒳<sup>i</sup>, τ<sub>+</sub><sup>i</sup>, 𝒢<sub>+</sub><sup>i</sup>)
+    &nbsp;&nbsp;&nbsp;
+    ℐ<sub>low</sub> ← <span class="hl-c">ℱ<sub>low</sub></span>(g<sup>i</sup>, τ<sub>+</sub><sup>i</sup>, τ<sub>−</sub><sup>i</sup>, ℐ<sub>low</sub>)
+  </div>
+  <div class="eq-cap">Eq. 1–4 · 紫色是高层反思，红色是低层反思；每个模块都是一次 LLM 提示（附 one-shot 示例，见 Fig. 1）</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">F_subgoal</span><h4>子目标推断</h4></div>
+    <p>对成功轨迹 τ₊ 和失败轨迹 τ₋ <strong>各自</strong>推断一遍子目标序列（Algorithm 1 第 4–5 行）。理由是：要评价 Planner 提的子目标好不好，得先知道这条轨迹里实际达成了什么。推断出的子目标<strong>锚定在智能体真实执行过的动作上</strong>，论文据此假定 Executor 已成功执行它们。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">F_high</span><h4>高层洞察抽取：成功 vs 失败对比</h4></div>
+    <p>在固定大小的集合 ℐ<sub>high</sub> 上，让 LLM 对洞察做添加、修改、点赞（提高重要性）、点踩（降低重要性）四种操作——机制直接来自 ExpeL。同一任务的成功轨迹与失败轨迹成对进入，因此这种反思天然是对比式的。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">F_trajectory</span><h4>子轨迹切分</h4></div>
+    <p>只切<strong>成功</strong>轨迹：按成功子目标序列 𝒢₊ 把整条轨迹切成一一对应的子轨迹 𝒯。这一步是把经验「降粒度」的关键动作，也是低层记忆能「一个子目标一个单元」的前提。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">F_low</span><h4>低层洞察抽取</h4></div>
+    <p>每个子目标 g<sup>i</sup> 结合它的子轨迹与<strong>同一任务的失败轨迹</strong>，更新 ℐ<sub>low</sub>。Fig. 1 给出的低层洞察例子是「动作失败时，检查当前合法动作列表」。</p>
+  </div>
+
+  <h3>最后一步把所有单元回填洞察</h3>
+  <p>主循环里先只放 <code>(𝒳<sup>i</sup>, 𝒢<sub>+</sub><sup>i</sup>, ∅)</code> 和 <code>(g<sup>i</sup>, τ<sub>+</sub><sup>i</sup>, ∅)</code>，洞察位置留空（Algorithm 1 第 8、14 行）。等全部洞察挖完，再遍历每个单元，用一个 LLM grounding 函数 <code>F<sub>ground</sub></code> 从整张洞察池里挑出与该单元相关的洞察挂上去（第 18–25 行）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">设计要点</span><h4>为什么要「两遍」而不是边挖边挂</h4></div>
+    <p>高处与低处共享同一个任务的成败对比，但低层反思建立在高层的产物之上——子目标序列先出来，子轨迹才能切，低层洞察才有载体。论文正是因此把方法命名为 <strong>Hierarchical</strong> Hindsight Reflection（§IV-B2）。<br>后置的挂靠也让 ℐ<sub>high</sub>、ℐ<sub>low</sub> 两个固定大小的池子在不断被 add / modify / vote 的过程中保持开关一致，挂靠时每个单元看到的是最终完整版本。</p>
+  </div>
+
+  <h3>开了几个 LLM 和要多少钱（论文没给的，这里也不编）</h3>
+  <p>§V-A 只交代了模型与评测规模：所有组件——反思、规划、执行——都用 <code>Qwen3-235B-A22B-Instruct-2507</code>，检索相似度用 <code>Qwen3-Embedding-0.6B</code>。反思成本用调用次数粗算：一次采集出的（成功, 失败）轨迹对，<strong>2 次子目标推断 + 1 次高层反思 + 1 次子轨迹切分 + 每个子目标 1 次低层反思</strong>，再加全部单元各一次 grounding。论文<strong>没有报告</strong> token 开销、延迟或与 ExpeL 的成本对比。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>整条流水线：离线建账，在线分账</h2></div>
+  <p class="sec-sub">把上面两节连起来看：左半边只在离线做一次，右半边每个测试任务都在跑。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 470" role="img" aria-label="H2R 流水线：离线反思建账与在线分层检索">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path class="pipe-arrow" d="M0 0 L10 5 L0 10 z"></path>
+        </marker>
+      </defs>
+
+      <!-- 分区标题 -->
+      <text x="20" y="26" class="pipe-s" style="font-weight:700;letter-spacing:.08em">离线 · 在 𝒟_train 上建账（§IV-B）</text>
+      <text x="495" y="26" class="pipe-s" style="font-weight:700;letter-spacing:.08em">在线 · 在每个 𝒟_test 任务上分账（§IV-C）</text>
+      <line x1="470" y1="36" x2="470" y2="440" stroke="var(--border)" stroke-width="1.2" stroke-dasharray="4 5"></line>
+
+      <!-- 采集 -->
+      <rect x="20" y="44" width="170" height="64" rx="10" class="pipe-c1"></rect>
+      <text x="105" y="70" class="pipe-t" text-anchor="middle">采集轨迹</text>
+      <text x="105" y="90" class="pipe-s" text-anchor="middle">Planner 直接输出任务不拆子目标</text>
+
+      <!-- 失败反思 -->
+      <rect x="250" y="44" width="170" height="64" rx="10" class="pipe-box"></rect>
+      <text x="335" y="70" class="pipe-t" text-anchor="middle">Reflexion 分析失败</text>
+      <text x="335" y="90" class="pipe-s" text-anchor="middle">沿用 ExpeL 采集策略</text>
+      <line x1="190" y1="76" x2="244" y2="76" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- 子目标推断 -->
+      <rect x="20" y="140" width="200" height="70" rx="10" class="pipe-c2"></rect>
+      <text x="120" y="168" class="pipe-t" text-anchor="middle">ℱ_subgoal</text>
+      <text x="120" y="188" class="pipe-s" text-anchor="middle">成功 / 失败各推一遍子目标序列</text>
+
+      <!-- 高层洞察 -->
+      <rect x="250" y="140" width="200" height="70" rx="10" class="pipe-c2"></rect>
+      <text x="350" y="168" class="pipe-t" text-anchor="middle">ℱ_high · 高层洞察池</text>
+      <text x="350" y="188" class="pipe-s" text-anchor="middle">add / modify / upvote / downvote</text>
+      <line x1="220" y1="175" x2="244" y2="175" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- 子轨迹切分 -->
+      <rect x="20" y="242" width="200" height="70" rx="10" class="pipe-acc"></rect>
+      <text x="120" y="270" class="pipe-t" text-anchor="middle">ℱ_trajectory</text>
+      <text x="120" y="290" class="pipe-s" text-anchor="middle">成功轨迹按子目标切成子轨迹</text>
+      <line x1="120" y1="210" x2="120" y2="236" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- 低层洞察 -->
+      <rect x="250" y="242" width="200" height="70" rx="10" class="pipe-acc"></rect>
+      <text x="350" y="270" class="pipe-t" text-anchor="middle">ℱ_low · 低层洞察池</text>
+      <text x="350" y="290" class="pipe-s" text-anchor="middle">每个子目标 + 子轨迹 + 同任务失败轨迹</text>
+      <line x1="220" y1="277" x2="244" y2="277" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- grounding -->
+      <rect x="20" y="352" width="430" height="58" rx="10" class="pipe-box"></rect>
+      <text x="235" y="377" class="pipe-t" text-anchor="middle">F_ground 回填：为每个单元挂上相关洞察</text>
+      <text x="235" y="397" class="pipe-s" text-anchor="middle">ℳ_high = (𝒳, 𝒢₊, ℐ_high) · ℳ_low = (g, τ₊, ℐ_low)</text>
+      <line x1="350" y1="312" x2="350" y2="346" class="pipe-line" marker-end="url(#ar)"></line>
+      <line x1="120" y1="312" x2="120" y2="346" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- 中间箭头 -->
+      <line x1="440" y1="381" x2="492" y2="381" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- 在线 Planner -->
+      <rect x="500" y="60" width="180" height="86" rx="10" class="pipe-c2"></rect>
+      <text x="590" y="86" class="pipe-t" text-anchor="middle">Planner</text>
+      <text x="590" y="106" class="pipe-s" text-anchor="middle">任务 + 规划历史 + 轨迹</text>
+      <text x="590" y="122" class="pipe-s" text-anchor="middle">+ top-k 高层记忆 → 子目标</text>
+
+      <!-- 在线 低层检索 -->
+      <rect x="708" y="60" width="132" height="86" rx="10" class="pipe-acc"></rect>
+      <text x="774" y="86" class="pipe-t" text-anchor="middle">低层检索</text>
+      <text x="774" y="106" class="pipe-s" text-anchor="middle">按子目标 g 取</text>
+      <text x="774" y="122" class="pipe-s" text-anchor="middle">top-k ℳ_low</text>
+      <line x1="680" y1="103" x2="702" y2="103" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- Executor -->
+      <rect x="560" y="200" width="160" height="86" rx="10" class="pipe-acc"></rect>
+      <text x="640" y="226" class="pipe-t" text-anchor="middle">Executor</text>
+      <text x="640" y="246" class="pipe-s" text-anchor="middle">子目标 + 轨迹 + 低层记忆</text>
+      <text x="640" y="262" class="pipe-s" text-anchor="middle">→ 原子动作 / a₊ / a⁻</text>
+      <path d="M590 146 L590 170 L640 170 L640 194" class="pipe-line" marker-end="url(#ar)"></path>
+      <path d="M774 146 L774 170 L640 170" class="pipe-line"></path>
+
+      <!-- 环境 -->
+      <rect x="560" y="326" width="160" height="70" rx="10" class="pipe-c1"></rect>
+      <text x="640" y="352" class="pipe-t" text-anchor="middle">环境</text>
+      <text x="640" y="372" class="pipe-s" text-anchor="middle">返回 observation</text>
+      <line x1="640" y1="286" x2="640" y2="320" class="pipe-line" marker-end="url(#ar)"></line>
+
+      <!-- a+ / a- 回到 planner -->
+      <path d="M720 243 L736 243 L736 30 L590 30 L590 54" class="pipe-line" stroke-dasharray="5 4" marker-end="url(#ar)"></path>
+      <text x="740" y="200" class="pipe-s">a₊/a⁻ 触发重新规划</text>
+
+      <!-- 高层记忆池 -->
+      <rect x="500" y="326" width="40" height="40" rx="8" class="pipe-c2" opacity="0.9"></rect>
+      <text x="520" y="351" class="pipe-s" text-anchor="middle" style="font-size:9.5px">ℳ_h</text>
+      <line x1="520" y1="326" x2="520" y2="150" class="pipe-line" stroke-dasharray="2 4"></line>
+      <line x1="520" y1="150" x2="504" y2="110" class="pipe-line" stroke-dasharray="2 4" marker-end="url(#ar)"></line>
+
+      <text x="640" y="436" class="pipe-s" text-anchor="middle" style="font-weight:600;fill:var(--text)">Planner 只读高层 · Executor 只读低层</text>
+      <text x="640" y="452" class="pipe-s" text-anchor="middle">参数符号用 ℳ_h / ℳ_l 简写</text>
+    </svg>
+    <figcaption>
+      依据 §IV-B、§IV-C 与 Algorithm 1 重绘的流水线（原 Fig. 1 / Fig. 2 为位图）。左半部分离线完成，右半部分每个测试任务执行一轮。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>采集阶段的反常之处</strong>：Planner 在采集时被禁用拆分能力，直接输出任务本身。论文的解释是避免「不合适的子目标」污染采集到的轨迹（§IV-B）。</li>
+          <li><strong>反思阶段是离线的</strong>：Algorithm 1 在全部（成功, 失败）轨迹对上一次性跑完，最后才统一 grounding。在线阶段不再调用任何反思模块。</li>
+          <li><strong>在线循环</strong>：Planner 出子目标 → Executor 逐动作执行 → 环境反馈 → Executor 判定完成后给出 a₊，或判定不可达时给出 a⁻ → 两种情况都回到 Planner 重新规划。AlfWorld 每回合上限 30 步，PDDLGame 40 步（§V-A）。</li>
+          <li><strong>虚线回路</strong>表示 a₊ / a⁻ 触发的重新规划；这样 Executor 不必把子目标硬做到底，规划与执行可以来回协商。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：两个基准都赢，复杂规划环境赢得最多</h2></div>
+  <p class="sec-sub">先把论文给的三张数表摆全，再说反直觉的地方和它没说的部分。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th style="text-align:right">AlfWorld 成功率</th><th style="text-align:right">PDDLGame 成功率</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ReAct</td><td class="num">46.3</td><td class="num">66.7</td></tr>
+        <tr><td>ExpeL</td><td class="num">72.4</td><td class="num">72.2</td></tr>
+        <tr class="best"><td>H²R</td><td class="num">75.9</td><td class="num">80.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left">Table 1 · 相对 ExpeL 的提升：AlfWorld +3.5，PDDLGame +8.3（论文原文口径，§V-B）</p>
+
+  <p>实验设置（§V-A）：两个基准的数据集各切一半做训练、一半做评测；AlfWorld 包括 pick_and_place、pick_clean_then_place、pick_heat_then_place、pick_cool_then_place、look_at_obj、pick_two_obj 六类任务，PDDLGame 包括 barman、gripper、tyreworld 三类。</p>
+
+  <h3>消融：两本账缺一本都塌，缺高层塌得更狠</h3>
+  <p>Table 2 只报告了 PDDLGame（注意：AlfWorld 没有给消融数据）。论文正文把跌幅写成 27.7% 和 19.4%，下面是按成功率点差还原的绝对差距。</p>
+
+  <div class="sim" style="padding:18px">
+    <div id="ablation"></div>
+    <div class="legend" style="margin-top:8px">
+      <span><i style="background:var(--c1)"></i>去掉该层后保留的百分点</span>
+      <span><i style="background:var(--bg-soft);border:1px solid var(--border-strong)"></i>相对完整 H²R 的损失</span>
+    </div>
+    <div class="readout">
+      <div class="r-head">怎么读</div>
+      完整 H²R 为 80.5。去掉高层记忆后只剩 52.8——Planner 再也拿不到子目标序列和规划洞察，「只能在没有战略规划知识的情况下运行」（§V-C）。去掉低层记忆后剩 61.1，Executor 拿不到执行洞察和子目标级模式。
+      <strong>缺高层比缺低层多丢 8.3 个点</strong>，与 PDDLGame 更偏「分层规划」的假设一致。
+    </div>
+  </div>
+
+  <h3>三个不仔细读就会误读的地方</h3>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">读数一</span><h4>正文写的「3.5% / 8.3%」是百分点，不是相对提升</h4></div>
+    <p>原文写 <code>representing relative improvements of 3.5% and 8.3%</code>，但 75.9 − 72.4 = 3.5、80.5 − 72.2 = 8.3，都是<strong>成功率之差</strong>。若按真正的相对提升算，AlfWorld 约为 4.8%、PDDLGame 约为 11.5%。引用时以点差为准。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">读数二</span><h4>「27.7% / 19.4%」也不是成功率本身</h4></div>
+    <p>它们是相对 80.5 的下降比例：13.4 / 80.5 ≈ 16.6%，8.3 / 80.5 ≈ 10.3%，与正文数字对不上；而原始点差正是 27.7 与 19.4。因此正文这两个数字只能理解为<strong>绝对降幅的另一个说法</strong>（或论文的笔误），消融图按点差画。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">读数三</span><h4>评测面很小，没有置信区间</h4></div>
+    <p>§V-A：<code>evaluated on three held-out test episodes per environment</code>，<code>averaged across three independent runs</code>。每个环境只有 3 个 held-out episode，论文<strong>没有报告方差、区间或显著性检验</strong>。75.9 与 72.4 之间 3.5 点的差距是否稳定，仅凭 Table 1 无法判断。</p>
+  </div>
+
+  <p>换一种读法：论文的「反直觉」不是 H²R 赢了，而是<strong>它赢在 ExpeL 没有改动的地方</strong>——洞察抽取机制、反思采集策略、甚至基座模型都是同一套，唯一动的是「一条经验存成几个单元、每个单元存什么」。同样的原料换一种切法，PDDLGame 上就多了 8.3 个点。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候它不够用</h2></div>
+  <p class="sec-sub">按证据强度从硬到软排列。前两条是原文数据里的问题，后三条是根据流程推导的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一 · 原文数据</span><h4>只测了两个离散的文本环境</h4></div>
+    <p>AlfWorld 与 PDDLGame 都是文本、离散动作空间。连续动作（机器人控制）或高维视觉输入下，怎么把轨迹切成「子轨迹」、怎么用句向量比较「子目标」，论文都没有验证。§VI 自己也把「更复杂、更动态的环境」列为未来工作。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二 · 原文数据</span><h4>评测规模撑不起细粒度结论</h4></div>
+    <p>每个环境 3 个 held-out episode、3 次运行，无方差报告。Table 2 只有 PDDLGame，所以「去高层比去低层更伤」这一结论在 AlfWorld 上没有得到验证。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三 · 流程推导</span><h4>整条链都建立在一个 LLM 的子目标推断上</h4></div>
+    <p>低层记忆完全依赖 ℱ<sub>subgoal</sub> 从轨迹里推出来的子目标序列：子目标推错，子轨迹切错，低层单元就挂错。论文以「推断出的子目标锚定在真实动作上」为前提假定 Executor 执行成功（§IV-B1），但<strong>没有报告推断准确率</strong>，也没有做对该环节的敏感性分析。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界四 · 流程推导</span><h4>记忆只增不改，固定大小的洞察池可能是瓶颈</h4></div>
+    <p>Algorithm 1 只往 ℳ<sub>high</sub>、ℳ<sub>low</sub> 里 add，没有删除、合并或淘汰机制；洞察池则是固定大小的集合，随着任务类型变多，新经验要挤进有限的名额。开放世界中规则不断变化的场景下，这套账本如何遗忘与压缩，原文未涉及。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界五 · 流程推导</span><h4>离线反思的成本被完整跳过</h4></div>
+    <p>每个（成功, 失败）轨迹对至少四次 LLM 调用，再加每个子目标一次低层反思、每个单元一次 grounding；而且全部使用 Qwen3-235B-A22B-Instruct-2507。论文没有给出 token 数、耗时或与 ExpeL 的成本对比，所以「精度提升了多少倍代价」目前无从判断——这也是未来应用时最该先补的实验。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>H²R 解决的是「记忆粒度与复用粒度不对齐」，不是「记忆不够多」。</strong>如果你的场景里子目标是清晰、可切分、可复用的，这套两层账本值得照抄；如果经验本身就是粒度粗糙的，或者对成本敏感，先把子目标推断的准确率和反思开销测清楚再说。</p>
+</section>
+
+<footer>
+  <div>H²R: Hierarchical Hindsight Reflection for Multi-Task LLM Agents</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.12810" target="_blank" rel="noopener">arXiv:2509.12810</a> · Shicheng Ye, Chao Yu, Kaiqiang Ke, Chengdong Xu（中山大学）· Yinqi Wei（悉尼大学）· 2025<br>
+    笔记：<a href="/h2rhierarchical-hindsight-reflection-for-multi-task-llm-agents/">H2R：Hierarchical Hindsight Reflection for Multi-Task LLM Agents</a><br>
+    笔记勘误：核对后，arXiv 编号、两项基准成功率（75.9% / 80.5%）、相对 ExpeL 的 +3.5 / +8.3、消融数字（27.7% / 19.4%）均与原文一致；「相对提升」的说法沿用了论文正文的口径（实为成功率之差）。<br>
+    文中 Figures 1 / 2 与 Algorithm 1 为依据论文内容重绘的示意图。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 检索粒度演示
+   ============================================================ */
+(function () {
+  var btns = document.querySelectorAll('#ret-btns .rule-btn');
+  var subBtns = document.querySelectorAll('#sub-btns .act');
+  var poolHi = document.getElementById('pool-hi');
+  var poolLo = document.getElementById('pool-lo');
+  var gridEl = document.getElementById('mgrid');
+  var msgEl = document.getElementById('ret-msg');
+  if (!btns.length || !poolHi || !poolLo || !gridEl || !msgEl) return;
+
+  var HI = [
+    { id: 'T1', name: '清洗平底锅并放到台面', tag: '旧任务', cls: 'old-exp', shares: ['place', 'clean'] }
+  ];
+  var NEW_HI = { id: 'T2', name: '冷却生菜并放到台面', tag: '新任务', cls: 'newl', shares: ['place', 'cool'] };
+
+  var LO = [
+    { id: 'L1', name: '放到台面', tag: '子目标', sub: 'place' },
+    { id: 'L2', name: '冷却生菜', tag: '子目标', sub: 'cool' },
+    { id: 'L3', name: '清洗平底锅', tag: '子目标', sub: 'clean' }
+  ];
+
+  var SUBS = {
+    place: { name: '放到台面', cleanText: '把它放到台面', insight: '放之前先看台面是否空闲' },
+    cool:  { name: '冷却生菜', cleanText: '把生菜放进冰箱冷却', insight: '冷却前先确认冰箱未满' },
+    clean: { name: '清洗平底锅', cleanText: '用洗涤剂清洗平底锅', insight: '清洗后用流水冲净' }
+  };
+
+  var state = { mode: 'hier', sub: null, shown: false };
+
+  function primaryFor(sub) {
+    return (sub && HI[0].shares.indexOf(sub) >= 0) ? 'hier' : 'mono';
+  }
+
+  function chip(text, subText, cls, tag) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mchip ' + cls;
+    b.innerHTML = '<span class="ch-n">' + text + (tag ? '<span class="tagx">' + tag + '</span>' : '') + '</span>'
+      + (subText ? '<span class="ch-s">' + subText + '</span>' : '');
+    return b;
+  }
+
+  function renderPools() {
+    poolHi.innerHTML = '';
+    poolLo.innerHTML = '';
+
+    if (state.mode === 'hier') {
+      // 共享子目标高亮
+      if (state.sub) {
+        var shareT1 = HI[0].shares.indexOf(state.sub) >= 0;
+        var t1 = chip('ℳ_high · ' + HI[0].name, shareT1 ? '与当前子目标共享：' + SUBS[state.sub].name : '与当前子目标没有共享内容', 'hi-m share', '');
+        var t2 = chip('ℳ_high · ' + NEW_HI.name, '当前任务本身', 'hi-m newl', '');
+        poolHi.appendChild(t1);
+        poolHi.appendChild(t2);
+        return;
+      }
+      poolHi.appendChild(chip('ℳ_high · ' + HI[0].name, '子目标：清洗平底锅、放到台面', 'hi-m old-exp', '旧 · ' + HI[0].shares.length + ' 个共享'));
+      poolHi.appendChild(chip('ℳ_high · ' + NEW_HI.name, '子目标：冷却生菜、放到台面', 'hi-m newl', '新'));
+    } else {
+      poolHi.appendChild(chip('ℳ_high · ' + HI[0].name, '子目标：清洗平底锅、放到台面', 'hi-m old-exp', '旧'));
+      poolHi.appendChild(chip('ℳ_high · ' + NEW_HI.name, '子目标：冷却生菜、放到台面', 'hi-m newl', '新'));
+    }
+
+    LO.forEach(function (u) {
+      var cls = 'lo-m unrel';
+      var extra = '';
+      if (state.sub && u.sub === state.sub) cls = 'lo-m pos';
+      else if (u.sub === 'clean') cls = 'lo-m old';
+      poolLo.appendChild(chip('ℳ_low · ' + u.name, '子轨迹：' + SUBS[u.sub].cleanText, cls, extra));
+    });
+  }
+
+  function renderGrid(s) {
+    var cells;
+    if (!s) {
+      cells = [
+        { n: 'Executor 看到的子单元', v: '—', b: '点选子目标' },
+        { n: '无关规划洞察', v: '—', b: '点选子目标' },
+        { n: '无关执行细节', v: '—', b: '点选子目标' },
+        { n: '命中当前子目标', v: '—', b: '点选子目标' }
+      ];
+    } else if (state.mode === 'mono') {
+      var unrel = 1;
+      var hit = 1;
+      cells = [
+        { n: 'Executor 看到的子单元', v: '2', b: '旧任务整个单元', on: false },
+        { n: '无关规划洞察', v: '2', b: '整任务一起带进来' },
+        { n: '无关执行细节', v: String(unrel), b: '没在用的子目标也读到了', bad: true },
+        { n: '命中当前子目标', v: String(hit) + ' ✓', b: '但淹没在无关内容里' }
+      ];
+    } else {
+      var hitT1 = HI[0].shares.indexOf(state.sub) >= 0;
+      cells = [
+        { n: 'Executor 看到的子单元', v: hitT1 ? '1' : '0', b: hitT1 ? '只拿命中的那个' : '库中无此子目标' },
+        { n: '无关规划洞察', v: '0', b: '不相关的旧任务单元不取' },
+        { n: '无关执行细节', v: '0', b: '其他子目标不会被检索' },
+        { n: '命中当前子目标', v: hitT1 ? '1 ✓' : '0', b: hitT1 ? '粒度与需求对齐' : '只能靠零样本执行', bad: !hitT1 }
+      ];
+    }
+    gridEl.innerHTML = cells.map(function (c) {
+      return '<div class="mcell' + (c.on ? ' on' : '') + '"><div class="mn">' + c.n + '</div>'
+        + '<div class="mv" style="' + (c.bad ? 'color:var(--c1)' : '') + '">' + c.v + '</div>'
+        + '<div class="mb">' + c.b + '</div></div>';
+    }).join('');
+  }
+
+  function renderMsg() {
+    var s = state.sub;
+    if (!s) {
+      msgEl.innerHTML = '旧任务只和「放到台面」共享子目标。点一个子目标，演示会自动切到更有利的那一侧：共享子目标看分层记忆，其余两个看整任务记忆——你也可以手动切换对比。';
+      return;
+    }
+    var t1 = HI[0];
+    var sharesText = t1.name + ' 的单元里有「' + SUBS[s].name + '」相关内容吗？' + (t1.shares.indexOf(s) >= 0 ? '有。' : '没有。');
+    if (state.mode === 'mono') {
+      msgEl.innerHTML = '<strong>整任务记忆 · ' + SUBS[s].name + '</strong>：Executor 拿到的是旧任务的<em>整个单元</em>——子目标序列、<strong>两个子目标</strong>的全部执行细节、以及为「清洗平底锅」写的洞察。'
+        + sharesText + ' ' + (t1.shares.indexOf(s) >= 0
+          ? '<span class="warn">可复用的那一小块被执行细节包围，这正是 §I 说的注意力分散。</span>'
+          : '<span class="warn">这个子目标在旧单元里根本没有记录，Executor 只能从零摸索。</span>');
+    } else {
+      msgEl.innerHTML = '<strong>分层记忆 · ' + SUBS[s].name + '</strong>：Planner 从 ℳ_high 里取到旧任务的<em>子目标序列</em>（看到「' + SUBS[s].name + '」曾是其中的一步，可以照抄结构），'
+        + 'Executor 再从 ℳ_low 里精确取到「' + SUBS[s].name + '」那一个单元及其执行洞察：<code>' + SUBS[s].insight + '</code>。'
+        + (t1.shares.indexOf(s) >= 0
+          ? (s === 'place' ? '其他子目标的低层单元（如「清洗平底锅」）<strong>不会被检索到</strong>。' : '其他子目标的低层单元<strong>不会被检索到</strong>。')
+          : '这是一个旧任务里没有的新子目标，低层库给不了执行细节——分层记忆的优势在这里会缩水。');
+    }
+  }
+
+  function render() {
+    btns.forEach(function (b) { b.classList.toggle('active', b.dataset.mode === state.mode); });
+    subBtns.forEach(function (b) {
+      b.classList.toggle('primary', state.shown && primaryFor(state.sub) === state.mode);
+    });
+    renderPools();
+    renderGrid(state.sub);
+    renderMsg();
+  }
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () { state.mode = b.dataset.mode; state.shown = true; render(); });
+  });
+  subBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      state.sub = (state.sub === b.dataset.sub) ? null : b.dataset.sub;
+      if (state.sub) state.mode = primaryFor(state.sub);
+      state.shown = true;
+      render();
+    });
+  });
+  render();
+})();
+
+/* ============================================================
+   2) 消融图（Table 2）
+   ============================================================ */
+(function () {
+  var host = document.getElementById('ablation');
+  if (!host) return;
+  var FULL = 80.5;
+  var rows = [
+    { name: 'H²R', sub: '完整两层记忆', val: 80.5 },
+    { name: 'H²R w/o high-level memories', sub: '去掉高层规划记忆', val: 52.8 },
+    { name: 'H²R w/o low-level memories', sub: '去掉低层执行记忆', val: 61.1 }
+  ];
+  var html = '';
+  rows.forEach(function (r) {
+    var gap = FULL - r.val;
+    var pct = r.val / FULL * 100;
+    html += '<div class="ab">'
+      + '<div class="ab-head"><span class="ab-name">' + r.name + '<small>' + r.sub + '</small></span>'
+      + '<span class="ab-val">' + r.val.toFixed(1) + '<small style="font-weight:400;color:var(--text-soft)"> %</small></span></div>'
+      + '<div class="track"><div class="fill" style="width:' + pct.toFixed(1) + '%;background:var(--c1)"></div></div>'
+      + '</div>';
+    if (gap > 0) {
+      html += '<div class="ab-gap">相对完整 H²R：−' + gap.toFixed(1) + ' 个百分点（正文记作 ' + (gap === 27.7 ? '27.7%' : '19.4%') + '）</div>';
+    } else {
+      html += '<div class="ab-gap" style="visibility:hidden">—</div>';
+    }
+  });
+  html += '<div style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--text-soft);margin-top:2px">Table 2 · 仅 PDDLGame · 成功率（%）</div>';
+  host.innerHTML = html;
+})();
+
+/* ============================================================
+   3) 图说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

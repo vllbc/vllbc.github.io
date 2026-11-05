@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gated DeltaNet · 用一条公式同时管住「忘」和「记」</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Gated DeltaNet</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#two-roads">两条路</a>
+      <a href="#rule">统一公式</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · ICLR 2025 · arXiv 2412.06464</span>
+  <h1>Gated DeltaNet：用一条公式，同时管住「该忘的忘掉」和「该记的记准」</h1>
+  <p class="hero-sub">
+    线性注意力把整段历史压成一个<strong>矩阵记忆</strong>。Mamba2 会给所有记忆均匀衰减，DeltaNet 能精确替换单条记忆——但两者各自都有一种场景直接失灵。
+    这篇论文把它们合成一条规则，并配了一套能在 GPU 上跑得动的分块并行算法。
+  </p>
+  <div class="meta">
+    <span>Gated Delta Networks: Improving Mamba2 with Delta Rule</span>
+    <a href="https://arxiv.org/abs/2412.06464" target="_blank" rel="noopener">arXiv 2412.06464 ↗</a>
+    <a href="https://github.com/NVlabs/GatedDeltaNet" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    线性注意力的状态 <code>S</code> 本质是一张 <strong>key→value 关联表</strong>，容量受模型维度限制；序列一长，不同的 key 就会挤进同一片空间，论文称之为 <em>memory collision</em>。
+  </p>
+  <p>
+    <strong>Mamba2</strong> 每步把所有关联乘上一个衰减系数——想只忘掉其中一条，做不到，只能「全部一起淡出」。<br>
+    <strong>DeltaNet</strong> 能精确地把某条 key 的旧 value 擦掉再写新的——但上下文切换时想<em>整片清空</em>，它也做不到。
+  </p>
+  <p>
+    <strong>Gated DeltaNet</strong> 的做法是：<em>先乘 α 做全局缩放，再按 β 做定向擦写</em>。α=0 就是清空，β 控制替换强度，一条公式覆盖两者的全部行为。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">16.42</div>
+      <div class="k">Wiki 困惑度（1.3B）<br>Mamba2 16.56 / DeltaNet 17.71</div>
+    </div>
+    <div class="metric">
+      <div class="v">16.6</div>
+      <div class="k">LongBench 平均分<br>Mamba2 13.5 / DeltaNet 13.6</div>
+    </div>
+    <div class="metric">
+      <div class="v">≈ DeltaNet</div>
+      <div class="k">训练吞吐<br>比 Mamba2 低 2–3K tok/s</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>线性注意力的记忆，到底是什么</h2></div>
+  <p class="sec-sub">先把这个「矩阵记忆」讲清楚，后面的两条路才看得懂。</p>
+
+  <p>标准注意力的代价是 KV cache 随序列长度线性增长。线性注意力换了个思路：把历史<strong>压进一个固定大小的状态矩阵</strong>，用一次矩阵乘法读出。</p>
+
+  <div class="eq">
+    S<sub>t</sub> = S<sub>t-1</sub> + v<sub>t</sub> k<sub>t</sub><sup>⊤</sup>
+    &nbsp;&nbsp;&nbsp;&nbsp; o<sub>t</sub> = S<sub>t</sub> q<sub>t</sub>
+  </div>
+  <div class="eq-cap">加性写入：每个新 token 把自己的 v·kᵀ 外积叠加进状态；查询时用 q 取出对应分量</div>
+
+  <p>关键在于：<code>v kᵀ</code> 是一个<strong>秩 1 的关联</strong>。状态 <code>S</code> 就是这些关联的叠加，能存下多少条互不干扰的关联，取决于 <code>S</code> 的秩上限，也就是模型维度 <code>d</code>。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>序列长度超过维度，就必然发生「记忆碰撞」</h4></div>
+    <p>当需要记住的 key-value 对多于 <code>d</code>，它们无法再保持正交，只能<strong>叠在同一个方向上</strong>。此时再查询某个 key，取回的是多条关联的混合值——检索精度直接崩掉。这不是训练不够，是结构性的容量上限。</p>
+  </div>
+
+  <p>于是问题变成：<strong>如何在固定大小的状态里，尽量少地发生碰撞？</strong>论文的答案是——让模型学会「什么时候该整体淡出，什么时候该精确擦除某一条」。这就引出后面两种机制。</p>
+</section>
+
+<!-- ================= 2. 两条路 ================= -->
+<section class="block" id="two-roads">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有两条路，各自失灵在相反的地方</h2></div>
+  <p class="sec-sub">这是全文最关键的一张对照：两者的强项，恰好是对方的盲区。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Mamba2</span><h4>全局衰减</h4></div>
+      <p>每步把所有关联统一乘上衰减系数 α<sub>t</sub>，再叠加新的 v·kᵀ。</p>
+      <p><strong>强项：</strong>能快速整体淡出，换话题时干净利落。</p>
+      <p><strong>盲区：</strong>它<strong>不区分哪条关联重要</strong>。想只丢掉过期的那一条？做不到——只能连有用的信息一起衰减。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">DeltaNet</span><h4>定向擦写</h4></div>
+      <p>先沿当前 key 方向<strong>擦掉旧值</strong>，再写入新值，写入强度由 β 控制。</p>
+      <p><strong>强项：</strong>单条关联可以精确替换，不会被旧值污染。</p>
+      <p><strong>盲区：</strong>它<strong>没有全局清空能力</strong>。上下文切换时，上一段的内容会长期残留在状态里，干扰后续检索。</p>
+    </div>
+  </div>
+
+  <h3>证据：S-NIAH 上三种失败模式各不相同</h3>
+  <p>S-NIAH 是「针在草堆里」的检索任务：上下文里埋一个 key-value 对，最后用 key 问 value。论文设计了三个变体，分别压测三种能力。切换下方基准，可以看到谁在哪一栏塌掉。</p>
+
+  <div class="tabs" id="niah-tabs">
+    <button class="tab active" data-bench="1">S-NIAH-1 · 纯记忆保持</button>
+    <button class="tab" data-bench="2">S-NIAH-2 · 需要过滤</button>
+    <button class="tab" data-bench="3">S-NIAH-3 · 复杂模式</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div id="niah-desc" class="readout" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="niah-chart"></div>
+    <div class="cx" id="niah-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>Mamba2</span>
+      <span><i style="background:var(--c2)"></i>DeltaNet</span>
+      <span><i style="background:var(--accent)"></i>Gated DeltaNet</span>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">三条结论正好对应上面两张卡片的盲区：</p>
+  <ul>
+    <li><strong>衰减伤记忆（S-NIAH-1）：</strong>纯保持场景下，Mamba2 在 4K 之后从 98.8 掉到 65.4、30.4；DeltaNet 全程 ~98，几乎没有损失——它不做无差别衰减。</li>
+    <li><strong>门控利于过滤（S-NIAH-2）：</strong>真实文本上下文里，DeltaNet 从 98.4 一路掉到 14.4，因为它清不掉无关信息；Mamba2 和 Gated 靠门控撑住。</li>
+    <li><strong>delta 利于记住（S-NIAH-3）：</strong>value 换成 UUID 后，Mamba2 在 4K 只剩 4.6；Gated 仍有 27.6，说明定向写入确实提升了复杂模式的记忆质量。</li>
+  </ul>
+</section>
+
+<!-- ================= 3. 统一公式 ================= -->
+<section class="block" id="rule">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把两条规则乘在一起</h2></div>
+  <p class="sec-sub">论文的全部创新，就是下面这一行。</p>
+
+  <div class="eq">
+    S<sub>t</sub> = S<sub>t-1</sub>
+    <span class="hl-a">· α<sub>t</sub></span>
+    <span class="hl-b">· (I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>)</span>
+    + β<sub>t</sub> v<sub>t</sub> k<sub>t</sub><sup>⊤</sup>
+  </div>
+  <div class="eq-cap">Eq. 10 · 蓝色是 Mamba2 的全局门控，紫色是 DeltaNet 的定向擦除；两者相乘，不冲突</div>
+
+  <p>拆开看就是三步：</p>
+  <ul>
+    <li><strong>α<sub>t</sub> 全局缩放</strong>：所有关联一起乘。α=0 就是清空整片记忆，α=1 表示完全不衰减。</li>
+    <li><strong>(I − β k kᵀ) 定向擦除</strong>：把状态沿当前 key 方向的分量抹掉 β 比例，其他方向不动。</li>
+    <li><strong>+ β v kᵀ 写入</strong>：在同一个 key 方向上补入新值。</li>
+  </ul>
+
+  <p>论文从在线学习的角度给了它一个统一解释：这个更新等价于<strong>带自适应权重衰减的测试时 SGD</strong>。α 就是权重衰减项，β 就是学习率。Mamba2 只有衰减没有回归目标，DeltaNet 只有回归没有衰减——Gated DeltaNet 两者都有。</p>
+
+  <h3>自己动手：看三种规则怎么处理同一段序列</h3>
+  <p>下面是一个最简化的记忆模拟。四个槽位代表四条 key 的关联，每个槽位存一个二维 value。切换规则、拖动 α / β，点按钮写入。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="rule-btns">
+      <button class="rule-btn" data-rule="mamba2">Mamba2<span class="r-sub">全局衰减</span></button>
+      <button class="rule-btn" data-rule="deltanet">DeltaNet<span class="r-sub">定向擦写</span></button>
+      <button class="rule-btn active" data-rule="gated">Gated DeltaNet<span class="r-sub">两者结合</span></button>
+    </div>
+
+    <div class="slots" id="slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>α 全局缩放 <span class="v" id="alpha-v">1.00</span></label>
+        <input type="range" id="alpha" min="0" max="1" step="0.05" value="1">
+      </div>
+      <div class="ctrl">
+        <label>β 擦写强度 <span class="v" id="beta-v">1.00</span></label>
+        <input type="range" id="beta" min="0" max="1" step="0.05" value="1">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" data-act="write-a">写入 A = (1, 0)</button>
+      <button class="act" data-act="write-b">写入 B = (0, 1)</button>
+      <button class="act" data-act="overwrite-a">覆写 A = (0, 1)</button>
+      <button class="act ghost" data-act="reset">重置</button>
+    </div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前状态</div>
+      <div id="sim-msg">先点「写入 A」和「写入 B」，再点「覆写 A」，对比三种规则的差别。</div>
+    </div>
+  </div>
+
+  <p><strong>建议按这个顺序试：</strong></p>
+  <ul>
+    <li>选 <strong>Mamba2</strong> → 写入 A → 写入 B → 覆写 A。槽 A 里会留下旧值的残余，查询得到的不是干净的 (0,1)。</li>
+    <li>选 <strong>DeltaNet</strong> → 同样操作。槽 A 被精确替换，但把 α 拖到 0 再写入 C，你会发现 A、B <strong>纹丝不动</strong>——它没有全局清空能力。</li>
+    <li>选 <strong>Gated DeltaNet</strong> → 两种操作都能干净完成。</li>
+  </ul>
+
+  <details>
+    <summary>这个模拟简化了什么？<span class="sum-sub">点开看与真实公式的差异</span></summary>
+    <div class="details-body">
+      <p>模拟里四个 key 取的是<strong>正交的 one-hot 向量</strong>，所以「槽位」和「维度」一一对应，擦除项 (I − β k kᵀ) 恰好只作用于目标槽位。</p>
+      <p>真实模型里 key 是稠密向量，不会严格正交——擦除一个方向时，会不可避免地轻微影响其他方向，这正是「近似擦除」的含义，也是碰撞问题的根源。模拟保留了机制层面的因果，省略了这种交叉干扰。</p>
+      <p>另外，论文里 α 和 β 都是由当前输入<strong>动态生成</strong>的标量（经过线性投影 + 激活），不是全局常数；模拟里用滑块代替，是为了让你手动感受它们的作用范围。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>公式好写，难的是怎么在 GPU 上训</h2></div>
+  <p class="sec-sub">逐 token 递推意味着训练必须串行，等于放弃 GPU。论文的第二个贡献是一个分块并行算法。</p>
+
+  <p>递推式 <code>S<sub>t</sub> = f(S<sub>t-1</sub>)</code> 天然是串行的：训练时无法像注意力那样把一个 batch 的整条序列并行算完。论文的解法和线性注意力圈的通用做法一致——<strong>分块（chunkwise）</strong>：</p>
+
+  <ul>
+    <li>把序列切成固定长度 C 的块。</li>
+    <li><strong>块内</strong>：把 C 步递推展开成矩阵形式，块内全部 token 并行计算。</li>
+    <li><strong>块间</strong>：只有块末状态需要串行传递，串行长度从 n 降到 n/C。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">工程关键</span><h4>WY 表示 / UT 变换</h4></div>
+    <p>块内递推里反复出现 <code>(I − β k kᵀ)</code> 的连乘。论文用 WY 表示把它整理成一个三角矩阵求逆的形式（UT 变换），从而把整个块的计算<strong>改写成几次标准矩阵乘法</strong>——这才是 GPU 真正擅长的形状。</p>
+    <p>附录 A 给了扩展 WY 表示在门控情形下的推导，这是让「门控 + delta」不至于比纯 delta 慢太多的原因。</p>
+  </div>
+
+  <p>结果就是论文报告的吞吐：<strong>Gated DeltaNet 与 DeltaNet 几乎同速</strong>，说明加入门控的额外开销很小；两者都比 Mamba2 慢 2–3K tokens/s，代价来自更复杂的转移矩阵。混合架构（把部分层换成滑窗注意力）反而比纯线性层更快，所以在他们的最终模型里用了混合。</p>
+</section>
+
+<!-- ================= 5. 架构图 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>落成模型长什么样</h2></div>
+  <p class="sec-sub">论文 Figure 1：两种混合排布 + 单个 block 的内部结构。</p>
+
+  <figure>
+    <div id="fig1-host"><svg  aria-label="Gated DeltaNet 架构图"  style="width:100%;height:auto;overflow:visible" version="1.1" viewBox="0 0 743.86 409.06" ><g transform="translate(0,409.06) matrix(1 0 0 -1 0 0) translate(121.2,0) translate(0,203.94)"><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F3F3F4;" class="ltx_centering" fill="#F3F3F4" stroke="#000000" stroke-width="1.2pt"><path d="M 67.8 114.16 L -67.8 114.16 C -75.44 114.16 -81.64 107.96 -81.64 100.32 L -81.64 -100.32 C -81.64 -107.96 -75.44 -114.16 -67.8 -114.16 L 67.8 -114.16 C 75.44 -114.16 81.64 -107.96 81.64 -100.32 L 81.64 100.32 C 81.64 107.96 75.44 114.16 67.8 114.16 Z M -81.64 -114.16"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" fill="#000000" stroke="#000000"><g stroke-width="0.4pt"><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 -116.59 -4.15)"><foreignObject style="--ltx-fo-width:1.91em;--ltx-fo-height:0.68em;--ltx-fo-depth:0.08em;font-size:10pt;" height="10.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="26.46"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><math id="S3.F1.pic1.m1" class="ltx_math_unparsed" alttext="N\times" display="inline" intent=":literal"><semantics><mrow><mi>N</mi><mo lspace="0.222em">×</mo></mrow><annotation encoding="application/x-tex">N\times</annotation></semantics></math></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F5F5CE;" class="ltx_centering" fill="#F5F5CE" stroke="#000000" stroke-width="1.2pt"><path d="M 49.81 -58.92 L -49.81 -58.92 C -52.11 -58.92 -53.96 -60.78 -53.96 -63.07 L -53.96 -82.33 C -53.96 -84.62 -52.11 -86.48 -49.81 -86.48 L 49.81 -86.48 C 52.11 -86.48 53.96 -84.62 53.96 -82.33 L 53.96 -63.07 C 53.96 -60.78 52.11 -58.92 49.81 -58.92 Z M -53.96 -86.48"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 -48.19 -77.51)"><foreignObject style="--ltx-fo-width:6.97em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="96.38"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.1" class="ltx_text">Gated DeltaNet</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 -131.59 L 0 -95.28"></path><g transform="matrix(0.0 1.0 -1.0 0.0 0 -95.28)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#CEEDF9;" class="ltx_centering" fill="#CEEDF9" stroke="#000000" stroke-width="1.2pt"><path d="M 49.81 -18.63 L -49.81 -18.63 C -52.11 -18.63 -53.96 -20.49 -53.96 -22.78 L -53.96 -42.04 C -53.96 -44.33 -52.11 -46.19 -49.81 -46.19 L 49.81 -46.19 C 52.11 -46.19 53.96 -44.33 53.96 -42.04 L 53.96 -22.78 C 53.96 -20.49 52.11 -18.63 49.81 -18.63 Z M -53.96 -46.19"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 -15.37 -37.14)"><foreignObject style="--ltx-fo-width:2.22em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="30.75"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.2" class="ltx_text">MLP</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 -58.09 L 0 -47.02"></path></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp9"><path d="M 5.53 -6.73 C 5.53 -3.68 3.06 -1.2 0 -1.2 C -3.06 -1.2 -5.53 -3.68 -5.53 -6.73 C -5.53 -9.79 -3.06 -12.27 0 -12.27 C 3.06 -12.27 5.53 -9.79 5.53 -6.73 Z M 0 -6.73"></path></clipPath><g clip-path="url(#pgfcp9)"><path style="fill:none" d="M 0 -6.73 L 11.81 -6.73 M 0 -6.73 L -11.81 -6.73 M 0 -6.73 L 0 5.08 M 0 -6.73 L 0 -18.54"></path></g><path style="fill:none" d="M 5.53 -6.73 C 5.53 -3.68 3.06 -1.2 0 -1.2 C -3.06 -1.2 -5.53 -3.68 -5.53 -6.73 C -5.53 -9.79 -3.06 -12.27 0 -12.27 C 3.06 -12.27 5.53 -9.79 5.53 -6.73 Z M 0 -6.73"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE6E7;" class="ltx_centering" fill="#FDE6E7" stroke="#000000" stroke-width="1.2pt"><path d="M 49.81 43.8 L -49.81 43.8 C -52.11 43.8 -53.96 41.94 -53.96 39.64 L -53.96 20.39 C -53.96 18.09 -52.11 16.24 -49.81 16.24 L 49.81 16.24 C 52.11 16.24 53.96 18.09 53.96 20.39 L 53.96 39.64 C 53.96 41.94 52.11 43.8 49.81 43.8 Z M -53.96 16.24"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 -15.37 25.29)"><foreignObject style="--ltx-fo-width:2.33em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="32.29"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.3" class="ltx_text">SWA</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 -17.8 L 0 -12.27"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 -1.2 L 0 7.44"></path><g transform="matrix(0.0 1.0 -1.0 0.0 0 7.44)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 -101.15 L -59.5 -101.15 C -63.32 -101.15 -66.42 -98.05 -66.42 -94.23 L -66.42 -13.65 C -66.42 -9.83 -63.32 -6.73 -59.5 -6.73 L 0 -6.73"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#CEEDF9;" class="ltx_centering" fill="#CEEDF9" stroke="#000000" stroke-width="1.2pt"><path d="M 49.81 84.08 L -49.81 84.08 C -52.11 84.08 -53.96 82.23 -53.96 79.93 L -53.96 60.68 C -53.96 58.38 -52.11 56.53 -49.81 56.53 L 49.81 56.53 C 52.11 56.53 53.96 58.38 53.96 60.68 L 53.96 79.93 C 53.96 82.23 52.11 84.08 49.81 84.08 Z M -53.96 56.53"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 -15.37 65.58)"><foreignObject style="--ltx-fo-width:2.22em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="30.75"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.4" class="ltx_text">MLP</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 44.63 L 0 55.7"></path></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp10"><path d="M 5.53 95.98 C 5.53 99.04 3.06 101.52 0 101.52 C -3.06 101.52 -5.53 99.04 -5.53 95.98 C -5.53 92.93 -3.06 90.45 0 90.45 C 3.06 90.45 5.53 92.93 5.53 95.98 Z M 0 95.98"></path></clipPath><g clip-path="url(#pgfcp10)"><path style="fill:none" d="M 0 95.98 L 11.81 95.98 M 0 95.98 L -11.81 95.98 M 0 95.98 L 0 107.8 M 0 95.98 L 0 84.17"></path></g><path style="fill:none" d="M 5.53 95.98 C 5.53 99.04 3.06 101.52 0 101.52 C -3.06 101.52 -5.53 99.04 -5.53 95.98 C -5.53 92.93 -3.06 90.45 0 90.45 C 3.06 90.45 5.53 92.93 5.53 95.98 Z M 0 95.98"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 84.91 L 0 90.45"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 1.57 L -59.5 1.57 C -63.32 1.57 -66.42 4.67 -66.42 8.49 L -66.42 89.07 C -66.42 92.89 -63.32 95.98 -59.5 95.98 L 0 95.98"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 -25.02 139.17)"><foreignObject style="--ltx-fo-width:3.62em;--ltx-fo-height:0.68em;--ltx-fo-depth:0.19em;font-size:10pt;" height="12.15" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="50.04"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.5" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Outputs</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 0 101.52 L 0 123.62"></path><g transform="matrix(0.0 1.0 -1.0 0.0 0 123.62)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F3F3F4;" class="ltx_centering" fill="#F3F3F4" stroke="#000000" stroke-width="1.2pt"><path d="M 260.41 166.04 L 124.81 166.04 C 117.17 166.04 110.97 159.85 110.97 152.21 L 110.97 -152.21 C 110.97 -159.85 117.17 -166.04 124.81 -166.04 L 260.41 -166.04 C 268.05 -166.04 274.25 -159.85 274.25 -152.21 L 274.25 152.21 C 274.25 159.85 268.05 166.04 260.41 166.04 Z M 110.97 -166.04"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 133.47 -197.98)"><foreignObject style="--ltx-fo-width:8.55em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="118.29"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.6" class="ltx_text">Gated DeltaNet-H2</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 -59.14 -197.98)"><foreignObject style="--ltx-fo-width:8.55em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="118.29"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.7" class="ltx_text">Gated DeltaNet-H1</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F5F5CE;" class="ltx_centering" fill="#F5F5CE" stroke="#000000" stroke-width="1.2pt"><path d="M 242.42 -110.81 L 142.8 -110.81 C 140.51 -110.81 138.65 -112.67 138.65 -114.96 L 138.65 -134.22 C 138.65 -136.51 140.51 -138.37 142.8 -138.37 L 242.42 -138.37 C 244.72 -138.37 246.58 -136.51 246.58 -134.22 L 246.58 -114.96 C 246.58 -112.67 244.72 -110.81 242.42 -110.81 Z M 138.65 -138.37"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 166.47 -129.39)"><foreignObject style="--ltx-fo-width:3.81em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="52.66"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.8" class="ltx_text">Mamba2</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -183.48 L 192.61 -147.17"></path><g transform="matrix(0.0 1.0 -1.0 0.0 192.61 -147.17)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#CEEDF9;" class="ltx_centering" fill="#CEEDF9" stroke="#000000" stroke-width="1.2pt"><path d="M 242.42 -70.52 L 142.8 -70.52 C 140.51 -70.52 138.65 -72.38 138.65 -74.67 L 138.65 -93.93 C 138.65 -96.22 140.51 -98.08 142.8 -98.08 L 242.42 -98.08 C 244.72 -98.08 246.58 -96.22 246.58 -93.93 L 246.58 -74.67 C 246.58 -72.38 244.72 -70.52 242.42 -70.52 Z M 138.65 -98.08"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 177.24 -89.03)"><foreignObject style="--ltx-fo-width:2.22em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="30.75"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.9" class="ltx_text">MLP</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -109.98 L 192.61 -98.91"></path></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp11"><path d="M 198.15 -58.62 C 198.15 -55.57 195.67 -53.09 192.61 -53.09 C 189.55 -53.09 187.08 -55.57 187.08 -58.62 C 187.08 -61.68 189.55 -64.16 192.61 -64.16 C 195.67 -64.16 198.15 -61.68 198.15 -58.62 Z M 192.61 -58.62"></path></clipPath><g clip-path="url(#pgfcp11)"><path style="fill:none" d="M 192.61 -58.62 L 204.42 -58.62 M 192.61 -58.62 L 180.8 -58.62 M 192.61 -58.62 L 192.61 -46.81 M 192.61 -58.62 L 192.61 -70.43"></path></g><path style="fill:none" d="M 198.15 -58.62 C 198.15 -55.57 195.67 -53.09 192.61 -53.09 C 189.55 -53.09 187.08 -55.57 187.08 -58.62 C 187.08 -61.68 189.55 -64.16 192.61 -64.16 C 195.67 -64.16 198.15 -61.68 198.15 -58.62 Z M 192.61 -58.62"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F5F5CE;" class="ltx_centering" fill="#F5F5CE" stroke="#000000" stroke-width="1.2pt"><path d="M 242.42 -8.09 L 142.8 -8.09 C 140.51 -8.09 138.65 -9.95 138.65 -12.24 L 138.65 -31.5 C 138.65 -33.79 140.51 -35.65 142.8 -35.65 L 242.42 -35.65 C 244.72 -35.65 246.58 -33.79 246.58 -31.5 L 246.58 -12.24 C 246.58 -9.95 244.72 -8.09 242.42 -8.09 Z M 138.65 -35.65"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 144.42 -26.68)"><foreignObject style="--ltx-fo-width:6.97em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="96.38"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.10" class="ltx_text">Gated DeltaNet</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -69.69 L 192.61 -64.16"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -53.09 L 192.61 -44.45"></path><g transform="matrix(0.0 1.0 -1.0 0.0 192.61 -44.45)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -153.04 L 133.11 -153.04 C 129.29 -153.04 126.19 -149.94 126.19 -146.12 L 126.19 -65.54 C 126.19 -61.72 129.29 -58.62 133.11 -58.62 L 192.61 -58.62"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#CEEDF9;" class="ltx_centering" fill="#CEEDF9" stroke="#000000" stroke-width="1.2pt"><path d="M 242.42 32.2 L 142.8 32.2 C 140.51 32.2 138.65 30.34 138.65 28.04 L 138.65 8.79 C 138.65 6.5 140.51 4.64 142.8 4.64 L 242.42 4.64 C 244.72 4.64 246.58 6.5 246.58 8.79 L 246.58 28.04 C 246.58 30.34 244.72 32.2 242.42 32.2 Z M 138.65 4.64"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 177.24 13.69)"><foreignObject style="--ltx-fo-width:2.22em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="30.75"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.11" class="ltx_text">MLP</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -7.26 L 192.61 3.81"></path></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp12"><path d="M 198.15 44.1 C 198.15 47.15 195.67 49.63 192.61 49.63 C 189.55 49.63 187.08 47.15 187.08 44.1 C 187.08 41.04 189.55 38.56 192.61 38.56 C 195.67 38.56 198.15 41.04 198.15 44.1 Z M 192.61 44.1"></path></clipPath><g clip-path="url(#pgfcp12)"><path style="fill:none" d="M 192.61 44.1 L 204.42 44.1 M 192.61 44.1 L 180.8 44.1 M 192.61 44.1 L 192.61 55.91 M 192.61 44.1 L 192.61 32.28"></path></g><path style="fill:none" d="M 198.15 44.1 C 198.15 47.15 195.67 49.63 192.61 49.63 C 189.55 49.63 187.08 47.15 187.08 44.1 C 187.08 41.04 189.55 38.56 192.61 38.56 C 195.67 38.56 198.15 41.04 198.15 44.1 Z M 192.61 44.1"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE6E7;" class="ltx_centering" fill="#FDE6E7" stroke="#000000" stroke-width="1.2pt"><path d="M 242.42 94.62 L 142.8 94.62 C 140.51 94.62 138.65 92.77 138.65 90.47 L 138.65 71.22 C 138.65 68.92 140.51 67.06 142.8 67.06 L 242.42 67.06 C 244.72 67.06 246.58 68.92 246.58 71.22 L 246.58 90.47 C 246.58 92.77 244.72 94.62 242.42 94.62 Z M 138.65 67.06"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 177.24 76.12)"><foreignObject style="--ltx-fo-width:2.33em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="32.29"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.12" class="ltx_text">SWA</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 33.03 L 192.61 38.56"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 49.63 L 192.61 58.26"></path><g transform="matrix(0.0 1.0 -1.0 0.0 192.61 58.26)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 -50.32 L 133.11 -50.32 C 129.29 -50.32 126.19 -47.22 126.19 -43.4 L 126.19 37.18 C 126.19 41 129.29 44.1 133.11 44.1 L 192.61 44.1"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#CEEDF9;" class="ltx_centering" fill="#CEEDF9" stroke="#000000" stroke-width="1.2pt"><path d="M 242.42 134.91 L 142.8 134.91 C 140.51 134.91 138.65 133.05 138.65 130.76 L 138.65 111.51 C 138.65 109.21 140.51 107.35 142.8 107.35 L 242.42 107.35 C 244.72 107.35 246.58 109.21 246.58 111.51 L 246.58 130.76 C 246.58 133.05 244.72 134.91 242.42 134.91 Z M 138.65 107.35"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 177.24 116.41)"><foreignObject style="--ltx-fo-width:2.22em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="30.75"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.13" class="ltx_text">MLP</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 95.45 L 192.61 106.52"></path></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp13"><path d="M 198.15 146.81 C 198.15 149.87 195.67 152.35 192.61 152.35 C 189.55 152.35 187.08 149.87 187.08 146.81 C 187.08 143.76 189.55 141.28 192.61 141.28 C 195.67 141.28 198.15 143.76 198.15 146.81 Z M 192.61 146.81"></path></clipPath><g clip-path="url(#pgfcp13)"><path style="fill:none" d="M 192.61 146.81 L 204.42 146.81 M 192.61 146.81 L 180.8 146.81 M 192.61 146.81 L 192.61 158.62 M 192.61 146.81 L 192.61 135"></path></g><path style="fill:none" d="M 198.15 146.81 C 198.15 149.87 195.67 152.35 192.61 152.35 C 189.55 152.35 187.08 149.87 187.08 146.81 C 187.08 143.76 189.55 141.28 192.61 141.28 C 195.67 141.28 198.15 143.76 198.15 146.81 Z M 192.61 146.81"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 135.74 L 192.61 141.28"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 52.4 L 133.11 52.4 C 129.29 52.4 126.19 55.5 126.19 59.32 L 126.19 139.89 C 126.19 143.72 129.29 146.81 133.11 146.81 L 192.61 146.81"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 167.59 191.06)"><foreignObject style="--ltx-fo-width:3.62em;--ltx-fo-height:0.68em;--ltx-fo-depth:0.19em;font-size:10pt;" height="12.15" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="50.04"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.14" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Outputs</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 192.61 152.35 L 192.61 175.51"></path><g transform="matrix(0.0 1.0 -1.0 0.0 192.61 175.51)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F3F3F4;" class="ltx_centering" fill="#F3F3F4" stroke="#000000" stroke-width="1.2pt"><path d="M 608 138.37 L 331.26 138.37 C 323.62 138.37 317.42 132.18 317.42 124.53 L 317.42 -124.53 C 317.42 -132.18 323.62 -138.37 331.26 -138.37 L 608 -138.37 C 615.64 -138.37 621.83 -132.18 621.83 -124.53 L 621.83 124.53 C 621.83 132.18 615.64 138.37 608 138.37 Z M 317.42 -138.37"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 430 -196.63)"><foreignObject style="--ltx-fo-width:5.73em;--ltx-fo-height:0.69em;--ltx-fo-depth:0.19em;font-size:10pt;" height="12.3" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="79.26"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.15" class="ltx_text">Block Design</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#F9F9E0;" class="ltx_centering" fill="#F9F9E0" stroke="#000000" stroke-width="1.2pt"><path d="M 569.25 39.48 L 370 39.48 C 367.71 39.48 365.85 37.62 365.85 35.33 L 365.85 12.14 C 365.85 9.84 367.71 7.99 370 7.99 L 569.25 7.99 C 571.55 7.99 573.41 9.84 573.41 12.14 L 573.41 35.33 C 573.41 37.62 571.55 39.48 569.25 39.48 Z M 365.85 7.99"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 413.85 18.93)"><foreignObject style="--ltx-fo-width:8.06em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="111.56"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.16" class="ltx_text">Gated Delta Rule </span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 450.18 -170.15)"><foreignObject style="--ltx-fo-width:2.81em;--ltx-fo-height:0.68em;--ltx-fo-depth:0.19em;font-size:10pt;" height="12.15" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="38.9"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.17" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Inputs</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#E3E6F3;" class="ltx_centering" fill="#E3E6F3" stroke="#000000" stroke-width="1.2pt"><path d="M 445.19 -107.63 L 440.47 -94.67 C 439.69 -92.52 440.91 -90.77 443.2 -90.77 L 496.05 -90.77 C 498.35 -90.77 499.57 -92.52 498.78 -94.67 L 494.07 -107.63 C 493.28 -109.78 490.79 -111.53 488.5 -111.53 L 450.76 -111.53 C 448.46 -111.53 445.97 -109.78 445.19 -107.63 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 450.29 -105.88)"><foreignObject style="--ltx-fo-width:2.79em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="38.67"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.18" class="ltx_text">Linear</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE6E7;" class="ltx_centering" fill="#FDE6E7" stroke="#000000" stroke-width="1.2pt"><path d="M 486.23 -60.19 L 453.02 -60.19 C 450.73 -60.19 448.87 -62.05 448.87 -64.34 L 448.87 -74.72 C 448.87 -77.01 450.73 -78.87 453.02 -78.87 L 486.23 -78.87 C 488.52 -78.87 490.38 -77.01 490.38 -74.72 L 490.38 -64.34 C 490.38 -62.05 488.52 -60.19 486.23 -60.19 Z M 448.87 -78.87"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 453.87 -74.26)"><foreignObject style="--ltx-fo-width:2.31em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="31.9"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.19" class="ltx_text">Conv</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp14"><path d="M 475.16 -48.29 C 475.16 -45.24 472.68 -42.76 469.63 -42.76 C 466.57 -42.76 464.09 -45.24 464.09 -48.29 C 464.09 -51.35 466.57 -53.83 469.63 -53.83 C 472.68 -53.83 475.16 -51.35 475.16 -48.29 Z M 469.63 -48.29"></path></clipPath><g clip-path="url(#pgfcp14)"><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 410.57 -48.29 L 411.78 -48.29 L 412.98 -48.29 L 414.19 -48.29 L 415.39 -48.29 L 416.6 -48.29 L 417.8 -48.29 L 419.01 -48.29 L 420.21 -48.29 L 421.42 -48.29 L 422.62 -48.29 L 423.83 -48.29 L 425.03 -48.29 L 426.24 -48.29 L 427.44 -48.29 L 428.65 -48.29 L 429.85 -48.29 L 431.06 -48.29 L 432.26 -48.29 L 433.47 -48.29 L 434.67 -48.29 L 435.88 -48.29 L 437.08 -48.29 L 438.29 -48.29 L 439.49 -48.29 L 440.7 -48.29 L 441.9 -48.29 L 443.11 -48.29 L 444.32 -48.29 L 445.52 -48.29 L 446.73 -48.29 L 447.93 -48.29 L 449.14 -48.29 L 450.34 -48.29 L 451.55 -48.29 L 452.75 -48.29 L 453.96 -48.29 L 455.16 -48.29 L 456.37 -48.29 L 457.57 -48.29 L 458.78 -48.29 L 459.98 -48.29 L 461.19 -48.29 L 462.39 -48.29 L 463.6 -48.29 L 464.8 -48.29 L 466.01 -48.29 L 467.21 -48.29 L 468.42 -48.29 L 469.62 -48.29"></path></g><g></g><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 469.63 -48.29 L 470.83 -47.09 L 472.04 -45.88 L 473.24 -44.68 L 474.45 -43.47 L 475.65 -42.27 L 476.86 -41.06 L 478.06 -39.86 L 479.27 -38.65 L 480.47 -37.45 L 481.68 -36.24 L 482.88 -35.04 L 484.09 -33.83 L 485.29 -32.63 L 486.5 -31.42 L 487.7 -30.22 L 488.91 -29.01 L 490.11 -27.81 L 491.32 -26.6 L 492.52 -25.4 L 493.73 -24.19 L 494.93 -22.99 L 496.14 -21.78 L 497.34 -20.58 L 498.55 -19.37 L 499.75 -18.17 L 500.96 -16.96 L 502.17 -15.75 L 503.37 -14.55 L 504.58 -13.34 L 505.78 -12.14 L 506.99 -10.93 L 508.19 -9.73 L 509.4 -8.52 L 510.6 -7.32 L 511.81 -6.11 L 513.01 -4.91 L 514.22 -3.7 L 515.42 -2.5 L 516.63 -1.29 L 517.83 -0.09 L 519.04 1.12 L 520.24 2.32 L 521.45 3.53 L 522.65 4.73 L 523.86 5.94 L 525.06 7.14 L 526.27 8.35 L 527.47 9.55 L 528.68 10.76"></path></g><g></g></g><path style="fill:none" d="M 475.16 -48.29 C 475.16 -45.24 472.68 -42.76 469.63 -42.76 C 466.57 -42.76 464.09 -45.24 464.09 -48.29 C 464.09 -51.35 466.57 -53.83 469.63 -53.83 C 472.68 -53.83 475.16 -51.35 475.16 -48.29 Z M 469.63 -48.29"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -42.76 L 469.63 -0.81"></path><g transform="matrix(0.0 1.0 -1.0 0.0 469.63 -0.81)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 475.07 -5.9)"><foreignObject style="--ltx-fo-width:0.6em;--ltx-fo-height:0.44em;--ltx-fo-depth:0em;font-size:10pt;" height="6.15" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 6.15)" width="8.35"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><math id="S3.F1.pic1.m2" class="ltx_Math" alttext="\bm{v}" display="inline" intent=":literal"><semantics><mi>𝒗</mi><annotation encoding="application/x-tex">\bm{v}</annotation></semantics></math></span></span></foreignObject></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -53.83 L 469.63 -59.36"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -79.7 L 469.63 -90.77"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -155.8 L 469.63 -146.12 C 469.63 -142.3 469.63 -136.1 469.63 -132.28 L 469.63 -111.53"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#E3E6F3;" class="ltx_centering" fill="#E3E6F3" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt"><path d="M 374.79 -109.01 L 370.08 -96.06 C 369.29 -93.9 370.51 -92.15 372.81 -92.15 L 425.66 -92.15 C 427.95 -92.15 429.17 -93.9 428.39 -96.06 L 423.67 -109.01 C 422.89 -111.16 420.39 -112.91 418.1 -112.91 L 380.36 -112.91 C 378.07 -112.91 375.57 -111.16 374.79 -109.01 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 379.9 -107.26)"><foreignObject style="--ltx-fo-width:2.79em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="38.67"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.20" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Linear</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE6E7;" class="ltx_centering" fill="#FDE6E7" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt"><path d="M 415.84 -61.58 L 382.63 -61.58 C 380.33 -61.58 378.48 -63.43 378.48 -65.73 L 378.48 -76.1 C 378.48 -78.4 380.33 -80.25 382.63 -80.25 L 415.84 -80.25 C 418.13 -80.25 419.99 -78.4 419.99 -76.1 L 419.99 -65.73 C 419.99 -63.43 418.13 -61.58 415.84 -61.58 Z M 378.48 -80.25"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 383.47 -75.64)"><foreignObject style="--ltx-fo-width:2.31em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="31.9"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.21" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Conv</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.0pt"><clipPath id="pgfcp15"><path d="M 404.77 -49.68 C 404.77 -46.62 402.29 -44.14 399.23 -44.14 C 396.18 -44.14 393.7 -46.62 393.7 -49.68 C 393.7 -52.73 396.18 -55.21 399.23 -55.21 C 402.29 -55.21 404.77 -52.73 404.77 -49.68 Z M 399.23 -49.68"></path></clipPath><g clip-path="url(#pgfcp15)"><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 340.18 -49.68 L 341.38 -49.68 L 342.59 -49.68 L 343.79 -49.68 L 345 -49.68 L 346.2 -49.68 L 347.41 -49.68 L 348.61 -49.68 L 349.82 -49.68 L 351.02 -49.68 L 352.23 -49.68 L 353.43 -49.68 L 354.64 -49.68 L 355.84 -49.68 L 357.05 -49.68 L 358.25 -49.68 L 359.46 -49.68 L 360.66 -49.68 L 361.87 -49.68 L 363.07 -49.68 L 364.28 -49.68 L 365.48 -49.68 L 366.69 -49.68 L 367.89 -49.68 L 369.1 -49.68 L 370.3 -49.68 L 371.51 -49.68 L 372.71 -49.68 L 373.92 -49.68 L 375.12 -49.68 L 376.33 -49.68 L 377.53 -49.68 L 378.74 -49.68 L 379.94 -49.68 L 381.15 -49.68 L 382.35 -49.68 L 383.56 -49.68 L 384.76 -49.68 L 385.97 -49.68 L 387.18 -49.68 L 388.38 -49.68 L 389.59 -49.68 L 390.79 -49.68 L 392 -49.68 L 393.2 -49.68 L 394.41 -49.68 L 395.61 -49.68 L 396.82 -49.68 L 398.02 -49.68 L 399.23 -49.68"></path></g><g></g><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 399.23 -49.68 L 400.44 -48.47 L 401.64 -47.27 L 402.85 -46.06 L 404.05 -44.86 L 405.26 -43.65 L 406.46 -42.45 L 407.67 -41.24 L 408.87 -40.04 L 410.08 -38.83 L 411.28 -37.62 L 412.49 -36.42 L 413.69 -35.21 L 414.9 -34.01 L 416.1 -32.8 L 417.31 -31.6 L 418.51 -30.39 L 419.72 -29.19 L 420.92 -27.98 L 422.13 -26.78 L 423.33 -25.57 L 424.54 -24.37 L 425.74 -23.16 L 426.95 -21.96 L 428.15 -20.75 L 429.36 -19.55 L 430.56 -18.34 L 431.77 -17.14 L 432.97 -15.93 L 434.18 -14.73 L 435.38 -13.52 L 436.59 -12.32 L 437.79 -11.11 L 439 -9.91 L 440.2 -8.7 L 441.41 -7.5 L 442.61 -6.29 L 443.82 -5.09 L 445.03 -3.88 L 446.23 -2.68 L 447.44 -1.47 L 448.64 -0.27 L 449.85 0.94 L 451.05 2.14 L 452.26 3.35 L 453.46 4.55 L 454.67 5.76 L 455.87 6.96 L 457.08 8.17 L 458.28 9.37"></path></g><g></g></g><path style="fill:none" d="M 404.77 -49.68 C 404.77 -46.62 402.29 -44.14 399.23 -44.14 C 396.18 -44.14 393.7 -46.62 393.7 -49.68 C 393.7 -52.73 396.18 -55.21 399.23 -55.21 C 402.29 -55.21 404.77 -52.73 404.77 -49.68 Z M 399.23 -49.68"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE8C9;" class="ltx_centering" fill="#FDE8C9" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt"><path d="M 415.84 -19.1 L 382.63 -19.1 C 380.33 -19.1 378.48 -20.96 378.48 -23.25 L 378.48 -33.62 C 378.48 -35.92 380.33 -37.78 382.63 -37.78 L 415.84 -37.78 C 418.13 -37.78 419.99 -35.92 419.99 -33.62 L 419.99 -23.25 C 419.99 -20.96 418.13 -19.1 415.84 -19.1 Z M 378.48 -37.78"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 391.45 -33.16)"><foreignObject style="--ltx-fo-width:1.13em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="15.57"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.22" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">L2</span></span></span></foreignObject></g><g class="ltx_centering" fill-opacity="0.2" stroke-opacity="0.2" stroke-width="1.2pt"><path style="fill:none" d="M 399.23 -18.27 L 399.23 -0.81"></path><g transform="matrix(0.0 1.0 -1.0 0.0 399.23 -0.81)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 404.12 -5.57)"><foreignObject style="--ltx-fo-width:0.62em;--ltx-fo-height:0.69em;--ltx-fo-depth:0em;font-size:10pt;" height="9.61" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="8.61"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><math id="S3.F1.pic1.m3" class="ltx_Math" alttext="\bm{k}" display="inline" intent=":literal"><semantics><mi>𝒌</mi><annotation encoding="application/x-tex">\bm{k}</annotation></semantics></math></span></span></foreignObject></g><g class="ltx_centering" fill-opacity="0.2" stroke-opacity="0.2" stroke-width="1.2pt"><path style="fill:none" d="M 399.23 -44.14 L 399.23 -38.61"></path></g><g class="ltx_centering" fill-opacity="0.2" stroke-opacity="0.2" stroke-width="1.2pt"><path style="fill:none" d="M 399.23 -55.21 L 399.23 -60.75"></path></g><g class="ltx_centering" fill-opacity="0.2" stroke-opacity="0.2" stroke-width="1.2pt"><path style="fill:none" d="M 399.23 -81.08 L 399.23 -92.15"></path></g><g class="ltx_centering" fill-opacity="0.2" stroke-opacity="0.2" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -155.8 L 469.63 -146.12 C 469.63 -142.3 469.63 -136.1 469.63 -132.28 L 469.63 -132.28 C 469.63 -128.46 466.53 -125.36 462.71 -125.36 L 462.71 -125.36 C 458.89 -125.36 452.69 -125.36 448.87 -125.36 L 406.15 -125.36 C 402.33 -125.36 399.23 -122.27 399.23 -118.44 L 399.23 -112.91"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#E3E6F3;" class="ltx_centering" fill="#E3E6F3" stroke="#000000" stroke-width="1.2pt"><path d="M 365.61 -106.24 L 360.89 -93.29 C 360.11 -91.13 361.33 -89.39 363.63 -89.39 L 416.47 -89.39 C 418.77 -89.39 419.99 -91.13 419.21 -93.29 L 414.49 -106.24 C 413.71 -108.4 411.21 -110.14 408.92 -110.14 L 371.18 -110.14 C 368.89 -110.14 366.39 -108.4 365.61 -106.24 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 370.72 -104.49)"><foreignObject style="--ltx-fo-width:2.79em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="38.67"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.23" class="ltx_text">Linear</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE6E7;" class="ltx_centering" fill="#FDE6E7" stroke="#000000" stroke-width="1.2pt"><path d="M 406.65 -58.81 L 373.45 -58.81 C 371.15 -58.81 369.29 -60.67 369.29 -62.96 L 369.29 -73.34 C 369.29 -75.63 371.15 -77.49 373.45 -77.49 L 406.65 -77.49 C 408.95 -77.49 410.81 -75.63 410.81 -73.34 L 410.81 -62.96 C 410.81 -60.67 408.95 -58.81 406.65 -58.81 Z M 369.29 -77.49"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 374.29 -72.88)"><foreignObject style="--ltx-fo-width:2.31em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="31.9"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.24" class="ltx_text">Conv</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp16"><path d="M 395.58 -46.91 C 395.58 -43.85 393.11 -41.37 390.05 -41.37 C 386.99 -41.37 384.52 -43.85 384.52 -46.91 C 384.52 -49.97 386.99 -52.44 390.05 -52.44 C 393.11 -52.44 395.58 -49.97 395.58 -46.91 Z M 390.05 -46.91"></path></clipPath><g clip-path="url(#pgfcp16)"><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 330.99 -46.91 L 332.2 -46.91 L 333.41 -46.91 L 334.61 -46.91 L 335.82 -46.91 L 337.02 -46.91 L 338.23 -46.91 L 339.43 -46.91 L 340.64 -46.91 L 341.84 -46.91 L 343.05 -46.91 L 344.25 -46.91 L 345.46 -46.91 L 346.66 -46.91 L 347.87 -46.91 L 349.07 -46.91 L 350.28 -46.91 L 351.48 -46.91 L 352.69 -46.91 L 353.89 -46.91 L 355.1 -46.91 L 356.3 -46.91 L 357.51 -46.91 L 358.71 -46.91 L 359.92 -46.91 L 361.12 -46.91 L 362.33 -46.91 L 363.53 -46.91 L 364.74 -46.91 L 365.94 -46.91 L 367.15 -46.91 L 368.35 -46.91 L 369.56 -46.91 L 370.76 -46.91 L 371.97 -46.91 L 373.17 -46.91 L 374.38 -46.91 L 375.58 -46.91 L 376.79 -46.91 L 377.99 -46.91 L 379.2 -46.91 L 380.4 -46.91 L 381.61 -46.91 L 382.81 -46.91 L 384.02 -46.91 L 385.22 -46.91 L 386.43 -46.91 L 387.63 -46.91 L 388.84 -46.91 L 390.04 -46.91"></path></g><g></g><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 390.05 -46.91 L 391.26 -45.7 L 392.46 -44.5 L 393.67 -43.29 L 394.87 -42.09 L 396.08 -40.88 L 397.28 -39.68 L 398.49 -38.47 L 399.69 -37.27 L 400.9 -36.06 L 402.1 -34.86 L 403.31 -33.65 L 404.51 -32.45 L 405.72 -31.24 L 406.92 -30.04 L 408.13 -28.83 L 409.33 -27.63 L 410.54 -26.42 L 411.74 -25.22 L 412.95 -24.01 L 414.15 -22.81 L 415.36 -21.6 L 416.56 -20.4 L 417.77 -19.19 L 418.97 -17.99 L 420.18 -16.78 L 421.38 -15.58 L 422.59 -14.37 L 423.79 -13.17 L 425 -11.96 L 426.2 -10.76 L 427.41 -9.55 L 428.61 -8.35 L 429.82 -7.14 L 431.02 -5.94 L 432.23 -4.73 L 433.43 -3.53 L 434.64 -2.32 L 435.84 -1.12 L 437.05 0.09 L 438.25 1.29 L 439.46 2.5 L 440.66 3.71 L 441.87 4.91 L 443.07 6.12 L 444.28 7.32 L 445.48 8.53 L 446.69 9.73 L 447.89 10.94 L 449.1 12.14"></path></g><g></g></g><path style="fill:none" d="M 395.58 -46.91 C 395.58 -43.85 393.11 -41.37 390.05 -41.37 C 386.99 -41.37 384.52 -43.85 384.52 -46.91 C 384.52 -49.97 386.99 -52.44 390.05 -52.44 C 393.11 -52.44 395.58 -49.97 395.58 -46.91 Z M 390.05 -46.91"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE8C9;" class="ltx_centering" fill="#FDE8C9" stroke="#000000" stroke-width="1.2pt"><path d="M 406.65 -16.33 L 373.45 -16.33 C 371.15 -16.33 369.29 -18.19 369.29 -20.48 L 369.29 -30.86 C 369.29 -33.15 371.15 -35.01 373.45 -35.01 L 406.65 -35.01 C 408.95 -35.01 410.81 -33.15 410.81 -30.86 L 410.81 -20.48 C 410.81 -18.19 408.95 -16.33 406.65 -16.33 Z M 369.29 -35.01"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 382.27 -30.4)"><foreignObject style="--ltx-fo-width:1.13em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="15.57"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.25" class="ltx_text">L2</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 390.05 -15.5 L 390.05 -0.81"></path><g transform="matrix(0.0 1.0 -1.0 0.0 390.05 -0.81)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 376.59 -4.77)"><foreignObject style="--ltx-fo-width:0.58em;--ltx-fo-height:0.44em;--ltx-fo-depth:0.19em;font-size:10pt;" height="8.84" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 6.15)" width="8.01"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><math id="S3.F1.pic1.m4" class="ltx_Math" alttext="{\bm{q}}" display="inline" intent=":literal"><semantics><mi>𝒒</mi><annotation encoding="application/x-tex">{\bm{q}}</annotation></semantics></math></span></span></foreignObject></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 390.05 -41.37 L 390.05 -35.84"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 390.05 -52.44 L 390.05 -57.98"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 390.05 -78.32 L 390.05 -89.39"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -155.8 L 469.63 -146.12 C 469.63 -142.3 469.63 -136.1 469.63 -132.28 L 469.63 -132.28 C 469.63 -128.46 466.53 -125.36 462.71 -125.36 L 462.71 -125.36 C 458.89 -125.36 452.69 -125.36 448.87 -125.36 L 396.97 -125.36 C 393.15 -125.36 390.05 -122.27 390.05 -118.44 L 390.05 -110.14"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#E3E6F3;" class="ltx_centering" fill="#E3E6F3" stroke="#000000" stroke-width="1.2pt"><path d="M 521.43 -88.91 L 499.94 -105.4 C 498.12 -106.8 498.5 -107.93 500.79 -107.93 L 548.64 -107.93 C 550.94 -107.93 551.32 -106.8 549.5 -105.4 L 528.01 -88.91 C 526.19 -87.52 523.24 -87.52 521.43 -88.91 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 512.71 -106.89)"><foreignObject style="--ltx-fo-width:1.74em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="24.02"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.26" class="ltx_text">Lin.</span></span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE6E7;" class="ltx_centering" fill="#FDE6E7" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt"><path d="M 530.61 -91.1 L 508.37 -108.17 C 506.56 -109.56 506.94 -110.7 509.23 -110.7 L 558.58 -110.7 C 560.87 -110.7 561.26 -109.56 559.44 -108.17 L 537.2 -91.1 C 535.38 -89.71 532.43 -89.71 530.61 -91.1 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" fill-opacity="0.2" stroke="#000000" stroke-opacity="0.2" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 521.89 -109.45)"><foreignObject style="--ltx-fo-width:1.74em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="24.02"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.27" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Lin.</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 524.72 -88.11 L 524.72 -0.81"></path><g transform="matrix(0.0 1.0 -1.0 0.0 524.72 -0.81)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 510.43 -6.3)"><foreignObject style="--ltx-fo-width:0.64em;--ltx-fo-height:0.43em;--ltx-fo-depth:0em;font-size:10pt;" height="5.96" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 5.96)" width="8.85"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><math id="S3.F1.pic1.m5" class="ltx_Math" alttext="{\alpha}" display="inline" intent=":literal"><semantics><mi>α</mi><annotation encoding="application/x-tex">{\alpha}</annotation></semantics></math></span></span></foreignObject></g></g><g class="ltx_centering" stroke-width="1.2pt"><g fill-opacity="0.2" stroke-opacity="0.2"><path style="fill:none" d="M 533.91 -90.3 L 533.91 -0.81"></path><g transform="matrix(0.0 1.0 -1.0 0.0 533.91 -0.81)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" fill="#000000" fill-opacity="1" stroke="#000000" stroke-opacity="1" transform="matrix(1.0 0.0 0.0 1.0 539.35 -7.02)"><foreignObject style="--ltx-fo-width:0.57em;--ltx-fo-height:0.69em;--ltx-fo-depth:0.19em;font-size:10pt;" height="12.3" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.61)" width="7.83"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><math id="S3.F1.pic1.m6" class="ltx_Math" alttext="{\beta}" display="inline" intent=":literal"><semantics><mi>β</mi><annotation encoding="application/x-tex">{\beta}</annotation></semantics></math></span></span></foreignObject></g></g><g class="ltx_centering" fill-opacity="0.2" stroke-opacity="0.2" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -155.8 L 469.63 -146.12 C 469.63 -142.3 469.63 -136.1 469.63 -132.28 L 469.63 -132.28 C 469.63 -128.46 466.53 -125.36 462.71 -125.36 L 462.71 -125.36 C 458.89 -125.36 458.89 -125.36 462.71 -125.36 L 526.99 -125.36 C 530.81 -125.36 533.91 -122.27 533.91 -118.44 L 533.91 -111.53"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -155.8 L 469.63 -146.12 C 469.63 -142.3 469.63 -136.1 469.63 -132.28 L 469.63 -132.28 C 469.63 -128.46 472.73 -125.36 476.55 -125.36 L 476.55 -125.36 C 480.37 -125.36 486.56 -125.36 490.38 -125.36 L 517.8 -125.36 C 521.62 -125.36 524.72 -122.27 524.72 -118.44 L 524.72 -108.76"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#E3E6F3;" class="ltx_centering" fill="#E3E6F3" stroke="#000000" stroke-width="1.2pt"><path d="M 564.56 -107.63 L 559.84 -94.67 C 559.06 -92.52 560.28 -90.77 562.57 -90.77 L 615.42 -90.77 C 617.71 -90.77 618.94 -92.52 618.15 -94.67 L 613.44 -107.63 C 612.65 -109.78 610.16 -111.53 607.87 -111.53 L 570.13 -111.53 C 567.83 -111.53 565.34 -109.78 564.56 -107.63 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 569.66 -105.88)"><foreignObject style="--ltx-fo-width:2.79em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="38.67"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.28" class="ltx_text">Linear</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 -155.8 L 469.63 -146.12 C 469.63 -142.3 469.63 -136.1 469.63 -132.28 L 469.63 -132.28 C 469.63 -128.46 472.73 -125.36 476.55 -125.36 L 476.55 -125.36 C 480.37 -125.36 486.56 -125.36 490.38 -125.36 L 582.08 -125.36 C 585.9 -125.36 589 -122.27 589 -118.44 L 589 -111.53"></path></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.0pt"><clipPath id="pgfcp17"><path d="M 594.53 -63.1 C 594.53 -60.04 592.05 -57.56 589 -57.56 C 585.94 -57.56 583.46 -60.04 583.46 -63.1 C 583.46 -66.15 585.94 -68.63 589 -68.63 C 592.05 -68.63 594.53 -66.15 594.53 -63.1 Z M 589 -63.1"></path></clipPath><g clip-path="url(#pgfcp17)"><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 529.94 -63.1 L 531.15 -63.1 L 532.35 -63.1 L 533.56 -63.1 L 534.76 -63.1 L 535.97 -63.1 L 537.17 -63.1 L 538.38 -63.1 L 539.58 -63.1 L 540.79 -63.1 L 541.99 -63.1 L 543.2 -63.1 L 544.4 -63.1 L 545.61 -63.1 L 546.81 -63.1 L 548.02 -63.1 L 549.22 -63.1 L 550.43 -63.1 L 551.63 -63.1 L 552.84 -63.1 L 554.04 -63.1 L 555.25 -63.1 L 556.45 -63.1 L 557.66 -63.1 L 558.86 -63.1 L 560.07 -63.1 L 561.27 -63.1 L 562.48 -63.1 L 563.68 -63.1 L 564.89 -63.1 L 566.09 -63.1 L 567.3 -63.1 L 568.5 -63.1 L 569.71 -63.1 L 570.91 -63.1 L 572.12 -63.1 L 573.32 -63.1 L 574.53 -63.1 L 575.73 -63.1 L 576.94 -63.1 L 578.14 -63.1 L 579.35 -63.1 L 580.56 -63.1 L 581.76 -63.1 L 582.97 -63.1 L 584.17 -63.1 L 585.38 -63.1 L 586.58 -63.1 L 587.79 -63.1 L 588.99 -63.1"></path></g><g></g><g style="--ltx-stroke-color:#0000FF;--ltx-fill-color:#0000FF;--ltx-fg-color:#0000FF;" color="#0000FF" fill="#0000FF" stroke="#0000FF" stroke-width="0.8pt"><path style="fill:none" d="M 589 -63.1 L 590.2 -61.89 L 591.41 -60.69 L 592.61 -59.48 L 593.82 -58.28 L 595.02 -57.07 L 596.23 -55.87 L 597.43 -54.66 L 598.64 -53.46 L 599.84 -52.25 L 601.05 -51.05 L 602.25 -49.84 L 603.46 -48.64 L 604.66 -47.43 L 605.87 -46.23 L 607.07 -45.02 L 608.28 -43.82 L 609.48 -42.61 L 610.69 -41.41 L 611.89 -40.2 L 613.1 -39 L 614.3 -37.79 L 615.51 -36.58 L 616.71 -35.38 L 617.92 -34.17 L 619.12 -32.97 L 620.33 -31.76 L 621.53 -30.56 L 622.74 -29.35 L 623.94 -28.15 L 625.15 -26.94 L 626.35 -25.74 L 627.56 -24.53 L 628.76 -23.33 L 629.97 -22.12 L 631.17 -20.92 L 632.38 -19.71 L 633.58 -18.51 L 634.79 -17.3 L 635.99 -16.1 L 637.2 -14.89 L 638.41 -13.69 L 639.61 -12.48 L 640.82 -11.28 L 642.02 -10.07 L 643.23 -8.87 L 644.43 -7.66 L 645.64 -6.46 L 646.84 -5.25 L 648.05 -4.05"></path></g><g></g></g><path style="fill:none" d="M 594.53 -63.1 C 594.53 -60.04 592.05 -57.56 589 -57.56 C 585.94 -57.56 583.46 -60.04 583.46 -63.1 C 583.46 -66.15 585.94 -68.63 589 -68.63 C 592.05 -68.63 594.53 -66.15 594.53 -63.1 Z M 589 -63.1"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 589 -90.77 L 589 -68.63"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#FDE8C9;" class="ltx_centering" fill="#FDE8C9" stroke="#000000" stroke-width="1.2pt"><path d="M 493.15 73.66 L 446.1 73.66 C 443.81 73.66 441.95 71.8 441.95 69.51 L 441.95 59.13 C 441.95 56.84 443.81 54.98 446.1 54.98 L 493.15 54.98 C 495.44 54.98 497.3 56.84 497.3 59.13 L 497.3 69.51 C 497.3 71.8 495.44 73.66 493.15 73.66 Z M 441.95 54.98"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 452.5 59.59)"><foreignObject style="--ltx-fo-width:2.48em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="34.25"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content">Norm</span></span></foreignObject></g><g style="--ltx-stroke-color:#000000;" class="ltx_centering" stroke="#000000" stroke-width="1.2pt"><clipPath id="pgfcp18"><path d="M 475.16 88.33 C 475.16 91.38 472.68 93.86 469.63 93.86 C 466.57 93.86 464.09 91.38 464.09 88.33 C 464.09 85.27 466.57 82.79 469.63 82.79 C 472.68 82.79 475.16 85.27 475.16 88.33 Z M 469.63 88.33"></path></clipPath><g clip-path="url(#pgfcp18)"><path style="fill:none" d="M 469.63 88.33 L 479.47 98.17 M 469.63 88.33 L 459.79 78.48 M 469.63 88.33 L 459.79 98.17 M 469.63 88.33 L 479.47 78.48"></path></g><path style="fill:none" d="M 475.16 88.33 C 475.16 91.38 472.68 93.86 469.63 93.86 C 466.57 93.86 464.09 91.38 464.09 88.33 C 464.09 85.27 466.57 82.79 469.63 82.79 C 472.68 82.79 475.16 85.27 475.16 88.33 Z M 469.63 88.33"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#E3E6F3;" class="ltx_centering" fill="#E3E6F3" stroke="#000000" stroke-width="1.2pt"><path d="M 418.59 105.93 L 436.37 123.71 C 437.99 125.33 441.16 126.65 443.46 126.65 L 495.8 126.65 C 498.09 126.65 501.27 125.33 502.89 123.71 L 520.67 105.93 C 522.29 104.31 521.75 102.99 519.45 102.99 L 419.8 102.99 C 417.51 102.99 416.96 104.31 418.59 105.93 Z"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" stroke-width="1.2pt" transform="matrix(1.0 0.0 0.0 1.0 450.29 110.09)"><foreignObject style="--ltx-fo-width:2.79em;--ltx-fo-height:0.68em;--ltx-fo-depth:0em;font-size:10pt;" height="9.46" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="38.67"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.29" class="ltx_text">Linear</span></span></span></foreignObject></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 40.31 L 469.63 46.18"></path><g transform="matrix(0.0 1.0 -1.0 0.0 469.63 46.18)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 74.49 L 469.63 82.79"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 93.86 L 469.63 102.16"></path></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 589 -57.56 L 589 81.41 C 589 85.23 585.9 88.33 582.08 88.33 L 475.16 88.33"></path></g><g style="--ltx-stroke-color:#000000;--ltx-fill-color:#000000;" class="ltx_centering" fill="#000000" stroke="#000000" transform="matrix(1.0 0.0 0.0 1.0 444.61 163.38)"><foreignObject style="--ltx-fo-width:3.62em;--ltx-fo-height:0.68em;--ltx-fo-depth:0.19em;font-size:10pt;" height="12.15" style="width:100%;height:auto;overflow:visible" transform="matrix(1 0 0 -1 0 9.46)" width="50.04"><span class="ltx_foreignobject_container"><span class="ltx_foreignobject_content"><span id="S3.F1.pic1.30" class="ltx_text" style="--ltx-fg-color:#FFFFFF;">Outputs</span></span></span></foreignObject></g></g><g class="ltx_centering" stroke-width="1.2pt"><path style="fill:none" d="M 469.63 127.48 L 469.63 147.83"></path><g transform="matrix(0.0 1.0 -1.0 0.0 469.63 147.83)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g><g class="ltx_centering" stroke-dasharray="3.0pt,2.0pt" stroke-dashoffset="0.0pt" stroke-width="1.2pt"><path style="fill:none" d="M 248.79 -21.87 L 291.68 -21.87 C 293.98 -21.87 295.84 -20.01 295.84 -17.72 L 295.84 -17.99 C 295.84 -15.7 295.84 -11.98 295.84 -9.69 L 295.84 -4.15 C 295.84 -1.86 297.69 0 299.99 0 L 307.24 0"></path><g transform="matrix(1.0 0.0 0.0 1.0 307.24 0)"><path style="stroke:none" d="M 7.97 0 C 5.61 0.44 1.77 1.77 -0.89 3.32 L -0.89 -3.32 C 1.77 -1.77 5.61 -0.44 7.97 0"></path></g></g></g></g></svg></div>
+    <figcaption>
+      图 1：Gated DeltaNet 的混合架构（左、中）与 block 内部设计（右）。原图来自论文，矢量渲染。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>左：Gated DeltaNet-H1</strong> —— 每个子层是「Gated DeltaNet 或 SWA（滑窗注意力）」+ MLP，按一定比例交替堆叠。论文里常用 3:1，即三层线性 + 一层注意力。</li>
+          <li><strong>中：Gated DeltaNet-H2</strong> —— 把线性层拆成两种交替：Gated DeltaNet 和 Mamba2，再夹 SWA。这样在同一模型里混合两种状态更新机制。</li>
+          <li><strong>右：Block Design</strong> —— 单个 block 的内部数据流。输入分别经线性投影得到 q、k、v、α、β；q/k/v 先过短卷积和 SiLU（q、k 额外做 L2 归一化以保证训练稳定），α、β 只做线性投影；然后进入 Gated Delta Rule 更新状态并读出。</li>
+          <li><strong>输出侧</strong> —— 读出结果先过归一化，再和一条从输入直连过来的门控信号逐元素相乘，最后做输出投影。这条直连支路就是图右侧那个 ⊗ 的上方来路。</li>
+          <li><strong>为什么混合</strong> —— 纯线性层在长序列检索上仍有短板，掺入少量滑窗注意力可以补上局部精确检索能力，同时保持整体线性复杂度。论文也报告混合后吞吐反而更高，因为注意力部分有高度优化的 FlashAttention kernel 可用。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>值得注意的是，这个 block 的<strong>宏结构几乎照搬 Llama</strong>：仍是「token mixer + SwiGLU MLP」的堆叠，只是把 self-attention 换成了 gated delta rule。这意味着它可以作为一个即插即用的替换层，而不需要重新设计整个网络。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：全线小胜，长上下文赢得最多</h2></div>
+  <p class="sec-sub">所有模型同为 1.3B 参数、100B tokens 的 FineWeb-Edu，条件完全对齐。</p>
+
+  <table>
+    <thead>
+      <tr><th>模型</th><th style="text-align:right">Wiki ppl ↓</th><th style="text-align:right">LMB ppl ↓</th><th style="text-align:right">常识推理 avg ↑</th><th style="text-align:right">LongBench ↑</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Mamba2</td><td class="num">16.56</td><td class="num">12.56</td><td class="num">54.89</td><td class="num">13.5</td></tr>
+      <tr><td>DeltaNet</td><td class="num">17.71</td><td class="num">16.88</td><td class="num">52.14</td><td class="num">13.6</td></tr>
+      <tr class="best"><td>Gated DeltaNet</td><td class="num">16.42</td><td class="num">12.17</td><td class="num">55.32</td><td class="num">16.6</td></tr>
+      <tr><td>Transformer++</td><td class="num">18.53</td><td class="num">18.32</td><td class="num">52.25</td><td class="num">11.0</td></tr>
+      <tr><td>Gated DeltaNet-H1</td><td class="num">16.07</td><td class="num">12.12</td><td class="num">56.40</td><td class="num">—</td></tr>
+      <tr><td>Gated DeltaNet-H2</td><td class="num">15.91</td><td class="num">12.55</td><td class="num">56.18</td><td class="num">—</td></tr>
+    </tbody>
+  </table>
+
+  <p>几个值得注意的点：</p>
+  <ul>
+    <li><strong>纯线性已经能压过 Transformer++</strong>：困惑度和常识推理都更好，说明这套状态更新不只是「省显存」的妥协。</li>
+    <li><strong>长上下文差距最大</strong>：LongBench 上 16.6 vs 13.5（Mamba2），这是最能体现「门控 + delta」互补价值的地方——恰好是需要同时过滤和精确记忆的场景。</li>
+    <li><strong>混合再涨一档</strong>：H1 / H2 把困惑度进一步压到 16 以下，常识推理也更高。</li>
+  </ul>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候它不够用</h2></div>
+  <p class="sec-sub">论文自己的数据里，就能读出三条边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>固定容量仍然是硬上限</h4></div>
+    <p>S-NIAH-2 在 8K 时 Gated DeltaNet 只有 29.6，S-NIAH-3 在 4K 只有 27.6。门控和 delta 优化的是<strong>有限容量内的信息管理</strong>，并没有扩大容量本身。序列继续变长，碰撞依然会发生。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>纯线性层仍不如混合</h4></div>
+    <p>从 Table 3 看，H1 / H2 在几乎所有指标上都优于纯 Gated DeltaNet。也就是说，<strong>局部精确检索这一点，还是得靠少量真注意力兜底</strong>。工程上直接上纯线性层并不是最优解。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>吞吐不是免费的</h4></div>
+    <p>门控几乎不增加开销（与 DeltaNet 同速），但整体仍比 Mamba2 慢 2–3K tokens/s，因为转移矩阵更复杂。如果场景对吞吐极度敏感、且不要求强检索，Mamba2 仍有优势。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>Gated DeltaNet 解决的是「同样的记忆容量下，怎么管得更好」，而不是「把容量做大」。</strong>这也是为什么 Qwen3-Next、Kimi Linear 这类模型选择把它当作混合架构里的「线性那几层」，而不是完全取代注意力。</p>
+</section>
+
+<footer>
+  <div>本文基于论文原文整理，并补充了你自己笔记里没有展开的机制细节与实验数据。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2412.06464" target="_blank" rel="noopener">Gated Delta Networks: Improving Mamba2 with Delta Rule</a> · ICLR 2025 · NVIDIA<br>
+    代码：<a href="https://github.com/NVlabs/GatedDeltaNet" target="_blank" rel="noopener">NVlabs/GatedDeltaNet</a><br>
+    图 1 版权归原作者所有，此处以矢量形式内嵌用于说明。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) S-NIAH 图表
+   ============================================================ */
+var NIAH = {
+  1: {
+    name: 'S-NIAH-1 · 纯记忆保持',
+    desc: '合成上下文、重复内容，模型几乎不需要过滤，只考验<strong>长期保持</strong>。看点在 4K 之后：Mamba2 因为无差别衰减直接塌掉，DeltaNet 与 Gated 基本稳住。',
+    xs: ['1K','2K','4K','8K'],
+    data: {
+      mamba2: [99.2, 98.8, 65.4, 30.4],
+      delta:  [97.4, 96.8, 99.0, 98.8],
+      gated:  [98.4, 88.4, 91.4, 91.8]
+    }
+  },
+  2: {
+    name: 'S-NIAH-2 · 需要过滤',
+    desc: '真实散文上下文，大量无关信息涌入，考验<strong>能否清掉无用内容</strong>。DeltaNet 没有全局门控，从 2K 起就崩；Mamba2 撑到 4K；Gated 明显更稳。',
+    xs: ['1K','2K','4K','8K'],
+    data: {
+      mamba2: [99.4, 98.8, 56.2, 17.0],
+      delta:  [98.4, 45.6, 18.6, 14.4],
+      gated:  [100.0, 99.8, 92.2, 29.6]
+    }
+  },
+  3: {
+    name: 'S-NIAH-3 · 复杂模式',
+    desc: 'value 从数字换成 UUID，考验<strong>复杂模式的写入质量</strong>。Mamba2 在 4K 只剩 4.6，几乎完全丢失；Gated 靠定向写入把精度拉回来。',
+    xs: ['1K','2K','4K'],
+    data: {
+      mamba2: [64.4, 47.6, 4.6],
+      delta:  [85.2, 47.0, 22.4],
+      gated:  [86.6, 84.2, 27.6]
+    }
+  }
+};
+
+function renderNiah(bench) {
+  var cfg = NIAH[bench];
+  document.getElementById('niah-desc').innerHTML =
+    '<div class="r-head">' + cfg.name + '</div>' + cfg.desc;
+
+  var colors = { mamba2: 'var(--c1)', delta: 'var(--c2)', gated: 'var(--accent)' };
+  var labels = { mamba2: 'Mamba2', delta: 'DeltaNet', gated: 'Gated' };
+  var chart = document.getElementById('niah-chart');
+  chart.innerHTML = '';
+
+  ['mamba2','delta','gated'].forEach(function (key) {
+    var row = document.createElement('div');
+    row.className = 'crow';
+    var name = document.createElement('div');
+    name.className = 'cname';
+    name.textContent = labels[key];
+    var bars = document.createElement('div');
+    bars.className = 'cbars';
+
+    cfg.data[key].forEach(function (val) {
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = colors[key];
+      fill.style.height = Math.max(2, val) + '%';
+      track.appendChild(fill);
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = val.toFixed(1);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+    });
+
+    row.appendChild(name);
+    row.appendChild(bars);
+    chart.appendChild(row);
+  });
+
+  var x = document.getElementById('niah-x');
+  x.innerHTML = cfg.xs.map(function (s) { return '<span>' + s + '</span>'; }).join('');
+}
+
+document.querySelectorAll('#niah-tabs .tab').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('#niah-tabs .tab').forEach(function (b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    renderNiah(btn.dataset.bench);
+  });
+});
+renderNiah(1);
+
+/* ============================================================
+   2) 记忆模拟器
+   ============================================================ */
+var KEYS = ['A', 'B', 'C', 'D'];
+var state = [[0,0],[0,0],[0,0],[0,0]];
+var rule = 'gated';
+var lastHit = -1;
+
+function getAlpha() { return parseFloat(document.getElementById('alpha').value); }
+function getBeta()  { return parseFloat(document.getElementById('beta').value); }
+
+function resetState() {
+  state = [[0,0],[0,0],[0,0],[0,0]];
+  lastHit = -1;
+}
+
+function applyWrite(idx, v) {
+  var a = getAlpha();
+  var b = getBeta();
+  var i;
+
+  if (rule === 'mamba2') {
+    // 全局衰减后叠加写入，没有定向擦除
+    for (i = 0; i < 4; i++) {
+      state[i][0] *= a;
+      state[i][1] *= a;
+    }
+    state[idx][0] += v[0];
+    state[idx][1] += v[1];
+  } else if (rule === 'deltanet') {
+    // 无门控，只有定向擦写
+    state[idx][0] = (1 - b) * state[idx][0] + b * v[0];
+    state[idx][1] = (1 - b) * state[idx][1] + b * v[1];
+  } else {
+    // 先全局缩放，再定向擦写
+    for (i = 0; i < 4; i++) {
+      state[i][0] *= a;
+      state[i][1] *= a;
+    }
+    state[idx][0] = (1 - b) * state[idx][0] + b * v[0];
+    state[idx][1] = (1 - b) * state[idx][1] + b * v[1];
+  }
+  lastHit = idx;
+}
+
+function fmt(x) { return (Math.abs(x) < 0.005 ? 0 : x).toFixed(2); }
+
+function renderSlots() {
+  var host = document.getElementById('slots');
+  host.innerHTML = '';
+  for (var i = 0; i < 4; i++) {
+    var v1 = state[i][0];
+    var v2 = state[i][1];
+    var slot = document.createElement('div');
+    slot.className = 'slot' + (i === lastHit ? ' hit' : '');
+
+    var name = document.createElement('div');
+    name.className = 'slot-name';
+    name.textContent = KEYS[i];
+
+    var val = document.createElement('div');
+    val.className = 'slot-val';
+    val.textContent = '(' + fmt(v1) + ', ' + fmt(v2) + ')';
+
+    var bar = document.createElement('div');
+    bar.className = 'bar';
+    var b1 = document.createElement('i');
+    b1.className = 'b1';
+    b1.style.width = Math.min(100, Math.abs(v1) * 100) + '%';
+    var b2 = document.createElement('i');
+    b2.className = 'b2';
+    b2.style.width = Math.min(100, Math.abs(v2) * 100) + '%';
+    bar.appendChild(b1);
+    bar.appendChild(b2);
+
+    slot.appendChild(name);
+    slot.appendChild(val);
+    slot.appendChild(bar);
+    host.appendChild(slot);
+  }
+}
+
+function setMsg(html) {
+  document.getElementById('sim-msg').innerHTML = html;
+}
+
+function describeAfter(action, idx, v, before) {
+  var a = getAlpha();
+  var b = getBeta();
+  var now = state[idx];
+  var stale = before[0] * (rule === 'mamba2' ? a : (1 - b));
+
+  if (rule === 'mamba2') {
+    if (Math.abs(stale) > 0.01) {
+      setMsg('写入 <strong>' + KEYS[idx] + ' = (' + v[0] + ', ' + v[1] + ')</strong> 后，'
+        + KEYS[idx] + ' 槽位是 <strong>(' + fmt(now[0]) + ', ' + fmt(now[1]) + ')</strong>。'
+        + '<span class="warn">旧值没有被擦掉，而是叠加上去了</span>——查询 ' + KEYS[idx]
+        + ' 会读回混合结果，这正是记忆碰撞。');
+    } else {
+      setMsg('写入 <strong>' + KEYS[idx] + ' = (' + v[0] + ', ' + v[1] + ')</strong>。'
+        + '旧值已被 α 衰减到可忽略，槽位为 <strong>(' + fmt(now[0]) + ', ' + fmt(now[1]) + ')</strong>。');
+    }
+  } else if (rule === 'deltanet') {
+    setMsg('写入 <strong>' + KEYS[idx] + ' = (' + v[0] + ', ' + v[1] + ')</strong>。'
+      + '定向擦除按 β=' + b.toFixed(2) + ' 替换，槽位为 <strong>(' + fmt(now[0]) + ', ' + fmt(now[1]) + ')</strong>。'
+      + (b >= 0.99 ? ' 旧值被完全擦干净。' : ' <span class="warn">β 不足 1，旧值仍有 ' + ((1-b)*100).toFixed(0) + '% 残留</span>。')
+      + ' 注意：其他槽位<strong>完全没动</strong>——它没有全局清空能力。');
+  } else {
+    setMsg('写入 <strong>' + KEYS[idx] + ' = (' + v[0] + ', ' + v[1] + ')</strong>。'
+      + '先按 α=' + a.toFixed(2) + ' 缩放全部槽位，再按 β=' + b.toFixed(2) + ' 定向替换，'
+      + KEYS[idx] + ' 槽位为 <strong>(' + fmt(now[0]) + ', ' + fmt(now[1]) + ')</strong>。'
+      + (a < 0.05 ? ' <span class="warn">α≈0，等价于清空整片记忆</span>。' : '')
+      + (b >= 0.99 && a > 0.95 ? ' 干净替换。' : ''));
+  }
+}
+
+document.querySelectorAll('#rule-btns .rule-btn').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('#rule-btns .rule-btn').forEach(function (x) { x.classList.remove('active'); });
+    btn.classList.add('active');
+    rule = btn.dataset.rule;
+    resetState();
+    renderSlots();
+    var hints = {
+      mamba2: 'Mamba2：每步 α 全局衰减 + 叠加写入。<strong>没有定向擦除</strong>，覆写同一个 key 会留下旧值残余。',
+      deltanet: 'DeltaNet：定向擦写，但<strong>完全忽略 α</strong>。把 α 拖到 0 也不会清空任何东西——这就是它在上下文切换时失灵的原因。',
+      gated: 'Gated DeltaNet：先 α 全局缩放，再 β 定向擦写。<strong>α=0 清空、β=1 精确替换</strong>，两种能力都有。'
+    };
+    setMsg(hints[rule]);
+  });
+});
+
+document.querySelectorAll('.act').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var act = btn.dataset.act;
+    if (act === 'reset') {
+      resetState();
+      renderSlots();
+      setMsg('已重置为全零状态。');
+      return;
+    }
+    var idx = 0, v = [0, 0];
+    if (act === 'write-a') { idx = 0; v = [1, 0]; }
+    else if (act === 'write-b') { idx = 1; v = [0, 1]; }
+    else if (act === 'overwrite-a') { idx = 0; v = [0, 1]; }
+
+    var before = state[idx].slice();
+    applyWrite(idx, v);
+    renderSlots();
+    describeAfter(act, idx, v, before);
+  });
+});
+
+document.getElementById('alpha').addEventListener('input', function (e) {
+  document.getElementById('alpha-v').textContent = parseFloat(e.target.value).toFixed(2);
+});
+document.getElementById('beta').addEventListener('input', function (e) {
+  document.getElementById('beta-v').textContent = parseFloat(e.target.value).toFixed(2);
+});
+
+renderSlots();
+
+/* ============================================================
+   3) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var detail = el.closest('figure').querySelector('.figure-detail');
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

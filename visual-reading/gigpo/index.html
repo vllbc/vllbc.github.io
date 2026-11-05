@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GiGPO · 给 GRPO 的分组再套一层</title>
+<meta name="description" content="GiGPO 用同一任务多次 rollout 中重复出现的状态作为锚点，在不训练 critic、不增加 rollout 的前提下，为长时程 LLM 智能体的每个动作计算步骤级优势。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+.dot-anchor{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.dot-unique{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.dot-text{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text);text-anchor:middle}
+
+/* ---- 步骤级 advantage 模拟器 ---- */
+.step-grid{display:grid;grid-template-columns:86px repeat(4,1fr);gap:8px;margin:18px 0}
+.sg-head{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);text-align:center;padding:4px 0}
+.sg-row-label{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--text-muted);display:flex;flex-direction:column;justify-content:center;gap:1px;line-height:1.45}
+.step-cell{border:1px solid var(--border);background:var(--bg);border-radius:8px;padding:8px 5px;cursor:pointer;font-family:inherit;text-align:center;transition:all .15s ease;min-height:78px;display:flex;flex-direction:column;justify-content:center;gap:2px;min-width:0}
+.step-cell:hover{border-color:var(--border-strong);background:var(--bg-soft)}
+.step-cell.anchor{background:var(--accent-soft);border-color:var(--accent)}
+.step-cell.unique{opacity:.72}
+.step-cell.selected{outline:2.5px solid var(--accent);outline-offset:2px;border-color:var(--accent);opacity:1}
+.step-cell .sc-state{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--text-soft)}
+.step-cell .sc-act{font-size:10.5px;color:var(--text-muted);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step-cell .sc-adv{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:600;line-height:1.2}
+.step-cell .sc-tag{font-family:"JetBrains Mono",monospace;font-size:9px;line-height:1.2;white-space:nowrap}
+.fine{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:8px 0 0}
+
+@media (max-width:520px){
+  .step-grid{grid-template-columns:64px repeat(4,1fr);gap:5px}
+  .step-cell{padding:6px 3px;min-height:84px}
+  .step-cell .sc-act{font-size:9.5px}
+  .step-cell .sc-adv{font-size:12px}
+  .step-cell .sc-tag{font-size:8px}
+  .sg-row-label{font-size:9.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GiGPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">两级优势</a>
+      <a href="#compute">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · NeurIPS 2025 · arXiv 2505.10978</span>
+  <h1>GiGPO：给 GRPO 的分组再套一层，让智能体知道哪一步做对了</h1>
+  <p class="hero-sub">
+    长时程智能体往往只在最后拿到一个成功或失败信号，GRPO 把这个信号复制给整条轨迹的每一步。
+    GiGPO 把同一任务多次 rollout 中<strong>重复出现的状态</strong>当作锚点，在同一状态下比较不同动作的未来回报，
+    从而在不训练 critic、不增加 rollout 的前提下，得到每个动作的独立优势。
+  </p>
+  <div class="meta">
+    <span>Lang Feng, Zhenghai Xue, Tingcong Liu, Bo An</span>
+    <a href="https://arxiv.org/abs/2505.10978" target="_blank" rel="noopener">arXiv 2505.10978 ↗</a>
+    <a href="https://github.com/langfengQ/verl-agent" target="_blank" rel="noopener">代码 verl-agent ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    长时程任务的奖励是<strong>稀疏且延迟</strong>的：ALFWorld 最多 50 步，WebShop 15 步，通常只有最后一步告诉你成功还是失败。信用分配要回答的是：这几十个动作里，哪一个该为结果负责？
+  </p>
+  <p>
+    <strong>GRPO</strong> 对同一任务采样 N 条轨迹，用整条轨迹的回报做组内比较。它不需要 critic，显存低、训练稳，但一条轨迹只有一个标量，所有步骤共享同一个 advantage——它分不清第 3 步和第 45 步。
+  </p>
+  <p>
+    GiGPO 的观察是：同一任务的 N 次 rollout 里，智能体会反复到达完全相同的状态（同一个房间、同一个搜索结果页）。把这些重复状态当作<strong>锚点</strong>，把不同轨迹中从同一状态出发的动作和它们的折扣未来回报放进一个组，就能算出状态条件下的<strong>步骤级优势 A<sup>S</sup></strong>。
+  </p>
+  <p>
+    最终优势是 <code>A = A<sup>E</sup> + ω·A<sup>S</sup></code>（主实验 ω=1）。整个过程只复用已有 rollout，不新增环境交互、不训练 critic；论文报告的额外耗时是每轮 0.54 秒，GPU 显存与 GRPO 相同。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">+12.6<small> pp</small></div>
+      <div class="k">ALFWorld 7B 成功率<br>GRPO 77.6 → GiGPO 90.2</div>
+    </div>
+    <div class="metric">
+      <div class="v">+9.1<small> pp</small></div>
+      <div class="k">WebShop 7B 成功率<br>GRPO 66.1 → GiGPO 75.2</div>
+    </div>
+    <div class="metric">
+      <div class="v">0.54<small> s</small></div>
+      <div class="k">单轮额外耗时<br>训练总时长 362.83 s</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一条轨迹一个分数，等于让 50 个动作平摊同一笔账</h2></div>
+  <p class="sec-sub">先建立共同认知：信用分配难，不是因为奖励少，而是因为奖励来得太晚、太粗。</p>
+
+  <p>
+    ALFWorld 是一个文本具身环境，包含 <code>3,827</code> 个任务实例、六类家务（Pick、Look、Clean、Heat、Cool、Pick2），每个回合最多 <code>50</code> 步；WebShop 模拟一个有一百多万件商品、<code>12k</code> 条指令的购物网站，每个回合最多 <code>15</code> 步。在这两个环境里，智能体看到的是文本观察，输出的是动作，只有回合结束才拿到成功或失败的奖励。
+  </p>
+
+  <p>
+    一条轨迹因此是一个很长的动作序列，但它的回报只是一个标量。任务失败时，环境不会告诉你“第 3 步拿错物品”还是“第 45 步放错位置”；任务成功时，它也不会告诉你“哪一步是关键”。这就是<strong>信用分配（credit assignment）</strong>：把最终结果归因到中间动作。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心区别</span><h4>回合级问“哪条轨迹更好”，步骤级问“哪个动作更好”</h4></div>
+    <p>
+      <strong>回合级（episode-level）</strong>：这条轨迹的整体回报，比同一任务的其他轨迹高还是低？<br>
+      <strong>步骤级（step-level）</strong>：在这个状态下，这个动作的后续回报，比从同一状态出发的其他动作高还是低？
+    </p>
+    <p>前者给的是全局基调，后者才是精细信用。长时程任务真正缺的是后者。</p>
+  </div>
+
+  <p>
+    GRPO 的做法属于前者：同一任务采样 N 条轨迹，计算每条轨迹的回报，减去组内均值，得到一个回合级优势，然后把它分配给这条轨迹的每一个 token、每一个步骤。这个估计是合法的策略梯度，也确实比 PPO 省显存、稳训练；但它有一个结构性上限——<strong>同一条轨迹里的所有步骤，拿到的是同一个数</strong>。
+  </p>
+
+  <p>
+    一个自然的补法是给每个状态学一个价值函数（PPO 的 critic），或者从每个状态多跑几条 rollout 来估计未来回报（逐步蒙特卡洛 / 树搜索）。两者都能给出步骤级信号，但代价都和“状态数量 × 每状态采样数”成正比。对 LLM 智能体来说，每次 rollout 都要调用大模型和环境，这个代价很难忽略。
+  </p>
+
+  <p>
+    论文要回答的问题因此很具体：<strong>能不能保留 group-based RL 的无 critic、低内存、稳定收敛，同时拿到细粒度的步骤级信用？</strong> 答案不是再加一个模型，而是去找一种已经存在于 rollout 数据里的步骤级比较信号。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成的路：一条要评论家，一条只能看总分</h2></div>
+  <p class="sec-sub">PPO 精确但重，GRPO 轻但粗；GiGPO 要的是两者的交集，而不是折中。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">PPO</span><h4>学一个 critic，换每步优势</h4></div>
+      <p>用一个价值网络估计 <code>V(s)</code>，再用 GAE 把回报和基线之间的差分解到每一步。优点是步骤级信号密集、理论成熟。</p>
+      <p><strong>代价：</strong>多一个和策略网络同量级的价值模型，显存和训练成本都上去；长文本观察下的价值估计本身也很难，训练更容易不稳定。</p>
+      <p>论文 Table 1 里，7B PPO 在 ALFWorld 上是 <code>80.4</code>，仍然低于无 critic 的 GiGPO <code>90.2</code>——有 critic 不等于信用分配就一定更好。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">GRPO / RLOO</span><h4>不要 critic，用组内相对回报</h4></div>
+      <p>同一任务采样一组轨迹，直接用组内相对回报当优势。无 critic、低显存、训练稳定，这也是它在单轮数学推理里成功的原因。</p>
+      <p><strong>盲区：</strong>一条轨迹只有一个标量，所有步骤共享。它知道“这条轨迹比平均好”，但不知道“好在哪一步”。对 50 步的 ALFWorld，这个粒度太粗。</p>
+      <p>7B GRPO 在 ALFWorld 上是 <code>77.6</code>，RLOO 是 <code>75.5</code>；两者都明显低于 GiGPO。</p>
+    </div>
+  </div>
+
+  <h3>看起来最直接的补法，为什么没人用</h3>
+  <p>
+    既然缺的是“从同一状态出发的比较”，最直接的做法就是从每个状态多跑几条 rollout，用蒙特卡洛估计它的价值。这样得到的步骤级优势是无偏的，但代价是<strong>环境交互和 LLM 推理成倍增加</strong>：一个 50 步的任务、每状态采 8 条，就是几百次额外 rollout。对长时程智能体，这基本不可接受。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方案</th><th>critic</th><th>额外 rollout</th><th>信用粒度</th><th>主要代价</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PPO</td><td>需要</td><td>不需要</td><td>每步（GAE）</td><td>第二个价值网络；显存与稳定性</td></tr>
+        <tr><td>GRPO / RLOO</td><td>不需要</td><td>不需要</td><td>整条轨迹</td><td>所有步骤共享一个标量</td></tr>
+        <tr><td>逐步 rollout / 树搜索</td><td>不需要</td><td>需要</td><td>每步</td><td>环境交互与推理成倍增加</td></tr>
+        <tr class="best"><td>GiGPO</td><td>不需要</td><td>不需要</td><td>每步（状态重复时）</td><td>要求状态可精确匹配、会重复</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    GiGPO 的关键观察是：你不需要为了“同一状态下的比较”去额外采样。同一任务的 N 条轨迹里，智能体本来就会反复到达相同的状态——同一个房间、同一个搜索结果页、同一个货架。这些重复状态是<strong>免费的锚点</strong>，不同轨迹从同一状态出发的动作和后续回报，已经躺在 rollout 数据里了。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两级分组：先用整条轨迹定基调，再用同一状态下的动作分高下</h2></div>
+  <p class="sec-sub">GiGPO 的机制可以压缩成三条公式：回合级优势、步骤级优势、以及它们的加权和。</p>
+
+  <p>
+    记同一任务 <code>x</code> 采样 <code>N</code> 条轨迹 <code>τ<sub>1</sub>…τ<sub>N</sub></code>，每条最多 <code>T</code> 步，第 <code>t</code> 步的奖励是 <code>r<sub>t</sub></code>。回合回报是 <code>R(τ<sub>i</sub>) = Σ<sub>t</sub> r<sub>t</sub></code>。论文的 ALFWorld / WebShop 实验用 <code>+10</code>（成功）/ <code>0</code>（失败）/ <code>−0.1</code>（无效动作）；下面的玩具用二值奖励（成功 1、失败 0），公式完全一样，只是数字更好手算。
+  </p>
+
+  <h3>第一级：回合级优势 A<sup>E</sup></h3>
+  <div class="eq">
+    <span class="hl-a">A<sup>E</sup>(τ<sub>i</sub>)</span>
+    = [ R(τ<sub>i</sub>) − mean<sub>j</sub> R(τ<sub>j</sub>) ] / F<sub>norm</sub>
+  </div>
+  <div class="eq-cap">这就是 GRPO 的优势：用同任务的其他轨迹当基线，衡量整条轨迹的相对好坏；<code>F<sub>norm</sub></code> 取组内标准差（GRPO 默认）或 1（w/o std 变体）</div>
+
+  <p>
+    这一项会被广播到该轨迹的每一步。它回答的是“这条轨迹整体比平均好多少”，不区分步骤。
+  </p>
+
+  <h3>第二级：步骤级优势 A<sup>S</sup></h3>
+  <p>
+    先把 N 条轨迹里出现过的所有不同状态收集起来，记作 <code>U = {s̃<sub>1</sub>, …, s̃<sub>U</sub>}</code>。每个唯一状态就是一个锚点。对某个锚点 <code>s̃</code>，把<strong>所有轨迹中从该状态出发的动作</strong>和它们的折扣未来回报收集成一个组：
+  </p>
+  <div class="eq">
+    G<sup>S</sup>(s̃) = { (a<sub>t</sub><sup>(i)</sup>, R<sub>t</sub><sup>(i)</sup>) &nbsp;|&nbsp; s<sub>t</sub><sup>(i)</sup> = s̃, &nbsp;1 ≤ i ≤ N, &nbsp;1 ≤ t ≤ T }
+  </div>
+  <div class="eq-cap">一个状态一个组；如果同一条轨迹再次回到该状态，它也会贡献多个条目</div>
+
+  <p>
+    折扣未来回报从当前步一直加到回合结束：
+  </p>
+  <div class="eq">
+    R<sub>t</sub><sup>(i)</sup> = Σ<sub>k=t</sub><sup>T</sup> γ<sup>k−t</sup> r<sub>k</sub><sup>(i)</sup>
+    &nbsp;&nbsp;&nbsp;&nbsp; (γ = 0.95)
+  </div>
+
+  <p>步骤级优势就是在这个组内做一次相对比较：</p>
+  <div class="eq">
+    <span class="hl-b">A<sup>S</sup>(a<sub>t</sub><sup>(i)</sup>)</span>
+    = [ R<sub>t</sub><sup>(i)</sup> − mean( G<sup>S</sup>(s̃) ) ] / F<sub>norm</sub>
+  </div>
+  <div class="eq-cap">同一状态下，这个动作的后续回报比同组的其他动作高多少；组内只有一个动作时，A<sup>S</sup> = 0</div>
+
+  <h3>合成：A = A<sup>E</sup> + ω·A<sup>S</sup></h3>
+  <div class="eq">
+    <span class="hl-c">A(a<sub>t</sub><sup>(i)</sup>)</span>
+    = <span class="hl-a">A<sup>E</sup>(τ<sub>i</sub>)</span>
+    + ω · <span class="hl-b">A<sup>S</sup>(a<sub>t</sub><sup>(i)</sup>)</span>
+    &nbsp;&nbsp;&nbsp;&nbsp; (主实验 ω = 1)
+  </div>
+  <div class="eq-cap">蓝色是整条轨迹共享的全局基调，紫色是同一状态下的局部对比，陶土红是最终用于策略更新的优势</div>
+
+  <p>
+    为什么两项都要？回合级项给整条轨迹一个共享的基线，保证策略仍然朝着“完成整个任务”的方向走；步骤级项在这个基线上再加一个<strong>状态条件下的对比</strong>，让同一条轨迹里的不同动作分开。只有 A<sup>S</sup> 会失去全局目标，只有 A<sup>E</sup> 就退回 GRPO——论文的消融显示，去掉任意一项都会明显掉点。
+  </p>
+
+  <p>
+    论文用一个很直观的例子说明这个机制：两条轨迹都成功了，回合级优势相同；但其中一条在某一步经过了一个重复状态，另一条经过的是只出现一次的状态。前者在同状态组里可以比出“这个动作的后续回报更高”，拿到正的 A<sup>S</sup>；后者的组里只有自己，A<sup>S</sup>=0。于是两条成功轨迹在每一步上不再被同等对待。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界情况</span><h4>如果没有任何状态重复，GiGPO 就退回 GRPO</h4></div>
+    <p>
+      所有组的大小都是 1，组均值等于自身，A<sup>S</sup> 全是 0，最终优势只剩 A<sup>E</sup>。这不是崩溃，而是<strong>优雅退化</strong>：性能下限就是 GRPO。反过来说，GiGPO 的收益完全来自“状态会重复”这个数据性质。
+    </p>
+  </div>
+
+  <h3>自己动手：点开每一步，看两级优势怎么算</h3>
+  <p>
+    下面是一个 3 条轨迹、4 个步骤的玩具任务。每条轨迹的最终奖励只有成功（1）或失败（0），γ=0.95，归一化因子取 1（对应论文的 w/o std 变体）。格子里的数字是当前模式下这一步的 advantage；点任意格子，下面会拆开算给你看。
+  </p>
+
+  <div class="sim" id="gigpo-sim">
+    <div class="sim-top" id="sim-modes">
+      <button class="rule-btn active" data-mode="full" type="button">A<sup>E</sup> + A<sup>S</sup><span class="r-sub">GiGPO</span></button>
+      <button class="rule-btn" data-mode="episode" type="button">仅 A<sup>E</sup><span class="r-sub">GRPO</span></button>
+    </div>
+
+    <p class="fine" style="margin-top:0">默认选中 τ1 第 2 步——这是 τ1 与 τ2 的分叉点，也是步骤级信号最强的地方。强调色格子表示该状态在 ≥2 条轨迹中出现过。</p>
+
+    <div class="step-grid" id="step-grid" role="grid" aria-label="三条轨迹、四个步骤的 advantage 网格"></div>
+
+    <div class="legend">
+      <span><i style="background:var(--accent-soft);border:1px solid var(--accent)"></i>重复状态（锚点组 ≥2）</span>
+      <span><i style="background:var(--bg-soft);border:1px solid var(--border-strong)"></i>只出现一次（A<sup>S</sup>=0）</span>
+    </div>
+
+    <div class="slots s5" id="sim-slots"></div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前选中</div>
+      <div id="sim-calc"></div>
+    </div>
+
+    <p class="fine">切换上方按钮，对比 GRPO 和 GiGPO：GRPO 下同一条轨迹的每一格数字完全相同；GiGPO 下，分叉点和重复状态会拿到不同的步骤级信用。</p>
+  </div>
+
+  <details>
+    <summary>这个模拟简化了什么？<span class="sum-sub">点开看与真实实验的差异</span></summary>
+    <div class="details-body">
+      <p>模拟用 <strong>3 条轨迹、4 个步骤</strong>，真实实验是 N=8、ALFWorld 最多 50 步。模拟用<strong>二值奖励</strong>（成功 1 / 失败 0），论文用 +10 / 0 / −0.1（无效动作扣 0.1）。模拟把归一化因子固定为 1，论文同时报告 std 和 1 两个变体。</p>
+      <p>模拟里的状态是离散标签（S0、A、B…），真实环境的状态是长文本观察；GiGPO 用状态本身作为哈希表的 key 做精确匹配。玩具保留了“同一状态被多条轨迹访问”这一因果结构，省略了真实文本状态的匹配细节。</p>
+      <p>另外，模拟里的 R<sub>t</sub> 用 γ=0.95 从后往前算，和论文公式一致；回合回报 R(τ) 用未折扣的奖励和，也和论文一致。所有数字都可以按公式手算复核。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>多出来的只是一个哈希表和一次反向扫描</h2></div>
+  <p class="sec-sub">GiGPO 之所以便宜，是因为它不新增任何环境交互或模型前向——所有信息都来自已经采到的轨迹。</p>
+
+  <p>把上面的公式放回训练循环，GiGPO 只比 GRPO 多两步：</p>
+  <ol style="margin:0 0 16px;padding-left:22px">
+    <li><strong>Rollout</strong>：每个任务采样 N=8 条轨迹，每轮 16 个任务，共 128 个环境；记录每一步的 <code>(s<sub>t</sub>, a<sub>t</sub>, r<sub>t</sub>)</code>。ALFWorld 最多 50 步，WebShop 15 步。</li>
+    <li><strong>回合级优势</strong>：算每条轨迹的 R(τ)、组均值和 A<sup>E</sup>。纯算术，没有模型调用。</li>
+    <li><strong>锚点分组</strong>：以状态为 key 建哈希表，把 <code>(a<sub>t</sub>, R<sub>t</sub>)</code> 追加进去。R<sub>t</sub> 用一次从后往前的扫描算完。耗时 0.01s。</li>
+    <li><strong>步骤级优势</strong>：对每个组算均值和 A<sup>S</sup>。耗时 0.53s。</li>
+    <li><strong>合并并更新</strong>：A = A<sup>E</sup> + ω·A<sup>S</sup>，代进 GRPO 式裁剪目标，加 KL 正则。没有 critic，没有额外 rollout。</li>
+  </ol>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>单轮环节</th><th style="text-align:right">耗时</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>rollout + 前后向 + 策略更新</td><td class="num">362.83 s</td><td>GRPO 也要做的部分</td></tr>
+        <tr><td>锚点状态分组</td><td class="num">0.01 s</td><td>哈希表查找</td></tr>
+        <tr><td>步骤级优势计算</td><td class="num">0.53 s</td><td>纯算术</td></tr>
+        <tr class="best"><td>GiGPO 额外合计</td><td class="num">0.54 s</td><td>相对 362.83s 约 0.15%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>论文写 &lt;0.002%，但按耗时算是约 0.15%——哪个对？<span class="sum-sub">点开看这笔账</span></summary>
+    <div class="details-body">
+      <p>论文原文说锚点分组 0.01s、步骤级优势 0.53s，合计 “account for &lt; 0.002% of the total per-iteration training time”；同一段给出的主导操作总耗时是 362.83s。</p>
+      <p>按这些数字直接算：<code>0.54 / 362.83 ≈ 0.00149</code>，即约 <strong>0.15%</strong>。如果 0.002 指的是<strong>小数比例</strong>而不是百分数，那它等于 0.2%，和 0.15% 同量级；写成 “0.002%” 就小了 100 倍。</p>
+      <p>不管按哪种读法，结论不变：这两个环节的额外开销都在千分之一量级，真正的大头仍然是 rollout、前后向和策略更新。页面标题里的 0.54s 用的是论文给出的原始耗时，不依赖这个百分比。</p>
+    </div>
+  </details>
+
+  <h3>更新目标：仍然是 GRPO 那一套，只是 A 变细了</h3>
+  <div class="eq">
+    J = E[ min( ρ·A, clip(ρ, 1−ε, 1+ε)·A ) ] − β·D<sub>KL</sub>(π<sub>θ</sub> ‖ π<sub>ref</sub>)
+  </div>
+  <div class="eq-cap">ρ 是新旧策略的概率比；A 是上面两级优势的和；KL 项把策略拉住参考模型。没有价值网络，也没有额外的环境交互。</div>
+
+  <h3>两个工程细节：归一化和 ω</h3>
+  <p>
+    <strong>F<sub>norm</sub> 取 std 还是 1？</strong> GRPO 默认用组内标准差；GiGPO 同时报告了 F<sub>norm</sub>=1 的 “w/o std” 变体。论文附录说明，F<sub>norm</sub>=1 等价于 RLOO 乘上 N/(N−1)，策略梯度的方向不变，仍然是无偏的。标准差归一化在长时程、低方差或组内极不均衡时，会把困难样本的梯度放大，训练更容易不稳；F<sub>norm</sub>=1 在 ALFWorld / WebShop 上更稳。论文的结论是：这个选择是<strong>任务相关</strong>的，不是 universally 谁更好。
+  </p>
+  <p>
+    <strong>ω 取多少？</strong> 主实验固定 ω=1，没有调。附录 E.5 在 WebShop 1.5B 上做了敏感性分析：ω=0.8 最好（Score 84.9 / Success 68.3），ω=1.0 是 83.5 / 67.4；在 [0.4, 1.2] 内比较平，1.4 明显下降（77.0 / 56.3）。所以“ω=1”是一个合理的默认值，但不是每个任务的最优值。
+  </p>
+
+  <p>
+    实现上，作者把代码整理成了 <strong>verl-agent</strong>，基于 veRL，专门面向长时程、多轮 LLM 智能体训练。论文的 1.5B 实验用 2×H100，7B 用 4×H100。
+  </p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条数据流：采样 → 两种分组 → 两个优势 → 一次更新</h2></div>
+  <p class="sec-sub">把上一节的公式放回训练循环，就是下面这张图。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 430" role="img" aria-label="GiGPO 数据流示意图：采样 N 条轨迹，做回合级和步骤级两种分组，得到 A^E 和 A^S，相加后进入 GRPO 式裁剪目标并更新策略">
+      <defs>
+        <marker id="gigpo-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+
+      <!-- column headers -->
+      <text x="110" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">1 · Rollout</text>
+      <text x="360" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">2 · 两级分组</text>
+      <text x="606" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">3 · Advantage → 更新</text>
+
+      <!-- column 1 -->
+      <rect x="8" y="38" width="204" height="330" rx="12" class="pipe-box"></rect>
+      <text x="110" y="62" text-anchor="middle" class="pipe-t" font-weight="600">同一任务 x · N=8 条轨迹</text>
+
+      <!-- row 1: states 0 A B C -->
+      <text x="20" y="108" class="pipe-t pipe-m" font-weight="600">τ1</text>
+      <circle cx="64" cy="104" r="11" class="dot-anchor"></circle><text x="64" y="104" dy=".35em" class="dot-text">0</text>
+      <circle cx="102" cy="104" r="11" class="dot-anchor"></circle><text x="102" y="104" dy=".35em" class="dot-text">A</text>
+      <circle cx="140" cy="104" r="11" class="dot-anchor"></circle><text x="140" y="104" dy=".35em" class="dot-text">B</text>
+      <circle cx="178" cy="104" r="11" class="dot-unique"></circle><text x="178" y="104" dy=".35em" class="dot-text">C</text>
+      <text x="110" y="130" text-anchor="middle" class="pipe-s pipe-m">R = 1.00</text>
+
+      <!-- row 2: states 0 A D E -->
+      <text x="20" y="188" class="pipe-t pipe-m" font-weight="600">τ2</text>
+      <circle cx="64" cy="184" r="11" class="dot-anchor"></circle><text x="64" y="184" dy=".35em" class="dot-text">0</text>
+      <circle cx="102" cy="184" r="11" class="dot-anchor"></circle><text x="102" y="184" dy=".35em" class="dot-text">A</text>
+      <circle cx="140" cy="184" r="11" class="dot-unique"></circle><text x="140" y="184" dy=".35em" class="dot-text">D</text>
+      <circle cx="178" cy="184" r="11" class="dot-unique"></circle><text x="178" y="184" dy=".35em" class="dot-text">E</text>
+      <text x="110" y="210" text-anchor="middle" class="pipe-s pipe-m">R = 0.00</text>
+
+      <!-- row 3: states 0 F B G -->
+      <text x="20" y="268" class="pipe-t pipe-m" font-weight="600">τ3</text>
+      <circle cx="64" cy="264" r="11" class="dot-anchor"></circle><text x="64" y="264" dy=".35em" class="dot-text">0</text>
+      <circle cx="102" cy="264" r="11" class="dot-unique"></circle><text x="102" y="264" dy=".35em" class="dot-text">F</text>
+      <circle cx="140" cy="264" r="11" class="dot-anchor"></circle><text x="140" y="264" dy=".35em" class="dot-text">B</text>
+      <circle cx="178" cy="264" r="11" class="dot-unique"></circle><text x="178" y="264" dy=".35em" class="dot-text">G</text>
+      <text x="110" y="290" text-anchor="middle" class="pipe-s pipe-m">R = 1.00</text>
+
+      <!-- legend -->
+      <circle cx="26" cy="324" r="7" class="dot-anchor"></circle>
+      <text x="40" y="324" dy=".35em" class="pipe-s">重复状态（锚点）</text>
+      <circle cx="26" cy="346" r="7" class="dot-unique"></circle>
+      <text x="40" y="346" dy=".35em" class="pipe-s">只出现一次（A^S = 0）</text>
+
+      <!-- arrows col1 -> col2 -->
+      <path d="M212 116 L244 116" class="pipe-line" marker-end="url(#gigpo-arrow)"></path>
+      <path d="M212 277 L244 277" class="pipe-line" marker-end="url(#gigpo-arrow)"></path>
+
+      <!-- column 2 box A -->
+      <rect x="244" y="56" width="232" height="120" rx="12" class="pipe-c1"></rect>
+      <text x="360" y="82" text-anchor="middle" class="pipe-t" font-weight="600">回合级 G<tspan baseline-shift="super" font-size="9">E</tspan></text>
+      <text x="360" y="106" text-anchor="middle" class="pipe-s">整条轨迹做组内比较</text>
+      <text x="360" y="132" text-anchor="middle" class="pipe-t pipe-m">→ A<tspan baseline-shift="super" font-size="9">E</tspan></text>
+      <text x="360" y="154" text-anchor="middle" class="pipe-s">每条轨迹一个标量</text>
+
+      <!-- column 2 box B -->
+      <rect x="244" y="206" width="232" height="142" rx="12" class="pipe-c2"></rect>
+      <text x="360" y="232" text-anchor="middle" class="pipe-t" font-weight="600">步骤级 G<tspan baseline-shift="super" font-size="9">S</tspan>(s̃)</text>
+      <text x="360" y="256" text-anchor="middle" class="pipe-s">同一状态下的动作做组内比较</text>
+      <text x="360" y="282" text-anchor="middle" class="pipe-t pipe-m">→ A<tspan baseline-shift="super" font-size="9">S</tspan></text>
+      <text x="360" y="304" text-anchor="middle" class="pipe-s">状态作 key，动作/回报进哈希表</text>
+      <text x="360" y="326" text-anchor="middle" class="pipe-s">一个状态一个组</text>
+
+      <text x="360" y="190" text-anchor="middle" class="pipe-s">两种分组共用同一批轨迹，不额外采样</text>
+
+      <!-- column 3 box C -->
+      <rect x="500" y="100" width="212" height="80" rx="12" class="pipe-accent"></rect>
+      <text x="606" y="126" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">A = A<tspan baseline-shift="super" font-size="9">E</tspan> + ω·A<tspan baseline-shift="super" font-size="9">S</tspan></text>
+      <text x="606" y="150" text-anchor="middle" class="pipe-s">ω = 1（主实验）</text>
+
+      <!-- arrows A/B -> C -->
+      <path d="M476 116 L492 116 L492 132 L500 132" class="pipe-line" marker-end="url(#gigpo-arrow)"></path>
+      <path d="M476 277 L484 277 L484 148 L500 148" class="pipe-line" marker-end="url(#gigpo-arrow)"></path>
+
+      <!-- column 3 box D -->
+      <rect x="500" y="220" width="212" height="72" rx="12" class="pipe-box"></rect>
+      <text x="606" y="246" text-anchor="middle" class="pipe-t" font-weight="600">GRPO 式裁剪目标</text>
+      <text x="606" y="270" text-anchor="middle" class="pipe-s">+ KL 正则，无 critic</text>
+      <path d="M606 180 L606 220" class="pipe-line" marker-end="url(#gigpo-arrow)"></path>
+
+      <!-- column 3 box E -->
+      <rect x="500" y="320" width="212" height="52" rx="12" class="pipe-box"></rect>
+      <text x="606" y="346" text-anchor="middle" class="pipe-t" font-weight="600">更新 π<tspan baseline-shift="sub" font-size="9">θ</tspan></text>
+      <path d="M606 292 L606 320" class="pipe-line" marker-end="url(#gigpo-arrow)"></path>
+
+      <!-- feedback -->
+      <path d="M606 372 L606 396 L110 396 L110 368" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#gigpo-arrow)"></path>
+      <text x="360" y="414" text-anchor="middle" class="pipe-s">下一轮 rollout：θ_old ← θ</text>
+    </svg>
+    <figcaption>
+      图 1：GiGPO 的数据流（示意）。左：同一任务的 N 条轨迹，强调色圆点表示在 ≥2 条轨迹中重复出现的锚点状态；中：回合级与步骤级两种分组；右：两个优势相加后进入 GRPO 式裁剪目标。实际实验中 N=8、ALFWorld 最多 50 步，这里为了画图只画了 3 条轨迹、4 个状态。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么两种分组能互补？</strong> 回合级分组回答“这条轨迹整体比同任务的其他轨迹好多少”，是一个全局基线；步骤级分组回答“在这个状态下，这个动作比从同一状态出发的其他动作好多少”，是一个局部基线。两者相加，既保留长期目标，又把同一条轨迹里的动作分开。</li>
+          <li><strong>为什么不需要额外 rollout？</strong> 锚点状态、动作和奖励都是标准 rollout 已经记录下来的。分组只是把这些数据按状态 key 重新索引一遍，没有环境调用，也没有模型前向。</li>
+          <li><strong>为什么显存不变？</strong> 没有 critic、没有新模型、没有新激活。额外存储只是一个“状态 → (动作, 回报) 列表”的哈希表，相对 LLM 的激活和 KV cache 可以忽略；论文报告 GPU 显存与 GRPO 相同。</li>
+          <li><strong>图中的数字是示意。</strong> 玩具用 3 条轨迹、4 个状态，真实实验是 N=8、最多 50 步。颜色编码与下面的模拟器一致：强调色 = 重复状态，青灰 = 只出现一次。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    这张图里最容易被忽略的一点是：<strong>分组发生在 rollout 之后、策略更新之前</strong>。也就是说，GiGPO 不改变采样过程，也不改变策略网络的结构；它只是在已有数据上多算了一个优势项。这也是它能和 DAPO 这类单轮 group-based RL 改进正交组合的原因。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>每一类任务都涨，越难的任务涨得越多</h2></div>
+  <p class="sec-sub">ALFWorld 六个子类、WebShop、1.5B 与 7B：GiGPO 全面领先，且不需要 critic。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>方法</th><th style="text-align:right">ALFWorld All ↑ (%)</th><th style="text-align:right">WebShop Score ↑</th><th style="text-align:right">WebShop Succ ↑ (%)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="5">Qwen2.5-1.5B</td><td>PPO</td><td class="num">54.4</td><td class="num">73.8</td><td class="num">51.5</td></tr>
+        <tr><td>RLOO</td><td class="num">69.7</td><td class="num">73.9</td><td class="num">52.1</td></tr>
+        <tr><td>GRPO</td><td class="num">72.8</td><td class="num">75.8</td><td class="num">56.8</td></tr>
+        <tr><td>GiGPO w/ std</td><td class="num">86.7</td><td class="num">83.1</td><td class="num">65.0</td></tr>
+        <tr class="best"><td>GiGPO w/o std</td><td class="num">86.1</td><td class="num">83.5</td><td class="num">67.4</td></tr>
+        <tr><td rowspan="5">Qwen2.5-7B</td><td>PPO</td><td class="num">80.4</td><td class="num">81.4</td><td class="num">68.7</td></tr>
+        <tr><td>RLOO</td><td class="num">75.5</td><td class="num">80.3</td><td class="num">65.7</td></tr>
+        <tr><td>GRPO</td><td class="num">77.6</td><td class="num">79.3</td><td class="num">66.1</td></tr>
+        <tr><td>GiGPO w/ std</td><td class="num">90.8</td><td class="num">84.4</td><td class="num">72.8</td></tr>
+        <tr class="best"><td>GiGPO w/o std</td><td class="num">90.2</td><td class="num">86.2</td><td class="num">75.2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine">表中为 3 个种子的均值，标准差见论文 Table 1。GiGPO w/ std 在 ALFWorld 上略高（1.5B 86.7，7B 90.8），w/o std 在 WebShop 上更好；论文把 w/o std 作为主要增益来源。</p>
+
+  <h3>ALFWorld 六个子类：增益集中在需要多步组合的任务</h3>
+  <p>
+    切换模型尺寸，看六个子类的成功率。Pick / Clean 这类任务在 7B 上本来就接近饱和（GRPO 下 90.8 / 89.3），提升空间小；Look（找灯）、Pick2（拿两件物品）需要更多步骤和组合，增益最大；Cool / Heat 居中。
+  </p>
+
+  <div class="tabs" id="alf-tabs">
+    <button class="tab active" data-model="7b" type="button">ALFWorld · 7B</button>
+    <button class="tab" data-model="1.5b" type="button">ALFWorld · 1.5B</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div id="alf-desc" class="readout" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="alf-chart"></div>
+    <div class="cx" id="alf-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>PPO（有 critic）</span>
+      <span><i style="background:var(--c3)"></i>RLOO</span>
+      <span><i style="background:var(--c2)"></i>GRPO</span>
+      <span><i style="background:var(--accent)"></i>GiGPO（w/o std）</span>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">几个值得注意的结论：</p>
+  <ul>
+    <li><strong>7B 上，ALFWorld 从 77.6 涨到 90.2（+12.6 个百分点），WebShop 成功率从 66.1 涨到 75.2（+9.1 个百分点）。</strong> 1.5B 上的提升更大：ALFWorld 72.8 → 86.1（+13.3），WebShop 56.8 → 67.4（+10.6）。</li>
+    <li><strong>越难的任务涨得越多，但不是每一类都同幅。</strong> 7B w/o std 相对 GRPO：Look 66.1 → 88.6（+22.5），Pick2 64.7 → 85.2（+20.5），Heat 74.7 → 90.2（+15.5），Cool 72.5 → 86.5（+14.0）；Pick 和 Clean 的增益明显更小（+1.0 和 +6.6），因为它们的起点已经很高。</li>
+    <li><strong>不需要 critic 也能超过 PPO。</strong> 7B 上 GiGPO 90.2 vs PPO 80.4（ALFWorld），75.2 vs 68.7（WebShop 成功率）。PPO 有显式的价值网络，但仍然落后，说明瓶颈不只是“有没有 value baseline”，而是这个 baseline 是否条件在正确的状态上。</li>
+    <li><strong>闭源提示基线差距很大。</strong> GPT-4o 在 ALFWorld 上 48.0，Gemini-2.5-Pro 60.3，都远低于训练后的 GiGPO 90.2。这个任务不是靠“换个更强的模型”就能解决的。</li>
+    <li><strong>消融：两级都不能少。</strong> 去掉 A<sup>E</sup> 会在所有任务上大幅掉点；去掉 A<sup>S</sup> 在 Cool、Pick2 和 WebShop 上掉得最明显。两级优势的组合才是主要增益来源，归一化变体之间的差距反而更小。</li>
+    <li><strong>锚点组会随着训练变健康。</strong> size-1 组全程占比 &lt;35%，超过 65% 的状态会重复；第 10 轮时，大小 ≥10 的组已经超过 20%；到第 140 轮，组大小分布集中在 6–8（接近 N=8），此时成功率超过 80%。策略越稳，轨迹越容易汇聚到相同状态，步骤级信号也越充足。</li>
+  </ul>
+
+  <details>
+    <summary>更多结果：搜索 QA、VLM、与 DAPO 的组合<span class="sum-sub">点开看 v3 新增实验</span></summary>
+    <div class="details-body">
+      <p><strong>搜索增强 QA</strong>（Qwen2.5-3B / 7B，NQ + HotpotQA 训练，7 个测试集平均）：GiGPO <strong>42.1 / 47.2</strong>，Search-R1 32.5 / 38.5，ZeroSearch 31.7 / 39.1，R1-Instruct 27.1 / 22.4。7B 上单跳平均约 0.9 次工具调用，多跳约 1.6 次，上限 3 次。</p>
+      <p><strong>VLM 智能体</strong>（Qwen2.5-VL-3B，Sokoban 6×6 / EZPoints）：GiGPO <strong>81.0 / 100.0</strong>，GRPO 67.1 / 86.9，提示基线 11.7 / 3.1。说明这套优势估计不局限于纯文本状态。</p>
+      <p><strong>与 DAPO 组合</strong>（WebShop，1.5B，Score / Success）：GiGPO + DAPO 的动态采样与 clip-higher 得 <strong>87.5 / 75.0</strong>，DAPO 单独 84.6 / 66.1，GRPO 75.8 / 56.8。两级优势与单轮 group-based RL 的改进是正交的。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它依赖“状态会重复”这个前提，而这在真实世界里最脆弱</h2></div>
+  <p class="sec-sub">GiGPO 的收益和它的假设是同一件事：状态能精确匹配，且真的会重复。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>精确状态匹配是最脆弱的一环</h4></div>
+    <p>
+      ALFWorld 和 WebShop 的状态是结构化文本，可以用状态本身作为哈希 key 做精确匹配。到了噪声大、连续、高维或视觉输入的环境，“完全相同的状态”很少出现，精确匹配会失效。论文自己把这一点列为局限，并把基于状态嵌入的近似匹配留作未来工作；v3 在搜索 QA 上改用相似度分组：两个状态的“最长匹配子序列”相似度 &gt;0.9 就算同一锚点，但这只是针对该任务的启发式。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>没有重复状态，A<sup>S</sup> 直接归零</h4></div>
+    <p>
+      如果所有状态都只出现一次，每个步骤组的大小都是 1，A<sup>S</sup>=0，GiGPO 退化成 GRPO。它不会比 GRPO 更差，但也拿不到任何步骤级收益。换句话说，<strong>GiGPO 的收益上限由数据的“状态重复率”决定</strong>。论文的 Fig. 5 显示 ALFWorld 里超过 65% 的状态会重复，所以这个假设在该环境成立；换一个环境，需要先验证这一点。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>归一化因子不是中性的</h4></div>
+    <p>
+      F<sub>norm</sub>=std 是 GRPO 的默认，但在长时程、低方差或组内极不均衡时，它会把困难样本的梯度放大，训练更容易不稳；F<sub>norm</sub>=1 在 ALFWorld / WebShop 上更稳，但论文也指出它在其他任务上不一定更好。这个选择是任务相关的，不能默认“std 一定对”或“1 一定对”。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>折扣会吃掉远距离信用</h4></div>
+    <p>
+      这是从公式可以直接推出的，不是论文的实验结论：R<sub>t</sub> 用 γ=0.95 做折扣，<code>0.95<sup>20</sup> ≈ 0.36</code>，<code>0.95<sup>47</sup> ≈ 0.09</code>。也就是说，第 3 步的奖励传到第 50 步时只剩约 9% 的权重（50 步全折扣是 <code>0.95<sup>50</sup> ≈ 0.08</code>）。锚点分组给了一个更好的基线，但<strong>没有改变折扣视野</strong>；如果任务的关键因果链跨越几十步，远距离信用仍然会被衰减。
+    </p>
+  </div>
+
+  <h3>什么时候别用：先问三个问题</h3>
+  <ul>
+    <li><strong>同一任务的多次 rollout 里，状态会重复吗？</strong> 不会，或者重复率很低，步骤级信号就很稀薄。</li>
+    <li><strong>状态能用一个稳定的 key 精确匹配吗？</strong> 不能，且没有可靠的近似匹配方案，锚点分组就不可靠。</li>
+    <li><strong>奖励主要是回合结束时的稀疏信号吗？</strong> 如果环境本身有密集奖励，或者你已经有可靠的价值函数，critic 仍然可能是更直接的选择。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>GiGPO 不是免费午餐，而是免费复用。</strong> 它把 rollout 里本来就存在的重复状态用起来；数据里有这个结构，它几乎零成本；没有，它就退回 GRPO。这个设计很漂亮，但它的适用边界和它的假设是同一件事。
+  </p>
+</section>
+
+<footer>
+  <div>Group-in-Group Policy Optimization for LLM Agent Training · Lang Feng, Zhenghai Xue, Tingcong Liu, Bo An · NeurIPS 2025</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2505.10978" target="_blank" rel="noopener">arXiv:2505.10978</a><br>
+    代码：<a href="https://github.com/langfengQ/verl-agent" target="_blank" rel="noopener">langfengQ/verl-agent</a><br>
+    笔记：<a href="/group-in-group-policy-optimization-for-llm-agent-training/">Group-in-Group Policy Optimization for LLM Agent Training</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记把 GRPO 写成 “Group-based Reward Policy Optimization”；原文是 “Group Relative Policy Optimization”。<br>
+    2. 笔记说论文没有 ω 的敏感性分析；v3 附录 E.5 有：WebShop 1.5B 上 ω=0.8 最好（Score 84.9 / Success 68.3），在 [0.4, 1.2] 内较平，1.4 明显下降。<br>
+    3. 笔记只覆盖 1.5B / 7B 与 ALFWorld / WebShop；v3 还包含 3B、搜索增强 QA、VLM（Sokoban / EZPoints）和 DAPO 组合。<br>
+    4. 笔记沿用论文的 “&lt;0.002%” 开销说法；按论文给出的 0.54s / 362.83s 计算约为 0.15%，两个数对不上（详见 04 节）。<br>
+    5. 笔记说 ALFWorld 任务“平均需要 50 步”；原文是每回合<strong>最多</strong> 50 步，没有给平均值。<br>
+    6. 笔记写“提升 12.6% / 9.1%”；按原文数字是 12.6 / 9.1 个<strong>百分点</strong>（77.6 → 90.2，66.1 → 75.2），论文自己也用了 % 的简写。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 步骤级 advantage 模拟器
+   3 条轨迹 × 4 步；γ=0.95；F_norm=1（w/o std）
+   ============================================================ */
+(function () {
+  var GAMMA = 0.95;
+  var W = 1;
+  var TRAJS = [
+    { id: 'τ1', success: true,  states: ['S0', 'A', 'B', 'C'], acts: ['search', 'go shelf', 'take', 'put'], rewards: [0, 0, 0, 1] },
+    { id: 'τ2', success: false, states: ['S0', 'A', 'D', 'E'], acts: ['search', 'go shelf', 'open fridge', 'look'], rewards: [0, 0, 0, 0] },
+    { id: 'τ3', success: true,  states: ['S0', 'F', 'B', 'G'], acts: ['search', 'go counter', 'take', 'put'], rewards: [0, 0, 0, 1] }
+  ];
+
+  function discReturns(rewards) {
+    var T = rewards.length;
+    var R = new Array(T);
+    var acc = 0;
+    for (var t = T - 1; t >= 0; t--) {
+      acc = rewards[t] + GAMMA * acc;
+      R[t] = acc;
+    }
+    return R;
+  }
+
+  var data = TRAJS.map(function (tr) {
+    var R = discReturns(tr.rewards);
+    var ep = tr.rewards.reduce(function (a, b) { return a + b; }, 0);
+    return { id: tr.id, success: tr.success, states: tr.states, acts: tr.acts, R: R, ep: ep };
+  });
+
+  var epMean = data.reduce(function (a, d) { return a + d.ep; }, 0) / data.length;
+  data.forEach(function (d) {
+    d.AE = d.ep - epMean;
+    d.AS = [];
+    d.ASmean = [];
+    d.gsize = [];
+  });
+
+  /* 以状态为 key 建组：G^S(s) = [(i, t, a, R_t), ...] */
+  var groups = {};
+  data.forEach(function (d, i) {
+    d.states.forEach(function (s, t) {
+      if (!groups[s]) groups[s] = [];
+      groups[s].push({ i: i, t: t, R: d.R[t], a: d.acts[t], AS: 0 });
+    });
+  });
+
+  Object.keys(groups).forEach(function (s) {
+    var g = groups[s];
+    var mean = g.reduce(function (a, x) { return a + x.R; }, 0) / g.length;
+    g.forEach(function (x) { x.AS = x.R - mean; });
+  });
+
+  data.forEach(function (d, i) {
+    d.states.forEach(function (s, t) {
+      var g = groups[s];
+      var entry = null;
+      for (var k = 0; k < g.length; k++) {
+        if (g[k].i === i && g[k].t === t) { entry = g[k]; break; }
+      }
+      d.AS[t] = entry ? entry.AS : 0;
+      d.ASmean[t] = g.reduce(function (a, x) { return a + x.R; }, 0) / g.length;
+      d.gsize[t] = g.length;
+    });
+  });
+
+  var selected = { i: 0, t: 1 };
+  var mode = 'full';
+
+  function fmt(x) {
+    if (Math.abs(x) < 0.005) x = 0;
+    return (x >= 0 ? '+' : '') + x.toFixed(2);
+  }
+  function fmt0(x) { return x.toFixed(2); }
+
+  function renderGrid() {
+    var host = document.getElementById('step-grid');
+    if (!host) return;
+    host.innerHTML = '';
+
+    var corner = document.createElement('div');
+    corner.className = 'sg-head';
+    corner.textContent = '';
+    host.appendChild(corner);
+
+    for (var t = 0; t < 4; t++) {
+      var h = document.createElement('div');
+      h.className = 'sg-head';
+      h.textContent = '第 ' + (t + 1) + ' 步';
+      host.appendChild(h);
+    }
+
+    data.forEach(function (d, i) {
+      var label = document.createElement('div');
+      label.className = 'sg-row-label';
+      label.innerHTML =
+        '<span>' + d.id + ' · ' + (d.success ? '成功' : '失败') + '</span>' +
+        '<span style="color:var(--text-soft)">R=' + fmt0(d.ep) + '</span>' +
+        '<span style="color:var(--c1)">A^E=' + fmt(d.AE) + '</span>';
+      host.appendChild(label);
+
+      d.states.forEach(function (s, t) {
+        var gsize = d.gsize[t];
+        var isAnchor = gsize >= 2;
+        var isSel = (selected.i === i && selected.t === t);
+        var cls = 'step-cell';
+        if (mode === 'full' && isAnchor) cls += ' anchor';
+        if (mode === 'full' && !isAnchor) cls += ' unique';
+        if (isSel) cls += ' selected';
+
+        var val = (mode === 'full') ? (d.AE + W * d.AS[t]) : d.AE;
+        var valColor = (mode === 'full') ? 'var(--accent)' : 'var(--c1)';
+        var tag = '';
+        if (mode === 'full') {
+          var tagColor = (Math.abs(d.AS[t]) > 1e-9) ? 'var(--c2)' : 'var(--text-soft)';
+          tag = '<div class="sc-tag" style="color:' + tagColor + '">A^S ' + fmt(d.AS[t]) + '</div>';
+        }
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = cls;
+        btn.setAttribute('data-i', String(i));
+        btn.setAttribute('data-t', String(t));
+        btn.setAttribute('aria-label', d.id + ' 第 ' + (t + 1) + ' 步，状态 ' + s);
+        btn.innerHTML =
+          '<div class="sc-state">s=' + s + '</div>' +
+          '<div class="sc-act">' + d.acts[t] + '</div>' +
+          '<div class="sc-adv" style="color:' + valColor + '">' + fmt(val) + '</div>' +
+          tag;
+        host.appendChild(btn);
+      });
+    });
+  }
+
+  function renderSlots() {
+    var host = document.getElementById('sim-slots');
+    if (!host) return;
+    var d = data[selected.i];
+    var t = selected.t;
+    var combined = d.AE + W * d.AS[t];
+    var items = [
+      { name: 'R(τ)', val: fmt0(d.ep), color: 'var(--text)' },
+      { name: 'A^E', val: fmt(d.AE), color: 'var(--c1)' },
+      { name: 'R_t', val: fmt0(d.R[t]), color: 'var(--text)' },
+      { name: 'A^S', val: fmt(d.AS[t]), color: 'var(--c2)' },
+      { name: '合并 A', val: fmt(combined), color: 'var(--accent)', hit: true }
+    ];
+    host.innerHTML = items.map(function (it) {
+      return '<div class="slot' + (it.hit ? ' hit' : '') + '">' +
+        '<div class="slot-name">' + it.name + '</div>' +
+        '<div class="slot-val" style="color:' + it.color + '">' + it.val + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  function renderReadout() {
+    var host = document.getElementById('sim-readout');
+    if (!host) return;
+    var d = data[selected.i];
+    var t = selected.t;
+    var s = d.states[t];
+    var a = d.acts[t];
+    var g = groups[s];
+    var gmean = d.ASmean[t];
+    var combined = d.AE + W * d.AS[t];
+    var head = (mode === 'full') ? 'GiGPO · 两级优势' : 'GRPO · 只看回合级';
+    var html = '<div class="r-head">' + head + ' · ' + d.id + ' 第 ' + (t + 1) + ' 步</div>';
+
+    html += '<p><strong>状态</strong> <span class="mono">' + s + '</span> · <strong>动作</strong> <span class="mono">' + a + '</span> · <strong>该状态出现</strong> ' + g.length + ' 次</p>';
+
+    html += '<p>回合级：R(' + d.id + ') = <span class="mono">' + fmt0(d.ep) + '</span>，' + data.length + ' 条轨迹的均值 = <span class="mono">' + fmt0(epMean) + '</span>，所以 A<sup>E</sup> = <span class="mono" style="color:var(--c1)">' + fmt(d.AE) + '</span>。</p>';
+
+    if (mode === 'episode') {
+      html += '<p>GRPO 会把 <strong>' + fmt(d.AE) + '</strong> 原样分配给这条轨迹的每一步——第 1 步到第 4 步没有区别。切到「A<sup>E</sup> + A<sup>S</sup>」看 GiGPO 如何把这一步和别的轨迹区分开。</p>';
+    } else {
+      if (g.length >= 2) {
+        var others = g.filter(function (x) {
+          return !(x.i === selected.i && x.t === selected.t);
+        });
+        var otherStr = others.map(function (x) {
+          return data[x.i].id + ' 的 ' + fmt0(x.R);
+        }).join('、');
+        html += '<p>步骤级：R<sub>t</sub> = <span class="mono">' + fmt0(d.R[t]) + '</span>；同一状态 ' + s + ' 的组内有 ' + g.length + ' 个动作（本步 ' + fmt0(d.R[t]) + '、' + otherStr + '），均值 = <span class="mono">' + fmt0(gmean) + '</span>；A<sup>S</sup> = <span class="mono" style="color:var(--c2)">' + fmt(d.AS[t]) + '</span>。</p>';
+      } else {
+        html += '<p>步骤级：状态 ' + s + ' 只出现一次，组内只有这个动作，均值就是它自己，所以 <span class="mono" style="color:var(--c2)">A<sup>S</sup> = 0.00</span>。这一步的信用完全来自 A<sup>E</sup>。</p>';
+      }
+      html += '<p>合并：A = A<sup>E</sup> + ω·A<sup>S</sup> = <span class="mono">' + fmt(d.AE) + '</span> + 1.00 × <span class="mono">' + fmt(d.AS[t]) + '</span> = <strong style="color:var(--accent)">' + fmt(combined) + '</strong>。</p>';
+    }
+    host.innerHTML = html;
+  }
+
+  function renderAll() {
+    renderGrid();
+    renderSlots();
+    renderReadout();
+  }
+
+  var grid = document.getElementById('step-grid');
+  if (grid) {
+    grid.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('.step-cell') : null;
+      if (!btn) return;
+      selected.i = parseInt(btn.getAttribute('data-i'), 10);
+      selected.t = parseInt(btn.getAttribute('data-t'), 10);
+      renderAll();
+    });
+  }
+
+  var modeBtns = document.querySelectorAll('#sim-modes .rule-btn');
+  modeBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      modeBtns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      mode = btn.getAttribute('data-mode');
+      renderAll();
+    });
+  });
+
+  renderAll();
+})();
+
+/* ============================================================
+   2) ALFWorld 六个子类对比图
+   ============================================================ */
+(function () {
+  var CATS = ['Pick', 'Look', 'Clean', 'Heat', 'Cool', 'Pick2'];
+  var CHART = {
+    '1.5b': {
+      desc: '1.5B 上 GiGPO 的增益更明显：GRPO 平均 72.8 → 86.1。Look、Pick2 提升最大（+22.8 / +26.0），Clean、Pick 的空间较小（+7.3 / +10.7），Heat、Cool 居中。',
+      methods: [
+        { name: 'PPO', color: 'var(--c1)', data: [64.8, 40.5, 57.1, 60.6, 46.4, 47.4] },
+        { name: 'RLOO', color: 'var(--c3)', data: [88.3, 52.8, 71.0, 62.8, 66.4, 56.9] },
+        { name: 'GRPO', color: 'var(--c2)', data: [85.3, 53.7, 84.5, 78.2, 59.7, 53.5] },
+        { name: 'GiGPO', color: 'var(--accent)', data: [96.0, 76.5, 91.8, 91.3, 71.7, 79.5] }
+      ]
+    },
+    '7b': {
+      desc: '7B 上 GRPO 平均 77.6 → 90.2。注意 Look 从 66.1 涨到 88.6，Pick2 从 64.7 涨到 85.2——这两类最考验多步组合。',
+      methods: [
+        { name: 'PPO', color: 'var(--c1)', data: [92.3, 64.0, 92.5, 89.5, 80.3, 68.8] },
+        { name: 'RLOO', color: 'var(--c3)', data: [87.6, 78.2, 87.3, 81.3, 71.9, 48.9] },
+        { name: 'GRPO', color: 'var(--c2)', data: [90.8, 66.1, 89.3, 74.7, 72.5, 64.7] },
+        { name: 'GiGPO', color: 'var(--accent)', data: [91.8, 88.6, 95.9, 90.2, 86.5, 85.2] }
+      ]
+    }
+  };
+
+  function renderChart(key) {
+    var cfg = CHART[key];
+    var desc = document.getElementById('alf-desc');
+    if (desc) {
+      desc.innerHTML = '<div class="r-head">ALFWorld · ' + (key === '7b' ? 'Qwen2.5-7B' : 'Qwen2.5-1.5B') + '</div>' + cfg.desc;
+    }
+
+    var chart = document.getElementById('alf-chart');
+    if (!chart) return;
+    chart.innerHTML = '';
+
+    cfg.methods.forEach(function (m) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = m.name;
+
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+
+      m.data.forEach(function (v) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+
+        var track = document.createElement('div');
+        track.className = 'track';
+
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = m.color;
+        fill.style.height = Math.max(2, v) + '%';
+
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = v.toFixed(1);
+
+        track.appendChild(fill);
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+
+    var x = document.getElementById('alf-x');
+    if (x) {
+      x.innerHTML = CATS.map(function (c) { return '<span>' + c + '</span>'; }).join('');
+    }
+  }
+
+  var tabs = document.querySelectorAll('#alf-tabs .tab');
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      tab.classList.add('active');
+      renderChart(tab.getAttribute('data-model'));
+    });
+  });
+
+  renderChart('7b');
+})();
+
+/* ============================================================
+   3) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var detail = el.closest('figure').querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

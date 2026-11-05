@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UloRL · 把 128k 输出切成段训，让长尾不再拖住整批</title>
+<meta name="description" content="腾讯混元 UloRL 把超长输出 RL 的解码切成固定长度段落、已完成样本立即入池训练，4 段时训练提速 2.06x；再用动态掩码已熟练正向词元（DMMPTs）把熵稳在目标值 0.2，Qwen3-30B-A3B 在 AIME2025 上从 70.9% 提到 82.8%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 分段解码时间线 ---- */
+.tl{display:flex;flex-direction:column;gap:6px;margin:16px 0 6px}
+.tl-row{display:grid;grid-template-columns:54px 1fr;gap:10px;align-items:center}
+.tl-lbl{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;color:var(--text-muted);text-align:right}
+.tl-lane{display:grid;gap:2px}
+.tl-bar{height:20px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-family:"JetBrains Mono",monospace;font-size:10px;color:#fff;overflow:hidden;white-space:nowrap;min-width:0}
+.tl-bar.wait{background:transparent;color:transparent}
+.tl-bar.base{background:var(--c1)}
+.tl-note{font-size:12px;color:var(--text-soft);margin-top:7px}
+
+/* ---- 段级重要性采样表 ---- */
+.seg-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:4px;max-width:520px;margin:12px 0}
+.seg-cell{height:22px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:"JetBrains Mono",monospace;font-size:10px;color:#fff;transition:all .2s ease;padding:0;background:var(--c1)}
+.seg-cell .seg-tag{display:none}
+
+@media (max-width:880px){
+  .tl-row{grid-template-columns:38px 1fr;gap:6px}
+  .tl-lbl{font-size:10.5px}
+  .tl-bar{height:17px;font-size:9px}
+  .seg-grid{gap:2px}
+  .seg-cell .seg-a{display:none}
+  .seg-cell .seg-tag{display:inline}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">UloRL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RLVR · arXiv 2025 · 2507.19766</span>
+  <h1>UloRL：把 128k 输出切成 8 段解码，让已完成样本先入池训练</h1>
+  <p class="hero-sub">
+    超长输出的 RL 有两个坎：批内少数超长样本拖住整批解码（长尾），以及训练中熵持续下降（熵坍塌）。
+    UloRL 用<strong>分段 rollout</strong> 把解码切成固定长度段落，已完成样本立即进入经验池；再用 <strong>DMMPTs</strong> 在熵低于目标值时屏蔽「已熟练掌握的正向词元」。
+    代价是分段带来的跨模型混合——论文选择直接把它近似成 on-policy。
+  </p>
+  <div class="meta">
+    <span>Dong Du, Shulin Liu, Tao Yang 等 · Tencent Hunyuan Team</span>
+    <a href="https://arxiv.org/abs/2507.19766" target="_blank" rel="noopener">arXiv 2507.19766 ↗</a>
+    <a href="https://github.com/liushulinle/ULORL" target="_blank" rel="noopener">代码 ULORL ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    128k 输出下，一批里只要有几条样本跑到最长的 128k，整批都要等它们；但大部分样本早就该入池了。UloRL 把最大长度切成 8 段、每段 16k，<strong>每次只解码 16k 就更新一次</strong>，完成的样本立即训练，没完成的带着前缀进入下一轮。
+  </p>
+  <p>
+    副作用是<strong>一条样本由多个版本的模型拼成</strong>。论文给了两种处理：按段查旧策略的 SAIS，以及把全部旧策略都当作当前策略的 <em>POIS</em>——所有权重恒为 1，永远不会被 clipping 截掉。最终选 POIS：它在 4k / 32k / 64k 三个长度上都优于 SAIS。
+  </p>
+  <p>
+    熵坍塌的根因被定位为<em>过度训练已熟练掌握的正向词元</em>（概率 ≥ τ，论文取 0.99）。全部屏蔽会让熵一路上涨，DMMPTs 只在熵低于目标 σ=0.2 时屏蔽，把熵稳在目标附近，不引入熵损失项。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">2.06<small>x</small></div>
+      <div class="k">4 段解码的每步耗时<br>1240s → 601s（Table 1，64k）</div>
+    </div>
+    <div class="metric">
+      <div class="v">82.8<small>%</small></div>
+      <div class="k">AIME-2025，UloRL-A3B-128k<br>基线 70.9%（Table 2）</div>
+    </div>
+    <div class="metric">
+      <div class="v">+11.9</div>
+      <div class="k">AIME-2025 32k → 128k 点数<br>73.5 → 82.8（Table 3）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>长尾让整批 RL 卡在最长的几条样本上</h2></div>
+  <p class="sec-sub">读完这节应该知道：超长输出 RL 的浪费不在总量，而在「等」。</p>
+
+  <p>RLVR 的做法是采样一组回答、按最终答案给奖励、再用 GRPO / DAPO 这类算法更新策略。标准框架里，<strong>一批中所有样本都解码完毕</strong>，才能进入下一步训练。输出长度一拉到 128k，长度分布就是重尾的。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文给的典型场景</span><h4>80% 的样本在 64k 内结束，却要等那 128k 的</h4></div>
+    <p>§3.1 的原话：一批里 80% 的样本长度不超过 64k，但所有样本都必须等最长的 128k 输出解码完，才进入下一次解码迭代。GPU 在一整段时间里只在为少数长尾样本服务，其余样本已经生成完却闲置。</p>
+  </div>
+
+  <p>长度本身不是浪费的来源——长推理确实能提升难题上的表现。浪费在于<strong>轮次的结构</strong>：长度为 L 的样本和长度为 128k 的样本被绑在同一个同步屏障上。</p>
+
+  <p>第二个问题与长度无直接关系，但同样在长训练中放大：<strong>熵坍塌</strong>。训练越久，模型输出分布越尖锐，探索能力随之下降（§3.2 与 Figure 4 的 baseline 曲线），最终伤害推理上限。UloRL 的两块主要技术分别对应这两个问题。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>长尾有人试过、熵也早有人管——各有堵点</h2></div>
+  <p class="sec-sub">两路已有方案，各自的限制都写在论文的 Introduction 里。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">对长尾</span><h4>K1.5 的 partial rollouts</h4></div>
+      <p>K1.5 最早提出把解码拆成部分进行。UloRL 认可这个方向，但指出：<strong>缺少对不同模型生成的段落如何参与训练的详细说明，也没有给超参数设置</strong>，难以复现。</p>
+      <p>UloRL 的做法是同构的：切段 → 完成即入池 → 未完成挂起。区别在于把「跨模型混合段落的训练学」写清楚了——SAIS 与 POIS 两种重要性采样方案，以及二选一的实验对比。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">对熵</span><h4>两类思路，两类堵点</h4></div>
+      <p><strong>① 加熵损失项。</strong>直接把它当优化目标之一。论文认为「维持熵」与「提升推理」目标并不完全一致，可能拉低性能天花板。</p>
+      <p><strong>② 改训练样本或词元。</strong>DAPO 的 clip-higher 只对 off-policy 有效，on-policy 下没有 clipping 可放；W-Reinforce 降低正样本权重，但对本身就低概率的重要词元，减速训练同样伤学习。</p>
+    </div>
+  </div>
+
+  <p>UloRL 对熵的立场是第三种：<strong>既不加优化目标，也不用重要性采样</strong>，只决定「哪些词元参与梯度」——当熵偏低时，把模型早已熟练的正向词元从梯度里拿掉。</p>
+
+  <details>
+    <summary>论文继承了什么？<span class="sum-sub">Base：GRPO + DAPO 的几项修改，框架用 verl</span></summary>
+    <div class="details-body">
+      <p>§2.3 说明训练沿用 DAPO 的 <strong>dynamic sampling、token-level gradient loss、去掉 KL 项</strong>。与 DAPO 不同的是奖励取值：论文用 <code>{0, 1}</code> 而不是 <code>{−1, 1}</code>，这样数据集上平均奖励直接等于准确率；在 GRPO 组内归一化下，奖励为 1 的样本优势恒为正、为 0 的恒为负，梯度方向与优化目标一致。</p>
+      <p>实现基于 <code>volcengine/verl</code>（§3 脚注）。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两块技术：切段解码，以及「熵低了就别练已会的词」</h2></div>
+  <p class="sec-sub">机制本身很短，难点在切段之后重要性采样怎么定义。</p>
+
+  <h3>3.1 分段 rollout：三种终止条件</h3>
+  <p>全局最大长度 128k、段数 8，则每次最多解码 <code>128k / 8 = 16k</code>。每解码一步，输入有两个来源：上一轮没完成的样本，以及数据集里新取的 prompt。解码在三种条件下停下（§3.1.1）：</p>
+  <ul>
+    <li><strong>遇到 EOS</strong>：样本完成，进入经验池训练。</li>
+    <li><strong>到达段长但未达全局最大长度</strong>：样本挂起，下一轮接着写。</li>
+    <li><strong>到达全局最大长度</strong>：截断，以当前内容进入经验池训练。</li>
+  </ul>
+
+  <div class="sim" id="tl-sim">
+    <div class="sim-top" id="tl-btns">
+      <button class="rule-btn" data-seg="2" type="button">2 段<span class="r-sub">1.6x · 774s</span></button>
+      <button class="rule-btn active" data-seg="4" type="button">4 段<span class="r-sub">2.06x · 601s</span></button>
+      <button class="rule-btn" data-seg="1" type="button">不分段<span class="r-sub">1.0x · 1240s</span></button>
+    </div>
+    <div class="eq" style="margin-top:0;font-size:13.5px">
+      T<sub>step</sub> = <span class="hl-a">max<sub>s</sub>(L<sub>s</sub>)</span> &nbsp;/&nbsp; <span class="hl-c">段数</span> &nbsp;&nbsp;&nbsp;→&nbsp;&nbsp;&nbsp; 屏障只等「当前段」写完，不等整条样本
+    </div>
+    <div class="eq-cap">四条示意样本长度 20k / 48k / 96k / 128k（形状示意，非论文数据）；色块宽度来自 Table 1 的每步耗时</div>
+    <div class="tl" id="tl-lanes"></div>
+    <div class="readout" id="tl-readout">
+      <div class="r-head">当前设置</div>
+      <div id="tl-msg"></div>
+    </div>
+  </div>
+  <p class="tl-note">看四种长度怎么被切：段数越大，短样本越早离开批次，而不分段时全部样本被绑在 128k 那一条上。</p>
+
+  <h3>3.2 跨模型段落：SAIS 与 POIS</h3>
+  <p>切段之后，同一条样本的不同段落由不同时刻的策略生成。GRPO / DAPO 的比值 <code>r<sub>i,t</sub> = π<sub>θ</sub> / π<sub>θ<sub>old</sub></sub></code> 里，分母不再唯一。论文给了两种定义（§3.1.2，Eq. 8；POIS 由 Figure 1(c) 描述）：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">SAIS</span><h4>按段查各自的旧策略</h4></div>
+      <p><code>r<sub>i,t</sub> = π<sub>θ</sub>(o<sub>i,t</sub>) / π<sub>θ<sub>old,f(i)</sub></sub>(o<sub>i,t</sub>)</code></p>
+      <p><code>f(i)</code> 把第 i 个词元映射到它所属段号的旧模型。精确，但老段落的比值可能远离 1，会被 clipping 截断。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">POIS · 采用</span><h4>全部旧策略换成最后一段的策略</h4></div>
+      <p>把各段旧策略统一替换成 <code>π<sub>θ<sub>old,t</sub></sub></code>，所有词元权重恒为 <strong>1</strong>，不会被截断。只有一段的样本是真 on-policy；多段样本里最后一段是真的，其余是「伪 on-policy」。</p>
+      <p>依据：on-policy 下熵更稳、性能更好，而过大的比值被裁剪会削弱多样性。</p>
+    </div>
+  </div>
+
+  <p>POIS 到底比 SAIS 差在哪？论文用 Figure 2 在三个输出长度上对比：<strong>4k、32k、64k 下 POIS 的表现都优于 SAIS</strong>；4k 时 POIS 的熵与准确率曲线几乎和 1 段的 TOIS 重合。另外 SAIS 配合 clip-higher（<code>ε<sub>high</sub> = 0.28</code>）会出现熵爆炸。直觉解释是：每条样本最后一段是真的 on-policy，可以部分抵消伪 on-policy 段的负面影响。</p>
+
+  <details>
+    <summary>两个容易看错的地方<span class="sum-sub">TOIS / SAIS / POIS 的设置，与决定「是否 on-policy」的到底是什么</span></summary>
+    <div class="details-body">
+      <p><strong>三个设置的段数不同。</strong>TOIS（True On-Policy Importance Sampling）是段数为 1 的对照组，SAIS 与 POIS 都是段数为 4。所以 TOIS 与 POIS 的曲线重合含义是「4 段 POIS 的熵和准确率跟不分段的真 on-policy 几乎一样」，即切段本身没有明显代价。</p>
+      <p><strong>「伪 on-policy」不是数学上无偏。</strong>把所有段的旧策略都换掉，本质是用当前模型重新打分旧段落，比值偏离 1 的部分被忽略。论文的实验依据是 POIS 优于 SAIS、且 entropy 更稳；为什么没有造成更严重的偏差，原文只给了上面的直觉解释，没有梯度层面的分析。</p>
+    </div>
+  </details>
+
+  <h3>3.3 熵坍塌：谁在把分布磨尖</h3>
+  <p>论文反对「训练正样本是熵下降主因」的说法（Zhu et al.），把根因收窄到<strong>正样本里已被熟练掌握的词元</strong>。定义（Eq. 9）：样本满足 <code>r(s<sub>k</sub>) = 1</code> 且词元满足 <code>p(t<sub>i</sub>) ≥ τ</code>，即为 MPTs。</p>
+
+  <div class="eq">
+    MPTs = ∪<sub>k=1…N</sub> ∪<sub>i=1…L<sub>k</sub></sub> { t<sub>i</sub> ∈ s<sub>k</sub> } ，&nbsp;其中 p(t<sub>i</sub>) ≥ τ，r(s<sub>k</sub>) = 1
+  </div>
+  <div class="eq-cap">Eq. 9 · MPTs 是「做对的回答」里「模型本来就很有把握」的那些词元；论文取 τ = 0.99</div>
+
+  <p>Figure 3 的机制：继续更新 MPTs 会进一步提高它的预测概率，分布更尖，熵下降；更新非 MPTs 则不一定。Figure 4 是直接证据——在 Qwen3-4B、Qwen3-8B、Qwen3-30B-A3B 上，<strong>全部词元参与训练</strong>时熵逐渐下降；<strong>只屏蔽 MPTs</strong> 时熵随时间上升。</p>
+
+  <h3>3.4 DMMPTs：熵低于 σ 才屏蔽</h3>
+  <p>只屏蔽 MPTs 又会让熵一路上涨，同样不稳。DMMPTs 加了一个条件开关：</p>
+
+  <div class="eq">
+    J(θ) = E[ (1 / |V|) · Σ<sub>i,t</sub> [<span class="hl-c">1 − 𝕀<sub>msk</sub><sup>(i,t)</sup></span>] · min( r<sub>i,t</sub>Â<sub>i,t</sub> , clip(r<sub>i,t</sub>, 1−ε, 1+ε) · Â<sub>i,t</sub> ) ]
+  </div>
+  <div class="eq-cap">Eq. 10 的简写：|V| 代表分母 Σ<sub>i=1</sub><sup>G</sup>|o<sub>i</sub>|；𝕀<sub>msk</sub> 为 1 时该项被丢弃。正常配置只有 (1 − 0.2)×100 = 80% 被计权</div>
+
+  <table>
+    <thead><tr><th>𝕀<sub>msk</sub><sup>(i,t)</sup></th><th>条件</th><th>该词元</th></tr></thead>
+    <tbody>
+      <tr class="best"><td class="num">1</td><td>H̄<sub>i</sub> &lt; σ 且 o<sub>i</sub><sup>t</sup> ∈ MPTs</td><td>屏蔽，不产生梯度</td></tr>
+      <tr><td class="num">0</td><td>其他情况</td><td>照常训练</td></tr>
+    </tbody>
+  </table>
+
+  <p>这里的 <code>H̄<sub>i</sub></code> 是单条回答的逐词元熵平均，即 <code>(1/|o<sub>i</sub>|) Σ<sub>t</sub> Σ<sub>j</sub> p<sub>t</sub><sup>j</sup> log p<sub>t</sub><sup>j</sup></code>。目标是让熵<strong>不低于</strong> σ：低时收回最没信息量的梯度，高时全部照训。论文没有对「恢复全部训练后熵如何变化」的瞬态做定量刻画，Figure 5 只看熵是否稳在目标附近。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">直觉</span><h4>它是一个「熵的下限开关」，不是熵正则</h4></div>
+    <p>熵正则项会把目标函数变成「奖励 + 熵」的加权和，需要调权重；DMMPTs 改的是<strong>哪些词元给梯度</strong>，目标函数本身不变。所以在熵充足时，训练与不加 DMMPTs 完全一致。代价是新增两个超参数 τ 与 σ（论文取 0.99 与 0.2）。</p>
+  </div>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>奖励的质量决定了这套方法的上限</h2></div>
+  <p class="sec-sub">这一节全是「让它跑得稳」的工程细节：验证器、数据清洗、超长处理。</p>
+
+  <h3>超参（§4.1，Qwen3-30B-A3B）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>项</th><th>取值</th></tr></thead>
+      <tbody>
+        <tr><td>优化器 / 学习率</td><td><code>AdamW</code>，常数 <code>1×10<sup>−6</sup></code></td></tr>
+        <tr><td>prompt batch / 每题采样</td><td><code>128</code> / <code>G = 8</code>，采样温度 0.85，top_p 1.0，top_k −1</td></tr>
+        <tr><td>最大长度 / 段数 / 段长</td><td><code>128k</code> / <code>8</code> / <code>16k</code></td></tr>
+        <tr><td>mini-batch</td><td><code>1024</code>，一个 rollout 步做一次梯度更新</td></tr>
+        <tr><td>MPTs 阈值 τ / 目标熵 σ</td><td><code>0.99</code> / <code>0.2</code></td></tr>
+        <tr><td>评测</td><td>AIME-2025、BeyondAIME，各跑 32 次取 <code>avg@32</code>；温度 0.85，top_p 0.95，top_k 20</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>生成式验证器：规则判等不行</h3>
+  <p>奖励是结果的二值判等：正确 1，其余 0。但「两答案是否等价」靠规则容易判错——论文举的例子是 <code>(27cm, 0.27m)</code> 与 <code>(1/2, one half)</code>。因此训练了一个生成式模型来判断语义等价。</p>
+
+  <h3>数据清洗：问题维度与答案维度</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">问题维度</span><h4>让题面适合短答</h4></div>
+      <ul>
+        <li>删除一个题含多个小问的样本，避免只答对部分子题被判错。</li>
+        <li>选择题、证明题、判断题改写为短答格式，防止猜答案。</li>
+        <li>用 Qwen3-30B-A3B 每题推理 8 次，<strong>8 次全对</strong>的题视为过简删除。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">答案维度</span><h4>让参考答案好判</h4></div>
+      <ul>
+        <li>从参考答案里抽出短答案，降低验证器判别难度。</li>
+        <li>删除参考答案过长的题（如矩阵答案）。</li>
+        <li>多个 SOTA 模型给出<strong>一致但与参考答案不同</strong>的答案时，判定参考答案错误并删除。</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>超长处理：截断即判错</h3>
+  <p>DAPO 给过两种处理：过度长过滤、软惩罚。论文的实验结论是——过滤会让输出长度<strong>快速变长</strong>，不可取；软惩罚的效果与「直接当作答错」相当。所以 UloRL 直接给截断样本奖励 0（§3.5）。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Algorithm 1：每一步都从「未完成池」续写</h2></div>
+  <p class="sec-sub">整个流程是两池一循环：unfinished_pool 装没写完的，experience_pool 装可以训的。</p>
+
+  <figure>
+    <svg viewBox="0 0 840 400" role="img" aria-label="UloRL 分段 rollout 训练流程">
+      <defs>
+        <marker id="ul-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="var(--border-strong)"></path>
+        </marker>
+        <marker id="ul-arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <!-- 顶部两列输入 -->
+      <rect x="60" y="20" width="220" height="58" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="170" y="45" text-anchor="middle" font-size="14" font-weight="600" fill="var(--text)">unfinished_pool</text>
+      <text x="170" y="64" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">上一轮没解码完的样本（带前缀）</text>
+
+      <rect x="560" y="20" width="220" height="58" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="670" y="45" text-anchor="middle" font-size="14" font-weight="600" fill="var(--text)">prompts</text>
+      <text x="670" y="64" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">新从 RL 数据集取的题（第 8 行）</text>
+
+      <!-- rollout -->
+      <path d="M170 78 L170 112" stroke="var(--border-strong)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+      <path d="M670 78 L670 112" stroke="var(--border-strong)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+      <rect x="250" y="118" width="340" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"></rect>
+      <text x="420" y="146" text-anchor="middle" font-size="14" font-weight="600" fill="var(--accent-deep)">rollout，max_len = each_segment_length</text>
+      <text x="420" y="166" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">每次只解码一段，例如 16k</text>
+
+      <!-- 三出口 -->
+      <path d="M330 182 L180 236" stroke="var(--border-strong)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+      <path d="M420 182 L420 236" stroke="var(--border-strong)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+      <path d="M510 182 L660 236" stroke="var(--border-strong)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+
+      <rect x="60" y="242" width="240" height="70" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="180" y="268" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">段满，但未到全局上限</text>
+      <text x="180" y="288" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">→ unfinished_pool（第 9 行）</text>
+
+      <rect x="312" y="242" width="216" height="70" rx="10" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1.4"></rect>
+      <text x="420" y="268" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">遇到 EOS / 到 128k 截断</text>
+      <text x="420" y="288" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">→ experience_pool（第 10 行）</text>
+      <text x="420" y="304" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">截断样本奖励 = 0（§3.5）</text>
+
+      <rect x="540" y="242" width="240" height="70" rx="10" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="660" y="268" text-anchor="middle" font-size="13" font-weight="600" fill="#fff">update_model（第 11 行）</text>
+      <text x="660" y="288" text-anchor="middle" font-size="11.5" fill="#F4DCD0">GRPO/DAPO 目标 + DMMPTs 掩码</text>
+
+      <!-- 回环 -->
+      <path d="M180 312 L180 352 L420 352 L420 312" stroke="var(--c1)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+      <path d="M660 312 L660 352 L520 352 L520 312" stroke="var(--c1)" stroke-width="1.5" fill="none" marker-end="url(#ul-arr)"></path>
+      <text x="300" y="345" text-anchor="middle" font-size="11" fill="var(--c1)">段形成后经验池立即训练</text>
+      <text x="596" y="345" text-anchor="middle" font-size="11" fill="var(--c1)">下一轮</text>
+    </svg>
+    <figcaption>
+      图：Algorithm 1 的数据流重绘。每一步只做一次 rollout，三出口决定样本是挂起、入池还是直接训练。
+      <br><span class="fig-toggle">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>每步都有样本离开批次。</strong>短样本在第 1 段遇到 EOS 随即入池；长样本继续挂起。批次的重心随时间从长样本转向「长样本尾巴 + 新 prompt」。</li>
+          <li><strong>截断样本照样训练。</strong>到 128k 仍没写完的样本被截断后进入经验池，奖励记为 0——这是有意为之，让模型学会在预算内收尾。</li>
+          <li><strong>update_model 用的是经验池里所有可训样本。</strong>Algorithm 1 第 11 行只有 experience_pool 一个输入；分段的「伪 on-policy」性质就来自这些样本里的不同段落。</li>
+          <li><strong>与不分段的差别只在第 8 行的 <code>max_len</code>。</strong>断点续写、经验池的接入都是流水线工程；算法层新增的只有 POIS 的比值定义和 DMMPTs 的掩码。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <h3>三种方法怎么落到「一条样本的每一段」上</h3>
+  <p>下面把 Algorithm 1 中的一个时刻切片出来：经验池里恰有一条 8 段的样本，每一段由一个时刻的策略生成。切换方法，看每个词元计算比值时，<strong>分母取的是哪个模型</strong>。</p>
+
+  <div class="sim" id="is-sim">
+    <div class="sim-top" id="is-btns">
+      <button class="rule-btn active" data-m="pois" type="button">POIS<span class="r-sub">分母全部取 π_old,t</span></button>
+      <button class="rule-btn" data-m="sais" type="button">SAIS<span class="r-sub">分母按段取 π_old,f(i)</span></button>
+      <button class="rule-btn" data-m="tois" type="button">不分段<span class="r-sub">分母全部取同一模型</span></button>
+    </div>
+    <div class="seg-grid" id="is-grid"></div>
+    <div class="readout" id="is-readout">
+      <div class="r-head">当前读数</div>
+      <div id="is-msg"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>不加 DMMPTs 少 4.2 点；Yarn 再加 2.3 点</h2></div>
+  <p class="sec-sub">主表的两处反直觉：更强的分结果不是 128k 那个模型；「越长越好」到 64k 之后边际在收窄。</p>
+
+  <h3>Table 2：Qwen3-30B-A3B 上的整体结果</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th style="text-align:right">AIME-2025</th><th style="text-align:right">BeyondAIME</th><th style="text-align:right">AVG</th></tr></thead>
+      <tbody>
+        <tr><td>DeepSeek-R1-0528</td><td class="num">87.5</td><td class="num">63.3*</td><td class="num">75.4</td></tr>
+        <tr><td>Seed-1.6-thinking</td><td class="num">86</td><td class="num">56.3</td><td class="num">71.2</td></tr>
+        <tr><td>Qwen3-235B-A22B</td><td class="num">81.5</td><td class="num">59.0*</td><td class="num">70.3</td></tr>
+        <tr><td>Qwen3-30B-A3B（基线）</td><td class="num">70.9</td><td class="num">50.7*</td><td class="num">60.8</td></tr>
+        <tr class="best"><td>UloRL-A3B-128k</td><td class="num">82.8</td><td class="num">60.2</td><td class="num">71.5</td></tr>
+        <tr><td>UloRL-A3B-w/o-DMMPTs</td><td class="num">78.6</td><td class="num">57.1</td><td class="num">67.9</td></tr>
+        <tr><td>UloRL-A3B-128k-Yarn</td><td class="num">85.1</td><td class="num">61.9</td><td class="num">73.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft)">* 为论文团队自行评测，其余来自官方报告（Table 2 注）。Yarn 版本把输出延长到 140k（factor 1.5，original_len 93k）。</p>
+
+  <h3>Table 3：输出长度的影响</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th style="text-align:right">AIME-2025</th><th style="text-align:right">BeyondAIME</th><th style="text-align:right">AVG</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen3-30B-A3B（基线）</td><td class="num">70.9</td><td class="num">50.7</td><td class="num">60.8</td></tr>
+        <tr><td>UloRL-A3B-32k</td><td class="num">73.5</td><td class="num">52.3</td><td class="num">62.9</td></tr>
+        <tr><td>UloRL-A3B-64k</td><td class="num">79.9</td><td class="num">58.5</td><td class="num">69.2</td></tr>
+        <tr><td>UloRL-A3B-96k</td><td class="num">81.6</td><td class="num">59.4</td><td class="num">70.5</td></tr>
+        <tr class="best"><td>UloRL-A3B-128k</td><td class="num">82.8</td><td class="num">60.2</td><td class="num">71.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft)">段数设置：32k 用 1 段，64k 用 4 段，96k / 128k 用 8 段（§4.3）。</p>
+
+  <p>读表时值得注意的三点：</p>
+  <ul>
+    <li><strong>32k 几乎不动：</strong>基线已经是很强的 32k 模型，不改变输出长度上限，很难再涨（§4.3）。往外扩到 64k，AIME-2025 一次跳了 6.4 点，是整条曲线里最大的单步增量。</li>
+    <li><strong>64k 之后收益递减：</strong>64k → 96k 涨 1.7 点，96k → 128k 涨 1.2 点。论文的措辞是「输出越长、表现越好」的趋势成立，但单步收益明显变小。</li>
+    <li><strong>最终最强的是 Yarn 版本，不是 128k：</strong>UloRL-A3B-128k 在 AIME-2025 上是 82.8，超过 Qwen3-235B-A22B 的 81.5；用到 140k 的 Yarn 版本则到 85.1、AVG 73.5。摘要里「70.9% → 85.1%」说的是 Yarn 那一行。</li>
+  </ul>
+
+  <h3>Table 1：切段带来的速度</h3>
+  <p>在 Qwen3-30B-A3B、64k 输出上测每步耗时：不分段 1240s，2 段 774s（1.6x），4 段 601s（2.06x）。论文没有报告 8 段的加速。注意这是 64k 上的测量，而主实验是 128k 切 8 段。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>三处需要带着疑虑看的地方</h2></div>
+  <p class="sec-sub">论文自己的方法取舍与缺失，比结论更值得记下来。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界一</span><h4>POIS 是近似，论文没给梯度层面的论证</h4></div>
+    <p>把伪 on-policy 段按权重 1 处理，意味着这些旧段落的数据没有被严格校正。论文的实验（Figure 2）显示 POIS 优于 SAIS，但为什么没有把训练带偏，原文只有「最后一段是真 on-policy」这条直觉。若分段更多、或策略更新更快，这个近似的误差是否会放大，论文没有系统探索。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>τ 与 σ 固定，且没有敏感性分析</h4></div>
+    <p>论文只给出 τ = 0.99、σ = 0.2 两个取值和 Figure 5 的熵稳定曲线，没有扫描不同 τ / σ 对性能的影响。换模型、换任务时该取多少，需要自己试。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>证据集中在数学，且增益很大程度来自「延长长度」</h4></div>
+    <p>评测只有 AIME-2025 与 BeyondAIME 两个数学基准。从 Table 3 看，32k 训练的收益很小；主要提升发生在把长度上限推到 64k 以上之后。换句话说，「UloRL 提升了推理」在实验里主要表现为「让模型能在更长预算下训练并受益」。这套流程在代码、多学科等长推理任务上是否同样有效，论文没有验证。</p>
+  </div>
+
+  <p style="margin-top:22px">还有两处工程细节值得记：<strong>冻结熵的方案不能只看熵</strong>——DMMPTs 的前提是「已熟练的词元不训也不伤性能」，但摘要在 Table 2 的检验里只用了「w/o-DMMPTs 掉 4.2 点」来间接证明；<strong>奖励依赖验证器与数据清洗</strong>，§3.3–3.4 的清洗步骤（删多小问、删过简题、纠正错参考答案）任何一步出问题，都会在奖励上体现为假阳性或假阴性。</p>
+</section>
+
+<footer>
+  <div>UloRL: An Ultra-Long Output Reinforcement Learning Approach for Advancing Large Language Models' Reasoning Abilities · Dong Du, Shulin Liu, Tao Yang, Shaohua Chen, Yang Li · Tencent Hunyuan Team · arXiv 2507.19766v1</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.19766" target="_blank" rel="noopener">arXiv:2507.19766</a><br>
+    代码：<a href="https://github.com/liushulinle/ULORL" target="_blank" rel="noopener">liushulinle/ULORL</a><br>
+    笔记：<a href="/ulorlan-ultra-long-output-reinforcement-learning-approach-for-advancing-large-language-models-reasoning-abilities/">UloRL：An Ultra-Long Output Reinforcement Learning Approach for Advancing Large Language Models' Reasoning Abilities</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记把 2.06x 写成「最多可提升」，并说「128k 切 8 段」。原文 Table 1 的测量条件是 <strong>64k 输出、2 段 / 4 段</strong>（1240s → 774s → 601s），正文没有报告 8 段的加速；128k 切 8 段只是 §3.1.1 的设定示例。<br>
+    2. 笔记写最终 AIME-2025 从 70.9%「飙升至 85.1%」。Table 2 中 <strong>UloRL-A3B-128k 是 82.8%</strong>，<strong>85.1% 属于 UloRL-A3B-128k-Yarn</strong>（输出延长到 140k）。笔记表里的 82.8 与 85.1 归属正确，但正文句子混淆了两者。<br>
+    3. 笔记写 SAIS「计算复杂」、POIS 避免了 clipping。原文给出的选择理由是<strong>实验结果</strong>：Figure 2 中 POIS 在 4k / 32k / 64k 上都优于 SAIS，且 SAIS 配 clip-higher（ε_high = 0.28）出现熵爆炸；POIS 的优势在于权重恒为 1、不会被截断从而保留多样性，论文没有以计算复杂度作为 SAIS 的主要缺点。<br>
+    4. 笔记说 K1.5 等「部分生成」缺乏实现细节，这对应原文 Introduction 对 K1.5 的描述，正确；但原文把 K1.5 视为可借鉴的前作，本页 02 节按其原话呈现。<br>
+    5. 笔记提到「Figure 5 显示熵稳定在 0.2 附近」。§4.1 确实给出 σ = 0.2，但原文对 Figure 5 的描述是「stable around the predefined target range」，没有给出逐点数值；本页不引用 Figure 5 的具体曲线数值。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+
+  /* ============================================================
+     1) 分段解码时间线
+     ============================================================ */
+  var LENS = [20, 48, 96, 128];            // 四条示意样本的长度（k），形状示意
+  var SEGS = {
+    1: { cost: 1240, speed: '1.0x' },
+    2: { cost: 774,  speed: '1.6x' },
+    4: { cost: 601,  speed: '2.06x' }
+  };
+
+  function initTimeline() {
+    var host = document.getElementById('tl-lanes');
+    var msg = document.getElementById('tl-msg');
+    var btns = document.querySelectorAll('#tl-btns .rule-btn');
+    if (!host) return;
+
+    function render(segN) {
+      var cfg = SEGS[segN] || SEGS[4];
+      var segLen = 128 / segN;             // 每段长度（k）
+      var maxDecodeRounds = Math.ceil(128 / segLen);
+      var totalLen = LENS.reduce(function (a, b) { return a + b; }, 0);
+      host.innerHTML = '';
+
+      LENS.forEach(function (len) {
+        var row = document.createElement('div');
+        row.className = 'tl-row';
+        var lbl = document.createElement('div');
+        lbl.className = 'tl-lbl';
+        lbl.textContent = len + 'k';
+        var lane = document.createElement('div');
+        lane.className = 'tl-lane';
+        lane.style.gridTemplateColumns = 'repeat(' + maxDecodeRounds + ',1fr)';
+
+        var decoded = 0;
+        for (var r = 0; r < maxDecodeRounds; r++) {
+          var bar = document.createElement('div');
+          bar.className = 'tl-bar';
+          var active = decoded < len;
+          if (active) {
+            var used = Math.min(segLen, len - decoded);
+            var remaining = len - decoded;
+            var isLast = remaining <= segLen;
+            // 首次解码以 --c1 出现，后续段用 --c2，最后一段收尾用 --accent
+            bar.style.background = r === 0 ? 'var(--c1)' : (isLast ? 'var(--accent)' : 'var(--c2)');
+            bar.style.opacity = String(0.45 + 0.55 * (used / segLen));
+            bar.textContent = isLast ? used.toFixed(0) + 'k 完' : 'seg' + (r + 1);
+            bar.title = '第 ' + (r + 1) + ' 轮解码 ' + used.toFixed(0) + 'k' + (isLast ? '，遇到 EOS' : '，挂起');
+            decoded += used;
+          } else {
+            bar.className += ' wait';
+            bar.textContent = '·';
+          }
+          lane.appendChild(bar);
+        }
+        row.appendChild(lbl);
+        row.appendChild(lane);
+        host.appendChild(row);
+      });
+
+      // 每轮结束时已完成的样本立即离场，所以多解码量只来自各样本「最后一段没写满」
+      var waste = 0;
+      LENS.forEach(function (len) {
+        var segsUsed = Math.ceil(len / segLen) || 1;
+        waste += segsUsed * segLen - len;
+      });
+      var decodedSum = LENS.reduce(function (a, l) {
+        return a + (Math.ceil(l / segLen) || 1) * segLen;
+      }, 0);
+
+      msg.innerHTML =
+        '每段 <strong>' + segLen + 'k</strong>，每轮更新前只解码一段。四条样本合计 ' + totalLen + 'k，' +
+        (segN === 1
+          ? '<span class="warn">不分段时屏障要等最长一条写完，短样本在等待期间没有贡献；Table 1 测得 1240s / 步</span>。'
+          : '按段边界对齐后实际解码 <strong>' + decodedSum + 'k</strong>（多解码 ' + waste.toFixed(0) + 'k，示意值）；Table 1 测得 <strong>' + cfg.cost + 's / 步 = ' + cfg.speed + '</strong>。') +
+        (segN === 1 ? '' : ' 色块越多，短样本越早离场。');
+    }
+
+    btns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        btns.forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        render(parseInt(b.getAttribute('data-seg'), 10));
+      });
+    });
+
+    render(4);
+  }
+
+  /* ============================================================
+     2) 段级重要性采样：一个 8 段样本
+     ============================================================ */
+  var IS_MODES = {
+    pois: {
+      name: 'POIS',
+      msg: '分母全部取 <strong>π_old,t</strong>（最后一段所在时刻的模型）。8 段的比值都按同一次更新计算，权重恒为 1，没有词元被 clip。只有最后一段是真正的 on-policy，前 7 段被当成「伪 on-policy」——第 1 段其实由 π_old,1 生成，比值本应接近 π_old,t / π_old,1，这里被省略掉了。'
+    },
+    sais: {
+      name: 'SAIS',
+      msg: '分母按段号取 <strong>π_old,f(i)</strong>：第 1 段用 π_old,1，第 8 段用 π_old,t。每条样本每段的比值对应它真实生成时的模型，数学上更准确；代价是早段的比值可能远离 1，很容易被 clip。Figure 2 中 SAIS 在 4k / 32k / 64k 三个长度上都不如 POIS，配 clip-higher 还会熵爆炸。'
+    },
+    tois: {
+      name: '不分段（TOIS）',
+      msg: '整条样本由<strong>同一个</strong> π_old 生成，这就是标准的 GRPO / DAPO 比值。为了对齐这里的「8 段」展示，相当于把 128k 一次性解码；它作为对照的意义在 <strong>1 段</strong>的设置下：4 段 POIS 的熵曲线与 1 段 TOIS 几乎重合。'
+    }
+  };
+
+  function initIS() {
+    var grid = document.getElementById('is-grid');
+    var msg = document.getElementById('is-msg');
+    var btns = document.querySelectorAll('#is-btns .rule-btn');
+    if (!grid) return;
+
+    function render(mode) {
+      grid.innerHTML = '';
+      for (var k = 1; k <= 8; k++) {
+        var cell = document.createElement('div');
+        cell.className = 'seg-cell slot';
+        var same = (mode === 'pois' || mode === 'tois');
+        // POIS：分母都等于第 8 段模型；TOIS：全部同一模型；SAIS：各段各自
+        var isLast = (k === 8);
+        var isSameAsLast = same && !isLast;
+        cell.style.background = mode === 'sais' ? 'var(--c2)' : (isLast ? 'var(--accent)' : 'var(--c1)');
+        cell.style.opacity = mode === 'sais' ? String(0.35 + 0.08 * k) : (isLast ? '1' : '0.72');
+        cell.innerHTML = '<span class="seg-a">π' + k + '</span><span class="seg-tag">' + k + '</span>';
+        cell.title = '第 ' + k + ' 段：生成模型 π_old,' + k +
+          (isSameAsLast ? '；比值分母取 π_old,t（POIS）' : '；比值分母取自身');
+        grid.appendChild(cell);
+      }
+      var cfg = IS_MODES[mode] || IS_MODES.pois;
+      msg.innerHTML = '<strong>' + cfg.name + '。</strong>' + cfg.msg;
+    }
+
+    btns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        btns.forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        render(b.getAttribute('data-m'));
+      });
+    });
+
+    render('pois');
+  }
+
+  /* ============================================================
+     3) 图片说明展开
+     ============================================================ */
+  function initFigToggle() {
+    var toggles = document.querySelectorAll('.fig-toggle');
+    toggles.forEach(function (el) {
+      el.addEventListener('click', function () {
+        var fig = el.closest('figure');
+        if (!fig) return;
+        var detail = fig.querySelector('.figure-detail');
+        if (!detail) return;
+        var open = detail.classList.toggle('active');
+        el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+      });
+    });
+  }
+
+  initTimeline();
+  initIS();
+  initFigToggle();
+
+})();
+</script>
+</body>
+</html>

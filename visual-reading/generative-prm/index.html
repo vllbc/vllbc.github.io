@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Generative PRM · 不要求裁判会做题，只要求它读懂学生的思考</title>
+<meta name="description" content="TP-GRPO 把过程奖励从「步」提到「思想」粒度，用推理轨迹里的反思、匹配等内在信号判对错，裁判不必会解原题；1.5B 模型 700 题即超逐步细化的基线。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.mono-sm{font-family:"JetBrains Mono",monospace;font-size:13px}
+.stage-line{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
+.stage-line span{font-family:"JetBrains Mono",monospace;font-size:12px;padding:4px 9px;border-radius:6px;background:var(--bg-soft);color:var(--text-muted);border:1px solid var(--border)}
+.tok-slot .slot-name{font-size:11px}
+.tok-slot .slot-val{font-size:11.5px}
+.acc-line{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 0;font-size:13px;color:var(--text-muted)}
+.acc-line .mono{color:var(--text)}
+@media (max-width:880px){
+  #adv-slots{grid-template-columns:repeat(3,1fr) !important}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Generative PRM</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#pipeline">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RL · LLM Reasoning · arXiv 2025</span>
+  <h1>Generative PRM：不要求裁判会做题，只要求它读懂学生的思考</h1>
+  <p class="hero-sub">
+    只用最终答案对错的 RLVR，把一条长思维链里所有 token 都按同一个信号更新——错的步和反思后改对的步，待遇完全一样。
+    这篇论文让一个 <strong>GenPRM</strong> 去读推理轨迹，但只读其中的<strong>内在信号</strong>：反思点、错误源头、与答案匹配的步，再把连续同类步合并成「思想」，只在该段末尾发一次奖励。
+    做法装进 <strong>TP-GRPO</strong>，配一条采样本与评估错开的 off-policy 流水线。代价是首阶段评估不稳定、错误解里的部分正确步仍会被连带惩罚。
+  </p>
+  <div class="meta">
+    <span>Tao He, Rongchuan Mu, Lizi Liao, Yixin Cao, Ming Liu, Bing Qin · HIT / SMU / Fudan</span>
+    <a href="https://arxiv.org/abs/2507.23317" target="_blank" rel="noopener">arXiv 2507.23317 ↗</a>
+    <a href="https://github.com/cs-holder/tp_grpo" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>问题不是「缺过程奖励」，而是「过程奖励不敢用」。</strong> 判别式 PRM 要海量步级标注，生成式 PRM 又要裁判自己会解原题——埋下一道「想教学生、先得比学生强」的死结。
+  </p>
+  <p>
+    论文把裁判的任务从<em>推理</em>降级成<em>理解</em>：正确的解，只找「wait / I made a mistake」这类反思点及其错误源头；错误的解，只判断 think 里哪几步被答案采纳（matched）。再把连续的同类步合并成 thought，<strong>整段只在末尾发一次奖励</strong>，重复刷同类正面步拿不到额外分，reward hacking 的常见路子被堵住。
+  </p>
+  <p>
+    <strong>奖励大小随能力自适应：</strong><code>r_correct = α · acc_mean</code>，同一组 rollout 全错时奖励归零、退化成原始 GRPO，全对时给满 α。论文还证明了：正确思想与 matched 思想的 advantage 恰好保持为 <code>r̂_o</code>，过程奖励<em>不改变</em>原本的优化目标；错误思想的 A 比 <code>r̂_o</code> 低一截 <code>r_correct</code>，unmatched 思想归零。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">50.10</div>
+      <div class="k">1.5B 五基准平均<br>140 步（700 题）</div>
+    </div>
+    <div class="metric">
+      <div class="v">36.43</div>
+      <div class="k">Effic. 训练效率<br>GRPO 复现仅 4.65</div>
+    </div>
+    <div class="metric">
+      <div class="v">+6.67</div>
+      <div class="k">7B · AIME 24 提升<br>仅用 1070 题</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>结果奖励把一整条思考压成一个数，好东西全丢了</h2></div>
+  <p class="sec-sub">先建立这个认识：在 outcome-only 的 RLVR 里，一条推理轨迹里所有 token 的 advantage 完全相同——无论它在正确段还是错误段。</p>
+
+  <p>DeepSeek-R1 系列把 RLVR 推到主流：对一个数学题采样 G 条解，用规则判 <code>\boxed{}</code> 里的答案对不对，组内归一化后把同一个 <code>r̂_o</code> 分给整条解的<strong>每一个 token</strong>（论文 Eq. 2 后的说明）。</p>
+
+  <div class="eq">
+    r̂<sub>o</sub> = ( r<sub>o</sub> − mean(r<sub>1..G</sub>) ) / std(r<sub>1..G</sub>)，&nbsp;&nbsp; ∀t：A<sub>i,t</sub> = r̂<sub>o</sub>
+  </div>
+  <div class="eq-cap">Eq. 2 与紧随其后的 advantage 赋值（§2.1）：只有结果的、步级信息在归一化里被抹平</div>
+
+  <p>这带来两个结构性浪费。其一是<strong>错误解被整条惩罚</strong>：一条解里也许有几步是有价值的探索，只是没走到最后，但它们和真正导致错误的步一起被降权。其二是<strong>正确解里的错误分支没有区分</strong>：学生先走错、反思后改回来，同样拿到满额 advantage，「走错」这件事从未被单独抑制。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心诉求</span><h4>过程奖励要有用，并且要「安全」</h4></div>
+    <p>论文在引言里给出三条判据（§1）：<br>
+      1）<strong>评估单元要合适</strong>——太细，PRM 负担重、易出错；太粗，正确步和错误步又被捆在一起；<br>
+      2）<strong>评估能力要与推理能力解耦</strong>——现有 GenPRM 常用 thinking 模式判步，隐含假设「裁判会解这道题」；<br>
+      3）<strong>探索与利用要平衡</strong>——过度强调过程奖励会压掉模型的试错、反思与自我修正。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>判别式 PRM 要标注，生成式 PRM 要会解题</h2></div>
+  <p class="sec-sub">两代 PRM 各自卡在自己的门槛上；论文要的是不碰这两个门槛的第三种玩法。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">判别式 PRM</span><h4>学一个打分器</h4></div>
+      <p>以 PRM800K 为代表的人工步级标注，或用 MCTS、自训练自动标注，监督学习一个「这步对不对」的判别器（§1、§5.1）。</p>
+      <p><strong>卡点：</strong>R1 之后的共识是——步切分困难、泛化有限、易被 reward hacking、训练低效。论文甚至说 PRM 的热度因此一度下降。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">生成式 PRM</span><h4>让 LLM 写评审</h4></div>
+      <p>把评估当成生成任务：LLM 以 thinking 模式逐步分析正确性，取「correct / yes」等指示 token 的似然作分数。</p>
+      <p><strong>卡点：</strong>thinking 模式判步等价于让裁判先解一遍题。题目越难，裁判越不可靠——「想教好学生，先要一个更强的老师」。</p>
+    </div>
+  </div>
+
+  <p>还有一路是把 PRM 塞进训练的早期工作，比如 Rest-MCTS* 用 PRM 给轨迹排序、OpenR 用 PRM 引导策略迭代（§5.2），但都受限于判别式范式或只把步级信号聚合成结果奖励。论文的判断是：<strong>瓶颈不在「要不要过程奖励」，而在「裁判能不能低成本、不错位地读过程」</strong>。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把裁判的工作从「再解一遍」换成「读学生的卷面」</h2></div>
+  <p class="sec-sub">这一段是全篇的机关：内在信号怎么找、思想怎么合并、奖励怎么发，以及为什么这样发不会把优化目标带偏。</p>
+
+  <h3>Stage 1：内在信号驱动的步级评估</h3>
+  <p>先把长 CoT 切成步。然后按解答对错分流（§3.1.1）：</p>
+  <ul>
+    <li><strong>正确解</strong>分三个子任务：(1) 找反思步，即「wait」「I made a mistake」这类<strong>反思触发词</strong>出现的位置；(2) 找<strong>错误源头</strong>——反思句通常本身就交代了错在哪；(3) 只判错误源头到反思步之间每步的对错。反思步本身按<strong>正确</strong>处理，以免压掉自我修正行为。</li>
+    <li><strong>错误解</strong>走<strong>匹配法</strong>：答案是对 think 的浓缩，所以把 think 每一步和 answer 逐条比对，<strong>被答案采纳的步</strong>标记为有缺陷（matched），<strong>没被采纳的步</strong>标为不确定（unmatched）。核心假设：答案错了，被采纳的那条路径就一定错了。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么这就降低了门槛</span><h4>任务从「验证对错」变成「定位与对齐」</h4></div>
+    <p>裁判不需要算出正确答案，只需要<strong>读懂一份卷子</strong>：反思词在哪、哪几步被结论引用。作者把所有 prompt 放在附录 D。代价是不再追求每步的精确对错——这正是 §3.1.4 坦承的局限。</p>
+  </div>
+
+  <h3>Stage 2：把同类步合并成「思想」</h3>
+  <p>把连续同类步并成一个单元（§3.1.2）：正确解并成交替的 correct / incorrect thought，错误解并成交替的 matched / unmatched thought。<strong>一个思想只在该段最后一个 token 收一次奖励</strong>。论文列了四条好处：分段更清楚；单次评估噪声不再叠加；<strong>重复刷同类正面步拿不到额外奖励</strong>（最常见的 reward hacking 因此失效）；给出交替结构，方便后面的 advantage 推导。</p>
+
+  <h3>Stage 3：随能力自适应的奖励</h3>
+  <div class="eq">
+    r<sub>correct</sub> = α · <span class="hl-a">acc_mean</span>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    r<sub>incorrect</sub> = <span class="hl-b">r̂<sub>o</sub></span>
+  </div>
+  <div class="eq-cap">Eq. 5 / Eq. 6 · acc_mean 是 GRPO 同组 G 条解的通过率；α 默认取 1（Table 7）。全错 → r_correct=0 退化为 outcome-only；全对 → 最强过程奖励 α</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">符号核对</span><h4>原文 Eq. 6/7 与附录 A 的符号互相矛盾</h4></div>
+    <p>§3.1.3 说 matched 思想被「penalized with <code>+r_incorrect</code>」、unmatched 拿 <code>−r_incorrect</code>；Eq. 7 与 Proposition 2 也是 matched <code>+r_i^incorrect</code>、unmatched <code>−r_i^incorrect</code>；但附录 A 的证明改写成「matched 得 <code>+r̂_o</code>、unmatched 得 <code>−r̂_o</code>」。<strong>原文 Eq. 6/7 与附录 A 符号不一致，本页按 Eq. 6/7</strong>（matched 为正、unmatched 为负）。</p>
+  </div>
+
+  <p><strong>对正确解</strong>：正确思想末尾给 <code>+r_correct</code>，错误思想末尾给 <code>−r_correct</code>，这也是 Eq. 7 前那段正文的措辞（原文称错误思想被「penalized with −r_correct」）。<strong>对错误解</strong>：matched 思想末尾给 <code>+r_incorrect</code>（原文说这是「penalize」，但符号是正的），unmatched 思想给 <code>−r_incorrect</code>；最后一段不发过程奖励，因为它的末尾 token 已经拿了结果奖励。每个 token 的 advantage 是它之后所有奖励的累加 <code>A_{i,t} = Σ_{t'≥t} r_{i,t'}</code>（§3.2）。注意优势是<strong>累加值</strong>，不是奖励符号本身：matched 段末尾发 <code>+r_incorrect</code>，后面的交替正负项把后缀和抵消回 <code>r̂_o</code>；unmatched 段末尾发 <code>−r_incorrect</code>，后缀和恰好抵消为 0。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">Proposition 1 · 正确解</span><h4>正确思想的 advantage 原封不动</h4></div>
+    <p>思想奖励是交替的 <code>[+r_c, −r_c, …, r̂_o]</code>，对正确思想求后缀和，正负项相互抵消，剩下 <code>A = r̂_o</code>；错误思想的项多出一个 <code>−r_c</code> 无法抵消，所以 <code>A = r̂_o − r_c</code>。也就是说：<strong>过程奖励只压低错误分支，不扰动正确分支原有的目标</strong>。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p2">Proposition 2 · 错误解</span><h4>matched 与 unmatched 分开了</h4></div>
+    <p>matched 思想的后缀和同样收敛到 <code>r̂_o</code>，unmatched 思想则是 <code>0</code>。原先被整条惩罚的探索性步骤被<strong>停止惩罚</strong>，而不是加分——避免误伤可能有用但尚未走完的思考。</p>
+  </div>
+
+  <h3>亲手验证：拖滑块，看 advantage 怎么算出来</h3>
+  <p>下面模拟一条 7 个「思想」的轨迹，每段只在自己的末尾 token 发一次奖励。拖动滑块改变 <code>r̂_o</code>、<code>acc_mean</code> 与 <code>α</code>，点任一思想，下方按 <code>A_{i,t} = Σ_{t'≥t} r</code> 逐项求和——数字与 Proposition 1/2 的结论应当完全对上。</p>
+
+  <div class="sim" id="adv-sim">
+    <div class="sim-top" id="adv-modes">
+      <button class="rule-btn active" data-mode="correct">正确解<span class="r-sub">Proposition 1</span></button>
+      <button class="rule-btn" data-mode="incorrect">错误解<span class="r-sub">Proposition 2</span></button>
+    </div>
+
+    <div class="controls" style="grid-template-columns:1fr 1fr 1fr">
+      <div class="ctrl">
+        <label>r̂<sub>o</sub> 结果奖励 <span class="v" id="ro-v">1.00</span></label>
+        <input type="range" id="ro" min="-2" max="2" step="0.25" value="1">
+      </div>
+      <div class="ctrl">
+        <label>acc_mean <span class="v" id="acc-v">0.50</span></label>
+        <input type="range" id="acc" min="0" max="1" step="0.125" value="0.5">
+      </div>
+      <div class="ctrl">
+        <label>α <span class="v" id="alpha-v">1.00</span></label>
+        <input type="range" id="alpha" min="0" max="2" step="0.25" value="1">
+      </div>
+    </div>
+
+    <div class="slots" id="adv-slots" style="grid-template-columns:repeat(7,1fr)"></div>
+
+    <div class="readout" id="adv-readout">
+      <div class="r-head">逐 token 累加</div>
+      <div id="adv-msg">点上面任一思想，看它的 advantage 是怎么从后面所有段落的奖励叠加出来的。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>模拟里简化了什么？<span class="sum-sub">与原文公式的差异</span></summary>
+    <div class="details-body">
+      <p>模拟把「思想」当成一个整体 token 处理，省略了作者合并时出现的交错结构（自由组合可达任意交替模式）；<strong>最后一段不发过程奖励、只保留 r̂<sub>o</sub></strong> 这一条完全照搬 §3.2 与附录 A。逐段求和用普通实数演示，本文取 α=1、r̂<sub>o</sub>=1、acc_mean=0.5 时，正确思想 A = 1.00，错误思想 A = 1 − 0.5 = 0.50；错误解的 unmatched 思想 A = 0.00。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>裁判要读很多遍，所以让采样、评估、更新叠在一起做</h2></div>
+  <p class="sec-sub">GenPRM 每次评估要多次调用；纯 on-policy 下 GPU 会大量空转。论文的解法是把一个迭代拆成三段，用同一批 GPU 轮着干。</p>
+
+  <p>每个迭代（§3.3，Figure 2）：</p>
+  <ul>
+    <li><strong>Stage 1 采样</strong>：用最新 actor 对 S×M 个问题各采 G 条解，得到 S×M×G 条轨迹。若 Stage 3 要训 S 步，就一次采够。</li>
+    <li><strong>Stage 2 评估</strong>：多进程、多线程调用 GenPRM（默认 Qwen3-32B），给这批解算过程奖励。</li>
+    <li><strong>Stage 3 更新</strong>：用两次积累的解做 S 步策略更新，<strong>丢掉没拿到过程奖励的解</strong>。</li>
+  </ul>
+
+  <p>实现上，采样温度 1.0、每 prompt 8 条 rollout、batch size 5、学习率 1e-6、KL 系数 β=0（Table 7 与 §4.1）。为省评估开销，评估前先用启发式规则过滤（附录 B.1）：<strong>正确解但 think 少于 4096 字符</strong>直接跳过，<strong>错误解但 answer 少于 256 字符</strong>跳过，被长度截断解的也跳过。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">代价</span><h4>off-policy 本身是亏的，但过程奖励能把这笔亏吃回来</h4></div>
+    <p>Table 6 里 off-policy GRPO（950 步，AIME 24 30.83）<strong>不如</strong> on-policy GRPO（850 步，32.71）；但同一口径下 TP-GRPO 50 步更新间隔 140 步就拿到 33.12。把更新间隔收紧到 25 步，还能再涨到 33.54。</p>
+  </div>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条解从采样到被加权，要过四道关</h2></div>
+  <p class="sec-sub">把 §3.1–3.2 的条文摊成流水线：切步 → 找信号 → 合并思想 → 发奖励累加。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 440" role="img" aria-label="TP-GRPO 过程评估流水线示意：采样、切步与内在信号、思想合并、奖励与 advantage">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+
+      <!-- lane 1: sampling -->
+      <rect x="20" y="18" width="190" height="70" rx="10" fill="#F8EFDC" stroke="#D4C4A6"></rect>
+      <text x="115" y="46" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="14" font-weight="600" fill="#1A1816">策略 π<sub>θ</sub> 采样 G 条解</text>
+      <text x="115" y="70" text-anchor="middle" font-family="JetBrains Mono" font-size="11" fill="#6B6660">Stage 1 · 全 GPU</text>
+      <text x="115" y="102" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="10" fill="#8C857B">一次采够 S×M×G 条解</text>
+
+      <line x1="210" y1="53" x2="250" y2="53" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+
+      <!-- lane 2: decompose -->
+      <rect x="255" y="10" width="230" height="110" rx="10" fill="#FFFFFF" stroke="#E8DCC7"></rect>
+      <text x="370" y="34" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="13" font-weight="600" fill="#1A1816">长 CoT 切成步</text>
+      <!-- steps -->
+      <g font-family="JetBrains Mono" font-size="10" text-anchor="middle">
+        <rect x="270" y="48" width="34" height="24" rx="4" fill="#DDEBDD" stroke="#3F6B4A"></rect>
+        <text x="287" y="64" fill="#3F6B4A">s1</text>
+        <rect x="308" y="48" width="34" height="24" rx="4" fill="#F4DCD0" stroke="#C04E2D"></rect>
+        <text x="325" y="64" fill="#7A2E16">s2</text>
+        <rect x="346" y="48" width="34" height="24" rx="4" fill="#DDEBDD" stroke="#3F6B4A"></rect>
+        <text x="363" y="64" fill="#3F6B4A">s3</text>
+        <rect x="384" y="48" width="34" height="24" rx="4" fill="#E4E0F0" stroke="#5A4A8C"></rect>
+        <text x="401" y="64" fill="#5A4A8C">s4</text>
+        <rect x="422" y="48" width="34" height="24" rx="4" fill="#DDE9EE" stroke="#2E5A6B"></rect>
+        <text x="439" y="64" fill="#2E5A6B">s5</text>
+      </g>
+      <text x="370" y="88" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="11" fill="#6B6660">正确解：反思步 + 错误源头</text>
+      <text x="370" y="105" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="11" fill="#6B6660">错误解：think ↔ answer 匹配</text>
+
+      <line x1="485" y1="65" x2="525" y2="65" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+
+      <!-- lane 3: thought merge -->
+      <rect x="530" y="10" width="250" height="110" rx="10" fill="#FFFFFF" stroke="#E8DCC7"></rect>
+      <text x="655" y="34" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="13" font-weight="600" fill="#1A1816">同类步合并成思想</text>
+      <g font-family="JetBrains Mono" font-size="10" text-anchor="middle">
+        <rect x="545" y="48" width="70" height="24" rx="4" fill="none" stroke="#3F6B4A"></rect>
+        <text x="580" y="64" fill="#3F6B4A">thought 1</text>
+        <rect x="619" y="48" width="36" height="24" rx="4" fill="none" stroke="#C04E2D"></rect>
+        <text x="637" y="64" fill="#7A2E16">2</text>
+        <rect x="659" y="48" width="70" height="24" rx="4" fill="none" stroke="#3F6B4A"></rect>
+        <text x="694" y="64" fill="#3F6B4A">thought 3</text>
+        <rect x="733" y="48" width="36" height="24" rx="4" fill="none" stroke="#5A4A8C"></rect>
+        <text x="751" y="64" fill="#5A4A8C">4</text>
+      </g>
+      <text x="655" y="92" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="11" fill="#6B6660">每段只在末尾收一次奖励</text>
+      <text x="655" y="108" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="11" fill="#6B6660">重复同类步不再加分</text>
+
+      <line x1="655" y1="120" x2="655" y2="150" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+
+      <!-- lane 4: reward tokens -->
+      <rect x="80" y="155" width="720" height="96" rx="10" fill="#FFFFFF" stroke="#E8DCC7"></rect>
+      <text x="100" y="178" font-family="Inter,Noto Sans SC" font-size="13" font-weight="600" fill="#1A1816">每段末尾 token 的奖励</text>
+      <g font-family="JetBrains Mono" font-size="11" text-anchor="middle">
+        <rect x="100" y="190" width="110" height="30" rx="4" fill="#DDEBDD" stroke="#3F6B4A"></rect>
+        <text x="155" y="210" fill="#3F6B4A">+r_correct</text>
+        <rect x="220" y="190" width="110" height="30" rx="4" fill="#F4DCD0" stroke="#C04E2D"></rect>
+        <text x="275" y="210" fill="#7A2E16">−r_correct</text>
+        <rect x="340" y="190" width="110" height="30" rx="4" fill="#DDEBDD" stroke="#3F6B4A"></rect>
+        <text x="395" y="210" fill="#3F6B4A">+r_correct</text>
+        <rect x="460" y="190" width="110" height="30" rx="4" fill="#E4E0F0" stroke="#5A4A8C"></rect>
+        <text x="515" y="210" fill="#5A4A8C">−r_correct</text>
+        <rect x="580" y="190" width="110" height="30" rx="4" fill="#F8EFDC" stroke="#D4C4A6"></rect>
+        <text x="635" y="210" fill="#6B6660">r̂_o（末段仅结果）</text>
+      </g>
+      <text x="100" y="243" font-family="Inter,Noto Sans SC" font-size="11" fill="#6B6660">无奖励 token</text>
+      <text x="395" y="243" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="11" fill="#8C857B">· · · 段内 token 奖励为 0 · · ·</text>
+
+      <line x1="440" y1="251" x2="440" y2="281" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+
+      <!-- lane 5: advantage -->
+      <rect x="80" y="286" width="720" height="84" rx="10" fill="#FFFFFF" stroke="#C04E2D"></rect>
+      <text x="100" y="310" font-family="Inter,Noto Sans SC" font-size="13" font-weight="600" fill="#7A2E16">advantage = 从该 token 起往后累加</text>
+      <g font-family="JetBrains Mono" font-size="11" text-anchor="middle">
+        <rect x="100" y="322" width="110" height="30" rx="4" fill="none" stroke="#3F6B4A"></rect>
+        <text x="155" y="342" fill="#3F6B4A">A = r̂_o</text>
+        <rect x="220" y="322" width="110" height="30" rx="4" fill="none" stroke="#C04E2D"></rect>
+        <text x="275" y="342" fill="#7A2E16">A = r̂_o − r_c</text>
+        <rect x="340" y="322" width="110" height="30" rx="4" fill="none" stroke="#3F6B4A"></rect>
+        <text x="395" y="342" fill="#3F6B4A">A = r̂_o</text>
+        <rect x="460" y="322" width="110" height="30" rx="4" fill="none" stroke="#5A4A8C"></rect>
+        <text x="515" y="342" fill="#5A4A8C">A = r̂_o − r_c</text>
+        <rect x="580" y="322" width="110" height="30" rx="4" fill="none" stroke="#6B6660"></rect>
+        <text x="635" y="342" fill="#6B6660">A = r̂_o</text>
+      </g>
+      <text x="100" y="366" font-family="Inter,Noto Sans SC" font-size="11" fill="#8C857B" style="line-height:1.05">错误解时：matched 段 A = r̂_o，unmatched 段 A = 0</text>
+
+      <!-- label -->
+      <text x="80" y="398" font-family="Inter,Noto Sans SC" font-size="10" fill="#8C857B" style="line-height:1.05">颜色：绿 = 正确 / matched，陶土红 = 错误，紫 = 错误解中 matched 之例</text>
+      <text x="80" y="418" font-family="JetBrains Mono" font-size="10.5" fill="#8C857B">Figure 1 / §3.2（自绘重排，非原图）</text>
+    </svg>
+    <figcaption>图 1（自绘）：基于 Eq. 7 与 Proposition 1/2 的奖励分配与 advantage 累加。绿色为正确思想，陶土红为错误思想，紫色为一个错误解中的 matched 思想示意。</figcaption>
+  </figure>
+
+  <p>这条流水线的关键在<strong>奖励只在边界发、advantage 跨段累加</strong>——正是这种交替结构让正确段的后缀和恰好收敛到 <code>r̂_o</code>，也正是不发奖励的段内 token 只继承了后方累加值，避免了按步平均带来的目标漂移。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>少样本的收益是确定的，绝对 SOTA 不是</h2></div>
+  <p class="sec-sub">论文的主论点是「同预算下更高效」，而非「绝对值最强」；读表要把这两件事分开。</p>
+
+  <h3>1.5B（DeepSeek-R1-Distill-Qwen-1.5B，表 1，Avg@16）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">AIME24</th><th style="text-align:right">AIME25</th><th style="text-align:right">AMC23</th><th style="text-align:right">MATH-500</th><th style="text-align:right">Olympiad</th><th style="text-align:right">Avg</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base Model</td><td class="num">28.80</td><td class="num">22.50</td><td class="num">62.90</td><td class="num">82.80</td><td class="num">43.30</td><td class="num">48.06</td></tr>
+        <tr><td>GRPO Replication（850 步）</td><td class="num">32.71</td><td class="num">24.58</td><td class="num">64.53</td><td class="num">82.70</td><td class="num">43.67</td><td class="num">49.64</td></tr>
+        <tr class="best"><td>TP-GRPO（140 步）</td><td class="num">33.12</td><td class="num">25.63</td><td class="num">64.01</td><td class="num">83.81</td><td class="num">43.91</td><td class="num">50.10</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>TP-GRPO 用 700 题超过只用结果奖励、训了 4250 题（850 步×5）的 GRPO 复现，平均 +2.04。开源对照里 DeepScaler-1.5B-Preview 平均 56.78，仍明显更高——差距来自训练数据规模，论文自己也这么说。</p>
+
+  <h3>7B（表 2，AIME / AMC 用 Avg@5，其余 Pass@1）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">AIME24</th><th style="text-align:right">AIME25</th><th style="text-align:right">AMC23</th><th style="text-align:right">MATH-500</th><th style="text-align:right">Olympiad</th><th style="text-align:right">Avg</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base Model</td><td class="num">54.00</td><td class="num">36.67</td><td class="num">81.20</td><td class="num">92.00</td><td class="num">55.11</td><td class="num">63.80</td></tr>
+        <tr><td>GRPO Replication（400 步）</td><td class="num">58.67</td><td class="num">38.00</td><td class="num">81.20</td><td class="num">92.40</td><td class="num">56.44</td><td class="num">65.34</td></tr>
+        <tr><td>Skywork-OR1-7B</td><td class="num">69.33</td><td class="num">51.33</td><td class="num">87.71</td><td class="num">93.40</td><td class="num">61.33</td><td class="num">72.62</td></tr>
+        <tr class="best"><td>TP-GRPO（214 步）</td><td class="num">60.67</td><td class="num">43.33</td><td class="num">83.13</td><td class="num">92.00</td><td class="num">57.04</td><td class="num">67.23</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>7B 平均 +3.43，AIME 24 / 25 分别 +6.67、+6.66。对照的 GRPO 复现 400 步，TP-GRPO 只用 214 步。</p>
+
+  <h3>Effic.：把「训练了多少条解」放进分母</h3>
+  <div class="eq">
+    Effic. = Improvement / (#training solutions) × 10<sup>5</sup>
+  </div>
+  <div class="eq-cap">§4.1 · 表 3 里 TP-GRPO 为 36.43（1.5B）与 40.07（7B），GRPO 复现为 4.65 与 9.6</div>
+
+  <div class="tabs" id="eff-tabs">
+    <button class="tab active" data-size="1.5">1.5B · AIME 24 逐步曲线</button>
+    <button class="tab" data-size="7">7B · 平均分</button>
+  </div>
+
+  <div class="sim" style="padding:16px">
+    <div id="eff-desc" class="readout" style="margin-top:0;margin-bottom:12px"></div>
+    <div id="eff-chart"></div>
+    <div class="legend" style="margin-top:10px">
+      <span><i style="background:var(--c1)"></i>Outcome-only GRPO</span>
+      <span><i style="background:var(--accent)"></i>TP-GRPO</span>
+      <span><i style="background:var(--c2)"></i>开源强基线</span>
+    </div>
+  </div>
+
+  <p>两个值得注意的发现：<strong>Figure 3</strong> 里 TP-GRPO 的曲线斜率明显更陡；<strong>Table 4</strong> 的消融显示，只用正确解的奖励（w/o IS Reward，Table 4 里训了 90 步）在 AIME 24 得 32.01、AIME 25 得 22.29，只用错误解的奖励（w/o CS Reward，只训了 58 步）则是 30.00 与 25.00——两套基准上的强弱恰好相反。但两行训练步数不同（58 vs 90，完整 TP-GRPO 为 140 步），作者解释是变体过滤掉的解更多、需要的步数更少，因此这两组分数不宜当作同步数的直接横比。作者把差异归因于基础模型的能力差异：AIME 24 上基座更强（28.80 vs 22.50），从正确解里学得更多；AIME 25 更容易从错误解里获益。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">最反直觉的一条</span><h4>裁判换成一弱很多，分数几乎不掉</h4></div>
+    <p>Table 5：把 GenPRM 换成 GPQA Diamond 准确率只有 40.9 的 Gemma-3-12b-it（Qwen3-32B 为 65.6），1.5B 训练后平均 51.13；Qwen3-4B 为 51.33；Qwen3-32B 为 51.64。裁判推理能力差了一大截，平均分只差 0.51。</p>
+  </div>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它是「更省数据的加速器」，不是「更强的推理器」</h2></div>
+  <p class="sec-sub">论文自己在 §3.1.4、§4.2.1 与结论里划了线，这里按原文摊开。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>首阶段评估不稳定</h4></div>
+    <p>§3.1.4 第一条就承认：Step-level 评估是多步流程，没有任务特训的 GenPRM 在这一阶段<strong>明显不稳定</strong>。作者把改进 prompt 与微调 GenPRM 列为未来工作。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>Primary thought 里部分正确的步被牵连</h4></div>
+    <p>对于错误的解，论文不逐步核验对错，而是「把被认为要对最终错误负责的 primary thought 里<strong>所有</strong> token 一起惩罚」；后果是惩罚被错误归因到这段 primary thought 中<strong>本身部分正确</strong>的推理步——并非所有步都错。原文称之为两种极端之间的「务实妥协」。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>没有做 RL scaling</h4></div>
+    <p>结论明确说：实验没有展示 TP-GRPO 在扩大训练规模后的 scaling 行为；过度强调过程奖励可能让模型<strong>提前过拟合、损害泛化</strong>。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界四</span><h4>绝对性能仍落后</h4></div>
+    <p>§4.2.1 承认落后于 SOTA RLVR 方法，归因于训练数据规模；且实验只在两个小规模蒸馏模型（1.5B、7B）上做，作者把更大规模留给未来工作。</p>
+  </div>
+
+  <p style="margin-top:22px">怎么选：在算力/数据预算紧、又希望每条错解不被一刀切的地方，它值得试；若你的目标是「同预算下绝对最强」，先把训练规模与数据量堆上去，再回来看过程奖励是否还剩下优势。</p>
+</section>
+
+<footer>
+  <div>Good Learners Think Their Thinking: Generative PRM Makes Large Reasoning Model More Efficient Math Learner · Tao He, Rongchuan Mu, Lizi Liao, Yixin Cao, Ming Liu, Bing Qin（HIT / SMU / Fudan）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.23317" target="_blank" rel="noopener">Good Learners Think Their Thinking: Generative PRM Makes Large Reasoning Model More Efficient Math Learner</a><br>
+    代码：<a href="https://github.com/cs-holder/tp_grpo" target="_blank" rel="noopener">cs-holder/tp_grpo</a><br>
+    笔记：<a href="/good-learners-think-their-thinkinggenerative-prm-makes-large-reasoning-model-more-efficient-math-learne/">笔记</a><br>
+    <span>笔记勘误（仅在此说明，不改原笔记）：笔记在第 57 行把能力自适应奖励写成 <code>r^correct = α / acc_mean</code>，并据此推出「acc_mean 很低 → 奖励很大、acc_mean 很高 → 奖励很小」（第 60–61、104 行）。原文 Eq. 5 是 <code>r_correct = α · acc_mean</code>：acc_mean 越高奖励越大、全对时取满 α，全错时为 0、退化为 outcome-only GRPO。笔记的公式方向与原文相反，其「低准确率给强过程奖励」的解读与原文「先探索、再强化过程」的用意也不一致。</span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+     交互 1：advantage 累加器（Eq. 7 + Proposition 1/2 + 附录 A）
+     ============================================================ */
+  (function () {
+    var host = document.getElementById('adv-slots');
+    var msg = document.getElementById('adv-msg');
+    var btnBox = document.getElementById('adv-modes');
+    if (!host || !msg || !btnBox) return;
+
+    var roEl = document.getElementById('ro');
+    var accEl = document.getElementById('acc');
+    var alphaEl = document.getElementById('alpha');
+    var roV = document.getElementById('ro-v');
+    var accV = document.getElementById('acc-v');
+    var alphaV = document.getElementById('alpha-v');
+    if (!roEl || !accEl || !alphaEl || !roV || !accV || !alphaV) return;
+
+    // 轨迹结构：correct=true/incorrect=false，last=true 表示解的最后一段（末尾 token 已拿结果奖励）
+    var TRACKS = {
+      correct:   [true, false, true, false, true],
+      incorrect: [true, false, true, false]
+    };
+    var mode = 'correct';
+    var sel = -1;
+
+    function num(el) { return parseFloat(el.value); }
+    function fmt(x) {
+      var v = Math.abs(x) < 0.005 ? 0 : x;
+      return (v < 0 ? '−' : '') + Math.abs(v).toFixed(2);
+    }
+    function rCorrect() { return num(alphaEl) * num(accEl); }
+
+    // 第 j 段的奖励；最后一段只拿 r̂_o
+    function segReward(map, j, last) {
+      if (last) return num(roEl);
+      return map[j] ? rCorrect() : -rCorrect();
+    }
+    function segAdv(j) {
+      var map = TRACKS[mode];
+      var n = map.length;
+      var s = 0;
+      for (var k = j; k < n; k++) s += segReward(map, k, k === n - 1);
+      return s;
+    }
+
+    function render() {
+      var map = TRACKS[mode];
+      roV.textContent = fmt(num(roEl));
+      accV.textContent = num(accEl).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+      alphaV.textContent = num(alphaEl).toFixed(2);
+
+      host.innerHTML = '';
+      map.forEach(function (isPos, j) {
+        var n = map.length;
+        var last = (j === n - 1);
+        var slot = document.createElement('div');
+        slot.className = 'slot tok-slot' + (j === sel ? ' hit' : '');
+        var name = document.createElement('div');
+        name.className = 'slot-name';
+        name.textContent = mode === 'correct' ? ('t' + (j + 1) + (isPos ? ' 正确' : ' 错误')) : ('t' + (j + 1) + (isPos ? ' matched' : ' unmatched'));
+        var val = document.createElement('div');
+        val.className = 'slot-val';
+        val.textContent = 'r = ' + fmt(segReward(map, j, last)).replace('r̂', '');
+        var sub = document.createElement('div');
+        sub.style.cssText = 'font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);margin-top:4px';
+        sub.textContent = last ? '末段 · 只拿 r̂' : '末尾 token';
+        slot.appendChild(name);
+        slot.appendChild(val);
+        slot.appendChild(sub);
+        slot.addEventListener('click', function () { sel = j; render(); });
+        host.appendChild(slot);
+      });
+
+      if (sel < 0) {
+        msg.innerHTML = '当前 r_correct = α·acc_mean = <strong>' + fmt(rCorrect()) + '</strong>。点任一思想看累加过程。';
+        return;
+      }
+      var map2 = TRACKS[mode];
+      var n = map2.length;
+      var terms = [];
+      var running = 0;
+      for (var k = sel; k < n; k++) {
+        var r = segReward(map2, k, k === n - 1);
+        running += r;
+        terms.push('段 ' + (k + 1) + '：' + fmt(r) + (k === sel ? '' : ''));
+      }
+      var A = segAdv(sel);
+      var expect;
+      if (mode === 'correct') {
+        expect = map2[sel] ? 'r̂_o' : 'r̂_o − r_correct';
+      } else {
+        expect = map2[sel] ? 'r̂_o' : '0';
+      }
+      msg.innerHTML = '从第 ' + (sel + 1) + ' 段起累加：' + terms.join(' &nbsp;+&nbsp; ') +
+        ' &nbsp;=&nbsp; <strong>' + fmt(A) + '</strong><br>' +
+        '公式预期（' + (mode === 'correct' ? 'Proposition 1' : 'Proposition 2') + '）：A = ' + expect +
+        (mode === 'incorrect' && map2[sel] === false ? '，即未采纳的探索不再被惩罚。' : '。');
+    }
+
+    btnBox.addEventListener('click', function (e) {
+      var b = e.target.closest('.rule-btn');
+      if (!b) return;
+      Array.prototype.forEach.call(btnBox.children, function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      mode = b.dataset.mode;
+      sel = -1;
+      render();
+    });
+    [roEl, accEl, alphaEl].forEach(function (el) { el.addEventListener('input', render); });
+    render();
+  })();
+
+  /* ============================================================
+     交互 2：效率曲线 / 柱状对比
+     ============================================================ */
+  (function () {
+    var tabs = document.getElementById('eff-tabs');
+    var chart = document.getElementById('eff-chart');
+    var desc = document.getElementById('eff-desc');
+    if (!tabs || !chart || !desc) return;
+
+    var DATA = {
+      '1.5': {
+        title: 'AIME 24 · Avg@16 随训练步数',
+        desc: 'TP-GRPO（Figure 3）在 140 步达到 0.3312，之后还出现过更高的峰值但 AIME 25 泛化不足，作者取 140 步存档点。on-policy GRPO 到 850 步为 0.3271；off-policy GRPO 到 950 步仍只有 0.3083。',
+        type: 'line',
+        max: 0.36,
+        series: [
+          { name: 'TP-GRPO', color: 'var(--accent)', pts: [[0, 0.288], [140, 0.3312]] },
+          { name: 'on-policy GRPO', color: 'var(--c1)', pts: [[0, 0.288], [850, 0.3271]] },
+          { name: 'off-policy GRPO', color: 'var(--c2)', pts: [[0, 0.288], [950, 0.3083]] }
+        ]
+      },
+      '7': {
+        title: '7B · 平均分（表 2）',
+        desc: '同样是 5 个基准的平均：TP-GRPO 214 步 67.23，GRPO 复现 400 步 65.34，基座 63.80。开源强基线 Skywork-OR1-7B 仍是 72.62，这是「更省样本」与「绝对 SOTA」两条线的分界。',
+        type: 'bar',
+        max: 80,
+        bars: [
+          { name: 'Base', v: 63.80, c: 'var(--c1)' },
+          { name: 'GRPO 400', v: 65.34, c: 'var(--c1)' },
+          { name: 'TP-GRPO 214', v: 67.23, c: 'var(--accent)' },
+          { name: 'Skywork 7B', v: 72.62, c: 'var(--c2)' }
+        ]
+      }
+    };
+
+    function renderLine(d) {
+      var W = 760, H = 260, L = 46, R = 14, T = 14, B = 34;
+      var xMax = 1000;
+      var sx = function (x) { return L + (x / xMax) * (W - L - R); };
+      var sy = function (y) { return T + (1 - y / d.max) * (H - T - B); };
+      var parts = [];
+      parts.push('<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;height:auto" role="img" aria-label="AIME 24 曲线">');
+      // grid
+      [0.28, 0.30, 0.32, 0.34].forEach(function (t) {
+        parts.push('<line x1="' + L + '" y1="' + sy(t) + '" x2="' + (W - R) + '" y2="' + sy(t) + '" stroke="#E8DCC7"/>');
+        parts.push('<text x="' + (L - 6) + '" y="' + (sy(t) + 4) + '" text-anchor="end" font-family="JetBrains Mono" font-size="10" fill="#8C857B">' + t.toFixed(2) + '</text>');
+      });
+      [0, 200, 400, 600, 800, 1000].forEach(function (x) {
+        parts.push('<text x="' + sx(x) + '" y="' + (H - 10) + '" text-anchor="middle" font-family="JetBrains Mono" font-size="10" fill="#8C857B">' + x + '</text>');
+      });
+      parts.push('<text x="' + ((L + W - R) / 2) + '" y="' + (H - 0) + '" text-anchor="middle" font-family="Inter,Noto Sans SC" font-size="10" fill="#6B6660">训练步数</text>');
+      d.series.forEach(function (s) {
+        var x0 = sx(s.pts[0][0]), y0 = sy(s.pts[0][1]);
+        s.pts.slice(1).forEach(function (p) {
+          var x1 = sx(p[0]), y1 = sy(p[1]);
+          parts.push('<line x1="' + x0 + '" y1="' + y0 + '" x2="' + x1 + '" y2="' + y1 + '" stroke="' + s.color + '" stroke-width="2.5"/>');
+          // 里程碑小圆点
+          parts.push('<circle cx="' + x1 + '" cy="' + y1 + '" r="4" fill="' + s.color + '"/>');
+          parts.push('<text x="' + (x1 + (x1 > 700 ? -8 : 8)) + '" y="' + (y1 - 8) + '" text-anchor="' + (x1 > 700 ? 'end' : 'start') + '" font-family="JetBrains Mono" font-size="10" fill="' + s.color + '">' + p[1].toFixed(4) + '</text>');
+          x0 = x1; y0 = y1;
+        });
+      });
+      parts.push('</svg>');
+      chart.innerHTML = parts.join('');
+    }
+
+    function renderBar(d) {
+      var max = d.max;
+      var rows = d.bars.map(function (b) {
+        var pct = (b.v / max) * 100;
+        return '<div class="crow"><div class="cname">' + b.name + '</div>' +
+          '<div class="cbars"><div class="cbar" style="text-align:left">' +
+          '<div class="track" style="height:24px"><div class="fill" style="height:100%;width:' + pct.toFixed(1) + '%;background:' + b.c + '"></div></div>' +
+          '<div class="num" style="text-align:left">' + b.v.toFixed(2) + '</div></div></div></div>';
+      }).join('');
+      chart.innerHTML = '<div class="chart">' + rows + '</div>';
+    }
+
+    function render(key) {
+      var d = DATA[key];
+      if (!d) return;
+      desc.innerHTML = '<div class="r-head">' + d.title + '</div>' + d.desc;
+      if (d.type === 'line') renderLine(d); else renderBar(d);
+    }
+
+    tabs.addEventListener('click', function (e) {
+      var b = e.target.closest('.tab');
+      if (!b) return;
+      Array.prototype.forEach.call(tabs.children, function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      render(b.dataset.size);
+    });
+    render('1.5');
+  })();
+})();
+</script>
+</body>
+</html>

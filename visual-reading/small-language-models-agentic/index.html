@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Small Language Models are the Future of Agentic AI · 一篇只摆论据、不做实验的立场论文</title>
+<meta name="description" content="NVIDIA Research 的立场论文：以消费者设备可运行这一运行性定义划出 SLM，用 A1–A7 七条论据支撑 V1–V3 三个论点，回应三个替代观点，给出六步 LLM→SLM 迁移算法，并在附录 B 用三个开源智能体估出约 40%–70% 的 LLM 调用可由专用 SLM 承担。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：推断标签、流程带、映射走道 */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;letter-spacing:.05em;
+  color:var(--c2);background:var(--c2-soft);border-radius:100px;padding:0 7px;margin-right:5px;vertical-align:1px;line-height:1.7}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0 16px}
+.chip{font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:600;padding:4px 9px;border-radius:6px;
+  border:1px solid var(--border-strong);background:var(--bg-surface);color:var(--text-muted)}
+.chip.llm{border-color:var(--c1);background:var(--c1-soft);color:var(--c1)}
+.chip.slm{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-deep)}
+.chip.op{background:transparent;border-style:dashed;color:var(--text-soft)}
+.chip.arrow{border:none;background:none;padding:0 1px;color:var(--text-soft)}
+.fig-note{font-size:12.5px;color:var(--text-soft);margin-top:-6px}
+.legend-jp{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin:4px 0 8px}
+.legend-jp i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+/* 沿论文 Figure 1 复刻：走道 */
+.px-lane{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.px-lane-a{stroke:var(--c1);stroke-width:1.8;fill:none}
+.px-box{fill:var(--bg);stroke:var(--border-strong);stroke-width:1.2}
+.px-lm{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.px-tool{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.2}
+.px-ctl{fill:var(--text);stroke:var(--text)}
+.px-tx{font-family:"Inter","Noto Sans SC",sans-serif;font-size:12px;fill:var(--text)}
+.px-tx-w{fill:#F5F1E8}
+.px-tx-m{font-family:"JetBrains Mono",monospace;font-size:9.5px;fill:var(--text-soft)}
+.margin-b{height:22px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SLMs for Agentic AI</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">立场与定义</a>
+      <a href="#method">三条论点</a>
+      <a href="#train">七条论据</a>
+      <a href="#arch">架构与流程</a>
+      <a href="#result">替代比例</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Position Paper · NVIDIA Research · arXiv 2506.02153v3</span>
+  <h1>SLM 是智能体的未来：一篇只摆论据、不做实验的立场论文</h1>
+  <p class="hero-sub">
+    智能体系统里绝大多数模型调用是<strong>重复、范围有限、非对话</strong>的子任务，却几乎都由同一类通用 LLM 端点承接。
+    论文给出的立场是 <strong>SLM 足够强、更适合、也更便宜</strong>，并把 SLM 定义成一个<strong>运行性条件</strong>（能装进常见消费电子设备、单用户低延迟）。
+    代价是：全文没有任何新实验，最接近效果的只有附录里三个开源智能体的专家估算。
+  </p>
+  <div class="meta">
+    <span>Peter Belcak, Greg Heinrich, Shizhe Diao, Yonggan Fu, Xin Dong, Saurav Muralidharan, Yingyan Celine Lin, Pavlo Molchanov（NVIDIA Research；Yingyan Celine Lin 另属 Georgia Institute of Technology）</span>
+    <a href="https://arxiv.org/abs/2506.02153v3" target="_blank" rel="noopener">arXiv 2506.02153v3 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文的 SLM 不是「参数小于 X」这种规格描述，而是<strong>能力描述</strong>：能装进常见消费电子设备、单用户推理延迟可接受（§2.1 WD1）。按这个口径，作者称 2025 年「大部分 10B 以下的模型都可以算 SLM」。
+  </p>
+  <p>
+    在此基础上作者提出三个论点：<em>V1 足够强</em>、<em>V2 运行上更适合</em>、<em>V3 必然更便宜</em>，并用 A1–A7 七条论据支撑，逐一回应三个替代观点。这里必须强调：<strong>全部是作者主张</strong>，论据大多引自被引论文自报的数字，本文没有做实验。
+  </p>
+  <p>
+    工程上最实用的是第六节的 <strong>S1–S6 迁移算法</strong>：在非人机接口的模型调用点加日志，攒到 <strong>10k–100k</strong> 条样本后清洗、聚类、选型、用 LoRA/QLoRA 微调，再周期性迭代。这条路径的前提是「智能体把复杂任务拆成子任务」本身就成立。
+  </p>
+  <p>
+    能被当成「效果」读的只有附录 B：三个开源智能体里作者估计约 <strong>60% / 40% / 70%</strong> 的 LLM 查询可由专用 SLM 承担。这是定性评估，不是实测。<span class="infer">推断</span>（依据：全文没有其他替换比例或精度变化数字，附录 B 是唯一给出这类估算的地方）
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="附录 B">60/40/70<small>%</small></div>
+      <div class="k">MetaGPT / Open Operator / Cradle 中作者估算可由专用 SLM 可靠处理的 LLM 查询占比</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§3.2">10–30<small>×</small></div>
+      <div class="k">部署 7B SLM 比 70B–175B LLM 在延迟、能耗、FLOPs 上更便宜（作者引用的区间，非实测）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§2.1">10<small>B</small></div>
+      <div class="k">作者称 2025 年「大部分 10B 以下」模型都可按 WD1 视为 SLM 的经验界</div>
+    </div>
+  </div>
+</div>
+
+<!-- 01 -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>被外包出去的是一个杂货铺，但接单的是一家大商超</h2></div>
+  <p class="sec-sub">论文要建立的共同认识只有一句：智能体对模型的请求大多很简单，却按最贵的通用规格买单。</p>
+
+  <p>论文引用行业调研说明智能体部署的体量：超过一半的大型 IT 企业在主动使用 AI 智能体，其中 <strong>21%</strong> 是「过去一年内才采用」的受访企业占比（不是提升幅度），引文 [14]（§1）。截至 2024 年末，智能体 AI 赛道已有超过 <strong>USD 2bn</strong> 的创业融资，估值 <strong>USD 5.2bn</strong>，预计到 2034 年增长到接近 <strong>USD 200bn</strong>（§1）。</p>
+
+  <p>这些智能体的核心部件几乎都是（非常）大的语言模型：由 LLM 提供「何时、如何调用工具」「如何控制流程」「如何拆解任务」的基础智能，智能体本身只是向集中托管在云端的 LLM API 端点发请求（§1）。这个运行模型又支撑着估算 <strong>USD 57bn</strong> 的集中算力投资，后者预期在 <strong>3–4 年</strong>内收回（§1）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">作者的核心判断</span><h4>LLM 在智能体设计中的主导地位既过度、又与多数用例的功能需求不匹配</h4></div>
+    <p>论文把缺陷拆成两条（§2.3）：<strong>重复、范围有限、非对话</strong>的子任务占多数，它们需要的是高效、可预测、便宜的模型；而把这些子任务全部交给通用 LLM，是<strong>经济上低效、大规模下环境不可持续</strong>的计算资源错配。</p>
+  </div>
+
+  <p>如果这个前提成立，问题就不再是「哪个模型更强」，而是「该为哪一种调用付哪一种规格的钱」。论文的整个立场都建立在这一步重述上，这也决定了它后面不会拿出精度-成本的实验曲线——它要争的是优先级，不是某个指标。</p>
+</section>
+
+<!-- 02 -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>先把定义从参数规格换成运行条件，论点才有对象</h2></div>
+  <p class="sec-sub">已有方案在这里是「行业默认做法」，本文的「方法」则从定义开始——定义一换，可比较的东西也换了。</p>
+
+  <p>论文用两条工作定义划出两拨模型（§2.1）：</p>
+
+  <div class="eq">
+    <span class="hl-c">WD1</span> SLM：能装进常见消费电子设备，且<strong>服务单用户智能体请求时</strong>延迟足够低
+    <br>
+    <span class="hl-a">WD2</span> LLM：不是 SLM 的语言模型
+  </div>
+  <div class="eq-cap">§2.1 工作定义 · 论文明说这一定义「对立场本质影响很小」，并补充：2025 年「大部分 10B 以下的模型」按此口径可视为 SLM</div>
+
+  <p>选这样定义的理由在附录 A：参数数、FLOPs 这类硬件指标会很快过时——今天「小」的规模明天可能算「大」；而「能部署在消费者设备上、就近提供低延迟服务」抓住的是训练小模型的原始动机。定义挂在使用条件上，就能随硬件进步自动漂移。</p>
+
+  <p>把定义放进三个论点，论文的立场陈述是（§2.2）：</p>
+
+  <table>
+    <thead>
+      <tr><th>论点</th><th>原文表述（§2.2）</th><th>负责支撑的论据</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono">V1</td><td>SLM 原则上<strong>足够强</strong>，能承担智能体应用的语言建模<strong>杂务</strong>（原文 "language modeling errands"）</td><td>A1、A4（v3 原文：A4 "supports items V1 and V2"）</td></tr>
+      <tr><td class="mono">V2</td><td>SLM 在智能体系统中<strong>运行上更适合</strong></td><td>A3、A4、A5、A6、A7</td></tr>
+      <tr><td class="mono">V3</td><td>因体积更小，SLM 对智能体系统中<strong>绝大多数</strong>使用都<strong>必然更经济</strong></td><td>A2、A3</td></tr>
+    </tbody>
+  </table>
+  <p class="fig-note">A1–A7 各自带 supports/aligns 标注；A8–A10 由段首领句指向 V2、A12/A13 由领句指向 V3（A11 无支撑标注）。</p>
+
+  <p>论文特意区分了「陈述」与「建议」（§2.2）：当自然优先级被遵循时，由 SLM 与 LLM 的差异推出的未来结果是<strong>必然后果</strong>；作者不给出时间表，也不对第三方强加义务。换句话说，作者在四、五两节里也承认反例的存在，立场并不是「已经赢了」。</p>
+</section>
+
+<!-- 03 -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三个论点各自最硬的一条论据</h2></div>
+  <p class="sec-sub">从七条论据里挑出每个论点最有分量的一条：V1 靠清单与数字，V2 靠架构的「窄接口」，V3 靠规模折价加可迁移微调。</p>
+
+  <p><strong>V1 · A1：性能对齐清单。</strong>论文按「常识推理 / 工具调用与代码生成 / 指令跟随」三类能力列举了 SLM 的公开成绩，并附作者原话中的效率数字：</p>
+
+  <table>
+    <thead>
+      <tr><th>模型家族</th><th>规模</th><th>作者引述的性能主张</th><th>效率</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Phi-2</td><td class="num">2.7B</td><td>常识推理与代码生成做到 30B 模型水平</td><td class="num">≈15× faster</td></tr>
+      <tr><td>Phi-3 small</td><td class="num">7B</td><td>语言理解、常识推理与同代 70B 相当 | 代码生成最高持平 70B</td><td>—</td></tr>
+      <tr><td>Nemotron-H</td><td class="num">2 / 4.8 / 9B</td><td>指令跟随与代码生成精度与同代稠密 30B 相当</td><td>推理 FLOPs 小一个数量级</td></tr>
+      <tr><td>SmolLM2</td><td class="num">125M–1.7B</td><td>语言理解、工具调用、指令跟随达到同代 14B 水平 | 匹配两年前的 70B</td><td>—</td></tr>
+      <tr><td>Hymba-1.5B</td><td class="num">1.5B</td><td>指令跟随优于 13B 模型；指令精度在该规模最好 | 3.5× token 吞吐</td><td>—</td></tr>
+      <tr><td>DeepSeek-R1-Distill-Qwen-7B</td><td class="num">7B</td><td>常识推理优于 Claude-3.5-Sonnet-1022 与 GPT-4o-0513</td><td>—</td></tr>
+      <tr><td>RETRO-7.5B</td><td class="num">7.5B</td><td>语言建模能力与 GPT-3（175B）相当</td><td class="num">25× 更少参数</td></tr>
+      <tr class="best"><td>xLAM-2-8B</td><td class="num">8B</td><td>工具调用 state-of-the-art（原文 "state-of-the-art performance on tool calling"），超过 GPT-4o 与 Claude 3.5，对比范围仅限 tool calling</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p class="fig-note">数据来自 §3.1 的引述文本，均为被引论文自报结果；本文没有复现。该节还提到 Toolformer（6.7B）借助 API 优于 GPT-3（175B）。</p>
+
+  <p><strong>V2 · A5：接口只接受一种格式。</strong>智能体与代码之间有频繁交互——工具调用要符合参数的顺序、类型与语义，输出要被调用方的代码解析。一个应用通常只选一种约定（JSON / XML / Python 之一用于工具调用，XML / YAML / Markdown / LaTeX 之一用于输出），所以模型根本不需要兼容多种格式；而偶尔「换个格式回复」的幻觉，在多格式模型上更难根治。用一次格式决策在后训练中固化下来的 SLM，在这个语境里优于通用 LLM（§3.5）。</p>
+
+  <p><strong>V3 · A2：规模折价，加上「一夜之间」可加的微调。</strong>论文引用的数字是：7B SLM 的服务成本比 70B–175B LLM 便宜 10–30 倍（延迟、能耗、FLOPs 三个口径）；LoRA / DoRA、低资源微调以及全参数微调都只需「几 GPU 小时」，新行为可以在<strong>一夜之间</strong>加上或修好，而调整大模型要按<strong>几周</strong>计（§3.2）。后一条是 A3 灵活性的来源：微调便宜，才买得起「多个专家、每个专家一份格式决策」的查表式架构。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">V2 · A6 / A7：异构与日志</span><h4>架构允许替换，调用现场又天然生成训练数据</h4></div>
+    <p>A6：每次智能体代码调用模型都可以在原则上选用任意模型，所以按任务复杂度分层用模型不需要改造架构（图 1）。A7：工具调用与模型调用的接口上可以挂一个<strong>监听器</strong>，收集专门的指令数据，过滤掉失败工作流后，就能造出代替 LLM 的专家 SLM——论文把这称为智能体架构<em>天然</em>提供的数据通路。</p>
+  </div>
+
+  <details>
+    <summary>替代观点怎么回应？<span class="sum-sub">AV1 / AV2 / AV3，点开看三段回应</span></summary>
+    <div class="details-body">
+      <p><strong>AV1「LLM 通用理解永远更强」（§4.1）。</strong>论文的回应分三点：A8，通行 scaling law 推导假设同代模型架构不变，而近期研究表明不同规模用不同架构有明显收益；A9，SLM 可以针对任务 T 微调，达到所需可靠性，scaling law 研究没算这一步；A10，小模型的 test-time compute 扩展开销低，推理时间可以继续换可靠性。针对 CA2，作者认为这个论点「too arcane」不足以攻击 V2；A11 的理由是语义中枢只在输入复杂时有用，而智能体系统会主动把复杂问题拆成子任务。</p>
+      <p><strong>AV2「集中式 LLM 靠规模经济更便宜」（§4.2）。</strong>作者<strong>承认</strong>这是一个有效观点，经济性高度取决于具体案例，并说「评审团仍在审议」。支撑 V3 的是两条趋势：A12，推理调度与推理系统模块化的进步削弱了「专家端点难做负载均衡」的质疑；A13：近期关于 AI 训练与推理经济性的分析显示，受底层技术推动，成本呈持续下降趋势（[82,4]）。</p>
+      <p><strong>AV3「两个世界等价，但 LLM 世界已领跑」（§4.3）。</strong>作者承认这是另一种可能，但坚持 A1–A7 的优势「有可能」推翻现状。</p>
+    </div>
+  </details>
+</section>
+
+<!-- 04 -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>论证与证据都是引用式的：没有新实验，只有引用和自己估的数</h2></div>
+  <p class="sec-sub">本文没有「怎么训练」，第四节要看清的是它的证据结构：每个数字从哪来、作者为它加了什么限定。</p>
+
+  <p>论文把 SLM 的性能证据直接挂在被引论文上（§3.1 开头：逐项引用各项工作的对比，并「在作者给出时」附上效率提升），把经济性证据挂在行业分析与成本观察上（§3.2）。本文自身产生的量只有三类：经验界（10B，原文明确是作者的主观判断）、工程经验区间（10k–100k 样本）、附录 B 的替换比例估算。阅读时值得区分这三类证据的强弱：第一类是引文事实，第二类是经验法则，第三类是<strong>基于专家判断的定性评估</strong>。</p>
+
+  <p>论文对自身主张的限定也写得相当克制，下面几处容易在转述时丢失：</p>
+
+  <ul>
+    <li><strong>置信度不对齐。</strong>AV1 的回应是作者「believe（相信）」；AV2 是明确承认「jury is still out（评审团仍在审议）」；AV3 只是「maintain（坚持）」立场。三个替代观点里，最常被引用的那条（LLM 通用理解更强）回应最依赖局部经验与未量化论证。</li>
+    <li><strong>10–30× 是引文区间。</strong>§3.2 原句是 "Serving a 7bn SLM is 10–30× cheaper (in latency, energy consumption, and FLOPs) than a 70–175bn LLM"，带引文 [70, 68, 36, 53]；论文没有自己测，这个引文区间恰好与规模比（70 ÷ 7 = 10，175 ÷ 7 = 25）同量级。<span class="infer">推断</span>（依据：引文倍数与参数比同量级）——它更像量级引用，不是一个实测的端到端成本乘数。</li>
+    <li><strong>数据量是「经验法则」。</strong>10k–100k 样本「足以微调小模型」在 §6 S2 里被表述为 rule of thumb，并引用了两篇微调数据效率相关工作。</li>
+    <li><strong>算力底座同样依赖假设。</strong>USD 57bn 的集中推理基础设施投资与 3–4 年回本都来自行业报告，作者的身份（NVIDIA Research）与这一立场的利害关系没有任何讨论（§5 只列了行业层面的障碍）。</li>
+  </ul>
+
+  <p>还有一个结构上的特点：论文没有给出任何「换成 SLM 后精度掉多少」的数据。所有精度数字都是被引工作的自报值，而替换是否成立恰恰取决于替换后是否掉精度——这要到附录 B 的估算才有触碰，且仍然是估计。</p>
+</section>
+
+<!-- 05 -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>两种代理模式，正好对应两种可替换的位置</h2></div>
+  <p class="sec-sub">本节对照论文 Figure 1：SLM 能替换哪些调用，取决于智能体的代理模式。</p>
+
+  <figure>
+    <svg viewBox="0 0 600 350" role="img" aria-label="Figure 1 重绘：左为语言模型代理，右为代码代理">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--border-strong)"></path>
+        </marker>
+        <marker id="arr-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--c1)"></path>
+        </marker>
+      </defs>
+
+      <!-- ================= 左：language model agency ================= -->
+      <text x="168" y="22" class="px-tx" font-weight="700" text-anchor="middle">Language model agency</text>
+      <text x="168" y="40" class="px-tx-m" text-anchor="middle">模型既是 HCI，也是工具调用的编排者</text>
+
+      <!-- 框 -->
+      <rect x="14" y="140" width="58" height="46" rx="8" class="px-lm"></rect>
+      <text x="43" y="168" class="px-tx" text-anchor="middle" font-weight="700">LM</text>
+      <rect x="112" y="80" width="52" height="40" rx="8" class="px-lm"></rect>
+      <text x="138" y="105" class="px-tx" text-anchor="middle" font-weight="700">LM</text>
+      <rect x="208" y="52" width="72" height="28" rx="6" class="px-tool"></rect>
+      <text x="244" y="70" class="px-tx" text-anchor="middle" font-size="11">Tool #1</text>
+      <rect x="208" y="96" width="72" height="28" rx="6" class="px-tool"></rect>
+      <text x="244" y="114" class="px-tx" text-anchor="middle" font-size="11">Tool #2</text>
+      <rect x="208" y="140" width="72" height="28" rx="6" class="px-tool"></rect>
+      <text x="244" y="158" class="px-tx" text-anchor="middle" font-size="11">Tool #3</text>
+      <rect x="208" y="214" width="72" height="28" rx="6" class="px-tool"></rect>
+      <text x="244" y="232" class="px-tx" text-anchor="middle" font-size="11">Tool #4</text>
+
+      <!-- 控制流：LM → Tool#1，Tool#1 响应 → LM -->
+      <path d="M72,152 L208,66" class="px-lane-a" stroke-dasharray="4 3" marker-end="url(#arr-a)"></path>
+      <text x="132" y="92" class="px-tx" font-size="10.5">调用</text>
+      <path d="M208,82 L74,166" class="px-lane-a" marker-end="url(#arr-a)"></path>
+      <text x="132" y="132" class="px-tx" font-size="10.5">响应</text>
+
+      <!-- 输入：外部 → LM（根代理） -->
+      <path d="M14,163 L14,122 L8,122" class="px-lane" marker-end="url(#arr)"></path>
+      <text x="8" y="196" class="px-tx" font-size="11">输入</text>
+      <text x="8" y="212" class="px-tx-m">(HCI)</text>
+
+      <!-- 从属 LM：Tool#2 → LM(子)；LM(子) → Tool#3；LM(子) → Tool#4 -->
+      <path d="M208,110 L166,110" class="px-lane-a" stroke-dasharray="4 3" marker-end="url(#arr-a)"></path>
+      <path d="M164,120 L206,148" class="px-lane-a" marker-end="url(#arr-a)"></path>
+      <path d="M84,84 L206,226" class="px-lane-a" stroke-dasharray="4 3" marker-end="url(#arr-a)"></path>
+      <text x="70" y="246" class="px-tx-m">logger 挂在模型调用接口上</text>
+
+      <!-- ================= 右：code agency ================= -->
+      <text x="452" y="22" class="px-tx" font-weight="700" text-anchor="middle">Code agency</text>
+      <text x="452" y="40" class="px-tx-m" text-anchor="middle">模型（可选）只做 HCI，控制器由代码承担</text>
+
+      <rect x="318" y="80" width="50" height="32" rx="8" class="px-lm"></rect>
+      <text x="343" y="101" class="px-tx" text-anchor="middle" font-weight="700" font-size="11">LM</text>
+      <text x="318" y="128" class="px-tx-m">(optional)</text>
+
+      <rect x="420" y="70" width="56" height="62" rx="8" class="px-ctl"></rect>
+      <text x="448" y="95" class="px-tx px-tx-w" text-anchor="middle" font-size="11" font-weight="700">Controller</text>
+      <text x="448" y="110" class="px-tx px-tx-w" text-anchor="middle" font-size="10">(code)</text>
+      <text x="448" y="124" class="px-tx px-tx-w" text-anchor="middle" font-size="10">+ logger</text>
+
+      <path d="M376,92 L418,92" class="px-lane" stroke-dasharray="4 3" marker-end="url(#arr)"></path>
+      <text x="396" y="86" class="px-tx" font-size="10" text-anchor="middle">可选对话</text>
+
+      <rect x="520" y="46" width="58" height="28" rx="6" class="px-tool"></rect>
+      <text x="549" y="64" class="px-tx" text-anchor="middle" font-size="11">Tool #1</text>
+      <rect x="520" y="96" width="58" height="28" rx="6" class="px-tool"></rect>
+      <text x="549" y="114" class="px-tx" text-anchor="middle" font-size="11">Tool #4</text>
+      <rect x="520" y="214" width="58" height="28" rx="6" class="px-tool"></rect>
+      <text x="549" y="232" class="px-tx" text-anchor="middle" font-size="11">Tool #N</text>
+
+      <path d="M476,72 L498,72 L498,60 L518,60" class="px-lane" marker-end="url(#arr)"></path>
+      <path d="M476,98 L498,98 L498,110 L518,110" class="px-lane" marker-end="url(#arr)"></path>
+      <path d="M476,126 L498,126 L498,228 L518,228" class="px-lane" marker-end="url(#arr)"></path>
+      <text x="486" y="160" class="px-tx" font-size="10">编排</text>
+
+      <rect x="318" y="214" width="50" height="32" rx="8" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="343" y="235" class="px-tx" text-anchor="middle" font-weight="700" font-size="11">LM</text>
+      <path d="M418,228 L370,228" class="px-lane-a" marker-end="url(#arr-a)"></path>
+      <text x="394" y="222" class="px-tx" font-size="10" text-anchor="middle">调用</text>
+      <path d="M370,242 L416,242" class="px-lane-a" marker-end="url(#arr-a)"></path>
+
+      <!-- ================= 控制流示例 ================= -->
+      <text x="14" y="286" class="px-tx-m">示例控制流 · 左</text>
+      <rect x="14" y="294" width="34" height="20" rx="4" class="px-lm"></rect>
+      <text x="31" y="308" class="px-tx" text-anchor="middle" font-size="10">LM</text>
+      <rect x="54" y="294" width="46" height="20" rx="4" class="px-tool"></rect>
+      <text x="77" y="308" class="px-tx" text-anchor="middle" font-size="9.5">Tool #1</text>
+      <rect x="106" y="294" width="34" height="20" rx="4" class="px-lm"></rect>
+      <text x="123" y="308" class="px-tx" text-anchor="middle" font-size="10">LM</text>
+      <rect x="146" y="294" width="46" height="20" rx="4" class="px-tool"></rect>
+      <text x="169" y="308" class="px-tx" text-anchor="middle" font-size="9.5">Tool #3</text>
+      <rect x="198" y="294" width="34" height="20" rx="4" class="px-lm"></rect>
+      <text x="215" y="308" class="px-tx" text-anchor="middle" font-size="10">LM</text>
+
+      <text x="318" y="286" class="px-tx-m">示例控制流 · 右</text>
+      <rect x="318" y="294" width="34" height="20" rx="4" class="px-lm"></rect>
+      <text x="335" y="308" class="px-tx" text-anchor="middle" font-size="10">LM</text>
+      <rect x="358" y="294" width="22" height="20" rx="4" class="px-ctl"></rect>
+      <text x="369" y="308" class="px-tx px-tx-w" text-anchor="middle" font-size="10">C</text>
+      <rect x="386" y="294" width="46" height="20" rx="4" class="px-tool"></rect>
+      <text x="409" y="308" class="px-tx" text-anchor="middle" font-size="9.5">Tool #1</text>
+      <rect x="438" y="294" width="22" height="20" rx="4" class="px-ctl"></rect>
+      <text x="449" y="308" class="px-tx px-tx-w" text-anchor="middle" font-size="10">C</text>
+      <rect x="466" y="294" width="34" height="20" rx="4" class="px-lm"></rect>
+      <text x="483" y="308" class="px-tx" text-anchor="middle" font-size="10">LM</text>
+    </svg>
+    <figcaption>
+      Figure 1：两种代理模式。左：语言模型代理，LM 同时充当 HCI 与工具调用编排者。右：代码代理，专用控制器代码编排全部交互，LM 只负责（可选的）对话。（按原文重绘，非原图矢量）
+    </figcaption>
+  </figure>
+
+  <p>这张图决定了两条不同的替换路径（§3.6）：在左图里，根代理可以留给 LLM，从属的 LM 换成 SLM；在右图里，原则上所有 LM 都可以是专用 SLM——一个负责对话，另一个负责控制器下发的具体建模任务。后者的含义更深：<strong>代码代理把「对话能力」从每个调用点上剥离了出去</strong>，不需要对话的调用就只剩「格式是否被遵守」这一项要求。</p>
+
+  <h3 style="margin-top:34px">六步迁移算法：S1–S6 是一条闭环</h3>
+  <p>论文第六节把「把 LLM 换成 SLM」写成了可执行的操作序列（S1–S6）。点开每一步看它要收集什么、判据是什么、踩什么坑：</p>
+
+  <div class="sim">
+    <div class="sim-top" id="step-btns">
+      <button class="rule-btn active" data-step="1">S1<span class="r-sub">安全采集</span></button>
+      <button class="rule-btn" data-step="2">S2<span class="r-sub">清洗过滤</span></button>
+      <button class="rule-btn" data-step="3">S3<span class="r-sub">任务聚类</span></button>
+      <button class="rule-btn" data-step="4">S4<span class="r-sub">SLM 选型</span></button>
+      <button class="rule-btn" data-step="5">S5<span class="r-sub">专项微调</span></button>
+      <button class="rule-btn" data-step="6">S6<span class="r-sub">迭代闭环</span></button>
+    </div>
+
+    <div class="slots s2" id="step-slots">
+      <div class="slot" id="slot-what"><div class="slot-name">这一步产出</div><div class="slot-val" id="slot-what-v">—</div></div>
+      <div class="slot" id="slot-gate"><div class="slot-name">进入下一步的条件</div><div class="slot-val" id="slot-gate-v">—</div></div>
+    </div>
+
+    <div class="readout" id="step-readout" data-src="§6">
+      <div class="r-head" id="step-head">S1 · Secure usage data collection</div>
+      <div id="step-body">—</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>六步一览表<span class="sum-sub">论文 §6 的完整表述摘要</span></summary>
+    <div class="details-body">
+      <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>步骤</th><th>做什么</th><th>关键数字 / 备注</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">S1</td><td>在所有非 HCI 的智能体调用点部署日志：输入提示、输出响应、每次工具调用内容，可选记录延迟</td><td>加密管道 + 基于角色的访问控制；入库前按来源匿名化</td></tr>
+          <tr><td class="mono">S2</td><td>积累够数据后，清除 PII、PHI 与应用特定敏感数据；敏感字段可自动检测脱敏</td><td class="num">10k–100k</td></tr>
+          <tr><td class="mono">S3</td><td>对提示与智能体动作做无监督聚类，找出重复出现的请求模式，定义候选任务</td><td>例：意图识别、数据抽取、特定文档摘要、面向工具的代码生成</td></tr>
+          <tr><td class="mono">S4</td><td>为每个任务选一个或多个候选 SLM</td><td>判据：指令跟随、推理、上下文窗口、基准、许可、内存与算力</td></tr>
+          <tr><td class="mono">S5</td><td>用前期数据构造任务数据集，微调所选 SLM；可选知识蒸馏</td><td>LoRA / QLoRA；资源允许时全参数微调</td></tr>
+          <tr><td class="mono">S6</td><td>周期性用新数据重训 SLM 与路由模型，回到 S2 或 S4</td><td>持续改进闭环</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </details>
+
+  <p>注意 S6 里出现了一个前面没提过的部件：<strong>路由模型</strong>。论文在这里才把它当作既有物带过，前面论证「异构架构是天然选择」时也没有讨论谁来路由、路由错一次要付什么代价——这是「Lego-like 组合」里没有讨论的一环<span class="infer">推断</span>（依据：前文与 §7 没有评估路由误差的代价）。</p>
+</section>
+
+<!-- 06 -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>可替换比例 40%–70%，但每一个都是作者「估算」的</h2></div>
+  <p class="sec-sub">能当成「效果」读的数字在附录 B：三个开源智能体里有多少 LLM 查询可以换成专用 SLM。</p>
+
+  <p>附录 B 逐一看三个流行开源智能体的 LLM 调用类型，判断哪些调用适合 SLM，最后给出「可替换查询比例」。</p>
+
+  <table id="tbl-b">
+    <thead>
+      <tr><th>智能体</th><th>许可</th><th>LLM 调用场景</th><th>适合 SLM 的场景</th><th style="text-align:right">可替换</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>MetaGPT</strong></td><td>Apache 2.0</td><td>角色动作、提示模板、动态智能、RAG</td><td>例行的代码生成与样板代码，基于模板的结构化输出</td><td class="num">60%</td></tr>
+      <tr><td><strong>Open Operator</strong></td><td>MIT</td><td>意图解析、执行流决策、摘要与报告生成</td><td>简单命令解析与路由，基于模板的消息生成</td><td class="num">40%</td></tr>
+      <tr class="best"><td><strong>Cradle</strong></td><td>MIT</td><td>界面理解、GUI 操作序列规划、异常处理</td><td>重复的 GUI 交互流程，已学会的点击序列</td><td class="num">70%</td></tr>
+    </tbody>
+  </table>
+  <p class="fig-note">附录 B（B.1–B.3）原文表述均为 "we estimate that about X% of its LLM queries could be reliably handled by appropriately specialized SLMs"；三个数字合计平均为 56.7%（(60+40+70) ÷ 3），不是论文里的数字。</p>
+
+  <div class="tabs" id="case-tabs">
+    <button class="tab active" data-case="meta">按智能体原序</button>
+    <button class="tab" data-case="sorted">升序排序（仅看分布）</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="chart" id="case-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>可替换比例（作者估算）</span>
+      <span><i style="background:var(--bg-soft);border:1px solid var(--border-strong)"></i>剩余需 LLM 的调用</span>
+    </div>
+    <div class="readout" id="case-readout" data-src="附录 B">
+      <div class="r-head" id="case-head">读数</div>
+      <div id="case-body">—</div>
+    </div>
+  </div>
+
+  <p>这三个数是整篇文章里最强也最弱的一段：说强，是因为它给出了「如果把调用日志拿出来数，SLM 可能顶掉一大半」的具体量级；说弱，是因为评估标准只有「适合 / 需要更多上下文」这类定性判断，没有给出样本、没有给出精度损失、没有给出替换后的延迟与成本，也没有第三方复核。<span class="infer">推断</span>（依据：附录 B 的写法均为作者估计，无测量描述）三个数的差异也提示比例强烈依赖智能体类型——越偏「预定义流程 + 模板」的智能体，可替换比例越高。</p>
+
+  <details>
+    <summary>手算对账：排序会改变什么？<span class="sum-sub">两组参数 → 结果，总体标准差 ÷3</span></summary>
+    <div class="details-body">
+      <p>下面的柱状图只改变<strong>展示顺序</strong>，不改数值；读数里的统计量取自附录 B 三个估值。标准差统一用<strong>总体标准差（÷3）</strong>，样本标准差（÷2）仅作对照。</p>
+      <p><strong>参数组 A：原序 [60, 40, 70]。</strong></p>
+      <ul>
+        <li>均值 = (60 + 40 + 70) ÷ 3 = 170 ÷ 3 = <code>56.666…</code></li>
+        <li>离差平方和 = (60 − 56.666…)² + (40 − 56.666…)² + (70 − 56.666…)² = 11.111… + 277.777… + 177.777… = 466.666…</li>
+        <li>总体方差 = 466.666… ÷ 3 = 155.555…；总体标准差 = <code>12.4722</code></li>
+        <li>样本标准差（÷2）= √(466.666… ÷ 2) = √233.333… = <code>15.2753</code></li>
+      </ul>
+      <p><strong>参数组 B：升序 [40, 60, 70]。</strong></p>
+      <ul>
+        <li>均值 = 170 ÷ 3 = <code>56.666…</code>（不变）</li>
+        <li>离差平方和 = (40 − 56.666…)² + (60 − 56.666…)² + (70 − 56.666…)² = 277.777… + 11.111… + 177.777… = 466.666…</li>
+        <li>总体标准差 = <code>12.4722</code>；样本标准差 = <code>15.2753</code></li>
+        <li>排序后相邻差值：60 − 40 = 20，70 − 60 = 10，最大间距 <code>20</code></li>
+      </ul>
+      <p>两组读数在页面上都显示为 <code>均值 56.67 · 总体标准差 12.47</code>（保留两位），与上面手算逐位一致；可见「升序」只改变观感，不改变统计量。</p>
+    </div>
+  </details>
+</section>
+
+<!-- 07 -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它证明了该往哪花钱，没有证明换过去不掉精度</h2></div>
+  <p class="sec-sub">边界分三类：论文自己承认的、论文结构性缺失的、以及读者需要自己补的。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">作者承认</span><h4>三个替代观点没有被驳倒</h4></div>
+      <p>AV2（集中化规模经济）被论文明确称为「still a valid view」，经济性「高度取决于具体案例」；AV3（LLM 世界领跑）被承认为「另一种可能」。V3 在这里是<strong>有条件的信念</strong>，不是已证结论。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">结构性</span><h4>没有替换后的精度数据</h4></div>
+      <p>所有精度证据都是被引工作的自报值，没有一个是在同一智能体上把 LLM 换成 SLM 前后的对照。附录 B 的比例是估算，衡量的是「适合」，不是「不掉分」。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">读者自补</span><h4>路由与运维成本没有被计入</h4></div>
+      <p>论文在 S6 才引用「路由模型」，前文未评估路由误差与维护开销。<span class="infer">推断</span>（依据：§3.6 与 §4.2 未讨论路由；CA4 提出的基础设施与人才成本被作者列为「趋势在下滑」，非实证）这正是「多专家组合」最容易反转胜负的地方。</p>
+    </div>
+  </div>
+
+  <p>论文自己列的采纳障碍（§5）值得单独读：B1 对集中式 LLM 推理基础设施的大额前期投资；B2 SLM 的设计、训练与评估仍在追随 LLM 的通用基准（作者引 Hymba 论文指出，若只看衡量智能体效用的基准，所研究的 SLM 容易超过更大的模型）；B3 缺乏公众认知。作者主张这三条都是实践性障碍而非技术缺陷；对 B1/B2 给了趋势性论据，对 B3 未给量化支持（§5 未附时间表）。</p>
+
+  <p>更实际的判断标准是看瓶颈在哪里：智能体的多数调用是<strong>重复、带固定格式、结果可校验</strong>时，SLM 替换的收益最确定；如果关键路径上的调用依赖长上下文或开放式推理，或者路由本身的出错代价高于成本节省，那么论文的论据（尤其是 A5 依赖「单格式」前提、A11 依赖「语义中枢的作用只在输入复杂时显现」这一前提）就不再成立。这篇论文能帮你写出一份内部论证的骨架，但不能替你补上那份「替换前后精度差多少」的测量。</p>
+</section>
+
+<footer>
+  <div>Small Language Models are the Future of Agentic AI · Peter Belcak, Greg Heinrich, Shizhe Diao, Yonggan Fu, Xin Dong, Saurav Muralidharan, Yingyan Celine Lin, Pavlo Molchanov · NVIDIA Research；Yingyan Celine Lin 另属 Georgia Institute of Technology</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2506.02153v3" target="_blank" rel="noopener">https://arxiv.org/abs/2506.02153v3</a>（2026-09-22 版；本页所有图表编号、数字均以 v3 为准）<br>
+    笔记：<a href="/small-language-models-are-the-future-of-agentic-ai/">Small Language Models are the Future of Agentic AI</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    笔记勘误（原笔记未改动）：<br>
+    1. 笔记中的 figure 1 是在线图片（i.imgur.com），与论文 v3 的 Figure 1 不是同一张图；本页 Figure 1 按 v3 重绘。<br>
+    2. 笔记「Hymba-1.5B 在指令跟随任务上超越了比它大近 10 倍的模型」：v3 原文是 "outperforms larger 13bn models"，13B ÷ 1.5B ≈ 8.67 倍，不是「近 10 倍」；3.5× 的修饰对象是 token 吞吐。<br>
+    3. 笔记把 xLAM-2-8B 写成「在工具调用这一核心能力上达到 SOTA」，v3 原文是 "achieves state-of-the-art performance on tool calling ... surpassing frontier models like GPT-4o and Claude 3.5"（作者引述），并限定为 tool calling 这一项，转述时不要外推到其他能力。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 附录 B 柱状图（数值逐字取自附录 B）
+   ============================================================ */
+(function () {
+  var CASES = [
+    { key: 'meta',  name: 'MetaGPT',       val: 60 },
+    { key: 'op',    name: 'Open Operator', val: 40 },
+    { key: 'cradle', name: 'Cradle',       val: 70 }
+  ];
+
+  var chart = document.getElementById('case-chart');
+  var tabs = document.getElementById('case-tabs');
+  if (!chart || !tabs) return;
+
+  function stdev(arr) {
+    var n = arr.length, mean = arr.reduce(function (a, b) { return a + b; }, 0) / n;
+    var ss = arr.reduce(function (a, b) { return a + (b - mean) * (b - mean); }, 0);
+    return { mean: mean, pop: Math.sqrt(ss / n), sample: Math.sqrt(ss / (n - 1)), ss: ss };
+  }
+
+  function renderCase(mode) {
+    var rows = CASES.slice();
+    if (mode === 'sorted') rows.sort(function (a, b) { return a.val - b.val; });
+
+    chart.innerHTML = '';
+    rows.forEach(function (c) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = c.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = 'var(--accent)';
+      fill.style.height = c.val + '%';
+      track.appendChild(fill);
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = c.val + '%';
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+
+    var s = stdev(CASES.map(function (c) { return c.val; }));
+    var head = document.getElementById('case-head');
+    var body = document.getElementById('case-body');
+    if (!head || !body) return;
+    head.textContent = mode === 'sorted' ? '读数 · 升序展示（总体标准差 ÷3）' : '读数 · 智能体原序（总体标准差 ÷3）';
+    body.innerHTML = '三个估算值 60 / 40 / 70 —— 均值 <strong>' + s.mean.toFixed(2) +
+      '</strong>；总体标准差 <strong>' + s.pop.toFixed(2) +
+      '</strong>（÷3），样本标准差 ' + s.sample.toFixed(2) + '（÷2 仅作对照）。' +
+      (mode === 'sorted'
+        ? '升序后相邻间距为 20 与 10。'
+        : '分属三个不同的开源智能体，数值不可跨智能体比较。') +
+      ' 均值为本页计算，论文未给出。';
+  }
+
+  tabs.querySelectorAll('.tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.querySelectorAll('.tab').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      renderCase(btn.dataset.case);
+    });
+  });
+  renderCase('meta');
+})();
+
+/* ============================================================
+   2) S1–S6 步骤分解（内容摘要自 §6）
+   ============================================================ */
+(function () {
+  var STEPS = {
+    1: { head: 'S1 · Secure usage data collection',
+         what: '非 HCI 调用日志',
+         gate: '加密管道 + 匿名化',
+         body: '在所有非人机交互的智能体调用点部署日志，记录输入提示、输出响应、每次工具调用的内容，可选记录延迟。实践上要搭建<strong>加密日志管道</strong>并设基于角色的访问控制，入库前按来源<strong>匿名化</strong>。图 1 的 logger 就画在调用接口上。' },
+    2: { head: 'S2 · Data curation and filtering',
+         what: '一份可训练数据集',
+         gate: '10k–100k 条样本',
+         body: '收集到「满意数量」的数据后，必须清除 PII、PHI 以及其他会造成账号间数据泄露的应用特定敏感数据。常见敏感字段可用自动化工具检测并掩码；应用特定输入（如法律或内部文档）可以自动改写以遮蔽实体与数值细节，而不破坏信息内容。这个数量门槛在原文里是 <strong>rule of thumb</strong>。' },
+    3: { head: 'S3 · Task clustering',
+         what: '候选任务簇',
+         gate: '聚类粒度随操作多样性',
+         body: '对收集到的提示与智能体动作做<strong>无监督聚类</strong>，找出重复出现的请求或内部操作模式。簇的粒度取决于操作多样性，常见候选任务包括意图识别、数据抽取、特定文档类型摘要、面向可用工具的代码生成。' },
+    4: { head: 'S4 · SLM selection',
+         what: '每个任务的候选模型',
+         gate: '能力 / 基准 / 许可 / 部署足迹',
+         body: '为每个识别出的任务选一个或多个候选 SLM。判据有四项：模型自身能力（指令跟随、推理、上下文窗口）、任务相关基准上的表现、许可、部署足迹（内存与算力需求）。§3.2 列出的模型家族是好起点。' },
+    5: { head: 'S5 · Specialized SLM fine-tuning',
+         what: '任务专用微调模型',
+         gate: 'LoRA / QLoRA（或全参）',
+         body: '用前两步整理的数据构造任务数据集，微调所选 SLM。<strong>PEFT</strong>（如 LoRA、QLoRA）可以压低算力与内存；资源允许、需要最大适配时可以全参数微调。部分场景还可用<strong>知识蒸馏</strong>，让专家 SLM 模仿更强大的通用 LLM 在该任务数据上的输出。' },
+    6: { head: 'S6 · Iteration and refinement',
+         what: '持续改进闭环',
+         gate: '回到 S2 或 S4',
+         body: '周期性用新数据重训 SLM 与<strong>路由模型</strong>，以维持性能并适应变化的用量模式。这一步把 S1–S5 串成闭环：每次迭代都回到 S2（重新清洗数据）或 S4（重新选型）。' }
+  };
+
+  var btns = document.getElementById('step-btns');
+  var head = document.getElementById('step-head');
+  var body = document.getElementById('step-body');
+  var whatV = document.getElementById('slot-what-v');
+  var gateV = document.getElementById('slot-gate-v');
+  var whatSlot = document.getElementById('slot-what');
+  var gateSlot = document.getElementById('slot-gate');
+  if (!btns || !head || !body || !whatV || !gateV || !whatSlot || !gateSlot) return;
+
+  function show(k) {
+    var s = STEPS[k];
+    if (!s) return;
+    head.textContent = s.head;
+    body.innerHTML = s.body;
+    whatV.textContent = s.what;
+    gateV.textContent = s.gate;
+    whatSlot.classList.add('hit');
+    gateSlot.classList.remove('hit');
+  }
+
+  btns.querySelectorAll('.rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btns.querySelectorAll('.rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      show(btn.dataset.step);
+    });
+  });
+  show(1);
+})();
+</script>
+</body>
+</html>

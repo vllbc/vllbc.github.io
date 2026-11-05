@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>High-Entropy Minority Tokens · RLVR 的收益几乎全由 20% 的分岔词元驱动</title>
+<meta name="description" content="论文用词元熵视角拆解 RLVR：CoT 里只有少数高熵「分岔词元」决定推理方向，只对 top 20% 高熵词元做策略梯度，Qwen3-32B 上 Acc@16 在 AIME'24/25 分别比全词元 DAPO 高 7.71 / 11.04 个百分点，且收益随模型规模增大。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.hero-text-para code{background:var(--bg-soft);padding:1px 5px;border-radius:4px;font-size:.92em}
+.sec-sub{max-width:800px}
+.hist-wrap{margin:22px 0}
+.hist-cells{display:grid;gap:2px}
+.hc{aspect-ratio:1/1;border-radius:2px;background:var(--bg-soft)}
+.hc.on{background:var(--c1)}
+.hc.on.cut{background:var(--accent)}
+.axis{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);margin-top:8px}
+.simple-steps{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}
+.ss{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-size:13.5px}
+.ss b{display:block;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--accent);letter-spacing:.08em;margin-bottom:4px}
+.mono{font-family:"JetBrains Mono",monospace}
+/* 流程示意（Figure 1b 重绘） */
+.flow{display:flex;flex-direction:column;gap:20px}
+.fl-row{display:flex;align-items:stretch;gap:10px}
+.fl-row .fl-box{flex:1}
+.fl-arrow{align-self:center;color:var(--text-soft);font-weight:700;flex:none}
+.fl-arrow-a{color:var(--accent)}
+.fl-box{background:var(--bg-surface);border:1.5px solid var(--border-strong);border-radius:var(--radius);padding:12px 14px;font-size:14px;line-height:1.5}
+.fl-box b{display:block;font-weight:600;color:var(--text)}
+.fl-box span{display:block;font-size:11.5px;color:var(--text-soft);margin-top:3px}
+.fl-box.fl-a{background:var(--accent-soft);border-color:var(--accent)}
+.fl-box.fl-a b,.fl-box.fl-a span{color:var(--accent-deep)}
+.fl-box.fl-q{background:var(--bg-soft);border-style:dashed;border-color:var(--border-strong)}
+.fl-split{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}
+.fl-branch{display:flex;flex-direction:column;gap:8px;align-items:stretch}
+.fl-branch .fl-box{max-height:none}
+.fl-tag{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;letter-spacing:.06em;color:var(--text-soft)}
+.fl-branch.fl-a .fl-tag{color:var(--accent)}
+.fl-arrow-down{text-align:center;color:var(--text-soft);font-weight:700;line-height:1}
+@media (max-width:880px){
+  .eq{font-size:13px}
+  .fl-row{flex-direction:column;align-items:stretch}
+  .fl-arrow,.fl-arrow-down{transform:rotate(90deg);justify-self:center;align-self:center}
+  .fl-split{grid-template-columns:1fr}
+}
+@media (max-width:880px){
+  .simple-steps{grid-template-columns:1fr 1fr}
+}
+/* 出处徽标与推断标记（SPEC §1.2 A / E） */
+.src-tag{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;line-height:1.4;color:var(--text-soft);border:1px solid var(--border-strong);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px;white-space:nowrap}
+.tldr .src-tag{color:#B9AFA0;border-color:#4A4540}
+.infer{display:inline-block;font-size:10.5px;font-weight:600;line-height:1.5;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:0 5px;margin:0 2px;vertical-align:1px;white-space:nowrap}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">High-Entropy Minority Tokens</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RLVR · NeurIPS 2025 · arXiv 2506.01939v2</span>
+  <h1>RLVR 的收益几乎全藏在 20% 的高熵词元里：只训「岔路口」，8B 持平、32B 反超全词元训练</h1>
+  <p class="hero-sub hero-text-para">
+    RLVR 对每条回答的所有词元一视同仁地做策略梯度，但 CoT 里绝大多数词元只是顺着句子往下走，只有少数几个在决定「接下来走哪条推理路」。
+    论文用量化到词元的<strong>熵</strong>把这批「分岔词元」找出来，<strong>只保留 top 20% 高熵词元的梯度</strong>，
+    做法只是在 DAPO 目标上乘一个指示函数，却在 Qwen3-32B 上把 AIME'24 / AIME'25 的 Acc@16 分别推高 7.71 / 11.04 个百分点，且模型越大优势越大。
+  </p>
+  <div class="meta">
+    <span>Qwen Team, Alibaba · LeapLab, Tsinghua</span>
+    <a href="https://arxiv.org/abs/2506.01939v2" target="_blank" rel="noopener">arXiv 2506.01939v2 ↗</a>
+    <a href="https://shenzhi-wang.github.io/high-entropy-minority-tokens-rlvr" target="_blank" rel="noopener">项目页 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    观察一：CoT 里超过一半的词元熵低于 <code>10⁻²</code>，只有约 20% 高于阈值 0.672。高熵那批人是 "wait / however / thus / suppose" 这类逻辑转折词，低熵那批人是词尾、代码片段和算式成分——前者是<strong>岔路口</strong>，后者是<strong>沿路走</strong>。
+  </p>
+  <p>
+    观察二：按词元熵分开设解码温度后，AIME'24 + AIME'25 的<strong>平均分</strong>在 62.71 ～ 72.22 之间浮动（Figure 3 上的标注值）。压低分岔词元的温度时，平均分从 71.04（T=1）掉到 62.71，而同样压低其它词元只掉到 68.33——低端相差 <span class="mono">5.62 个百分点</span>（68.33 − 62.71，相对 62.71 高 9.0%）；高端把分岔词元调到 3.0 到 72.22，其它词元调到 5.0 却回落到 70.76，相差 <span class="mono">1.46 个百分点</span>（72.22 − 70.76）。论文原文的措辞是 "significantly degrades" 与 "substantially better"。
+  </p>
+  <p>
+    观察三：RLVR 基本<strong>延续</strong> base model 的熵分布（训练收敛时 top 20% 高熵位置与初代的 overlap 仍有 86.67%），主要改动的也是高熵词元。
+  </p>
+  <p>
+    于是方法只有一句话：<em>在 DAPO 的损失里只保留每个 mini-batch 中熵最高 20% 的词元</em>。低熵 80% 的梯度直接丢弃，在 32B 上不仅不掉点，反而大幅超过全词元训练，规模越大越明显。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Figure 2 / §3">50.64<small>%</small></div>
+      <div class="k">Qwen3-8B 思维模式下 10⁶ 词元中熵低于 10⁻² 的占比（Figure 2 / §3）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">+11.04</div>
+      <div class="k">Qwen3-32B · AIME'25 的 Acc@16 绝对百分点差：45.63 → 56.67（Table 2）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">86.67<small>%</small></div>
+      <div class="k">Qwen3-14B，step 1360 训练模型与 base（step 0）的 top 20% 高熵位置重叠率（Table 1）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>RLVR 有效是事实，但没人说清是哪几个词元在起作用</h2></div>
+  <p class="sec-sub">先把「词元熵」和「分岔词元」两个概念立起来，这一节不涉及任何训练改动。</p>
+
+  <p>RLVR 的现状是：算法不断迭代（PPO → GRPO → DAPO），但几乎所有实现都对一条回答里的<strong>每一个词元</strong>计算策略梯度，并默认它们贡献相同。论文指出，这忽略了词元在推理中承担的不同功能——大量的语法规整词元可能只是噪声，真正决定推理走向的词元却混在里面被平均掉了。<span class="src-tag">§7 Related Work</span></p>
+
+  <h3>词元熵衡量的是「此刻有多犹豫」</h3>
+  <p>对生成的第 <var class="mono">t</var> 个词元，模型先给出 vocab 上的概率分布 <code>p<sub>t</sub></code>，当然可以算出它的香农熵：</p>
+  <div class="eq">
+    H<sub>t</sub> := −Σ<sub>j=1</sub><sup>V</sup> p<sub>t,j</sub> log p<sub>t,j</sub>，
+    &nbsp; p<sub>t</sub> = Softmax(z<sub>t</sub> / T)
+  </div>
+  <div class="eq-cap">Eq. 1 · 熵越高，模型越不确定「下一个该说哪个词」。注意它定义在分布上，而不是词本身——Appendix 的 Figure 12–17 把整段 CoT 的词元熵逐点画出来<span class="src-tag">§3 / Appendix</span></div>
+
+  <h3>Qwen3-8B 思维模式下的真实分布</h3>
+  <p>作者用 Qwen3-8B、温度 T=1.0、强制 thinking 模式，在 AIME'24 / AIME'25 上生成了超过 <strong>10⁶</strong> 个词元，统计结果高度偏斜：熵低于 <code>10⁻²</code> 的占约 <span class="mono">50.64%</span>，熵高于 0.672 的恰好是最高的 20%（0.672 就是这批 10⁶ 词元的 80% 分位点）。<span class="src-tag">§3 / Figure 2(a)</span></p>
+
+  <div class="hist-wrap">
+    <div class="hist-cells" id="hist" aria-hidden="true"></div>
+    <div class="axis"><span>熵 → 0（几乎确定）</span><span>熵 → 高（高度犹豫）</span></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>低熵多数词元（沿路走）</span>
+      <span><i style="background:var(--accent)"></i>高熵分岔词元 top 20%（H ≥ 0.672）</span>
+    </div>
+  </div>
+
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-8px">示意图：每格代表等数量的词元，颜色按 Figure 2(a) 的统计比例上色（精确到百分比见下方工具栏），不是原始直方图。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="controls" style="margin-top:0">
+      <div class="ctrl">
+        <label>模拟词元总数 <span class="v" id="hist-nv">1,000,000</span></label>
+        <input type="range" id="hist-n" min="100000" max="4000000" step="100000" value="1000000">
+      </div>
+      <div class="ctrl" style="display:flex;flex-direction:column;justify-content:center">
+        <label>熵阈值 <span class="v" id="hist-tv">0.672</span></label>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-soft)">固定为 top 20% 分位点（论文取值）</div>
+      </div>
+    </div>
+    <div class="slots s3" style="margin-bottom:0">
+      <div class="slot"><div class="slot-name">H &lt; 10⁻²</div><div class="slot-val" id="hist-v1">506,400</div></div>
+      <div class="slot hit"><div class="slot-name">H ≥ 0.672</div><div class="slot-val" id="hist-v2">200,000</div></div>
+      <div class="slot"><div class="slot-name">其余（中间地带）</div><div class="slot-val" id="hist-v3">293,600</div></div>
+    </div>
+    <div class="readout" id="hist-readout" data-src="Figure 2 / §3">
+      <div class="r-head">读法<span class="src-tag">Figure 2 / §3</span></div>
+      <div id="hist-msg">拖动滑块改变词元总量，三格的<strong>绝对数</strong>在变，但<strong>比例不变</strong>：50.64% / 20% / 29.36%（29.36% = 100% − 50.64% − 20%，为派生值）。这正是「多数低熵、少数高熵」的偏斜结构。</div>
+    </div>
+  </div>
+
+  <h3>熵高熵低，对应的词确实不一样</h3>
+  <p>从出现频次 &gt; 100 的常用词元里，各取平均熵最高 / 最低的 100 个做词云（Figure 2(b)(c)）：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">高熵 · 分岔</span><h4>逻辑连接与假设引入</h4></div>
+      <p><code>wait</code>、<code>however</code>、<code>unless</code>（转折 / 换路）、<code>thus</code>、<code>also</code>（推进 / 补充）、<code>since</code>、<code>because</code>（因果）。</p>
+      <p>数学推导里还常出现 <code>suppose</code>、<code>assume</code>、<code>given</code>、<code>define</code>——都在引入假设、已知条件或定义。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">低熵 · 沿路</span><h4>词尾、代码片段、算式成分</h4></div>
+      <p>多是单词后缀、源码片段或数学表达式中的固定成分，确定性极高——模型在这些位置几乎只有一个合理选择。</p>
+      <p>它们的作用是「把当前半步走完」，不改变方向。</p>
+    </div>
+  </div>
+
+  <p>论文据此把这些高熵词元称为 <strong>forking tokens（分岔词元）</strong>：用熵、而不是「答案对错」来给词元分重要性。这也是整篇工作的立足点——论文自己的说法是，相对前人按输出正误判断词元重要性，它提出"token entropy as a criterion that may more accurately reflect the underlying mechanisms"（§7），用词是 may，不是已证实的结论。<span class="src-tag">§3 / §7</span></p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人的探索只看整体熵，判断依据也靠「对错」</h2></div>
+  <p class="sec-sub">论文把已有工作归成两条路，各自差了一口气，但合起来正好搭出本文的位置。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>看生成熵，但只看平均值</h4></div>
+      <p>Qwen3、VAPO 等工作都注意到 entropy 在 CoT 推理中很重要，但核算时对<strong>所有词元做平均</strong>。<span class="src-tag">§3 开头</span></p>
+      <p>平均值被大量近零的低熵词元稀释，看不清「少数词元撑起了探索」这件事，更无法据此挑出要训练哪些位置。<span class="infer">推断</span>（依据：§3 只说前人「analyze the entropy of all tokens collectively」，未逐词元分析；「被稀释」与「无法据此挑位置」是据此推出的，原文未就此点做实验）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>找「关键 token」，但按对错判定</h4></div>
+      <p>Vassoyan et al.（2025）识别「critical tokens」——模型容易出错的决策点，用改 KL 惩罚的方式驱动探索；Lin et al.（2024）找对错误结果贡献大的词元。</p>
+      <p>这个定义是<strong>部分结果导向</strong>的：Vassoyan et al.（2025）与 Lin et al.（2024）都以输出是否出错来判定词元重要性，而错误要等答案生成完才知道，所以这个判断必须先看到结果。它挑的是「容易出错的点」，不一定是「该探索的分岔点」。<span class="src-tag">§7 Related Work</span></p>
+    </div>
+  </div>
+
+  <h3>本文用一次控制实验把「分岔词元」的角色坐实</h3>
+  <p>作者不满足于定性观察，直接在解码时按词元的熵<strong>分别调制温度</strong>（Eq. 5）——高熵位置用一个温度，其它位置用另一个温度，在 AIME'24 + AIME'25 上评测 Qwen3-8B（最大响应长度 28,672）：</p>
+  <div class="eq">
+    p′<sub>t</sub> = Softmax(z<sub>t</sub> / T′<sub>t</sub>)，
+    &nbsp; T′<sub>t</sub> = <span class="hl-a">T<sub>high</sub></span>（若 H<sub>t</sub> &gt; 0.672）&nbsp;／&nbsp;
+    <span class="hl-b">T<sub>low</sub></span>（否则）
+  </div>
+  <div class="eq-cap">Eq. 5 · 0.672 正是从 10⁶ 词元里算出的 80% 分位点，也就是 top 20% 的门槛。注意原文图里用的判据是严格大于 H<sub>t</sub> &gt; 0.672，本文其余公式用 ≥<span class="src-tag">§3 Eq. 5</span></div>
+
+  <p>把其中一组温度固定在 T = 1（<span class="hl-a">T<sub>high</sub></span> = 1 或 <span class="hl-b">T<sub>low</sub></span> = 1），另一组在 0.05 ~ 5.0 间扫（Figure 3 横轴为 T = 0.0 / 0.05 / 0.3 / 0.6 / 1.0 / 2.0 / 3.0 / 5.0），得到 Figure 3 的两条曲线（纵轴是 AIME 2024 与 AIME 2025 的平均分）。下表只收录原图上<strong>数值与所属曲线都无歧义</strong>的标注；「—」表示该温度处的标注落在两条曲线之间、无法归属（见下表脚注），数字不猜：</p>
+
+  <figure style="margin:18px 0">
+    <figcaption style="font-size:13px;color:var(--text-muted);margin:0 0 8px">表 1 · Figure 3 的两条温度曲线（AIME'24 + AIME'25 平均分，Qwen3-8B）</figcaption>
+    <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>扫描的温度</th><th style="text-align:right">0.05</th><th style="text-align:right">1.0</th><th style="text-align:right">2.0</th><th style="text-align:right">3.0</th><th style="text-align:right">5.0</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="pill p1">A · 只动其它词元</span><br><span class="mono" style="font-size:11px;color:var(--text-soft)">T<sub>high</sub>=1，扫 T<sub>low</sub></span></td>
+          <td class="num">68.33</td><td class="num">71.04</td><td class="num">—</td><td class="num">—</td><td class="num">70.76</td>
+        </tr>
+        <tr>
+          <td><span class="pill pa">B · 只动分岔词元</span><br><span class="mono" style="font-size:11px;color:var(--text-soft)">T<sub>low</sub>=1，扫 T<sub>high</sub></span></td>
+          <td class="num">62.71</td><td class="num">71.04</td><td class="num">—</td><td class="num">72.22</td><td class="num">70.94</td>
+        </tr>
+      </tbody>
+    </table>
+    </div>
+    <figcaption style="font-size:12.5px;color:var(--text-soft);font-weight:400;margin-top:8px">两组曲线在 T = 1.0 处是同一设置，交点处原图标注为 71.04。原图挤在一起的 71.67 / 71.11 / 71.67 / 70.73 四个标注都横在两条曲线之间，按像素位置无法可靠判断哪个属于蓝线（其它词元）、哪个属于红线（分岔词元），因此 2.0 / 3.0 列留空、不做插值。<strong>0.3 / 0.6 等中间点同样不做插值。</strong>（同理，2.0 列两个标注不收录。）</figcaption>
+  </figure>
+
+  <p>看两条曲线在低端的差别：<strong>把分岔词元的温度压到 0.05，成绩掉到 62.71；而同样把其它词元压到 0.05，还有 68.33</strong>，两者相差 <span class="mono">5.62 个百分点</span>（68.33 − 62.71，即其它词元组比分岔词元组高 9.0% 相对值）。原文措辞是 "lowering T<sub>high</sub> <i>significantly</i> degrades performance compared to lowering T<sub>low</sub>"。高端方向，分岔词元调到 3.0 时达到 72.22，其它词元调到 2.0 之后一路回落到 5.0 处的 70.76（原文："increasing T<sub>high</sub> results in substantially better performance than increasing T<sub>low</sub>"；此时两者相差 <span class="mono">1.46 个百分点</span>，72.22 − 70.76）。论文对此的解读是：分岔词元需要更高的熵才配得上它们作为「岔路口」的角色，而其它词元一味加温，会让模型生成无意义的输出（原文<i>"which can even cause LLMs generating nonsensical outputs"</i>；图中 T<sub>low</sub> 越出横轴常规范围、T<sub>low</sub> = 20 处的离群标注为 20.14，T<sub>high</sub> = 0.0 处为 0.14）。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>方法只有一处改动：在 DAPO 的损失上乘一个「只剩 top 20%」的指示函数</h2></div>
+  <p class="sec-sub">看懂 Eq. 6 相比 Eq. 4 改了什么、没改什么，就掌握全文。</p>
+
+  <p>基线是 DAPO，它的目标是在整条回答所有词元上做因 token 级别的裁剪重要性比与 group 内标准化后的优势的乘积之和，再除以总词元数做平均（Eq. 4）。论文的做法是：</p>
+
+  <div class="simple-steps">
+    <div class="ss"><b>STEP 1</b>照常 rollout，得到每条回答每个词元的 <code>p<sub>t</sub></code> 与 <code>H<sub>t</sub></code></div>
+    <div class="ss"><b>STEP 2</b>在整个 mini-batch 内取熵的 <strong>top-ρ（ρ=20%）</strong> 分位点 τ</div>
+    <div class="ss"><b>STEP 3</b>损失里乘上 <code>I[H ≥ τ]</code>，低熵词元贡献归零</div>
+    <div class="ss"><b>STEP 4</b>归一化分母也换成「通过筛选的词元数」，保证量级稳定</div>
+  </div>
+
+  <div class="eq">
+    J<sub>HighEnt</sub>(θ) =
+    E<sub>B,{o<sup>i</sup>}~π</sub><span style="font-size:1.35em;">[</span>
+    (1 / Σ<sub>i,t</sub> <span class="hl-c">I[H<sup>i</sup><sub>t</sub> ≥ τ<sup>B</sup><sub>ρ</sub>]</span>)
+    · Σ<sub>i</sub> Σ<sub>t</sub> <span class="hl-c">I[H<sup>i</sup><sub>t</sub> ≥ τ<sup>B</sup><sub>ρ</sub>]</span>
+    · min( r Â<sup>i</sup><sub>t</sub>, clip(r, 1−ε<sub>low</sub>, 1+ε<sub>high</sub>) Â<sup>i</sup><sub>t</sub> )
+    <span style="font-size:1.35em;">]</span>
+  </div>
+  <div class="eq-cap">Eq. 6 · 只在高熵词元上求和的 DAPO 目标；clip-higher、动态采样、token-level 损失、超长奖励塑形都沿用 DAPO<span class="src-tag">§5.2</span></div>
+
+  <p>与 DAPO（Eq. 4）逐项对照，差异只有红色的两处：</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">差异 1 · 分子</span><h4>优势项乘指示函数</h4></div>
+      <p>只有在（mini-）batch B 内熵值不低于阈值 <code>τ<sup>B</sup><sub>ρ</sub></code> 的词元才进入损失；其余词元的梯度直接<strong>不参与反向传播</strong>。<span class="src-tag">§5.1</span></p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">差异 2 · 分母</span><h4>平均范围换成「被选中的词元」</h4></div>
+      <p>原本除以全 batch 的词元总数，现在除以<strong>通过筛选的词元数</strong>。<span class="src-tag">§5.1</span> 否则丢掉 80% 词元会让损失缩水 5 倍（只保留 1/5 的词元），有效学习率等于被悄悄改了（1 ÷ 0.2 = 5 倍）。<span class="infer">推断</span>（依据：Eq. 6 的分母；原文只给出归一化项的定义，没有讨论学习率影响）</p>
+    </div>
+  </div>
+
+  <p>阈值 τ 是<strong>每个（mini-）batch 内动态计算的分位点</strong>，不是固定常数，所以即便不同问题、不同长度的回答熵分布差异大，「取了多少比例的词元」也是稳定的。<span class="src-tag">§5.1</span></p>
+
+  <h3>为什么「20%」不是拍脑袋</h3>
+  <p>作者在 Qwen3-8B / 14B / 32B 三个规模上分别只训 top 10%、top 20%、top 50%、100%，或反过来只训最低 80%（Figure 7）。训练过程中的<strong>整体平均熵</strong>是一条很干净的信号：ρ 取 10%、50% 或 100%（以及只训 bottom 80%）时，整体平均熵都显著更低（原文："significantly reduced overall entropy"），也就是<strong>探索不足</strong>。论文的解释是：真正参与探索的只有约 20% 的高熵词元——砍到 10% 误伤了一些有用的分岔点，扩到 50% / 100% 则混进了大量低熵词元（论文原文的措辞是 "adds low-entropy tokens"），反而削弱了探索效果。<span class="src-tag">§5.3 / Figure 7</span></p>
+
+  <p>下面这个模拟把「top-ρ 选择」落在一个 batch 上，看看 ρ 变成多少时被选中的词元里还剩多少真正能推动探索的部分：</p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>保留比例 ρ <span class="v" id="sel-rv">0.70</span></label>
+        <input type="range" id="sel-r" min="0.05" max="1" step="0.05" value="0.7">
+      </div>
+      <div class="ctrl" style="display:flex;flex-direction:column;justify-content:center">
+        <label>batch 内词元数 <span class="v">8,192</span></label>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-soft)">词元数仅为示意（论文 mini-batch 为 32 条回答）；ρ 与论文一致时取 0.20</div>
+      </div>
+    </div>
+    <div class="slots" id="sel-slots"></div>
+    <div class="actions">
+      <button class="act" data-sel="0.1">top 10%</button>
+      <button class="act primary" data-sel="0.2">top 20%（论文）</button>
+      <button class="act" data-sel="0.5">top 50%</button>
+      <button class="act" data-sel="1">100%（vanilla DAPO）</button>
+    </div>
+    <div class="readout" data-src="§5.2（batch 512 / mini-batch 32）、Figure 7">
+      <div class="r-head">读法<span class="src-tag">§5.2 / Figure 7</span></div>
+      <div id="sel-msg"></div>
+    </div>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft)">模拟里把每个词元按熵排序后按 ρ 截断。手算示例：8,192 个词元里真正的高熵分岔词元是 <code>8,192 × 20% = 1,638</code> 个，ρ=0.20 的截断点正好落在它们之内，选中 <code>1,638</code> 个；ρ=0.50 时选中 <code>4,096</code> 个，其中混入 <code>4,096 − 1,638 = 2,458</code> 个低熵词元；ρ=1.0 时混入 <code>6,554</code> 个。ρ=0.10 时只选中 <code>819</code> 个，仅覆盖真分岔词的 <code>819 / 1,638 = 50.0%</code>——剩下的一半被误伤。</p>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练配方几乎照抄 DAPO，只换掉「哪些词元算梯度」</h2></div>
+  <p class="sec-sub">超参数、训练框架、数据全部对齐，唯一变量就是粒度降到词元级的筛选。</p>
+
+  <figure style="margin:18px 0">
+    <figcaption style="font-size:13px;color:var(--text-muted);margin:0 0 8px">表 2 · 训练配方对照（全部取自 §5.2 Training details，除 Llama 见 §5.4）</figcaption>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项目</th><th>设置</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>代码基础</td><td>verl；训练 recipe 沿用 DAPO（Yu et al. 2025）</td></tr>
+        <tr><td>训练数据</td><td>DAPO-Math-17K</td></tr>
+        <tr><td>模型</td><td>Qwen3-32B / 14B / 8B base；另测 Llama-3.1-8B（cold-start 后）</td></tr>
+        <tr><td>选择比例 ρ</td><td class="num">20%（Eq. 6 中 top 20% 高熵词元）</td></tr>
+        <tr><td>clip-higher</td><td>ε<sub>high</sub> = 0.28，ε<sub>low</sub> = 0.2</td></tr>
+        <tr><td>超长奖励塑形</td><td>最大回答长度 20,480，cache 长度 4,096</td></tr>
+        <tr><td>batch / mini-batch</td><td>512 / 32，每轮 16 次梯度步</td></tr>
+        <tr><td>学习率</td><td>10⁻⁶，无 warmup、无调度</td></tr>
+        <tr><td>KL 损失 / 熵损失</td><td><strong>均不使用</strong></td></tr>
+        <tr><td>评估</td><td>6 个数学基准，zero-shot，T = 1.0，每题 16 条独立回答，报 Acc@16 与平均长度</td></tr>
+      </tbody>
+    </table>
+  </div>
+  </figure>
+
+  <h3>和「熵正则」思路的对照</h3>
+  <p>常见做法是在损失里加 entropy bonus 鼓励探索。论文在讨论部分指出这在 CoT 推理里可能是次优的：它会同时抬高<strong>所有</strong>词元（包括本该低熵的确定性词元）的熵，反而破坏低熵多数的稳定性。<span class="src-tag">§6 Discussion 3</span>clip-higher（通过给重要性比 r 高的词元更高上限，间接抬高其熵）之所以有效，恰恰是因为「重要比 r 高的词元往往熵也更高」，天然就瞄准了高熵那部分（原文："tokens with high importance ratios r<sub>t</sub>(θ) tend to have higher entropy"，是经验观察）。</p>
+
+  <p>本文的 top-ρ 选择则是<strong>哑铃式的</strong>：不改变任何词元的分布，只决定哪个词元的梯度在损失函数中说话。<strong>结果并不省算力</strong>——rollout 仍要生成完整回答，前向仍要算所有词元的 logits 与熵；省下来的只是反向传播里低熵词元那部分梯度计算，以及它们带来的梯度噪声。<span class="infer">推断</span>（依据：Eq. 6 的筛选发生在算完 H<sub>t</sub> 之后，rollout 与前向不变；「低熵词元带来梯度噪声」是本文的解读之一，论文原话是 low-entropy tokens "may have little effect on or could even hinder reasoning performance"，没有单独测量省下多少反向计算或噪声）</p>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一步 RLVR 里，熵筛选插在 rollout 和反向传播之间</h2></div>
+  <p class="sec-sub">对照 Figure 1(b) 的示意，标出新增的「按熵截断」环节到底发生在哪里。</p>
+
+  <figure>
+    <div class="flow">
+      <div class="fl-row">
+        <div class="fl-box"><b>问题 q</b><span>DAPO-Math-17K</span></div>
+        <div class="fl-arrow" aria-hidden="true">→</div>
+        <div class="fl-box"><b>Rollout · 16 条回答</b><span>温度 T = 1.0</span></div>
+        <div class="fl-arrow" aria-hidden="true">→</div>
+        <div class="fl-box"><b>算每词元 H<sub>t</sub></b><span>对训练策略 π<sub>θ</sub> 取熵（Eq. 1）</span></div>
+        <div class="fl-arrow fl-arrow-a" aria-hidden="true">→</div>
+        <div class="fl-box fl-a"><b>H<sub>t</sub> ≥ τ ？</b><span>τ = batch 内 top-ρ 分位点</span></div>
+      </div>
+      <div class="fl-split">
+        <div class="fl-branch fl-a">
+          <div class="fl-tag">是 · 约 20%</div>
+          <div class="fl-box fl-a"><b>保留策略梯度</b><span>I[H ≥ τ] = 1，进入损失</span></div>
+          <div class="fl-arrow-down" aria-hidden="true">↓</div>
+          <div class="fl-box"><b>Eq. 6 · 只在选中词元上求和</b><span>分母 = 被选中词元数</span></div>
+          <div class="fl-arrow-down" aria-hidden="true">↓</div>
+          <div class="fl-box"><b>反向传播</b><span>只更新那 20% 位置的梯度</span></div>
+        </div>
+        <div class="fl-branch fl-quiet">
+          <div class="fl-tag">否 · 约 80%</div>
+          <div class="fl-box fl-q"><b>丢弃</b><span>I[H ≥ τ] = 0，梯度不回传</span></div>
+        </div>
+      </div>
+    </div>
+    <figcaption>
+      Figure 1(b) 的流程重绘：红色是本文新增的「按熵筛词元」环节，插在算完 logits、算出熵之后，损失求平均之前。rollout、分组、奖励塑形、clip 等其余步骤与原 DAPO 一致。
+    </figcaption>
+  </figure>
+
+  <p>两个设计细节值得重点标出：门槛 τ 是<strong>整个（mini-）batch 的一个分位点</strong>（不是每条回答各自取 20%），所以长短回答会被放到同一池子里比较——一篇长回答能贡献更多的「被选中词元」，短回答可能几乎全军覆没。这也解释了为什么归一化项用<strong>全 batch 被选中词元数</strong>（Eq. 6 里对 i、t 一起求和），而不是每条回答自己的选中数。<span class="src-tag">§5.1</span> 长回答占更多名额这一点是直接由「batch 内统一分位点」推出来的。<span class="infer">推断</span>（依据：Eq. 6 的阈值 τ<sup>B</sup><sub>ρ</sub> 在 batch B 内统一；论文未按回答长度分桶统计选中比例）</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>8B 持平、14B/32B 反超，低熵 80% 单独训练直接崩</h2></div>
+  <p class="sec-sub">这是全文最反直觉的地方：丢掉 80% 词元的梯度，不但没掉点，在大模型上还能明显涨。下表 3 摘自原文 Table 2 的 Acc@16（每题 16 条独立回答的平均准确率，zero-shot，T = 1.0）。</p>
+
+  <figure style="margin:18px 0">
+    <figcaption style="font-size:13px;color:var(--text-muted);margin:0 0 8px">表 3 · DAPO 全词元 vs. 仅 top 20% 高熵词元，Acc@16，摘自原文 Table 2</figcaption>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>模型</th><th>基准</th>
+          <th style="text-align:right">DAPO<br>全词元</th>
+          <th style="text-align:right">DAPO<br>top 20%</th>
+          <th style="text-align:right">Δ Acc</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen3-32B</td><td>AIME'24</td><td class="num">55.83</td><td class="num">63.54</td><td class="num">+7.71</td></tr>
+        <tr><td>Qwen3-32B</td><td>AIME'25</td><td class="num">45.63</td><td class="num">56.67</td><td class="num">+11.04</td></tr>
+        <tr><td>Qwen3-32B</td><td>AMC'23</td><td class="num">91.88</td><td class="num">94.22</td><td class="num">+2.34</td></tr>
+        <tr><td>Qwen3-32B</td><td>MATH500</td><td class="num">94.36</td><td class="num">94.88</td><td class="num">+0.52</td></tr>
+        <tr><td>Qwen3-32B</td><td>Minerva</td><td class="num">45.70</td><td class="num">45.82</td><td class="num">+0.12</td></tr>
+        <tr><td>Qwen3-32B</td><td>Olympiad</td><td class="num">66.16</td><td class="num">69.02</td><td class="num">+2.86</td></tr>
+        <tr class="best"><td>Qwen3-32B</td><td>平均</td><td class="num">66.59</td><td class="num">70.69</td><td class="num">+4.10</td></tr>
+        <tr><td>Qwen3-14B</td><td>AIME'24</td><td class="num">45.21</td><td class="num">50.42</td><td class="num">+5.21</td></tr>
+        <tr><td>Qwen3-14B</td><td>AIME'25</td><td class="num">38.13</td><td class="num">42.92</td><td class="num">+4.79</td></tr>
+        <tr><td>Qwen3-14B</td><td>平均</td><td class="num">61.40</td><td class="num">64.39</td><td class="num">+2.99</td></tr>
+        <tr><td>Qwen3-8B</td><td>AIME'24</td><td class="num">33.33</td><td class="num">34.58</td><td class="num">+1.25</td></tr>
+        <tr><td>Qwen3-8B</td><td>AIME'25</td><td class="num">25.42</td><td class="num">26.25</td><td class="num">+0.83</td></tr>
+        <tr><td>Qwen3-8B</td><td>AMC'23</td><td class="num">77.81</td><td class="num">77.19</td><td class="num">−0.63</td></tr>
+        <tr><td>Qwen3-8B</td><td>平均</td><td class="num">53.71</td><td class="num">54.23</td><td class="num">+0.53</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <figcaption style="font-size:12.5px;color:var(--text-soft);font-weight:400;margin-top:8px">数据来自 Table 2（Δ Acc 由原表两列相减得到，单位是绝对百分点）；AMC'23 在 8B 上为负（原文 −0.625，表格保留两位）。</figcaption>
+  </figure>
+
+  <h3>提升随模型规模放大</h3>
+  <p>Figure 8 把 8B → 14B → 32B 的 Acc@16 提升画成一张趋势图（单位均为绝对百分点）：AIME'24 上 +1.25 / +5.21 / +7.71，AIME'25 上 +0.83 / +4.79 / +11.04（顺序为 8B / 14B / 32B）。8B 基本持平（AMC 上甚至是负的），14B 有可观增益，32B 的增益最大。论文把这种随规模放大的模式归因于「较小的模型可能容量不足，限制了它从增强探索中获益的能力」（<i>"This may be due to the insufficient capacity of the smaller model, which restricts its ability to benefit from increased exploration."</i>），同样的解释也出现在原文对 Qwen3-8B 的分析中（"probably due to the model's lower capacity"）；原文是直接比较 8B / 14B / 32B 的增益趋势，并没有针对三个规模分别做验证。<span class="infer">推断</span>（依据：§5.3 与 introduction 的归因句；论文没有做「限制容量 / 放开容量」的控制实验）</p>
+
+  <div class="chart" style="margin-top:14px">
+    <div class="crow">
+      <div class="cname">AIME'24 Δ</div>
+      <div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="height:24%;background:var(--c1)"></div></div><div class="num">+1.25 · 8B</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="height:100%;background:var(--c1)"></div></div><div class="num">+5.21 · 14B</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="height:148%;background:var(--c1)"></div></div><div class="num">+7.71 · 32B</div></div>
+      </div>
+    </div>
+    <div class="crow">
+      <div class="cname">AIME'25 Δ</div>
+      <div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="height:17%;background:var(--c2)"></div></div><div class="num">+0.83 · 8B</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="height:43%;background:var(--c2)"></div></div><div class="num">+4.79 · 14B</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="height:100%;background:var(--c2)"></div></div><div class="num">+11.04 · 32B</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--c1)"></i>AIME'24</span>
+    <span><i style="background:var(--c2)"></i>AIME'25</span>
+    <span>柱高按组内最大值归一化（AIME'24 以 +5.21、AIME'25 以 +11.04 为满格，与 Figure 8 一致），数值标签为 Table 2 的 Δ Acc（绝对百分点）</span>
+  </div>
+
+  <h3>其它几个反直觉的结果</h3>
+  <ul>
+    <li><strong>先失后得</strong>：训练结束时，被选中的词元是随训练变化的；Table 1 显示 top 20% 高熵位置在训练不同阶段会漂移，与 base model 的重叠率从 100% 降到 86.67%（原文：收敛时 "still remains above 86%"）——但变化并不剧烈。</li>
+    <li><strong>低熵 80% 单独训，直接崩</strong>：Figure 7(a)(b) 显示只保留 entropy 最低的 80% 时，成绩明显掉，整体熵也明显低——低熵词元对推理能力几乎无贡献。</li>
+    <li><strong>OOD 也涨</strong>：用数学数据训练，但在 LiveCodeBench（v5，2024.08–2025.02，原文 Jain et al. 2024）上，top 10% / 20% 的词元整体优于全词元训练（原文 Figure 9 图注说明准确率曲线方差大，已用窗口 10 做平滑）。论文由此推测高熵词元可能与可泛化的推理能力相关（原文用的是 may be associated，且只验证了 LiveCodeBench 一个 OOD 基准）。</li>
+    <li><strong>加长上下文再涨</strong>：把最大回答长度从 20,480 扩到 29,696 继续训练，32B 模型的 AIME'24 从 63.54 进一步涨到 68.12（+4.58 个百分点；63.54 本身已是仅 top 20% 的训练结果）。原文的说法是：这一调整「improvement of the already SoTA performance on AIME'24」，即对当时已是 SoTA 的结果继续改进；论文把 "new SoTA" 的限定范围写作「directly from base models with fewer than 600B parameters」下的 63.5（AIME'24）/ 56.7（AIME'25）。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它没能说明的事：20% 是经验值，小模型收益有限，跨家族靠不住</h2></div>
+  <p class="sec-sub">原文 §8 的 Limitations 与本文补充的批判视角，合在一起就是这张「使用时该注意什么」的清单。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>20% 是超参数，不是定理</h4></div>
+    <p>论文自己在 Limitations 里写明：换一个 RLVR 设定，"the effective proportion of 20% observed in our experiments may need to be adjusted to a different value to achieve optimal results"。消融（Figure 7）只有 10% / 20% / 50% / 100% / bottom 80% 五档，且都在 Qwen3 + DAPO-Math-17K 上；论文称约 20% 是探索与训练稳定性的「有效平衡」，但没有给出跨任务的 20% 证据。<span class="src-tag">§8 Limitations / §5.3</span></p>
+    <p>原文没有讨论「真正驱动推理的词元比率是否随任务结构变化」；<span class="infer">推断</span>（依据：Limitations 只笼统地说 20% 可能在别的 RLVR 设定里需要调整，未分析原因，也无跨领域实验）——这属于本文作者视角的提示，不是论文结论，使用时应自行验证。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>模型容量不足时，少即是多会失效</h4></div>
+    <p>在 Qwen3-8B 上只训 top 20% 与全词元几乎持平：六个基准的平均 Acc@16 为 54.23 vs 53.71（<span class="mono">+0.53 个百分点</span>），AMC'23 上 77.19 vs 77.81（<span class="mono">−0.625 个百分点</span>，相对 −0.8%）。论文对 8B 的解释是 "probably due to the model's lower capacity"——用词是「可能」，且论文没有做容量控制实验。如果外推到比 8B 更小的模型，「只训高熵」未必再成立。<span class="infer">推断</span>（依据：论文没有小于 8B 的规模结果，原文明说 "these findings are based on specific experimental settings"）</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>跨模型家族的证据很有限</h4></div>
+    <p>所有主结果都在 Qwen3 家族上。Llama-3.1-8B 上直接用 DAPO 时在训练集（DAPO-Math-17K）上准确率只有约 1%，且早期容易输出重复词；作者只能先用 Qwen3-32B 做 teacher 生成回答并从 DAPO-Math-17K 中随机抽 10,000 条正确答案做 cold-start SFT，剩下 7,398 条再做 RL。即便这样 top 20% 仍优于全词元，但作者自己也承认 "the results on Llama-3.1-8B are less convincing compared to those observed on the Qwen3 models"。<span class="src-tag">§5.4 / §8 Limitations</span></p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>任务集中在数学推理</h4></div>
+    <p>训练数据全是数学（DAPO-Math-17K），评估也以数学竞赛题为主；OOD 只验证了 LiveCodeBench 一个。论文把编程、ARC-AGI 等列为未来方向（§8 Limitations "could be expanded"）。在开放、松散的领域（如写作、对话），「高熵词元 = 决策点」这个对应关系未必成立。<span class="infer">推断</span>（依据：§8 Limitations 建议把数据扩展到 math 之外；论文未在写作/对话类任务上做实验）</p>
+  </div>
+
+  <details>
+    <summary>关于「因果」与「相关性」的自我检查<span class="sum-sub">一点批判视角</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>高熵 ≠ 因果上的关键：</strong>论文用控制实验（调温度）建立了方向性证据，但立即的因果链条仍是「高熵位置需要更高熵」与「只训高熵仍能学到东西」两个观察；是否存在更底层变量（如概念抽象层级）同时决定了两者，论文没有排除。</li>
+        <li><strong>低熵词元的长期作用：</strong>论文说低熵词元对推理贡献小，但只考察了数学 benchmark 上的推理性能。它们维持的语言流畅性、格式合规性等，本实验不是对照组。</li>
+        <li><strong>阈值 τ 由训练策略计算：</strong>off-policy 设置下，熵按 π<sub>θ</sub> 算（而不是生成回答的旧策略），论文在 §5.1 明确说明，落地时要小心别算错。<span class="src-tag">§5.1</span></li>
+      </ul>
+    </div>
+  </details>
+
+  <p style="margin-top:22px">一句话总结：<strong>这篇论文的贡献不是「又找到一个调参技巧」，而是把「哪个词元在驱动推理」这个问题从『整条回答』细化到『单个词元』，并用一个几乎零成本的目标函数改动来验证这个视角。</strong>把 20% 当成一个经验起点，而不是一个普适常量，是使用这套方法时最该保持的状态。</p>
+</section>
+
+<footer>
+  <div>基于论文原文 <strong>arXiv 2506.01939v2</strong>（last revised: 13 Nov 2025；NeurIPS 2025）整理，本页所有表号、图号、数字与作者信息都锚定这一版，换版本后编号可能变化。表格与正文数字均取自原文；Figure 3 只收录能确定归属的图注数值。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2506.01939v2" target="_blank" rel="noopener">Beyond the 80/20 Rule: High-Entropy Minority Tokens Drive Effective Reinforcement Learning for LLM Reasoning</a> · arXiv 2506.01939v2（作者：Shenzhi Wang, Le Yu, Chang Gao, Chujie Zheng 等，Qwen Team / LeapLab Tsinghua）<br>
+    笔记：<a href="/beyond-the-80-20-rulehigh-entropy-minority-tokens-drive-effective-reinforcement-learning-for-llm-reasoning/">Beyond the 80 20 Rule：High-Entropy Minority Tokens Drive Effective Reinforcement Learning for LLM Reasoning</a><br>
+    笔记勘误（页面未修改原文，按 v2 编号）：原文依次为 <strong>Figure 2</strong>（熵分布）、<strong>Figure 3</strong>（温度调制）、<strong>Figure 7</strong>（比例消融，含 Bottom 80%）、<strong>Figure 8</strong>（规模趋势）、<strong>Figure 9</strong>（LiveCodeBench）。笔记引用的数字（+7.71 / +11.04 / +5.21 等）与原文一致；但笔记称本方法可「节省大量计算资源」，原文并未给出计算节省的测量，本页未沿用该说法。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =========================================================
+     1) 熵分布示意（直方图格子 + 词元总数滑块）
+     比例取自 Figure 2(a) / §3：H<10⁻² 占 50.64%，H≥0.672 占 20%，其余 29.36%
+     ========================================================= */
+  var P_LOW = 0.5064, P_HIGH = 0.20;
+  var COLS = 24, ROWS = 9;
+  var hist = document.getElementById('hist');
+  var histN = document.getElementById('hist-n');
+  var histNv = document.getElementById('hist-nv');
+  var histV1 = document.getElementById('hist-v1');
+  var histV2 = document.getElementById('hist-v2');
+  var histV3 = document.getElementById('hist-v3');
+  var histMsg = document.getElementById('hist-msg');
+
+  function fmtInt(x) {
+    return Math.round(x).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function renderHist() {
+    if (!hist || !histN || !histNv || !histV1 || !histV2 || !histV3) return;
+    var n = parseInt(histN.value, 10) || 1000000;
+    histNv.textContent = fmtInt(n);
+
+    // 三格切片：按比例计算词元数（百分比取两位小数是为了手算可复现）
+    var low = n * P_LOW;
+    var high = n * P_HIGH;
+    var mid = n - low - high;
+    histV1.textContent = fmtInt(low);
+    histV2.textContent = fmtInt(high);
+    histV3.textContent = fmtInt(mid);
+
+    var totalCells = COLS * ROWS;
+    var highCells = Math.round(totalCells * P_HIGH);
+    // 高熵格放在整体格子区最右侧（图示：x 轴是熵）
+    var html = '';
+    for (var i = 0; i < totalCells; i++) {
+      if (i >= totalCells - highCells) {
+        html += '<span class="hc on cut"></span>';
+      } else {
+        html += '<span class="hc on"></span>';
+      }
+    }
+    hist.innerHTML = html;
+    hist.style.gridTemplateColumns = 'repeat(' + COLS + ', 1fr)';
+
+    if (histMsg) {
+      histMsg.innerHTML =
+        '当前 <strong>' + fmtInt(n) + '</strong> 个词元：低于 10⁻² 的有 <strong>' + fmtInt(low) +
+        '</strong> 个（' + (P_LOW * 100).toFixed(2) + '%），达到分岔门槛 0.672 的有 <strong>' +
+        fmtInt(high) + '</strong> 个（20%）。无论总数怎么变，<strong>高熵那批始终是少数</strong>。';
+    }
+  }
+
+  if (histN) {
+    histN.addEventListener('input', renderHist);
+  }
+  renderHist();
+
+  /* =========================================================
+     2) top-ρ 选择模拟
+     batch 固定 8,192 词元；真正的高熵分岔词元占 20%
+     手算：N=8192, high=1638
+     ========================================================= */
+  var BATCH = 8192, HIGH = BATCH * 0.20; // 1638.4 → 取整 1,638
+  var selR = document.getElementById('sel-r');
+  var selRv = document.getElementById('sel-rv');
+  var selSlots = document.getElementById('sel-slots');
+  var selMsg = document.getElementById('sel-msg');
+
+  function fmt1(x) {
+    return (Math.round(x * 10) / 10).toFixed(1);
+  }
+
+  function renderSel() {
+    if (!selR || !selRv || !selSlots || !selMsg) return;
+    var rho = parseFloat(selR.value) || 0.2;
+    selRv.textContent = rho.toFixed(2);
+
+    var highN = Math.round(HIGH); // 1,638
+    var selected = Math.round(BATCH * rho);
+    var realHighSel = Math.min(selected, highN);
+    var lowSel = selected - realHighSel;
+    var lowTotal = BATCH - highN; // 6,554
+    var highMissed = highN - realHighSel;
+    // 探测噪声比例：被选中的低熵词元 / 入选词元数
+    var noisePct = selected > 0 ? lowSel / selected * 100 : 0;
+    // 分岔词元召回率
+    var recall = realHighSel / highN * 100;
+
+    var slots = [
+      { n: 'batch 词元', v: fmtInt(BATCH), hit: false },
+      { n: '分岔词元', v: fmtInt(highN), sub: '20%', hit: false },
+      { n: '入选词元', v: fmtInt(selected), sub: rho.toFixed(2), hit: true },
+      { n: '真分岔 / 低熵噪声', v: fmtInt(realHighSel) + ' / ' + fmtInt(lowSel), hit: false }
+    ];
+    var html = '';
+    for (var i = 0; i < slots.length; i++) {
+      html += '<div class="slot' + (slots[i].hit ? ' hit' : '') + '">' +
+        '<div class="slot-name">' + slots[i].n + '</div>' +
+        '<div class="slot-val">' + slots[i].v + '</div></div>';
+    }
+    selSlots.className = 'slots';
+    selSlots.innerHTML = html;
+
+    var verdict;
+    if (rho <= 0.2) {
+      verdict = '<span class="warn">只取 ' + fmtInt(selected) + ' 个词元，分岔词元召回仅 <strong>' +
+        fmt1(recall) + '%</strong>——有 ' + fmtInt(highMissed) + ' 个真分岔点被误伤，探索被削弱。</span>';
+    } else if (rho < 1) {
+      verdict = '选了 <strong>' + fmtInt(selected) + '</strong> 个，其中 <strong>' + fmtInt(lowSel) +
+        '</strong> 个是低熵噪声（占比 <strong>' + fmt1(noisePct) + '%</strong>），但同时覆盖了全部 ' +
+        fmtInt(highN) + ' 个分岔词元。';
+    } else {
+      verdict = '全选：所有 <strong>' + fmtInt(BATCH) + '</strong> 个词元都进损失，其中 <strong>' +
+        fmtInt(lowTotal) + '</strong> 个是低熵噪声（<strong>' + fmt1(lowTotal / BATCH * 100) +
+        '%</strong>），这正是 vanilla DAPO 的「梯度稀释」。';
+    }
+
+    selMsg.innerHTML =
+      'ρ = ' + rho.toFixed(2) + '：' + verdict +
+      '<br>注：真实最高熵的 20% 与真实低熵的 80% 之间并非严格按 ρ 线性切分，这里的模拟只验证「截断点位置与噪声比例」的算术关系。';
+  }
+
+  if (selR) {
+    selR.addEventListener('input', renderSel);
+  }
+  var selBtns = document.querySelectorAll('[data-sel]');
+  for (var bi = 0; bi < selBtns.length; bi++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        if (!selR) return;
+        selR.value = btn.getAttribute('data-sel');
+        renderSel();
+      });
+    })(selBtns[bi]);
+  }
+  renderSel();
+})();
+</script>
+</body>
+</html>

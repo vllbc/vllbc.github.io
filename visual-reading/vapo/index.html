@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VAPO · 把价值模型的 RL 从崩溃拉回 AIME 60 分</title>
+<meta name="description" content="VAPO 针对长 CoT RL 中价值模型的三个障碍——价值偏差、异构序列长度、奖励稀疏——组合价值预训练、解耦 GAE、长度自适应 GAE 等七项改动，在 Qwen2.5-32B 上把 AIME 2024 avg@32 从 Vanilla PPO 的 5 分推到 60 分（Table 1）。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.eq-inline{background:var(--bg-soft);padding:1px 6px;border-radius:4px;font-size:13.5px}
+.sec-sub-row{margin:-18px 0 16px}
+.quote{border-left:3px solid var(--border-strong);padding:2px 0 2px 14px;margin:16px 0;color:var(--text-muted);font-size:14px;line-height:1.8}
+.quote cite{display:block;font-style:normal;font-size:12px;color:var(--text-soft);margin-top:4px;font-family:"JetBrains Mono",monospace}
+.hl{color:var(--accent-deep);font-weight:600}
+.cm{color:var(--c1)}
+.cm2{color:var(--c2)}
+.trange{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-soft);text-align:right;margin:-8px 0 8px}
+.mini-note{font-size:12.5px;color:var(--text-soft);margin:-6px 0 16px}
+.crow.wide{grid-template-columns:150px 1fr}
+.lam-val{font-family:"JetBrains Mono",monospace;font-size:18px;font-weight:600;color:var(--accent-deep);text-align:center;margin:4px 0 0}
+.lam-val small{font-size:12px;color:var(--text-soft);font-weight:400}
+@media (max-width:880px){.crow.wide{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">VAPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">七项改动</a>
+      <a href="#train">训练细节</a>
+      <a href="#pipeline">训练流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RL for LLM · arXiv 2025 · 2504.05118v3</span>
+  <h1>VAPO：价值模型不是训不起来，是没被系统地对齐</h1>
+  <p class="hero-sub">
+    无价值模型的 GRPO / DAPO 靠「组内奖励均值」当基线，稳定但只能做轨迹级信用分配。论文认为价值模型能给出逐 token、更低方差的优势估计——前提是先修好三件事：
+    <strong>价值初始化偏差、固定 λ 的 GAE、稀疏的 0/1 奖励</strong>。VAPO 用七项改动逐一应对，在 Qwen2.5-32B 上把 AIME 2024 的 avg@32 从 Vanilla PPO 的 5 分推到 60 分（Table 1）。
+  </p>
+  <div class="meta">
+    <span>ByteDance Seed</span>
+    <a href="https://arxiv.org/abs/2504.05118v3" target="_blank" rel="noopener">arXiv 2504.05118v3 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>价值模型的三个病。</strong>（1）价值网络常用奖励模型初始化，奖励模型只在 &lt;EOS&gt; 上打分，对不完整前缀给低分，于是每个位置的初值都系统性偏高；（2）λ=0.95 时，终止奖励回传到第 t 个 token 的系数是 <code>0.95<sup>T−t</sup></code>，长序列里趋近 0，价值更新几乎全靠有偏的 bootstrapping；（3）验证器只给 0/1，长 CoT 让正样本更稀缺。
+  </p>
+  <p>
+    <strong>对症下药。</strong>前两病用 VC-PPO 的 <em>Value-Pretraining</em>（固定策略采样、用 Monte-Carlo return 预训价值网络到 explained variance 够高）和 <em>Decoupled-GAE</em>（价值更新 λ=1.0，策略更新另设 λ）。第三病对应 Clip-Higher、正样本 LM 损失、Group-Sampling（后者从 GRPO 借用）。
+  </p>
+  <p>
+    <strong>最值得记住的一点</strong>是 Length-Adaptive GAE：把 GAE 系数的总和固定为 αl，解出 <code>λ<sub>policy</sub> = 1 − 1/(αl)</code>，α=0.05。序列越长 λ 越接近 1，终止奖励的权重不再随长度指数衰减。消融显示这一项单独贡献 60 − 45 = 15 分（绝对点差）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">60<small>/100</small></div>
+      <div class="k">AIME24 avg@32，Qwen2.5-32B，VAPO<br>同表 DAPO 50、Vanilla PPO 5</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.2">5,000<small> 步</small></div>
+      <div class="k">达到 60.4 的梯度更新步数<br>VAPO 仅用 DAPO 更新步数的 60% 就追平 50 分<br>原句 SOTA 读数 60.4；Table 1 的行为 60（已在 04 节并列）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">11</div>
+      <div class="k">去掉 Value-Pretraining 后<br>「the same collapse as Vanilla PPO」</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>长 CoT 的 RL，难在「每一步」该拿多少功劳</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么在只有终局 0/1 奖励时，逐 token 的价值估计会整体失真。</p>
+
+  <p>论文把语言生成写成 token 级 MDP（§2.1）：状态是「prompt + 已生成的全部 token」，动作是下一个 token，轨迹在 &lt;EOS&gt; 处结束。奖励只在终止 token 给出：</p>
+
+  <div class="quote">"In traditional RLHF and most tasks related to LLMs, the reward is sparse and is only assigned at the terminal action ω, that is, the end-of-sentence token &lt;eos&gt;."<cite>§2.2</cite></div>
+
+  <p>优势估计 <code>Â<sub>t</sub> = Σ<sub>l</sub> (γλ)<sup>l</sup> δ<sub>t+l</sub></code>（Eq. 3）里的 <code>δ<sub>t</sub> = R(s<sub>t</sub>, a<sub>t</sub>) + γV(s<sub>t+1</sub>) − V(s<sub>t</sub>)</code>。除了终点，每一步 R(s<sub>t</sub>, a<sub>t</sub>) 都是 0，所以每一步的优势几乎完全来自 <code>V</code>。价值网络稍微偏一点，整个信号就偏；价值网络偏得越久，GAE 的递归就把误差累得越大。</p>
+
+  <p>再加上推理模型的回复长度本身极不稳定，长、短序列对偏差–方差权衡的要求不同。论文的 §3 把这三个问题拆成三节，§4 对应用三组改动分别处理——这一一对应也是后面读方法时的线索。</p>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两路主流方案：一路绕开价值网络，一路硬训价值网络</h2></div>
+  <p class="sec-sub">读完这节你应该知道：VAPO 站在哪条路上、批判的对象是谁、以及它借了哪些前人的零件。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">无价值模型</span><h4>GRPO / DAPO</h4></div>
+      <p><strong>做法：</strong>用一组回复的奖励均值当基线，把轨迹级优势直接当成每个 token 的优势；不需要价值网络，省掉它的算力开销。</p>
+      <p><strong>论文的评价：</strong>「value-model-free methods deliver an accurate and stable baseline」（§1）。但也指出它们难以做到精确的逐步信用分配（§1 引 [21][30]）。</p>
+      <p><strong>论文观点：</strong>价值模型若能训好，能提供逐 token 的信用分配和更低方差的估计，性能上限更高（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">基于价值模型</span><h4>PPO / VC-PPO / ORZ</h4></div>
+      <p><strong>Vanilla PPO：</strong>价值网络用奖励模型初始化，样本级损失，λ=0.95。论文 Table 1 中只有 5 分，训练后期回复长度急剧收缩、直接作答。</p>
+      <p><strong>VC-PPO：</strong>论文说「Value-Pretraining ... This phenomenon is first identified and addressed in VC-PPO」（§4.1）。对 Decoupled-GAE，§4.1 写 VAPO 只「adopt the core idea of decoupling GAE computation」：价值更新的 λ=1.0 与策略更新的「更小 λ」这条思路来自 VC-PPO，而 VC-PPO 的具体取值 λ<sub>critic</sub>=1.0、λ<sub>policy</sub>=0.95 是 VC-PPO 自己的设定（「In VC-PPO, this is achieved by employing ... λcritic = 1.0 and λpolicy = 0.95」）；VAPO 的策略 λ 改用 Eq. 5 按长度自适应。</p>
+      <p><strong>ORZ：</strong>同样用价值模型，但以 Monte-Carlo 估计代替 GAE；论文称它「could just achieves a comparable performance to value-model-free method」（§6）。</p>
+    </div>
+  </div>
+
+  <p>所以 VAPO 的定位不是另起炉灶。§1 写它「draws inspiration from prior research works such as VC-PPO [30] and DAPO [29]」；七项改动里，Value-Pretraining 与 Decoupled-GAE 来自 VC-PPO，Clip-Higher 与 Token-Level Loss 来自 DAPO，正样本损失是 SIL 式的 self-imitation learning，Group-Sampling 来自 GRPO（§1 贡献第 3 条）。论文明说的新增点是 Length-Adaptive GAE（§1 贡献第 2 条）；其余各项按 §1 贡献第 3 条归为对前人技术的系统整合，并用消融验证必要性。</p>
+
+  <details>
+    <summary>论文对自身定位的原句<span class="sum-sub">两处措辞不同，并列引用</span></summary>
+    <div class="details-body">
+      <p>§1 贡献第 1 条：「VAPO, the first value-model-based RL training framework to outperform value-model-free methods on long COT tasks significantly.」</p>
+      <p>§7 结论：「By introducing seven novel techniques atop PPO ...」（未说明哪几项为 VAPO 新提出）。</p>
+      <p>对比 §1 贡献第 3 条：「We systematically integrate techniques from prior work ...」并列出了 VC-PPO / DAPO / SIL / GRPO 的来源。本页不判断哪几项属于「novel」：§1 贡献第 2 条点名 Length-Adaptive GAE，贡献第 3 条把其余归为前人技术的整合，两处没有逐项对照。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>七项改动按「三个病」分组：每个病都有对应的药</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每项改动针对 §3 的哪个问题，以及它在消融表里值多少分。</p>
+
+  <p>下表左侧是 §4 的分节与对应病症，右侧是该节引入的改动、出处，以及 Table 1 中「单独移除该项后」的分数（均为 Table 1 转录；点差由 python3 按 60 − x 计算，为绝对点差）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>病症（§3）</th><th>改动（§4）</th><th>论文给出的来源</th><th class="num">移除后 AIME24 avg@32（Table 1）</th><th class="num">点差 vs 60</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="hl">价值偏差</span></td>
+          <td>Value-Pretraining</td>
+          <td>VC-PPO（§4.1）</td>
+          <td class="num">11</td>
+          <td class="num">−49</td>
+        </tr>
+        <tr>
+          <td><span class="hl">价值偏差</span></td>
+          <td>Decoupled-GAE</td>
+          <td>VC-PPO（§4.1）</td>
+          <td class="num">33</td>
+          <td class="num">−27</td>
+        </tr>
+        <tr>
+          <td><span class="hl">异构长度</span></td>
+          <td>Length-Adaptive GAE</td>
+          <td><strong>Eq. 4–5（§4.2）</strong></td>
+          <td class="num">45</td>
+          <td class="num">−15</td>
+        </tr>
+        <tr>
+          <td><span class="hl">异构长度</span></td>
+          <td>Token-Level Loss</td>
+          <td>DAPO（§4.2, Eq. 7）</td>
+          <td class="num">53</td>
+          <td class="num">−7</td>
+        </tr>
+        <tr>
+          <td><span class="hl">奖励稀疏</span></td>
+          <td>Clip-Higher</td>
+          <td>DAPO（§4.3, Eq. 8）</td>
+          <td class="num">46</td>
+          <td class="num">−14</td>
+        </tr>
+        <tr>
+          <td><span class="hl">奖励稀疏</span></td>
+          <td>Positive Example LM Loss</td>
+          <td>SIL 式模仿学习（§1；Eq. 9–10）</td>
+          <td class="num">54</td>
+          <td class="num">−6</td>
+        </tr>
+        <tr>
+          <td><span class="hl">奖励稀疏</span></td>
+          <td>Group-Sampling</td>
+          <td>GRPO（§4.3）</td>
+          <td class="num">55</td>
+          <td class="num">−5</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Value-Pretraining：先把价值网络拉到「看得懂回报」</h3>
+  <p>§4.1 给了三步：用固定策略（例如 π<sub>sft</sub>）持续采样；用 Monte-Carlo return 更新价值网络，直到 value loss 与 explained variance 等指标足够低；保存 checkpoint 供后续实验加载。§5.1 的参数表写的是「a value network warmup for 50 steps based on the reward model (RM) before initiating policy training」。<strong>论文未写明：</strong>这 50 步预训练用的是哪一批采样、value loss / explained variance 的具体阈值是多少。本页不给推测值。</p>
+
+  <h3>Decoupled-GAE：价值的 λ=1，策略的 λ 另算</h3>
+  <p>价值更新目标用 λ=1.0，论文称这带来「an unbiased gradient-descent optimization」（§4.1）；策略更新则用更小的 λ 以约束计算与时间。§5.2 解释移除它的后果：「reward signals to exponentially decay during backpropagation」。注意原文的 27 点下降是相对完整版 60 的绝对点差（60 − 33）。</p>
+
+  <h3>Length-Adaptive GAE：让系数总和跟着长度走</h3>
+  <p>固定 λ=0.95 时，长序列（l&gt;100）里 TD 误差上奖励对应的系数是 <code>0.95<sup>100</sup> ≈ 0.006</code>（§4.2）。论文改为令系数之和正比于序列长度 l：</p>
+  <div class="eq">
+    Σ<sub>t≥0</sub> <span class="hl-a">λ<sub>policy</sub><sup>t</sup></span> ≈ 1 / (1 − λ<sub>policy</sub>) = <span class="hl-b">α l</span>
+    &nbsp;&nbsp;⟹&nbsp;&nbsp;
+    <span class="hl-c">λ<sub>policy</sub> = 1 − 1 / (α l)</span>
+  </div>
+  <div class="eq-cap">Eq. 4（左）与 Eq. 5（右），§4.2；α 控制整体偏差–方差权衡，§5.1 取 α = 0.05</div>
+  <p>直观地说：序列越长，λ 越接近 1，单步 TD 误差的贡献衰减得越慢；而所有系数加起来始终是 αl，长序列里有更多步、每一步分摊到更多项。下面的交互可以按 Eq. 5 直接算 λ。
+
+  <h3>Token-Level Loss：每个 token 等权</h3>
+  <p>原损失（Eq. 6）先在序列内对 token 求平均、再对 batch 求平均，长序列的每个 token 权重被稀释；Eq. 7 改为在 batch 内所有 token 上统一平均。论文在 §5.2 称「Token-level loss implicitly increased the weight of long responses, contributing to a 7-point gain」。</p>
+
+  <h3>Clip-Higher：给低概率 token 留上行空间</h3>
+  <p>Eq. 8 把裁剪区间拆成 ε<sub>low</sub> 与 ε<sub>high</sub>，§5.1 取 ε<sub>high</sub>=0.28、ε<sub>low</sub>=0.2。论文的理由是「leave more room for the increase of low-probability tokens」，而 ε<sub>low</sub> 保持较小，因为「increasing it will suppress the probability of these tokens to 0」。</p>
+
+  <h3>Positive Example LM Loss：正确轨迹加一条 NLL</h3>
+  <p>对采样到的正确答案集合 T 追加 NLL 损失（Eq. 9），总目标为 <code>L = L<sub>PPO</sub> + μ · L<sub>NLL</sub></code>（Eq. 10），§5.1 取 μ=0.1。§1 把它的来源标为 SIL [14]。</p>
+
+  <h3>Group-Sampling：少样本、多重复</h3>
+  <p>同样的计算预算下，论文对比「尽量多 prompt、每个采样一次」与「少 prompt、多次重复采样」，称后者「yields marginally better performance」（§4.3），消融中对应 60 − 55 = 5 点（绝对）。</p>
+
+  <h3>交互：λ 随长度变化（Eq. 4–5）</h3>
+  <p>拖动长度 l，看 λ 从 0 涨向 1、奖励权重的衰减变慢；Length-Adaptive GAE 对每一个序列长度给出多大的 λ，以及它替换掉的固定 λ=0.95 衰减得多快。</p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>序列长度 l（token） <span class="v" id="l-v">20</span></label>
+        <input type="range" id="lam-l" min="1" max="200" step="1" value="20">
+      </div>
+      <div class="ctrl">
+        <label>α 超参数 <span class="v" id="a-v">0.05</span></label>
+        <input type="range" id="lam-a" min="0.01" max="0.10" step="0.01" value="0.05">
+      </div>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot">
+        <div class="slot-name">λpolicy = 1 − 1/(αl)</div>
+        <div class="slot-val" id="lam-out">0.000</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">1/(1−λ) 系数总和</div>
+        <div class="slot-val" id="sum-out">1.00</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">0.95<sup>l</sup> 固定 λ 下终点奖励系数</div>
+        <div class="slot-val" id="d95-out">0.3585</div>
+      </div>
+    </div>
+    <div class="lam-val" id="lam-cap" data-src="Eq. 5">λ<sub>policy</sub> = 0.000 <small>（l = 20，α = 0.05；l &lt; 1/α 时 1 − 1/(αl) &lt; 0；l = 1/α 时恰为 0，此处显示为 0）</small></div>
+
+    <p class="mini-note">下图两条曲线的每个点分别是 <code>λ<sup>k</sup></code> 与 <code>0.95<sup>k</sup></code>，k 为距离终点还有多少步（k = 0 是终点本身）。断点标记的是当前 l，滑块右侧是 l 处 0.95 曲线的高度。</p>
+
+    <div class="chart" id="lam-chart" data-src="§4.2"></div>
+    <div class="readout" id="lam-readout" data-src="§4.2">
+      <div class="r-head">读数 · §4.2 原文对照</div>
+      <div id="lam-msg"></div>
+    </div>
+
+    <p class="mini-note">横轴 k 固定为 0–100，两条曲线都只画到 k = l。</p>
+  </div>
+
+  <details>
+    <summary>计算规则与手算两组<span class="sum-sub">与 JS 同为 5 位有效数字</span></summary>
+    <div class="details-body">
+      <p><strong>计算规则（逐字对应）：</strong>λ 由 Eq. 5：<code>λ = 1 − 1/(α·l)</code>；若 l &lt; 1/α，式值为负（1 − 1/(αl) &lt; 0），不满足 λ 的定义域，显示为 0；l = 1/α 时式值恰为 0。（<span class="infer">推断</span>：原文未规定这些情形，此处为显示用截断，不参与其它读数）。系数总和为 <code>1/(1−λ)</code>（Eq. 4 的左端，闭式求和）。固定 λ 衰减为 <code>0.95<sup>l</sup></code>。图表横轴 k 从 0 到 100，纵轴取 <code>λ<sup>k</sup></code>，均按标准 IEEE 浮点幂计算，不涉及标准差。</p>
+      <p style="margin-top:14px"><strong>组 1：l = 20，α = 0.05</strong></p>
+      <ul>
+        <li>α·l = 0.05 × 20 = 1.000000</li>
+        <li>λ = 1 − 1/1.000000 = <code>0.000000</code></li>
+        <li>1/(1−0) = 1.00，α·l = 1.00</li>
+        <li>0.95<sup>20</sup> = 0.3584859224085419 → 显示 <code>0.35849</code>（5 位有效数字）</li>
+      </ul>
+      <p><strong>组 2：l = 100，α = 0.05</strong></p>
+      <ul>
+        <li>α·l = 0.05 × 100 = 5.000000</li>
+        <li>λ = 1 − 1/5.000000 = <code>0.800000</code></li>
+        <li>1/(1−0.8) = 5.00000，α·l = 5.000000</li>
+        <li>0.95<sup>100</sup> = 0.0059205292203339975 → 显示 <code>0.0059205</code>（5 位有效数字；原文写作「≈ 0.006」，§4.2）</li>
+      </ul>
+      <p>在浏览器控制台分别执行 <code>setVapo(20, 0.05)</code> 与 <code>setVapo(100, 0.05)</code>，三个读数依次为 <code>0.000 &nbsp;1.00 &nbsp;0.35849</code> 和 <code>0.800 &nbsp;5.00 &nbsp;0.0059205</code>，与上面逐位相同。</p>
+      <p><strong>覆盖 / 未覆盖：</strong>覆盖 Eq. 5 的 λ 与 Eq. 4 的闭式系数和；<strong>未覆盖</strong> Eq. 3 中真实的逐步 GAE 累加（那需要在训练轨迹上逐 token 计算 δ 与 <code>(γλ)<sup>l</sup></code>，论文没有公布轨迹数据），本页不做该模拟。图表是曲线示意（SVG polyline），其像素位置不是精确读数，精确值以三个数字槽与手算为准。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么训：一组参数表，三处原文没对齐的地方</h2></div>
+  <p class="sec-sub">读完这节你应该知道：论文给的训练配置、它没披露的工程细节，以及原文内部需要并列阅读的数字。</p>
+
+  <h3>§5.1 的两套配置（转录）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项目</th><th>Vanilla PPO 基线（§5.1）</th><th>VAPO（§5.1 第 1–7 条）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>基础模型</td><td>Qwen-32B（文中写作 Qwen-32B / Qwen2.5-32B）</td><td>同左</td></tr>
+        <tr><td>优化器 / 学习率</td><td>AdamW，actor 1×10<sup>−6</sup>，critic 2×10<sup>−6</sup>，warmup-constant</td><td>未单列（沿用 PPO 基础配置）</td></tr>
+        <tr><td>batch</td><td>8192 prompts，每个采样 1 次，mini-batch 512</td><td>512 prompts，每个采样 16 次，mini-batch 512</td></tr>
+        <tr><td>价值网络初始化</td><td>reward model；λ=0.95；γ=1.0</td><td>RM 上 50 步 warmup 后开始策略训练</td></tr>
+        <tr><td>GAE λ</td><td>0.95（统一）</td><td>价值 λ=1.0；策略 λ = 1 − 1/(αl)，α=0.05</td></tr>
+        <tr><td>损失粒度</td><td>sample-level</td><td>token-level</td></tr>
+        <tr><td>裁剪 ε</td><td>0.2</td><td>ε<sub>high</sub>=0.28，ε<sub>low</sub>=0.2</td></tr>
+        <tr><td>正样本 LM 损失权重</td><td>—</td><td>0.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="mini-note">γ 在 §2.3 写「it is a common practice to use discount factor γ = 1.0 in RLHF」，§5.1 写「γ set to 1.0」。评测参数：AIME24 每个 prompt 跑 32 次取平均通过率，top-p=0.7，temperature=1.0（§5.1 末段）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">按我的整理</span><h4>三处需要并列阅读的地方</h4></div>
+    <ul>
+      <li><strong>60 还是 60.4：</strong>§5.2 写「achieves a new SOTA score of 60.4 within just 5,000 steps」；Table 1 的 VAPO 行写 60；§1 写「from vanilla PPO a score of 5 to 60」，同段称「surpassing ... DAPO [29] by 10 points」（按 Table 1 为 60 − 50 = 10，绝对；按 60.4 则为 10.4）。</li>
+      <li><strong>预训练 50 步：</strong>§4.1 说训到「value loss and explained variance ... attain sufficiently low values」再保存，§5.1 只给了「50 steps」。两处描述的终止条件都在 Eq. 4–5 一节之外的 §4.1，本页不判断哪个是实际采用的早停标准。</li>
+      <li><strong>batch 是 8192 还是 512：</strong>§5.1 的 PPO 基线写「The batch size was 8192 prompts, with each prompt sampled once」；VAPO 第 7 条写「Used 512 prompts per sampling, with each prompt sampled 16 times」。两段文字对「batch」一词指代的是一次采样还是更新都未说明，原文对 batch 指代未说明，本页照原文并列，不推测两者是否等价。</li>
+    </ul>
+  </div>
+
+  <p><strong>论文没披露的工程面：</strong>§5.1 只给了配置，没有给各模块的并行方式、价值网络与策略网络的参数规模、总 GPU 时数或 tokens 数。唯一与开销相关的原文表述是 §1 说的无价值模型方法「eliminate the computational overhead of learning a value model」——VAPO 选择承担这笔开销，但论文没有量化它。本页因此不估算 VAPO 比 DAPO 慢多少。</p>
+</section>
+
+<!-- ================= 05 SVG ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次采样到一次更新：七项改动分别落在哪里</h2></div>
+  <p class="sec-sub">读完这节你应该知道：在 PPO 的每一步里，预训练、采样、优势计算、损失与裁剪各对应哪项改动。</p>
+
+  <p>下面这张图是按 §4 的文字组织的示意，不是论文原图；论文没有给出流程示意图。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 470" role="img" aria-label="VAPO 训练流程示意" style="width:100%;height:auto">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+
+      <rect x="20" y="30" width="150" height="66" rx="10" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <text x="95" y="55" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816">奖励模型初始化 V</text>
+      <text x="95" y="74" text-anchor="middle" font-size="11" fill="#6B6660">§5.1 配置起点</text>
+      <line x1="170" y1="63" x2="215" y2="63" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+
+      <rect x="220" y="20" width="180" height="86" rx="10" fill="#C04E2D" fill-opacity="0.08" stroke="#C04E2D"></rect>
+      <text x="310" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="#7A2E16">Value-Pretraining</text>
+      <text x="310" y="63" text-anchor="middle" font-size="11" fill="#6B6660">固定策略采样 · MC return</text>
+      <text x="310" y="80" text-anchor="middle" font-size="11" fill="#6B6660">warmup 50 steps（§5.1）</text>
+      <text x="310" y="97" text-anchor="middle" font-size="10" fill="#8C857B">§4.1</text>
+      <line x1="400" y1="63" x2="445" y2="63" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+
+      <rect x="455" y="20" width="200" height="86" rx="10" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <text x="555" y="44" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816">采样</text>
+      <text x="555" y="63" text-anchor="middle" font-size="11" fill="#6B6660">512 prompts × 16 次</text>
+      <text x="555" y="80" text-anchor="middle" font-size="11" fill="#6B6660">同一 prompt 内组成对比</text>
+      <text x="555" y="97" text-anchor="middle" font-size="10" fill="#C04E2D">Group-Sampling（§4.3）</text>
+      <line x1="555" y1="106" x2="555" y2="146" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+
+      <rect x="455" y="151" width="200" height="86" rx="10" fill="#C04E2D" fill-opacity="0.08" stroke="#C04E2D"></rect>
+      <text x="555" y="175" text-anchor="middle" font-size="13" font-weight="600" fill="#7A2E16">优势估计</text>
+      <text x="555" y="194" text-anchor="middle" font-size="11" fill="#6B6660">价值 λ=1.0 → V 的目标</text>
+      <text x="555" y="211" text-anchor="middle" font-size="11" fill="#6B6660">策略 λ = 1 − 1/(αl)</text>
+      <text x="555" y="228" text-anchor="middle" font-size="10" fill="#C04E2D">Decoupled-GAE · Length-Adaptive GAE（§4.1–4.2）</text>
+      <line x1="455" y1="194" x2="420" y2="194" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+
+      <rect x="220" y="151" width="190" height="86" rx="10" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <text x="315" y="175" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816">策略损失 L(θ)</text>
+      <text x="315" y="194" text-anchor="middle" font-size="11" fill="#6B6660">token-level 平均（Eq. 7）</text>
+      <text x="315" y="211" text-anchor="middle" font-size="11" fill="#6B6660">+ μ·NLL 正样本（Eq. 10）</text>
+      <text x="315" y="228" text-anchor="middle" font-size="10" fill="#C04E2D">Token-Level L. · Pos. LM Loss（§4.2–4.3）</text>
+      <line x1="220" y1="194" x2="185" y2="194" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+
+      <rect x="20" y="151" width="155" height="86" rx="10" fill="#C04E2D" fill-opacity="0.08" stroke="#C04E2D"></rect>
+      <text x="97" y="175" text-anchor="middle" font-size="13" font-weight="600" fill="#7A2E16">裁剪</text>
+      <text x="97" y="194" text-anchor="middle" font-size="11" fill="#6B6660">ε_low 0.2 / ε_high 0.28</text>
+      <text x="97" y="219" text-anchor="middle" font-size="10" fill="#C04E2D">Clip-Higher（§4.3）</text>
+      <line x1="97" y1="237" x2="97" y2="277" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+
+      <rect x="20" y="282" width="155" height="56" rx="10" fill="#2E5A6B" fill-opacity="0.10" stroke="#2E5A6B"></rect>
+      <text x="97" y="306" text-anchor="middle" font-size="13" font-weight="600" fill="#2E5A6B">梯度更新</text>
+      <text x="97" y="324" text-anchor="middle" font-size="11" fill="#6B6660">actor 1e-6 / critic 2e-6</text>
+
+      <path d="M97,338 L97,400 L790,400 L790,63 L655,63" fill="none" stroke="#8C857B" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow)"></path>
+      <text x="440" y="392" text-anchor="middle" font-size="11" fill="#8C857B">下一步：用更新后的策略继续采样（1–3 项只在训练开始时执行一次）</text>
+
+      <rect x="30" y="420" width="14" height="14" rx="3" fill="#C04E2D" fill-opacity="0.25" stroke="#C04E2D"></rect>
+      <text x="52" y="432" font-size="12" fill="#6B6660">强调色 = VAPO 相对 Vanilla PPO 改动的环节</text>
+      <rect x="380" y="420" width="14" height="14" rx="3" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <text x="402" y="432" font-size="12" fill="#6B6660">中性 = PPO 原有环节；全部按 §4 文字组织</text>
+    </svg>
+    <figcaption>图 1（本页绘制）：VAPO 一轮更新的环节与对应改动。原文没有流程示意图，Paper 中 Figure 1 是 AIME 曲线、Figure 2 是训练动态曲线。</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：Table 1 的完整转录，以及两条原文没解释的训练动态</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每个被移除的组件分别掉多少分（绝对点差），以及 Figure 2 里与「探索」叙事相反的那条曲线。</p>
+
+  <h3>Table 1（Abalation results of VAPO）逐行转录</h3>
+  <p>原文表头为「AIME24<sub>avg@32</sub>」；评测设置见 §5.1：32 次采样取平均通过率。所有数字来自 Table 1，未做四舍五入。点差列是本页用 python3 计算的绝对差。</p>
+
+  <div class="figure-detail active" style="margin-top:0">
+    <div class="figure-detail-in" style="border-top:none;padding-top:0">
+  <div class="chart" id="t1-chart" data-src="Table 1"></div>
+  <div class="readout" id="t1-readout" data-src="Table 1">
+    <div class="r-head">Table 1 · VAPO 与各消除项</div>
+    <div id="t1-msg"></div>
+  </div>
+    </div>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Model（Table 1）</th><th class="num">AIME24 avg@32</th><th class="num">相对 VAPO(60) 的点差</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>VAPO</td><td class="num">60</td><td class="num">0</td></tr>
+        <tr><td>VAPO w/o Value-Pretraining</td><td class="num">11</td><td class="num">−49</td></tr>
+        <tr><td>VAPO w/o Decoupled-GAE</td><td class="num">33</td><td class="num">−27</td></tr>
+        <tr><td>VAPO w/o Length-adaptive GAE</td><td class="num">45</td><td class="num">−15</td></tr>
+        <tr><td>VAPO w/o Clip-Higher</td><td class="num">46</td><td class="num">−14</td></tr>
+        <tr><td>VAPO w/o Token-level Loss</td><td class="num">53</td><td class="num">−7</td></tr>
+        <tr><td>VAPO w/o Positive Example LM Loss</td><td class="num">54</td><td class="num">−6</td></tr>
+        <tr><td>VAPO w/o Group-Sampling</td><td class="num">55</td><td class="num">−5</td></tr>
+        <tr><td>DAPO</td><td class="num">50</td><td class="num">−10</td></tr>
+        <tr><td>DeepSeek-R1-Zero-Qwen-32B</td><td class="num">47</td><td class="num">−13</td></tr>
+        <tr><td>Vanilla PPO</td><td class="num">5</td><td class="num">−55</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="mini-note">Table 1 中 DAPO 与 DeepSeek-R1-Zero 是论文引用的他人报道值（§5.2：「DAPO reaches 50 points with 50% of the update steps」），并非 VAPO 复现；表格本身未对这两种方法做逐项注明。</p>
+
+  <h3>主张与证据：Table 1 支撑到什么，原文怎么描述</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>原文主张</th><th>对应数字（Table 1）</th><th>原文原句</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>七项改动合在一起比朴素 PPO 好得多</td><td>60 vs 5</td><td>「Our VAPO method finally achieves 60 points, which is a significant improvement.」（§5.2）</td></tr>
+        <tr><td>价值预训练是防止崩溃的关键</td><td>11</td><td>「the model experiences the same collapse as Vanilla PPO during training, converging to a maximum of approximately 11 points.」（§5.2）</td></tr>
+        <tr><td>解耦 GAE 防奖励衰减</td><td>33</td><td>「Removing the decoupled GAE causes reward signals to exponentially decay during backpropagation ... leading to a 27-point drop.」（§5.2）</td></tr>
+        <tr><td>长度自适应 GAE 平衡长短序列</td><td>45</td><td>「Adaptive GAE balances optimization for both short and long responses, yielding a 15-point improvement.」（§5.2）</td></tr>
+        <tr><td>Clip-Higher 鼓励充分探索</td><td>46</td><td>「its removal limited the model's maximum convergence to 46 points.」（§5.2）</td></tr>
+        <tr><td>Token-level loss 加大长回复权重</td><td>53</td><td>「Token-level loss implicitly increased the weight of long responses, contributing to a 7-point gain.」（§5.2）</td></tr>
+        <tr><td>正样本 LM 损失提升正样本利用</td><td>54</td><td>「Incorporating positive-example LM loss boosted the model by nearly 6 points.」（§5.2）</td></tr>
+        <tr><td>Group-Sampling 提供对比信号</td><td>55</td><td>「Using Group-Sampling to generate fewer prompts but with more repetitions also resulted in a 5-point improvement.」（§5.2）</td></tr>
+        <tr><td>比无价值模型方法高 10 分以上</td><td class="num">60.4 → +10.4 vs DAPO(50)；+13.4 vs R1-Zero(47)；原句称 &gt;10</td><td>「VAPO outperforms the previously reported results of DeepSeek-R1-Zero-Qwen-32B and DAPO by more than 10 points.」（Abstract）——60.4 为 §5.2 / Figure 1 读数，Table 1 为 60（差值由 python3 计算，绝对点差）</td></tr>
+        <tr><td>比 DAPO 更省步数</td><td>5,000 步 / DAPO 的 60%</td><td>「VAPO matches this performance using only 60% of DAPO's steps」（§5.2，指追平 50 分）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Figure 2：熵曲线与「鼓励探索」的叙事方向相反</h3>
+  <p>Figure 2c 的纵轴是 generation entropy，横轴是训练步（0–5000）。正文说 VAPO 熵更高（「VAPO maintains stable entropy—neither collapsing nor becoming excessively high」，§5.2），但紧接着的训练动态部分又写：</p>
+  <div class="quote">"According to Figure 2c, VAPO's entropy drops lower than DAPO's in the later stages of training."<cite>§5.3</cite></div>
+  <p>两点并列记录：(a) §5.2 的「neither collapsing nor becoming excessively high」与 §5.3 的「lower than DAPO's in the later stages」；(b) §5.2 训练动态描述中「更快的分数增长」与「更低的熵」同在 Figure 2 下，作者称「the lower entropy has minimal negative impact on performance」。§5.2 的「60.4 within 5,000 steps」与 Table 1 的 60 已在第 04 节「三处需要并列阅读的地方」列出。Figure 2 为曲线图，具体数值坐标<strong>未转录</strong>（论文只给折线，未列表值）。</p>
+
+  <h3>可靠性：论文说得多具体</h3>
+  <p>原文在 Abstract、§1、§5.2 三处说多次运行结果相近、无训练崩溃（「across multiple independent runs, no training crashes occur」），§5.2 写「consistently achieves peak scores of 60-61 across three repeated experiments」。论文没有给出三次运行的逐次分数与方差。</p>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它没证明的事：跨任务、跨架构、跨规模</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些结论是实验直接支持的，哪些只是论文顺带提及、没有数据。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">范围</span><h4>实验只在一组设定上：Qwen2.5-32B + AIME 2024</h4></div>
+    <p>§5 全部数字来自 Qwen2.5-32B（正文也写作 Qwen-32B）在 AIME24 上的训练，且论文声明「no SFT data is introduced in any of the experiments」（§1）。Table 1 未列出其它模型规模或其它基准的结果。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p1">代码任务</span><h4>「对代码任务也有效」是判断，不是数据</h4></div>
+    <p>§5.1 只写「These techniques are also effective for other reasoning tasks, such as code-related tasks」，本页范围内未获取到对应的实验表或数字。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p1">代价</span><h4>价值网络的开销没有量化</h4></div>
+    <p>§1 指出无价值模型方法「eliminate the computational overhead of learning a value model」，而 VAPO 额外引入价值网络、价值预训练与每步价值更新；论文没有报告参数量、显存或吞吐对比。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p1">学习率</span><h4>critic 学习率比 actor 高一倍</h4></div>
+    <p>§5.1 写「the actor learning rate to 1 × 10<sup>−6</sup> and the critic learning rate to 2 × 10<sup>−6</sup>, as the critic needs to update faster to keep pace with policy changes」，这是 PPO 基础配置，未说明 VAPO 是否沿用——论文在该段的 VAPO 参数表里没有重列学习率，本页按「沿用」阅读。<span class="infer">推断</span>（依据：VAPO 小节写的是「Compared to vanilla PPO, VAPO made the following parameter adjustments」，七条里无学习率）。</p>
+  </div>
+
+  <details>
+    <summary>与本页范围相关的原文缺口<span class="sum-sub">未获取 / 未标注</span></summary>
+    <div class="details-body">
+      <ul>
+        <li>Value-Pretraining 使用的具体数据与停止阈值：<strong>未获取</strong>（§4.1 只给指标名，§5.1 只给 50 步）。</li>
+        <li>Figure 1 / Figure 2 的逐点数值：<strong>未转录</strong>（论文为曲线图，未附表值）。</li>
+        <li>Table 2 及以后：本论文 v3 中<strong>未出现</strong> Table 2（本页通读全文，表格编号只到 Table 1）。</li>
+        <li>三次重复实验的逐次得分与波动：<strong>未获取</strong>（§5.2 只给「peak scores of 60-61」）。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<footer>
+  <div>VAPO: Efficient and Reliable Reinforcement Learning for Advanced Reasoning Tasks · ByteDance Seed · 本页只引用 arXiv 2504.05118v3，图表编号以 v3 为准。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2504.05118v3" target="_blank" rel="noopener">arXiv 2504.05118v3</a><br>
+    笔记：<a href="/vapoefficient-and-reliable-reinforcement-learning-for-advanced-reasoning-tasks/">VAPO：Efficient and Reliable Reinforcement Learning for Advanced Reasoning Tasks</a><br>
+    笔记勘误：① 笔记称「λ=1.0 意味着价值函数的更新目标是无偏的蒙特卡洛回报，…而较小的 λ_policy 能引入一定的偏差以降低方差」——原文 §4.1（Decoupled-GAE 段）写「This choice results in an unbiased gradient-descent optimization」，同段又说策略用更小的 λ 是为了「accelerate policy convergence under computational and time constraints」；笔记「长度自适应 GAE」一段写「对于短序列，λ 值较低，估计偏向于低偏差、高方差的蒙特卡洛方法」，与 §3.2 原句「for short-length responses, the estimates obtained through GAE tend to suffer from high variance」的因果方向相反（高方差来自 GAE 本身，λ 低是在缓解它），本页按原文写。② 笔记实验数据部分写 VAPO「平均得分达到 60.4」并标「数据来源：论文 Table 1」，但 Table 1 的 VAPO 行是 60；60.4 是 §5.2 与摘要的 SOTA 读数（「achieves a new SOTA score of 60.4」），两者在页内已并列。笔记另称「VAPO 引入了多个新的超参数（如 α、μ 等）」，原文 Eq. 10 确为 <code>L = L<sub>PPO</sub> + μ · L<sub>NLL</sub></code>，§5.1 取 α=0.05、该权重 0.1。③ 笔记 Table 1 转录中「性能下降幅度」一列为绝对点差，与原文数值一致；笔记正文未给出 `λ<sub>policy</sub> = 1 − 1/(αl)` 中 α 的取值（原文 §5.1 为 0.05），本页已补。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ==========================================================
+     交互：Length-Adaptive GAE（Eq. 4 / Eq. 5）
+     ========================================================== */
+  function sig(x, n) {
+    if (!isFinite(x)) return String(x);
+    if (x === 0) return '0';
+    if (Math.abs(x) >= 1) {
+      var s = x.toPrecision(n);
+      if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+      return s;
+    }
+    return x.toPrecision(n);
+  }
+  function lamOf(l, a) {
+    var v = 1 - 1 / (a * l);
+    return v > 0 ? v : 0;
+  }
+
+  var lIn = document.getElementById('lam-l');
+  var aIn = document.getElementById('lam-a');
+  var lV = document.getElementById('l-v');
+  var aV = document.getElementById('a-v');
+  var outLam = document.getElementById('lam-out');
+  var outSum = document.getElementById('sum-out');
+  var out95 = document.getElementById('d95-out');
+  var cap = document.getElementById('lam-cap');
+  var chart = document.getElementById('lam-chart');
+  var msg = document.getElementById('lam-msg');
+
+  function drawCurves(l, a) {
+    if (!chart) return;
+    var lam = lamOf(l, a);
+    var W = 400, H = 150, padL = 8, padB = 6, N = 100;
+    function poly(base) {
+      var pts = [];
+      for (var k = 0; k <= Math.min(N, l); k++) {
+        var y = Math.pow(base, k);
+        var x = padL + (k / N) * (W - padL);
+        var yy = H - padB - y * (H - padB);
+        pts.push(x.toFixed(2) + ',' + yy.toFixed(2));
+      }
+      return pts.join(' ');
+    }
+    var yL = (H - padB) - lam * (H - padB);
+    var xL = (padL + (Math.min(l, N) / N) * (W - padL)).toFixed(2);
+    chart.innerHTML =
+      '<div class="crow wide">' +
+        '<div class="cname">λ<sup>k</sup> / 0.95<sup>k</sup></div>' +
+        '<div><svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="λ 与 0.95 的幂曲线" style="width:100%;height:150px;display:block">' +
+          '<line x1="' + padL + '" y1="' + (H - padB) + '" x2="' + W + '" y2="' + (H - padB) + '" stroke="#D4C4A6" stroke-width="1"></line>' +
+          '<polyline points="' + poly(lam) + '" fill="none" stroke="#C04E2D" stroke-width="2.5" preserveAspectRatio="none"></polyline>' +
+          '<polyline points="' + poly(0.95) + '" fill="none" stroke="#2E5A6B" stroke-width="2" stroke-dasharray="5 4"></polyline>' +
+          '<line x1="' + xL + '" y1="0" x2="' + xL + '" y2="' + (H - padB) + '" stroke="#8C857B" stroke-width="1" stroke-dasharray="3 3"></line>' +
+        '</svg></div>' +
+      '</div>';
+  }
+
+  function updateLam() {
+    if (!lIn || !aIn) return;
+    var l = parseInt(lIn.value, 10);
+    var a = parseFloat(aIn.value);
+    var lam = lamOf(l, a);
+    var total = 1 / (1 - lam);
+    var d95 = Math.pow(0.95, l);
+
+    if (lV) lV.textContent = String(l);
+    if (aV) aV.textContent = a.toFixed(2);
+    if (outLam) outLam.textContent = lam.toFixed(3);
+    if (outSum) outSum.textContent = total.toFixed(2);
+    if (out95) out95.textContent = sig(d95, 5);
+    if (cap) {
+      cap.innerHTML = 'λ<sub>policy</sub> = ' + lam.toFixed(3) +
+        ' <small>（l = ' + l + '，α = ' + a.toFixed(2) + '；l < 1/α 时 1 − 1/(αl) < 0；l = 1/α 时恰为 0，此处显示为 0）</small>';
+      cap.setAttribute('data-src', 'Eq. 5');
+    }
+    if (msg) {
+      var bound = Math.ceil(1 / a);
+      var html;
+      if (l < 100) {
+        html = '§4.2 原文：「for longer output sequences with lengths l &gt; 100, the coefficient of the TD-error corresponding to the reward is 0.95<sup>100</sup> ≈ 0.006, which is effectively zero」。当前 l = ' + l +
+          '，固定 λ 下终点奖励系数为 0.95<sup>' + l + '</sup> = ' + sig(d95, 5) + '；自适应 λ 的系数总和是 ' + total.toFixed(2) +
+          '（αl = ' + (a * l).toFixed(2) + '）。';
+      } else {
+        html = '当前跨过 §4.2 举的 l &gt; 100 例子：固定 λ 下终点奖励系数只剩 ' + sig(d95, 5) + '，而自适应 λ = ' + lam.toFixed(3) + '，系数总和为 ' + total.toFixed(2) + '（αl = ' + (a * l).toFixed(2) + '）。';
+      }
+      if (l <= bound) {
+        html += ' <span class="warn">l = ' + l + ' ≤ 1/α = ' + bound + '，Eq. 5 给出的 λ ≤ 0，本页显示为 0；原文没有讨论这一边界。</span>';
+      }
+      msg.innerHTML = html;
+    }
+    drawCurves(l, a);
+  }
+
+  if (lIn) lIn.addEventListener('input', updateLam);
+  if (aIn) aIn.addEventListener('input', updateLam);
+  window.setVapo = function (l, a) {
+    if (lIn) lIn.value = String(l);
+    if (aIn) aIn.value = String(a);
+    updateLam();
+  };
+  updateLam();
+
+  /* ==========================================================
+     Table 1 条形图（常量逐字取自 Table 1）
+     ========================================================== */
+  var T1 = [
+    { name: 'VAPO', v: 60, own: true },
+    { name: 'w/o Value-Pretraining', v: 11 },
+    { name: 'w/o Decoupled-GAE', v: 33 },
+    { name: 'w/o Length-adaptive GAE', v: 45 },
+    { name: 'w/o Clip-Higher', v: 46 },
+    { name: 'w/o Token-level Loss', v: 53 },
+    { name: 'w/o Positive Example LM Loss', v: 54 },
+    { name: 'w/o Group-Sampling', v: 55 },
+    { name: 'DAPO', v: 50, base: true },
+    { name: 'DeepSeek-R1-Zero-Qwen-32B', v: 47, base: true },
+    { name: 'Vanilla PPO', v: 5 }
+  ];
+  var t1c = document.getElementById('t1-chart');
+  if (t1c) {
+    t1c.innerHTML = T1.map(function (r) {
+      var color = r.own ? 'var(--accent)' : (r.base ? 'var(--c2)' : 'var(--c1)');
+      return '<div class="crow"><div class="cname" style="font-size:11px">' + r.name + '</div>' +
+        '<div class="cbars"><div class="cbar"><div class="track" style="height:16px">' +
+        '<div class="fill" style="width:' + r.v + '%;height:100%;border-radius:3px;background:' + color + '"></div>' +
+        '</div><div class="num">' + r.v + '</div></div></div></div>';
+    }).join('');
+  }
+  var t1m = document.getElementById('t1-msg');
+  if (t1m) {
+    t1m.innerHTML = 'Table 1 的满分刻度为 100（AIME24 avg@32）。VAPO 60；每去掉一项，分数落在 11–55 之间（点差由 python3 计算，绝对）。';
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parallel-R1 · 先教格式，再让 RL 决定何时并行</title>
+<meta name="description" content="Parallel-R1 用三段课程解决并行思考的冷启动：GSM8K 冷启动 SFT 教格式，简单题 RL 学触发，DAPO 上只用准确率奖励学泛化。Seen 平均 48.9，GRPO 基线 45.1；并行比例从 SFT 的 95.6% 被 RL 压到 27.3%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.stage-note{font-size:12px;color:var(--text-soft);margin-top:10px;line-height:1.65}
+.tbl-nowrap th,.tbl-nowrap td{white-space:nowrap}
+.slot .na{color:var(--text-soft);font-weight:400}
+.slot .slot-sub{font-size:10.5px;color:var(--text-soft);margin-top:4px;line-height:1.45;font-family:Inter,"Noto Sans SC",sans-serif}
+.flow-fig svg,.behavior-fig svg{max-width:100%}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.5}
+.flow-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}
+.flow-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.5}
+.flow-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.5}
+.flow-text{fill:var(--text);font-size:17px;font-weight:600;font-family:Inter,"Noto Sans SC",sans-serif}
+.flow-mono{fill:var(--text);font-size:15px;font-family:"JetBrains Mono",monospace}
+.flow-label{fill:var(--text-muted);font-size:14px;font-family:"JetBrains Mono",monospace}
+.flow-small{fill:var(--text-soft);font-size:12.5px;font-family:Inter,"Noto Sans SC",sans-serif}
+.flow-arrow{stroke:var(--border-strong);stroke-width:2;fill:none}
+.arrow-head{fill:var(--border-strong)}
+@media (max-width:560px){
+  .slots.s3{grid-template-columns:1fr}
+  .flow-text{font-size:19px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Parallel-R1</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">两条路</a>
+      <a href="#method">课程</a>
+      <a href="#train">训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2509.07980</span>
+  <h1>Parallel-R1：先教模型「怎么写并行」，再让 RL 学会「什么时候用」</h1>
+  <p class="hero-sub">
+    并行思考的冷启动不是数据量问题：同一个提示，在 GSM8K 上能生成 <strong>83.7%</strong> 格式合格的并行轨迹，在 DAPO 上是 <strong>0.0%</strong>。
+    论文用三段课程先把格式教会，再用 RL 把并行从「逢题就写」压成「该用才用」——平均分 <strong>48.9</strong>，GRPO 基线 <strong>45.1</strong>。
+    代价是它只在数学这类可验证奖励的领域里被验证过。
+  </p>
+  <div class="meta">
+    <span>Tong Zheng 等 · Tencent AI Lab Seattle / UMD 等</span>
+    <a href="https://arxiv.org/abs/2509.07980" target="_blank" rel="noopener">arXiv 2509.07980 ↗</a>
+    <a href="https://github.com/zhengkid/Parallel-R1" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    并行思考是：主链推理走到一个关键步时暂停，同时展开多条独立路径，再用 <code>&lt;Summary&gt;</code> 把各路口径汇总回主链。
+    难点不在「多写几条」，而在<strong>冷启动</strong>：模型预训练里从没见过 <code>&lt;Parallel&gt;</code>、<code>&lt;Path&gt;</code> 这些标签，RL 的探索分布里根本不会出现这个行为，奖励也就无从附着。
+  </p>
+  <p>
+    论文的课程分三段：GSM8K 冷启动 SFT 只教格式 → 同分布 GSM8K 上用 <code>R<sub>⟨Parallel⟩</sub> × R<sub>acc</sub></code> 做 35 步 RL 稳住触发 → DAPO 上只用准确率做 300 步 RL 学泛化。
+    最终 <strong>Parallel-R1-Seen</strong> 四基准平均 <strong>48.9</strong>，GRPO 基线 45.1；AIME25 mean@16 为 <strong>19.2</strong>，基线 14.8。
+  </p>
+  <p>
+    行为会自己变：SFT 后并行比例高达 <strong>95.6%</strong>，最终模型只有 <strong>27.3%</strong>；<code>&lt;Parallel&gt;</code> 块的平均位置从推理早期移到末尾——早期用来探索，后期用来验证。
+    这是最终答案主导的奖励把模型推向更保守的策略，不是模型突然「更懂并行」。
+  </p>
+  <p>
+    最值得拿走的不是并行本身，而是<strong>中期探索脚手架</strong>：前 200 步用交替奖励强制高频并行，之后切回纯准确率，AIME25 峰值 <strong>25.6%</strong>，论文报告相对基线提升 <strong>42.9%</strong>。
+    脚手架拆了，模型已经站在更好的策略区域。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">48.9</div>
+      <div class="k">Parallel-R1-Seen 四基准平均<br>GRPO (DAPO) 45.1</div>
+    </div>
+    <div class="metric">
+      <div class="v">19.2</div>
+      <div class="k">AIME25 mean@16<br>GRPO 14.8 / SFT 8.0</div>
+    </div>
+    <div class="metric">
+      <div class="v">83.7%<small> vs 0.0%</small></div>
+      <div class="k">并行格式合格率<br>GSM8K 7,472 条 / DAPO 17,916 条</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>难的不是多写几条路径，是模型根本发不出这个结构</h2></div>
+  <p class="sec-sub">先把冷启动讲清楚：RL 只能强化已经出现过的行为，而并行标签在预训练里从未出现。</p>
+
+  <p>
+    串行 CoT 的风险是「一步错，步步错」：中间某个假设一旦选错，后面的推理都会沿着错误前提展开。并行思考试图在关键步制造分歧——同时探索多条路径，比较后再收敛，避免过早锁定到一条可能错误的解法上。
+  </p>
+
+  <p>
+    论文把这种行为形式化成两个阶段：<strong>Exploration</strong>（检测到关键步，暂停主链，展开 N 条独立轨迹）和 <strong>Summary</strong>（汇总各路结果、消解冲突，带着结论恢复主链）。实现上只用三个控制标签：
+    <code>&lt;Parallel&gt;</code> 标记并行块，<code>&lt;Path&gt;</code> 隔离每条路径，<code>&lt;Summary&gt;</code> 汇总。
+    模型可以在一次推理里重复这个流程。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">冷启动</span><h4>RL 需要「非零概率」的行为，但模型从没学过这些标签</h4></div>
+    <p>
+      预训练和常规 SFT 的语料里没有 <code>&lt;Parallel&gt;</code> 这种结构。模型在 RL 探索时不会自发写出来，rollout 里没有合法的并行单元，奖励信号就没有东西可以强化。
+      论文指出，这正是此前 RL 教并行思考的工作大多停留在 CountDown 这类合成任务上的原因——真实难题的高质量并行轨迹既稀少又难合成。
+    </p>
+  </div>
+
+  <p>论文用一组很直接的统计说明「借简单题做冷启动」为什么必要：</p>
+
+  <table>
+    <thead>
+      <tr><th>数据</th><th style="text-align:right">样本数</th><th style="text-align:right">并行格式合格率</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>GSM8K</td><td class="num">7,472</td><td class="num">83.7%</td></tr>
+      <tr><td>DAPO</td><td class="num">17,916</td><td class="num">0.0%</td></tr>
+    </tbody>
+  </table>
+  <p class="eq-cap" style="text-align:left;margin-top:-6px">Table 1：同一个零样本提示 + 教师模型，在简单数学上能稳定生成并行格式，在难题上一条合格轨迹都没有。</p>
+
+  <p>
+    这就把问题拆成了两个：<strong>怎么给模型一个可优化的起点</strong>，以及<strong>怎么设计奖励不让它走偏</strong>。第二个问题同样棘手——论文在结构化变体上做了奖励消融，两个极端都不行：
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">只奖励答案</span><h4>模型会把并行「优化掉」</h4></div>
+      <p>准确率单独作奖励时，并行比例只有 <strong>13.6%</strong>。模型能找到正确答案，但几乎不采用并行结构——它学会了更省事的串行捷径。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">只奖励并行</span><h4>模型会为了结构牺牲正确性</h4></div>
+      <p>并行比例被拉到 <strong>80.3%</strong>，但 AMC23 掉到 <strong>59.4</strong>、MATH 掉到 <strong>81.7</strong>。结构形式盖过了逻辑正确性。</p>
+    </div>
+  </div>
+
+  <p>
+    所以真正的问题不是「要不要并行」，而是：<strong>怎么在模型还不会并行的时候给它一个可学习的起点，又怎么在它会了之后不让它滥用。</strong>
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条旧路：一条买推理时的算力，一条买别人的轨迹</h2></div>
+  <p class="sec-sub">测试时方法把并行放在模型外面，SFT 把并行放进数据里；前者贵，后者学不深。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Test-time</span><h4>外挂控制器：有效，但贵</h4></div>
+      <p>
+        Tree of Thoughts、self-consistency、MCTS、多智能体辩论等方法，在推理时通过外部程序强行分叉、搜索、投票或合并。
+      </p>
+      <p><strong>强项：</strong>不需要改模型，现成模型就能用。</p>
+      <p><strong>盲区：</strong>分支点和合并点通常由预定义日程或手写启发式决定，<strong>不随中间推理进展自适应</strong>；而且一次问题要多次调用模型，推理开销显著高于标准生成。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">SFT</span><h4>行为克隆：学得像，学不深</h4></div>
+      <p>
+        用合成数据做监督微调，让模型模仿预先生成的并行轨迹。数据往往要经过复杂的多阶段管线，成本高。
+      </p>
+      <p><strong>强项：</strong>能把已知的并行模式稳定地写进模型。</p>
+      <p><strong>盲区：</strong>本质是 behavioral cloning，上限受数据质量约束；模型复现的是<strong>见过的模式</strong>，不是可泛化的策略。更致命的是，难题上的并行数据根本生成不出来——Table 1 里 DAPO 的格式合格率是 0.0%。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">第三条路</span><h4>RL 可以自己探索，但必须先解决冷启动和奖励设计</h4></div>
+    <p>
+      与 SFT 的「lossless transformation」思路不同，RL 允许模型在探索中发现数据里没有的推理模式。论文的主张是：并行思考不只是把一条长 CoT 改写成并行形式，而是可以通过奖励<strong>学出一种新的策略</strong>。
+    </p>
+    <p>
+      但这条路有两个前提：第一，模型得先能偶尔写出合法结构（冷启动）；第二，奖励得同时约束「用并行」和「答对」，否则模型会滑向上面两个极端。Parallel-R1 的三段课程就是为这两个前提设计的。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三段课程：先学格式，再学触发，最后学泛化</h2></div>
+  <p class="sec-sub">每一段只解决一个问题；把三个问题混在一起，RL 优化不动。</p>
+
+  <p>
+    论文的核心不是某个新算子，而是<strong>把「学会并行思考」拆成三个可分别优化的阶段</strong>。同一个基座模型，三个阶段的数据、奖励、目标都不同：
+  </p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">01</span><h4>冷启动 SFT</h4></div>
+      <div class="sub">Parallel-GSM8K · 58 步</div>
+      <p>用 GSM8K 的约 7k 道题，让教师模型 <code>DeepSeek-R1-0528-Qwen-3-8B</code> 生成并行轨迹，只保留非思考部分作为金标注。目标很纯粹：<strong>教会格式</strong>，不要求它会解难题。</p>
+      <p>SFT：batch 128，LR <code>1e-5</code>，weight decay 0.01，warm-up 0.1，cosine 调度。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">02</span><h4>简单题 RL</h4></div>
+      <div class="sub">GSM8K · 35 步</div>
+      <p>同一批 GSM8K 问题，改用 GRPO。奖励要求「至少一个并行单元」且「答案正确」才给正分。目标：<strong>把格式和正确性绑定</strong>，让模型稳定地在合适的时候触发。</p>
+      <p>5 epochs，batch 1024，5 rollouts，LR <code>1e-6</code>，无 warm-up / 调度。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">03</span><h4>难题 RL</h4></div>
+      <div class="sub">DAPO · 300 步</div>
+      <p>换到 DAPO 训练集，奖励只剩准确率。目标：让模型把已经学会的并行能力<strong>泛化</strong>到难题，而不是继续被格式奖励牵着走。</p>
+      <p>batch 512，8 rollouts，LR <code>1e-6</code>，无 warm-up / 调度。产出 Parallel-R1-Seen。</p>
+    </div>
+  </div>
+
+  <div class="eq">
+    R<sub>final</sub> = <span class="hl-a">R<sub>⟨Parallel⟩</sub></span> × <span class="hl-c">R<sub>acc</sub></span>
+  </div>
+  <div class="eq-cap">Stage 2 的奖励：两项同时为真才给 +1，否则 −1。Stage 3 退化为 R<sub>final</sub> = R<sub>acc</sub>。</div>
+
+  <p>
+    注意这是<strong>乘法</strong>，不是加权求和：它要求两件事同时成立，防止模型用「写了并行结构」来换奖励。Stage 2 的作用不是提高最终分数，而是让模型在进入难题之前，已经具备稳定的触发行为。
+  </p>
+
+  <p>
+    结构化变体（Parallel-R1-Unseen）走另一条路：它跳过 Stage 2，改用两种奖励方案——S1 只看准确率；S2 在 10 步窗口里 80% 用准确率、20% 用分层奖励（并行且正确 <code>+1.2</code>，正确但没并行 <code>+1.0</code>，其余 <code>−1.0</code>）。这会在后面的结果里看到取舍。
+  </p>
+
+  <h3>自己动手：沿着课程看并行比例怎么变</h3>
+  <p>下面四个阶段对应论文的训练路径。切换阶段，看并行比例、AIME25 和平均分怎么走；Stage 2 的模型没有单独列在主表里，所以留空，不替论文补数。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="stage-btns">
+      <button class="rule-btn active" data-stage="base">00 串行基座<span class="r-sub">Qwen3-4B-Base</span></button>
+      <button class="rule-btn" data-stage="sft">01 冷启动 SFT<span class="r-sub">只教格式</span></button>
+      <button class="rule-btn" data-stage="easy">02 简单题 RL<span class="r-sub">学会触发</span></button>
+      <button class="rule-btn" data-stage="hard">03 难题 RL<span class="r-sub">学会泛化</span></button>
+    </div>
+
+    <div class="slots" id="stage-slots"></div>
+
+    <div class="readout" id="stage-readout">
+      <div class="r-head">当前阶段</div>
+      <div id="stage-msg"></div>
+    </div>
+    <div class="stage-note">数值取自论文 Table 2 / Table 3；条形按各指标自身量程缩放。Stage 2 未单独评测，显示「—」。</div>
+  </div>
+
+  <details>
+    <summary>Stage 2 到底值不值？<span class="sum-sub">因果模型和结构化模型的答案相反</span></summary>
+    <div class="details-body">
+      <p><strong>因果模型（Seen）：</strong>保留冷启动 SFT、去掉 GSM8K 上的 Stage 2 RL，平均分从 48.9 掉到 46.6（−2.3）。说明只靠 SFT 学格式不够，模型还没有学会「什么时候触发」。</p>
+      <p><strong>结构化模型（Unseen）：</strong>加上 Stage 2 RL 反而从 47.1 掉到 38.5（−8.6）。论文的假设是：在 GSM8K 上学到的 attention mask 不能很好地迁移到更难的数学分布，导致对浅层模式的过拟合。</p>
+      <p>同一段课程，对两种架构一正一负。这是论文没有把它包装成「通用配方」的原因，也是后面边界一节的伏笔。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 / 怎么算 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>GRPO 的账：35 步稳住格式，300 步推出泛化</h2></div>
+  <p class="sec-sub">这一节看工程可行性：每阶段多少步、多少 rollout、奖励怎么给，以及「并行」到底并行在哪。</p>
+
+  <p>
+    论文用 GRPO，不需要 critic：对每个问题采样 G 条回答，用组内均值方差把奖励归一化成 advantage，再做带 clip 的策略更新，并对参考策略加 KL 约束。核心三项是：
+  </p>
+
+  <div class="eq" style="text-align:left">
+    ρ<sub>i</sub> = π<sub>θ</sub>(o<sub>i</sub> | q) / π<sub>old</sub>(o<sub>i</sub> | q)<br>
+    A<sub>i</sub> = (r<sub>i</sub> − r̄) / √( (1/G) Σ<sub>j</sub> (r<sub>j</sub> − r̄)<sup>2</sup> + ε )<br>
+    L = E[ (1/G) Σ<sub>i</sub> min(ρ<sub>i</sub>A<sub>i</sub>, clip(ρ<sub>i</sub>, 1−α, 1+α) A<sub>i</sub>) − β D<sub>KL</sub>(π<sub>θ</sub> ‖ π<sub>ref</sub>) ]
+  </div>
+  <div class="eq-cap">论文 §3.4.1 的 GRPO 目标；α 是 clip 范围，β 是 KL 系数，ε 是数值稳定项。</div>
+
+  <div class="tbl-scroll">
+    <table class="tbl-nowrap">
+      <thead>
+        <tr><th>阶段</th><th>数据</th><th>奖励</th><th style="text-align:right">batch</th><th style="text-align:right">rollouts</th><th style="text-align:right">步数</th><th style="text-align:right">LR</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>冷启动 SFT</td><td>Parallel-GSM8K</td><td>SFT（格式）</td><td class="num">128</td><td class="num">—</td><td class="num">58 / 230</td><td class="num">1e-5</td></tr>
+        <tr><td>简单题 RL</td><td>GSM8K</td><td>R<sub>⟨Parallel⟩</sub> × R<sub>acc</sub></td><td class="num">1024</td><td class="num">5</td><td class="num">35</td><td class="num">1e-6</td></tr>
+        <tr><td>难题 RL</td><td>DAPO</td><td>R<sub>acc</sub></td><td class="num">512</td><td class="num">8</td><td class="num">300</td><td class="num">1e-6</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left;margin-top:-6px">58 / 230 分别是 Parallel-SFT-Seen 与 Parallel-SFT-Unseen 的梯度更新步数。代码库基于 VERL，论文称沿用官方 recipe、没有调超参。</p>
+
+  <h3>「并行」并行在哪</h3>
+  <p>
+    这里的并行是<strong>结构上的多路径</strong>，不是多卡并行解码。从论文的实现描述看，因果模型里所有 <code>&lt;Path&gt;</code> 仍在同一条自回归序列中依次生成，只是被标签切成不同的段；论文也指出，因果模型没有显式隔离，某条路径的隐状态可能泄漏到另一条，路径之间的梯度也会互相干扰。
+  </p>
+  <p>
+    结构化变体才真正改动注意力：<strong>path-window masking</strong> 让每条路径只能看自己和共享上下文，<strong>multiverse position encodings</strong> 给每条路径分配不重叠的位置下标。两者一起把路径隔开，同时保留 <code>&lt;Summary&gt;</code> 对全部路径的可见性。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">工程取舍</span><h4>结构隔离不是免费的</h4></div>
+    <p>
+      结构化变体在 Unseen S2 上平均 46.8，低于因果 Seen 的 48.9；加上 Stage 2 RL 还会再掉 8.6。论文的解释是：在简单题上学到的 mask 不能很好地迁移到难题分布。
+      换句话说，<strong>给模型更强的结构先验，不等于给它更好的优化路径</strong>；RL 训练和架构归纳偏置需要一起设计。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条主链，三个标签；结构化变体再加两道隔离</h2></div>
+  <p class="sec-sub">先看推理时怎么走，再看训练中并行块的位置怎么从「探索」滑到「验证」。</p>
+
+  <figure class="flow-fig">
+    <svg viewBox="0 0 680 660" role="img" aria-label="Parallel-R1 推理流程">
+      <defs>
+        <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"></path>
+        </marker>
+      </defs>
+
+      <rect class="flow-box" x="160" y="20" width="360" height="54" rx="12"></rect>
+      <text class="flow-text" x="340" y="53" text-anchor="middle">问题 q</text>
+      <path class="flow-arrow" d="M 340 74 L 340 100" marker-end="url(#arrowhead)"></path>
+
+      <rect class="flow-c1" x="160" y="104" width="360" height="54" rx="12"></rect>
+      <text class="flow-text" x="340" y="137" text-anchor="middle">主链自回归推理</text>
+      <path class="flow-arrow" d="M 340 158 L 340 184" marker-end="url(#arrowhead)"></path>
+
+      <rect class="flow-box" x="160" y="188" width="360" height="54" rx="12"></rect>
+      <text class="flow-text" x="340" y="221" text-anchor="middle">走到关键步：预测 &lt;Parallel&gt;</text>
+      <path class="flow-arrow" d="M 340 242 L 340 268" marker-end="url(#arrowhead)"></path>
+
+      <rect class="flow-accent" x="100" y="272" width="480" height="190" rx="16"></rect>
+      <text class="flow-mono" x="340" y="298" text-anchor="middle">并行块（可重复）</text>
+
+      <rect class="flow-box" x="120" y="315" width="120" height="70" rx="10"></rect>
+      <text class="flow-mono" x="180" y="345" text-anchor="middle">&lt;Path&gt; A</text>
+      <text class="flow-small" x="180" y="366" text-anchor="middle">独立推理</text>
+
+      <rect class="flow-box" x="280" y="315" width="120" height="70" rx="10"></rect>
+      <text class="flow-mono" x="340" y="345" text-anchor="middle">&lt;Path&gt; B</text>
+      <text class="flow-small" x="340" y="366" text-anchor="middle">独立推理</text>
+
+      <rect class="flow-box" x="440" y="315" width="120" height="70" rx="10"></rect>
+      <text class="flow-mono" x="500" y="345" text-anchor="middle">&lt;Path&gt; C</text>
+      <text class="flow-small" x="500" y="366" text-anchor="middle">独立推理</text>
+
+      <rect class="flow-box" x="220" y="405" width="240" height="42" rx="10"></rect>
+      <text class="flow-mono" x="340" y="431" text-anchor="middle">&lt;Summary&gt; 汇总</text>
+
+      <path class="flow-arrow" d="M 340 462 L 340 496" marker-end="url(#arrowhead)"></path>
+      <rect class="flow-c1" x="160" y="500" width="360" height="54" rx="12"></rect>
+      <text class="flow-text" x="340" y="533" text-anchor="middle">恢复主链</text>
+      <path class="flow-arrow" d="M 340 554 L 340 580" marker-end="url(#arrowhead)"></path>
+
+      <rect class="flow-box" x="160" y="584" width="360" height="50" rx="12"></rect>
+      <text class="flow-text" x="340" y="615" text-anchor="middle">继续推理 / 输出答案</text>
+    </svg>
+    <figcaption>
+      图 1：推理时的控制流。主链在关键步暂停，展开多个 <code>&lt;Path&gt;</code>，再由 <code>&lt;Summary&gt;</code> 汇总回主链；这个过程可以在一次推理里重复多次。依据论文 §3.2 重绘。
+      <br><span class="fig-toggle">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>触发是动态的：</strong>不是每道题都固定分叉；模型在自回归过程中预测到 <code>&lt;Parallel&gt;</code> 才进入并行块。</li>
+          <li><strong>路径数量不固定：</strong>论文的形式化里是 N 条独立轨迹；实现中由模型自己决定生成几条 <code>&lt;Path&gt;</code>。</li>
+          <li><strong>因果模型没有硬隔离：</strong>所有路径在同一条序列里，前面的路径可能影响后面的路径；结构化变体才用 attention mask 和位置编码把路径隔开。</li>
+          <li><strong>并行的收益是「探索」，不是吞吐：</strong>论文没有把它实现成多路并行解码；多路径会增加 token 量，换的是更广的探索和更好的策略。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <h3>训练中，并行块从链首滑到链尾</h3>
+  <p>
+    论文用「<code>&lt;Parallel&gt;</code> 起始 token 下标 / 解的总长度」度量并行块的相对位置，发现它随 RL 训练<strong>持续上升</strong>：早期模型在推理开头就用并行，后期模型把并行放到接近答案的位置。
+  </p>
+
+  <figure class="behavior-fig">
+    <svg viewBox="0 0 680 230" role="img" aria-label="并行块位置从早期探索移到后期验证">
+      <defs>
+        <marker id="arrowhead2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"></path>
+        </marker>
+      </defs>
+
+      <text class="flow-label" x="20" y="61">早期</text>
+      <rect class="flow-box" x="100" y="36" width="500" height="40" rx="20"></rect>
+      <rect class="flow-accent" x="130" y="36" width="150" height="40" rx="20"></rect>
+      <text class="flow-text" x="205" y="62" text-anchor="middle" style="font-size:14px">Parallel 探索</text>
+      <text class="flow-label" x="560" y="62" text-anchor="middle">主链</text>
+      <path class="flow-arrow" d="M 600 56 L 638 56" marker-end="url(#arrowhead2)"></path>
+      <text class="flow-small" x="656" y="61" text-anchor="middle">答案</text>
+
+      <text class="flow-label" x="20" y="191">后期</text>
+      <rect class="flow-box" x="100" y="166" width="500" height="40" rx="20"></rect>
+      <rect class="flow-accent" x="420" y="166" width="150" height="40" rx="20"></rect>
+      <text class="flow-text" x="495" y="192" text-anchor="middle" style="font-size:14px">Parallel 验证</text>
+      <text class="flow-label" x="140" y="192" text-anchor="middle">主链</text>
+      <path class="flow-arrow" d="M 600 186 L 638 186" marker-end="url(#arrowhead2)"></path>
+      <text class="flow-small" x="656" y="191" text-anchor="middle">答案</text>
+
+      <path class="flow-arrow" d="M 75 92 L 75 152" marker-end="url(#arrowhead2)"></path>
+      <text class="flow-small" x="20" y="126" text-anchor="start">训练推进</text>
+    </svg>
+    <figcaption>
+      图 2：<code>&lt;Parallel&gt;</code> 块在推理链中的位置变化（示意）。论文 Figure 3 发现相对位置随训练持续上升；图中只表达方向，不是精确读数。
+    </figcaption>
+  </figure>
+
+  <p>
+    论文的解释是：训练早期模型本身推理能力弱，用并行做<strong>计算探索</strong>是发现解法的必要手段，方差高但值得；训练后期单链已经能给出高置信答案，早期分叉反而可能引入错误、危及最终奖励。于是模型学会了更保守的策略：<strong>先用单链解一遍，再用并行做多角度验证</strong>。
+  </p>
+  <p>
+    这不是模型突然更「理解」并行的价值，而是<strong>最终答案主导的奖励</strong>把它推向风险规避。论文也把这一点点破：最终答案优化和多样推理结构之间存在张力。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均 48.9：不是一直并行，是少而准地用</h2></div>
+  <p class="sec-sub">看三组数：主表、奖励消融、以及训练中并行行为怎么变。</p>
+
+  <div class="tbl-scroll">
+    <table class="tbl-nowrap">
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th style="text-align:right">#Parallel</th>
+          <th style="text-align:right">AIME25<br>Mean@16</th>
+          <th style="text-align:right">AIME25<br>Pass@16</th>
+          <th style="text-align:right">AIME24<br>Mean@16</th>
+          <th style="text-align:right">AIME24<br>Pass@16</th>
+          <th style="text-align:right">AMC23<br>Mean@16</th>
+          <th style="text-align:right">AMC23<br>Pass@16</th>
+          <th style="text-align:right">MATH<br>Mean@1</th>
+          <th style="text-align:right">Avg.</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen3-4B-Base</td><td class="num">0.0</td><td class="num">1.3</td><td class="num">10.2</td><td class="num">2.9</td><td class="num">16.5</td><td class="num">8.1</td><td class="num">51.2</td><td class="num">13.9</td><td class="num">6.6</td></tr>
+        <tr><td>Parallel-SFT-Seen</td><td class="num">95.6</td><td class="num">8.0</td><td class="num">29.8</td><td class="num">10.6</td><td class="num">26.4</td><td class="num">48.9</td><td class="num">79.2</td><td class="num">76.6</td><td class="num">36.0</td></tr>
+        <tr><td>Parallel-SFT-Unseen</td><td class="num">95.6</td><td class="num">5.2</td><td class="num">20.9</td><td class="num">8.5</td><td class="num">26.7</td><td class="num">41.7</td><td class="num">80.1</td><td class="num">71.5</td><td class="num">31.7</td></tr>
+        <tr><td>GRPO (DAPO)</td><td class="num">0.0</td><td class="num">14.8</td><td class="num">32.4</td><td class="num">18.5</td><td class="num">30.6</td><td class="num">63.6</td><td class="num">85.1</td><td class="num">83.5</td><td class="num">45.1</td></tr>
+        <tr><td>+ RL on GSM8K</td><td class="num">0.0</td><td class="num">13.3</td><td class="num">26.3</td><td class="num">18.8</td><td class="num">34.9</td><td class="num">66.4</td><td class="num">82.2</td><td class="num">82.6</td><td class="num">45.3</td></tr>
+        <tr class="best"><td>Parallel-R1-Seen</td><td class="num">27.3</td><td class="num">19.2</td><td class="num">38.9</td><td class="num">19.4</td><td class="num">37.1</td><td class="num">70.5</td><td class="num">85.0</td><td class="num">86.7</td><td class="num">48.9</td></tr>
+        <tr><td>Parallel-R1-Unseen (S1)</td><td class="num">13.6</td><td class="num">17.7</td><td class="num">37.8</td><td class="num">18.3</td><td class="num">33.2</td><td class="num">69.7</td><td class="num">88.9</td><td class="num">82.6</td><td class="num">47.1</td></tr>
+        <tr><td>Parallel-R1-Unseen (S2)</td><td class="num">63.0</td><td class="num">19.0</td><td class="num">42.2</td><td class="num">16.3</td><td class="num">31.8</td><td class="num">67.5</td><td class="num">91.5</td><td class="num">84.5</td><td class="num">46.8</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left;margin-top:-6px">Table 2。AIME25 / AIME24 / AMC23 为 mean@16 与 pass@16，MATH 为 mean@1；采样温度 T=1.0。</p>
+
+  <p>几个值得注意的点：</p>
+  <ul>
+    <li><strong>Seen 的平均分 48.9，比 GRPO 的 45.1 高 8.4%</strong>（相对提升）。AIME25 从 14.8 拉到 19.2，AIME24 从 18.5 到 19.4，AMC23 从 63.6 到 70.5，MATH 从 83.5 到 86.7——四个基准全涨。</li>
+    <li><strong>SFT 单独只有 36.0</strong>：格式学会了（并行比例 95.6%），但推理能力没跟上，远低于 GRPO 的 45.1。格式不是能力。</li>
+    <li><strong>「多加一段简单题 RL」本身几乎没用</strong>：GRPO + RL on GSM8K 是 45.3，只比 45.1 高 0.2。关键不是「多训简单题」，而是冷启动阶段要教的是<strong>格式和触发行为</strong>，不是再刷一遍简单题。</li>
+    <li><strong>结构化变体没有赢</strong>：Unseen S2 平均 46.8、S1 47.1，都低于因果 Seen 的 48.9。S2 把并行比例拉到 63.0（S1 只有 13.6），AIME25 也更高（19.0 vs 17.7），但 AMC23 掉了（67.5 vs 69.7），MATH 反而略高（84.5 vs 82.6）——并行比例和平均分之间不是单调关系。</li>
+    <li><strong>最终模型只用了 27.3% 的并行</strong>，远低于 SFT 的 95.6%。它不是「一直并行」，而是学会了选择性使用。</li>
+  </ul>
+
+  <h3>奖励怎么选：三种方案的取舍</h3>
+  <p>切换指标，看「只奖励准确率」「只奖励并行」「交替奖励」在四个基准和并行比例上的差别。数据来自论文 Table 4（结构化变体 Unseen）。</p>
+
+  <div class="tabs" id="reward-tabs">
+    <button class="tab active" data-reward="aime25">AIME25</button>
+    <button class="tab" data-reward="aime24">AIME24</button>
+    <button class="tab" data-reward="amc23">AMC23</button>
+    <button class="tab" data-reward="math">MATH</button>
+    <button class="tab" data-reward="ratio">并行比例</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="slots s3" id="reward-slots"></div>
+    <div class="readout" id="reward-readout" style="margin-top:14px">
+      <div class="r-head">当前指标</div>
+      <div id="reward-msg"></div>
+    </div>
+    <div class="legend" style="margin-top:12px">
+      <span><i style="background:var(--c1)"></i>只奖励准确率</span>
+      <span><i style="background:var(--c2)"></i>只奖励并行</span>
+      <span><i style="background:var(--accent)"></i>交替奖励</span>
+    </div>
+    <div class="stage-note">AIME25 / AIME24 的条形按 0–25 缩放，AMC23 / MATH / 并行比例按 0–100 缩放；数字为原始值。</div>
+  </div>
+
+  <h3>最反直觉的发现：并行可以只当脚手架</h3>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">中期探索</span><h4>先强制探索 200 步，再切回纯准确率</h4></div>
+    <p>
+      论文设计了一个两段实验：前 200 步沿用 Unseen S2 的交替奖励，强制模型高频使用并行（探索阶段）；200 步后切换成只看准确率（利用阶段）。
+      进入第二阶段后，并行比例持续下降，但 AIME25 准确率反而上升，峰值达到 <strong>25.6%</strong>。论文报告这相对基线提升 <strong>42.9%</strong>。
+    </p>
+    <p>
+      这说明并行的价值不只在「推理时多几条路」本身，更在于<strong>强制探索把模型推到了一个更好的策略区域</strong>。脚手架拆除后，模型已经不在原来的起点上。这是论文最值得迁移的思路：过程本身可以是一种临时的训练信号，而不是永久的推理格式。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是「怎么学并行」，不是「并行一定更好」</h2></div>
+  <p class="sec-sub">论文自己留下的四个边界，决定了这套方法能搬到哪里。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界一</span><h4>只在数学这类可验证奖励里验证</h4></div>
+      <p>
+        四个基准全是数学：AIME25、AIME24、AMC23、MATH。奖励是答案对错，能自动判定。代码、写作、科学假说这些开放域任务，奖励函数本身就要重新设计；论文没有给出证据说明这套课程能直接迁移。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界二</span><h4>4B 基座 + 教师依赖</h4></div>
+      <p>
+        实验只用了 <code>Qwen-3-4B-Base</code>；冷启动数据来自 <code>DeepSeek-R1-0528-Qwen-3-8B</code>。更大的模型是否已经有潜在的并行能力、是否还需要这套冷启动，论文没有回答。教师模型生成的格式也构成了学生能力的天花板。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界三</span><h4>推理开销没有定量账</h4></div>
+      <p>
+        论文论证测试时方法开销高，但没有给出 Parallel-R1 自己多路径生成的 token / 延迟增量，也没有和测试时方法做同等条件下的成本对比。多写几条路径终究比单链贵；这笔账需要在使用场景里自己算。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界四</span><h4>结构化变体更差，行为也可能被奖励塑形</h4></div>
+      <p>
+        Unseen S2 平均 46.8、S1 47.1，都低于 Seen 的 48.9；给结构化模型加 Stage 2 RL 还会掉 8.6。另一方面，最终答案主导的奖励把并行推到链尾，模型可能变得过于保守、在真正需要探索时也不分叉。论文把它解释为风险规避，但这仍是开放问题。
+      </p>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>Parallel-R1 给出的是一套「把复杂行为拆成格式、触发、泛化」的训练范式，以及一个可复用的中期脚手架思路；它没有证明并行在所有任务上都优于串行。</strong>
+    如果你的任务有可靠的过程信号、且单链模型已经卡在探索不足上，这套课程值得试；如果你只是想要更高的吞吐，多路径生成不是答案。
+  </p>
+</section>
+
+<footer>
+  <div>Parallel-R1: Towards Parallel Thinking via Reinforcement Learning · Tong Zheng, Hongming Zhang, Wenhao Yu, Xiaoyang Wang, Runpeng Dai, Rui Liu, Huiwen Bao, Chengsong Huang, Heng Huang, Dong Yu</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.07980" target="_blank" rel="noopener">arXiv 2509.07980</a> · arXiv 2025 · Tencent AI Lab Seattle 等<br>
+    代码：<a href="https://github.com/zhengkid/Parallel-R1" target="_blank" rel="noopener">zhengkid/Parallel-R1</a><br>
+    笔记：<a href="/parallel-r1towards-parallel-thinking-via-reinforcement-learning/">Parallel-R1：Towards Parallel Thinking via Reinforcement Learning</a>
+  </div>
+  <div class="src">
+    笔记勘误：原笔记把「AIME25 相比基线提升 42.9%」写在主表 Parallel-R1-Seen 的介绍里。论文中 42.9% 来自 §4.5 的中期探索脚手架实验（AIME25 峰值 25.6%）；主表 Seen 的 AIME25 是 19.2，对比 GRPO 的 14.8，相对提升约 29.7%。
+    本页数字均取自论文 Table 1–4、§4.4–4.5 与摘要。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 课程阶段切换器
+   ============================================================ */
+(function () {
+  var DATA = {
+    base: {
+      name: '00 · 串行基座',
+      parallel: 0.0,
+      aime25: 1.3,
+      avg: 6.6,
+      steps: null,
+      color: 'var(--c1)',
+      msg: '基座模型从不使用并行结构（并行比例 0.0%），AIME25 只有 1.3，四基准平均 6.6。它是一条纯串行 CoT。'
+    },
+    sft: {
+      name: '01 · 冷启动 SFT',
+      parallel: 95.6,
+      aime25: 8.0,
+      avg: 36.0,
+      steps: 58,
+      color: 'var(--c2)',
+      msg: '在 Parallel-GSM8K 上做 58 步 SFT 后，模型几乎逢题就写并行块：并行比例 95.6%，AIME25 升到 8.0，平均 36.0。格式学会了，但还不会判断什么时候值得用。'
+    },
+    easy: {
+      name: '02 · 简单题 RL',
+      parallel: null,
+      aime25: null,
+      avg: null,
+      steps: 35,
+      color: 'var(--c3)',
+      msg: '在 GSM8K 上用 R⟨Parallel⟩ × Racc 做 35 步 RL。奖励要求「有并行且答对」，模型开始把格式和正确性绑定。这一阶段的模型没有单独列在主表里，所以不填数字；它的作用是让 Stage 3 有一个稳定的触发行为。'
+    },
+    hard: {
+      name: '03 · 难题 RL',
+      parallel: 27.3,
+      aime25: 19.2,
+      avg: 48.9,
+      steps: 300,
+      color: 'var(--accent)',
+      msg: '在 DAPO 上只用准确率奖励做 300 步 RL。最终 Seen 模型的并行比例降到 27.3%，AIME25 升到 19.2，平均 48.9。并行没有被丢掉，而是从「默认动作」变成了「选择性动作」。'
+    }
+  };
+
+  var btns = document.querySelectorAll('#stage-btns .rule-btn');
+  var slots = document.getElementById('stage-slots');
+  var msg = document.getElementById('stage-msg');
+  if (!slots || !msg) return;
+
+  function makeSlot(name, text, num, max, color, sub) {
+    var slot = document.createElement('div');
+    slot.className = 'slot';
+
+    var n = document.createElement('div');
+    n.className = 'slot-name';
+    n.textContent = name;
+    slot.appendChild(n);
+
+    var v = document.createElement('div');
+    v.className = 'slot-val';
+    if (text === null || text === undefined) {
+      v.innerHTML = '<span class="na">—</span>';
+    } else {
+      v.textContent = text;
+    }
+    slot.appendChild(v);
+
+    if (num !== null && num !== undefined) {
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var fill = document.createElement('i');
+      fill.style.background = color;
+      var w = num === 0 ? 0 : Math.max(2, Math.min(100, num / max * 100));
+      fill.style.width = w + '%';
+      bar.appendChild(fill);
+      slot.appendChild(bar);
+    }
+
+    if (sub) {
+      var s = document.createElement('div');
+      s.className = 'slot-sub';
+      s.textContent = sub;
+      slot.appendChild(s);
+    }
+    return slot;
+  }
+
+  function render(key) {
+    var d = DATA[key];
+    if (!d) return;
+    slots.innerHTML = '';
+
+    var pSub = d.parallel === null ? '论文未单独评测' : '使用并行结构的回答占比';
+    var aSub = d.aime25 === null ? '论文未单独评测' : 'Mean@16';
+    var gSub = d.avg === null ? '论文未单独评测' : '四个基准平均';
+    var sSub = d.steps === null ? '无课程训练' : '梯度更新步';
+
+    slots.appendChild(makeSlot('并行比例 (# Parallel)', d.parallel === null ? null : d.parallel.toFixed(1) + '%', d.parallel, 100, d.color, pSub));
+    slots.appendChild(makeSlot('AIME25 mean@16', d.aime25 === null ? null : d.aime25.toFixed(1), d.aime25, 25, d.color, aSub));
+    slots.appendChild(makeSlot('四基准平均', d.avg === null ? null : d.avg.toFixed(1), d.avg, 50, d.color, gSub));
+    slots.appendChild(makeSlot('训练步数', d.steps === null ? null : d.steps, d.steps, 300, d.color, sSub));
+
+    msg.innerHTML = '<div class="r-head">' + d.name + '</div>' + d.msg;
+
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('active', btns[i].getAttribute('data-stage') === key);
+    }
+  }
+
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].addEventListener('click', function () {
+      render(this.getAttribute('data-stage'));
+    });
+  }
+
+  render('base');
+})();
+
+/* ============================================================
+   2) 奖励方案对比
+   ============================================================ */
+(function () {
+  var DATA = {
+    aime25: {
+      label: 'AIME25 mean@16',
+      max: 25,
+      unit: '',
+      values: [17.7, 17.7, 19.0],
+      msg: '交替奖励 19.0 最高；准确率与并行单独奖励都是 17.7。并行比例却从 13.6 拉到 63.0——多出来的并行没有伤害难题表现。'
+    },
+    aime24: {
+      label: 'AIME24 mean@16',
+      max: 25,
+      unit: '',
+      values: [18.3, 15.2, 16.3],
+      msg: '准确率单独 18.3 最高；交替 16.3，并行 15.2。这里交替没有赢，说明奖励设计不是全胜。'
+    },
+    amc23: {
+      label: 'AMC23 mean@16',
+      max: 100,
+      unit: '',
+      values: [69.7, 59.4, 67.5],
+      msg: '准确率 69.7 最高；交替 67.5；并行 59.4。强行奖励并行结构的代价在这里最明显。'
+    },
+    math: {
+      label: 'MATH mean@1',
+      max: 100,
+      unit: '',
+      values: [82.6, 81.7, 84.5],
+      msg: '交替 84.5 最高；准确率 82.6；并行 81.7。差距不大，但方向一致：只奖励结构会掉点。'
+    },
+    ratio: {
+      label: '并行比例 (# Parallel)',
+      max: 100,
+      unit: '%',
+      values: [13.6, 80.3, 63.0],
+      msg: '准确率 13.6%，并行 80.3%，交替 63.0%。交替方案把并行比例拉高，同时保住了大部分准确率——这是论文选它的理由。'
+    }
+  };
+
+  var names = ['只奖励准确率', '只奖励并行', '交替奖励'];
+  var colors = ['var(--c1)', 'var(--c2)', 'var(--accent)'];
+  var tabs = document.querySelectorAll('#reward-tabs .tab');
+  var slots = document.getElementById('reward-slots');
+  var msg = document.getElementById('reward-msg');
+  if (!slots || !msg || !tabs.length) return;
+
+  function render(key) {
+    var d = DATA[key];
+    if (!d) return;
+    slots.innerHTML = '';
+
+    for (var i = 0; i < 3; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot';
+
+      var n = document.createElement('div');
+      n.className = 'slot-name';
+      n.textContent = names[i];
+      slot.appendChild(n);
+
+      var v = document.createElement('div');
+      v.className = 'slot-val';
+      v.textContent = d.values[i].toFixed(1) + d.unit;
+      slot.appendChild(v);
+
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var fill = document.createElement('i');
+      fill.style.background = colors[i];
+      fill.style.width = Math.max(2, Math.min(100, d.values[i] / d.max * 100)) + '%';
+      bar.appendChild(fill);
+      slot.appendChild(bar);
+
+      slots.appendChild(slot);
+    }
+
+    msg.innerHTML = '<div class="r-head">' + d.label + '</div>' + d.msg;
+
+    for (var j = 0; j < tabs.length; j++) {
+      tabs[j].classList.toggle('active', tabs[j].getAttribute('data-reward') === key);
+    }
+  }
+
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener('click', function () {
+      render(this.getAttribute('data-reward'));
+    });
+  }
+
+  render('aime25');
+})();
+
+/* ============================================================
+   3) 图注展开
+   ============================================================ */
+(function () {
+  var toggles = document.querySelectorAll('.fig-toggle');
+  for (var i = 0; i < toggles.length; i++) {
+    toggles[i].addEventListener('click', function () {
+      var fig = this.closest('figure');
+      if (!fig) return;
+      var detail = fig.querySelector('.figure-detail');
+      if (!detail) return;
+      var open = detail.classList.toggle('active');
+      this.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+    });
+  }
+})();
+</script>
+</body>
+</html>

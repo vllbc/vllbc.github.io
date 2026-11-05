@@ -1,0 +1,643 @@
+<!-- LEDGER
+| 25.0 | Table 1 | 72.6-47.6 |
+| 52.5 | Table 1 | (72.6-47.6)/47.6*100 |
+| 13.7 | Table 1 | 72.6-58.9 |
+| 23.3 | Table 1 | (72.6-58.9)/58.9*100 |
+| 17.1 | Table 1 | 67.3-50.2 |
+| 34.1 | Table 1 | (67.3-50.2)/50.2*100 |
+| 9.1 | Table 1 | 67.3-58.2 |
+| 15.6 | Table 1 | (67.3-58.2)/58.2*100 |
+| 21.9 | Table 1 | 45.4-23.5 |
+| 93.2 | Table 1 | (45.4-23.5)/23.5*100 |
+| 14.3 | Table 1 | 45.4-31.1 |
+| 46.0 | Table 1 | (45.4-31.1)/31.1*100 |
+| 3.5 | Table 1 | 28.3-24.8 |
+| 9.0 | Table 1 | 28.3-19.3 |
+| 28.0 | Table 1 | 46.5-18.5 |
+| 10.5 | Table 1 | 46.5-36.0 |
+| 21.4 | Table 1 | 45.1-23.7 |
+| 90.3 | Table 1 | (45.1-23.7)/23.7*100 |
+| 1.5076 | Eq.3 | (1-0.375)/0.414578098794425 |
+| -0.9045 | Eq.3 | (0-0.375)/0.414578098794425 |
+| 0.3015 | Eq.3 | (0.5-0.375)/0.414578098794425 |
+| 0.0635 | Eq.2 | 0.063527763378787 |
+| 1.8084 | Eq.2 | 1.2*1.507556722888818-0.01*(0.063527763378787) |
+| 0.3612 | Eq.2 | 1.2*0.301511344577764-0.01*(0.063527763378787) |
+| -1.2670 | Eq.2 | 1.4*-0.904534033733291-0.01*(0.063527763378787) |
+| 1.1180 | Eq.3 | (1-0.5)/0.447213595499958 |
+| 0.0000 | Eq.3 | (0.5-0.5)/0.447213595499958 |
+| 1.3410 | Eq.2 | 1.2*1.118033988749895-0.01*(0.063527763378787) |
+| -1.5659 | Eq.2 | 1.4*-1.118033988749895-0.01*(0.063527763378787) |
+| -0.0006 | Eq.2 | 0-0.01*(0.063527763378787) |
+| 1.7500 | Eq.3 | (1-0.3)/0.4 |
+| -0.7500 | Eq.3 | (0-0.3)/0.4 |
+| 0.5000 | Eq.3 | (0.5-0.3)/0.4 |
+| 2.1000 | Eq.2 | 1.2*1.75-0*(0.063527763378787) |
+| -1.0500 | Eq.2 | 1.4*-0.75-0*(0.063527763378787) |
+| 0.6000 | Eq.2 | 1.2*0.5-0*(0.063527763378787) |
+| 14.1 | Table 1 | (28.3-24.8)/24.8*100 |
+<!-- 本次新增推导。ln 1.4 = 0.3364722366212129，1.4 − 1 − ln 1.4 = 0.06352776337878707；
+     k = 0.01 × (1.4 − 1 − ln 1.4) = 0.0006352776337878707，第 2、4 组共用此 k。
+     原 A 行分母改为全精度 0.414578098794425 / 0.447213595499958，数值不变。 -->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUA-RL · 让 LLM 扮的用户进到 RL 循环里</title>
+<meta name="description" content="MUA-RL 把 LLM 模拟的用户放进 GRPO 的多轮 rollout，用「工具结果 + 用户消息」掩码训练，奖励只剩任务是否完成；Qwen3-32B 在 TAU1 Retail 从 47.6 升到 72.6。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.ladder{display:grid;grid-template-columns:120px 1fr 64px;gap:10px 12px;align-items:center;margin:22px 0}
+.ladder .lname{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;color:var(--text-muted);text-align:right}
+.ladder .ltrack{height:26px;background:var(--bg-soft);border-radius:6px;overflow:hidden}
+.ladder .lfill{height:100%;border-radius:6px;transition:width .45s ease}
+.ladder .lval{font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--text);text-align:right}
+.ladder .lfill.f-base{background:var(--c1)}
+.ladder .lfill.f-cold{background:var(--c2)}
+.ladder .lfill.f-mua{background:var(--accent)}
+.mask-row{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:10px 0 4px}
+.mask-row span{font-family:"JetBrains Mono",monospace;font-size:11px;text-align:center;padding:6px 2px;border-radius:6px;background:var(--bg-soft);color:var(--text-soft)}
+.mask-row span.tr{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+@media (max-width:520px){.ladder{grid-template-columns:86px 1fr 56px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MUA-RL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agentic Tool Use · arXiv 2025</span>
+  <h1>MUA-RL：把「会变卦的用户」塞进 RL 循环</h1>
+  <p class="hero-sub">
+    多轮工具调用里，用户会追问、补信息、改主意，而现有的 agentic RL 大多面对脚本化的问题单和固定环境。
+    这篇把 <strong>LLM 扮演的用户</strong>放进 GRPO 的 rollout，让 agent 一边和用户对话澄清意图、一边调工具查数据库，
+    奖励只看最终任务是否完成。代价是全流程依赖 GPT-4o 当用户模拟器，且只在 TAU1 的 retail/airline 上训。
+  </p>
+  <div class="meta">
+    <span>Weikang Zhao, Xili Wang et al. · 美团 / 中科院自动化所 / 北大</span>
+    <a href="https://arxiv.org/abs/2508.18669" target="_blank" rel="noopener">arXiv 2508.18669 ↗</a>
+    <span>代码：论文称将开源于 github.com/zzwkk/MUA-RL（v1 中标注「will be open-sourced」）</span>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    问题不是「不会调工具」，而是「不会和人来回核对」。论文把 rollout 从「文本生成」推到「多步调工具」再推到
+    <strong>「多轮用户交互 + 实时工具执行」</strong>：agent 每一轮可以选择调工具或给用户发消息，LLM 用户按 agent 的回复动态回应。
+  </p>
+  <p>
+    训练配方极简：SFT 冷启动约 2000 条轨迹 → GRPO（<em>β=0.001</em>、每 query 8 个 rollout、最长 32768 token、最多 30 轮）→
+    二元奖励（完成 1，否则 0），工具结果与用户消息在 loss 里被掩码。
+  </p>
+  <p>
+    最亮眼的是泛化：用 TAU1 的 retail（115 题）+ airline（50 题）训练，在没见过的 TAU2 Telecom 上
+    MUA-RL-32B 的 TCR 从冷启动的 <em>21.6%</em> 拉到 <em>45.1%</em>；但 8B 在 BFCL-V3 上反而比冷启动低。
+  </p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">72.6<small></small></div><div class="k">MUA-RL-32B · TAU1 Retail（基线 47.6）</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">45.1<small>% TCR</small></div><div class="k">MUA-RL-32B · TAU2 Telecom（冷启动 21.6%）</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">28.0<small> 点</small></div><div class="k">Telecom 成功率：32B 的 TCR 45.1 vs 成功率 28.3，相差 28.0 个百分点（25B 级 Qwen3-235B 成功率仅 24.6）</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>用户会变卦，环境却按剧本走</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么「多轮工具调用」不是把单轮函数调用重复几次。</p>
+  <p>
+    论文在 §1 里把真实用户的需求描述为「highly dynamic and unpredictable」：用户会「根据模型的回复调整问题和预期」，
+    形成「a feedback loop that requires continuous bidirectional adaptation」。在 TAU 这类任务里，超过一半的槽位信息
+    agent 无法直接从工具拿到，必须开口问用户；而用户只会在被问到（或按 policy 规定）时才给出关键信息。
+  </p>
+  <p>
+    形式化上（§3.1, Eq.1），一条轨迹是 <code>o<sub>1,user</sub> → t<sub>1</sub> → o<sub>1,db</sub> → … → m<sub>1</sub> → …</code>
+    的交替：工具调用 <code>t<sub>i</sub></code> 后得到数据库观测 <code>o<sub>i,db</sub></code>，发给用户消息 <code>m<sub>i</sub></code> 后得到用户观测
+    <code>o<sub>i,user</sub></code>。每一轮 agent 自己决定调几个工具、要不要先说话。
+  </p>
+  <p>
+    难点在于「每一步都不是独立可验证的」：同一次订单修改，先问地址还是先查订单都行；用户第一次回答常常含糊，需要追问。
+    这种路径依赖让「每步都给格式分」的奖励容易把 agent 引到复制某种回复模板上，而不是真的解决任务。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两类前人都停在「环境是死的」</h2></div>
+  <p class="sec-sub">读完这节你应该知道：现有 RL 的 rollout 缺的到底是哪一环。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">A</span><h4>文本 / 多步工具 RL</h4></div>
+      <p class="sub">Retool · SkyRL · RAGEN · Search-R1 …</p>
+      <p>论文 §1：这些系统「operate in predetermined environments and rely on pre-scripted queries」。
+      rollout 里 agent 要么只输出文本拿奖励，要么和代码沙箱、Docker、搜索引擎这类「数据库」交替交互（§3.3.2, Figure 4(a)(b)）。
+      它们证明了工具执行能进训练循环，但没有<strong>用户</strong>这个角色。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">B</span><h4>LLM 模拟人类 + SFT</h4></div>
+      <p class="sub">Generative Agents · PLM world models · 各类工具轨迹合成</p>
+      <p>LLM 可以扮演用户来造数据、做基准里的 user simulator（TAU 评测本身就用 LLM 用户）。论文 §3.3.2 承认已有工作「explored using LLMs as simulators of human characters」，
+      但指出这些模拟没被放进<strong>大规模 RL rollout</strong>，agent 因此学不到「对动态用户的反向适配」。</p>
+    </div>
+  </div>
+  <p class="lead">
+    于是缺口很清楚：RL 训练里有真实的工具和数据库，唯独没有会随 agent 回复而改变行为的用户。
+    MUA-RL 就是把 A 的工具执行和 B 的 LLM 用户拼在同一个 rollout 里（Figure 4(c)）。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心只有三件事：GRPO、掩码、0/1 奖励</h2></div>
+  <p class="sec-sub">读完这节你应该知道：adv 是怎么从一组 rollout 里算出来的，而本模拟和原文哪里不同。</p>
+  <h3>第 1 件：组内归一化的优势</h3>
+  <p>
+    §3.3.1 采用 GRPO（Eq.2/3）：对每个 query 采一组 <code>G</code> 个轨迹，组内标准化得到 advantage
+    <code>A<sub>i</sub> = (r<sub>i</sub> − mean) / std</code>，再做带裁剪的 ratio 目标并减去 KL。原文没写 <code>std</code> 的口径；
+    本页交互按 <strong>总体标准差（÷G，即 numpy 默认 df=0）</strong> 实现，下面的手算块同口径。原文的超参：裁剪系数 <code>ε</code> 未给出具体值，
+    KL 系数 <code>β = 0.001</code>（§4.1）。
+  </p>
+  <div class="eq">
+    A<sub>i</sub> = (r<sub>i</sub> − r̄) / std(r) ，
+    &nbsp;&nbsp;L<sub>i</sub> = min(ρ<sub>i</sub>A<sub>i</sub>, clip(ρ<sub>i</sub>, 1−ε, 1+ε)·A<sub>i</sub>) − β·(ρ<sub>i</sub> − 1 − ln ρ<sub>i</sub>)
+    &nbsp;&nbsp;，ρ<sub>i</sub> = π<sub>θ</sub>/π<sub>old</sub>
+  </div>
+  <p class="eq-cap">Eq.2/3 的改写；GRPO 的 KL 项在 Eq.2 只写成 βD<sub>KL</sub>(π<sub>θ</sub>‖π<sub>ref</sub>)，具体估计用 k3 形式是页面自定，见交互说明。</p>
+
+  <h3>第 2 件：用户消息与工具结果不进 loss</h3>
+  <p>
+    §4.1 的 “Loss mask strategy”：在 loss 计算时掩掉「tool execution results and user messages」的 token。
+    交互里把 4 笔交易的 token 范围可视化——只有 agent 自己生成的部分（标 <span style="color:var(--accent-deep);font-weight:600">self</span>）参与梯度。
+  </p>
+  <div class="mask-row" id="mask-row">
+    <span class="tr" id="m-user">user msg</span>
+    <span class="tr" id="m-think">agent 发言</span>
+    <span id="m-tool">tool 结果</span>
+    <span class="tr" id="m-call">tool call</span>
+    <span class="tr" id="m-answer">agent 最终</span>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:6px">
+    示意排布（agent 发言 → 调工具 → 工具返回 → … → 任务完成）。原文只给了「掩掉 tool results 和 user messages」这一句，
+    没说明 tool call 参数本身是否参与 loss；这里按「agent 生成的一切都参与」画，属于<span class="infer">推断</span>。实际轨迹里 tool call 常以格式化文本写在 agent 消息内，二者无法从原文区分。
+  </p>
+
+  <h3>第 3 件：奖励只剩 0 或 1</h3>
+  <p>
+    §3.3.3：只有 agent「successfully fulfills the task in accordance with the system prompt」时才 <code>r = 1</code>，否则 <code>r = 0</code>。
+    论文给的理由是「Robustness to dialogue variation」与「Mitigation of reward hacking」：不限定走哪条对话路径，也不让 agent 靠输出格式骗分。
+    §4.1 还特别说明：训练时<strong>去掉了 TAU1 原本的对话内容要求</strong>（例如必须告诉用户某件衣服的库存）——因为作者观察到这些要求
+    「impede the model’s ability to learn correct tool invocation patterns」。
+  </p>
+
+  <div class="sim" id="sim">
+    <div class="sim-top">
+      <button class="rule-btn active" data-ratio-button="1.0">ρ = 1.0<span class="r-sub">on-policy：new = old</span></button>
+      <button class="rule-btn" data-ratio-button="1.4">ρ = 1.4<span class="r-sub">离策略漂移，ε=0.2 下裁剪</span></button>
+    </div>
+    <div class="slots s5" id="slots">
+      <div class="slot" data-i="0"><div class="slot-name">y₁ r=1.00</div><div class="slot-val" id="a0">A=1.1180 · L=1.1180</div><div class="bar"><i class="b1" id="b0" style="width:100%"></i></div></div>
+      <div class="slot" data-i="1"><div class="slot-name">y₂ r=0.00</div><div class="slot-val" id="a1">A=-1.1180 · L=-1.1180</div><div class="bar"><i class="b3" id="b1" style="width:100%"></i></div></div>
+      <div class="slot" data-i="2"><div class="slot-name">y₃ r=0.50</div><div class="slot-val" id="a2">A=0.0000 · L=0.0000</div><div class="bar"><i class="b1" id="b2" style="width:0%"></i></div></div>
+      <div class="slot" data-i="3"><div class="slot-name">y₄ r=0.00</div><div class="slot-val" id="a3">A=-1.1180 · L=-1.1180</div><div class="bar"><i class="b3" id="b3" style="width:100%"></i></div></div>
+      <div class="slot" data-i="4"><div class="slot-name">r₅=1.00</div><div class="slot-val" id="a4">A=1.1180 · L=1.1180</div><div class="bar"><i class="b1" id="b4" style="width:100%"></i></div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>r₅（第 5 个 rollout 的奖励）<span class="v" id="r5-v">1.00</span></label>
+        <input type="range" id="r5" min="0" max="100" step="50" value="100">
+      </div>
+      <div class="ctrl">
+        <label>ε 裁剪系数<span class="v" id="eps-v">0.20</span></label>
+        <input type="range" id="eps" min="0.05" max="0.30" step="0.05" value="0.20">
+      </div>
+      <div class="ctrl">
+        <label>β KL 系数<span class="v" id="beta-v">0.001</span></label>
+        <input type="range" id="beta" min="0" max="0.02" step="0.001" value="0.001">
+      </div>
+    </div>
+    <div class="readout" data-src="Algorithm 1 / Eq.3">
+      <div class="r-head">组统计 · 总体标准差（÷N）</div>
+      <span id="stat">N=5 · mean 0.5000 · std 0.4472（总体）· 组内有 3 种奖励，adv 非零</span>
+      <br><span id="obj">ρ=1.0：裁剪不生效，Lᵢ = ρᵢAᵢ − β(ρᵢ−1−ln ρᵢ) = Aᵢ（KL=0）</span>
+    </div>
+    <p style="font-size:13px;color:var(--text-soft);margin:14px 0 0">
+      交互覆盖：Eq.3 的组内标准化、Eq.2 的裁剪与 KL 惩罚（KL 用 k3 估计 ρ−1−ln ρ）。
+      未覆盖：多 token 上对 ratio 取和再相除的实际计算、π<sub>ref</sub> 与 π<sub>old</sub> 分开（这里把 ref 概率当 1，即 KL 只相对 old 计）、
+      原文未给出的 ε 默认值。这是<strong>简化模拟</strong>，<strong>4 个固定 rollout + 1 个可调 rollout</strong>（r₅）是页面自定的例子：
+      前四个奖励 {1, 0, 0.5, 0} 用来让组内出现多种取值，r₅ 可以让人手动改变组均值与 std；
+      MUA-RL 实际奖励只有 0/1（§3.3.3），若一组全 0 或全 1，Eq.3 的分母为 0，原文未讨论这一情形<span class="infer">推断</span>。
+    </p>
+    <details>
+      <summary>手算四组参数<span class="sum-sub">与上方读数逐位一致</span></summary>
+      <div class="details-body">
+        <p><strong>第 1 组：</strong>r = {1, 0, 0.5, 0}，ρ = 1.0，ε = 0.2，β = 0.01。（这组对应 r₅ 滑到 0 时的前 4 个固定 rollout；β 拉大是为了让 KL 项可见。）</p>
+        <p>均值 = (1+0+0.5+0)/4 = 0.375；离差² = 0.390625 + 0.140625 + 0.015625 + 0.140625 = 0.6875；
+        总体方差 = 0.6875/4 = 0.171875，总体 std = √0.171875 = <code>0.414578098794425</code>（四位 0.4146）。</p>
+        <p>A = (r − 0.375)/0.414578… =
+        <code>1.5076</code>（1.507556722888818）, <code>−0.9045</code>（−0.904534033733291）,
+        <code>0.3015</code>（0.301511344577764）, <code>−0.9045</code>（同第 2 项）。
+        ρ=1.0 时 clip(1.0, 0.8, 1.2)=1.0，L = 1.0·A − 0.01·(1−1−ln1) = A，与交互读数 A=… · L=… 逐位一致。</p>
+
+        <p><strong>第 2 组：</strong>r = {1, 0, 0.5, 0, 1}（即 4 个固定 rollout + r₅=1，交互的默认视图），ρ = 1.0，ε = 0.2，β = 0.001（默认值；ρ=1 时 KL=0，β 取什么都一样）。</p>
+        <p>N = 5，均值 = (1+0+0.5+0+1)/5 = 0.5000；离差² = 0.25 + 0.25 + 0 + 0.25 + 0.25 = 1.00；
+        总体方差 = 1.00/5 = 0.2，总体 std = √0.2 = <code>0.447213595499958</code>（四位 0.4472）。</p>
+        <p>A = (r − 0.5)/0.447213… =
+        <code>1.1180</code>（1.118033988749895）, <code>−1.1180</code>（−1.118033988749895）,
+        <code>0.0000</code>（0）, <code>−1.1180</code>, <code>1.1180</code>。
+        L = A − 0.001·(1−1−ln1) = A。交互默认读数「N=5 · mean 0.5000 · std 0.4472」与五个 slot 的 A/L 都与此逐位一致。</p>
+
+        <p><strong>第 3 组（ρ=1.4）：</strong>r = {1, 0, 0.5, 0}，ρ = 1.4，ε = 0.2，β = 0.01。（r₅ 滑到 0、β 拉到 0.01 时的前 4 个固定 rollout。）A 同第 1 组，<strong>A 全程保留全精度</strong>，只在显示时四舍五入。</p>
+        <p>ρ=1.4 &gt; 1+ε=1.2，clip(1.4, 0.8, 1.2) = 1.2；KL = 1.4 − 1 − ln 1.4 = 0.06352776337878707（四位 0.0635），β·KL = 0.01 × 0.0635278 = 0.000635278。</p>
+        <p>对每个 A 先算 min(ρA, clip(ρ)A)，再减 β·KL：</p>
+        <p>L₁：ρA = 1.4×1.507556722888818 = 2.1105794，clip(ρ)A = 1.2×1.507556722888818 = 1.8090681 → min = 1.8090681；
+        L₁ = 1.8090681 − 0.0006353 = <code>1.8084</code>。</p>
+        <p>L₂：ρA = 1.4×(−0.904534033733291) = −1.2663476，clip(ρ)A = 1.2×(−0.904534033733291) = −1.0854408 →
+        <strong>取 min 时负数上界更小，ρA 更小</strong>，min = −1.2663476；L₂ = −1.2663476 − 0.0006353 = <code>−1.2670</code>。</p>
+        <p>L₃：ρA = 1.4×0.301511344577764 = 0.4221159，clip(ρ)A = 1.2×0.301511344577764 = 0.3618136 → min = 0.3618136；
+        L₃ = 0.3618136 − 0.0006353 = <code>0.3612</code>。（若误用非裁剪的 1.4A 会得到 0.4215；若再把 0.3015 先截成四位会得到 0.3584，两者都不是交互输出。）</p>
+        <p>L₄：同 L₂，<code>−1.2670</code>。</p>
+        <p>交互中把 r₅ 滑到 0、β 拉到 0.01、ρ 切到 1.4，四个 slot 依次显示 A=1.5076 / −0.9045 / 0.3015 / −0.9045，L = <code>1.8084</code> / <code>−1.2670</code> / <code>0.3612</code> / <code>−1.2670</code>，与上面逐位一致。</p>
+
+        <p><strong>第 4 组（默认视图切到 ρ=1.4）：</strong>r = {1, 0, 0.5, 0, 1}，ρ = 1.4，ε = 0.2，β = 0.01。A 同第 2 组。</p>
+        <p>ρA = 1.4×1.118033988749895 = 1.5652476，clip(ρ)A = 1.2×1.118033988749895 = 1.3416408 → min = 1.3416408；
+        L₁ = 1.3416408 − 0.0006353 = <code>1.3410</code>；L₂ = 1.4×(−1.118033988749895) − 0.0006353 = <code>−1.5659</code>；
+        L₃（A=0）：min(0, 0) − 0.0006353 = <code>−0.0006</code>；L₄ 同 L₂，L₅ 同 L₁。
+        交互默认切到 ρ=1.4 时五个 slot 即显示这组。</p>
+        <p style="color:var(--text-soft)">注：标准差口径会明显改变 adv——同样 r={1,0,0.5,0,1}，若改用样本 std（÷(N−1)，0.5），A 会变成 1.0000 / −1.0000 / 0 / −1.0000 / 1.0000，和交互读数对不上；交互一律用总体 std（÷N），原文 Eq.3 未写明用的是哪一种。</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>1000 条训练题、25 个 epoch、每轮 8 条轨迹</h2></div>
+  <p class="sec-sub">读完这节你应该知道：这套训练要花多少、哪些开销原文没报。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">冷启动</span></div>
+      <h4>≈2000 条轨迹</h4>
+      <p>9 个场景（5 个合成 + 4 个真实 MCP server）。batch 128、2 个 epoch、AdamW、lr 5e-6、cosine 衰减（§4.1）。两条合成管线：LLM 模拟工具结果、真实 MCP 执行（§3.2）。全部数据经「人工专家 + DeepSeek-R1」双重校验。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">RL</span></div>
+      <h4>165 道题</h4>
+      <p>训练数据是 TAU1 的 115 retail + 50 airline 题。25 个 epoch、batch 32、每 query 8 个 rollout、KL β=0.001、序列上限 32768 token、每题最多 30 轮、rollout 温度 1.0（§4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">评测</span></div>
+      <h4>temp = 0</h4>
+      <p>全部 non-thinking、全走 Function Calling、温度 0.0；TAU1/TAU2 与 ACEBench 用 GPT-4.1 当用户（§4.1），每个测试集重复 4 次取平均。</p>
+    </div>
+  </div>
+  <p>
+    规模上，一次 RL step 要同时跑 agent 生成和用户模拟器回复，每个 query 8 个 rollout、每个最多 30 轮、32k token；
+    论文说基于 VeRL 实现并接入「a real, operational database environment」验证工具调用结果，但<strong>没有报告训练耗时或 GPU 数</strong>，
+    与 SFT 或离线 RL 的成本对比也未给出。
+  </p>
+  <p>
+    TAU2 Telecom 的评测指标是 TCR（§4.1）：<code>TCR(q) = |{cᵢ ∈ C_q : satisfied(cᵢ)}| / |C_q|</code>，
+    即满足的验证项占比，从 0.0% 到 100.0%，用来衡量部分完成。注意这是 0–100 的百分比刻度，而其余 TAU 数字是任务成功率刻度，两者不可直接相减比较。
+  </p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三轮 rollout：说话、调工具、被掩码</h2></div>
+  <p class="sec-sub">读完这节你应该知道：一条轨迹里谁产出了什么、哪些 token 进了梯度。</p>
+  <figure>
+    <svg viewBox="0 0 860 300" role="img" aria-label="MUA-RL rollout 流程示意">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="#8C857B"/>
+        </marker>
+      </defs>
+      <foreignObject x="10" y="10" width="180" height="70">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="background:var(--accent-soft);border:1px solid var(--accent);border-radius:10px;padding:10px;font-size:13px;height:100%">
+          <strong style="color:var(--accent-deep)">Policy LLM</strong><br><span style="white-space:nowrap">Qwen3-8B/14B/32B</span>
+        </div>
+      </foreignObject>
+      <foreignObject x="340" y="10" width="180" height="70">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="background:var(--c3-soft);border:1px solid var(--c3);border-radius:10px;padding:10px;font-size:13px;height:100%">
+          <strong style="color:var(--c3)">数据库 / 工具</strong><br><span style="white-space:nowrap">实时执行，结果进 obs</span>
+        </div>
+      </foreignObject>
+      <foreignObject x="670" y="10" width="180" height="70">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="background:var(--c2-soft);border:1px solid var(--c2);border-radius:10px;padding:10px;font-size:13px;height:100%">
+          <strong style="color:var(--c2)">用户模拟器</strong><br><span style="white-space:nowrap">GPT-4o-2024-11-20</span>
+        </div>
+      </foreignObject>
+      <line x1="190" y1="45" x2="335" y2="45" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"/>
+      <text x="262" y="36" text-anchor="middle" font-size="11" fill="#6B6660">tool call</text>
+      <line x1="340" y1="62" x2="195" y2="62" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"/>
+      <text x="262" y="80" text-anchor="middle" font-size="11" fill="#6B6660">tool result（掩码）</text>
+      <line x1="190" y1="30" x2="665" y2="30" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"/>
+      <text x="430" y="24" text-anchor="middle" font-size="11" fill="#6B6660">agent 消息</text>
+      <line x1="670" y1="58" x2="195" y2="58" stroke="#8C857B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+      <foreignObject x="10" y="120" width="840" height="170">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:13px;line-height:1.5">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8C857B;margin-bottom:6px">TURN k（Figure 4(c) 的多轮用户交互 rollout）</div>
+          <ol style="margin:0;padding-left:20px;line-height:1.7">
+            <li>agent 读入 system prompt + 工具说明 + 历史（含被掩码的 user/tool 段），<strong style="color:var(--accent-deep)">生成</strong>文本或 tool call；</li>
+            <li>若是 tool call，数据库实时执行，结果追加为 tool 观测；若是消息，GPT-4o 用户按人格 + 任务指令回复；</li>
+            <li>直到任务完成、用户道别或达到 30 轮上限；整条轨迹写入 buffer；</li>
+            <li>TAU1 评测器跑验证项，完成 → r=1，否则 r=0；与同题另外 7 条轨迹一起做组内标准化（Eq.3）。</li>
+          </ol>
+        </div>
+      </foreignObject>
+    </svg>
+    <figcaption>Figure 4(c) 与 §3.3.2、§4.1 的流程化；箭头方向表示消息流向。虚线箭头同时与实线重叠，仅用于示意用户回复路径。</figcaption>
+  </figure>
+  <details>
+    <summary>训练中的行为变化<span class="sum-sub">§4.3.1、Figure 5–6</span></summary>
+    <div class="details-body">
+      <ul>
+        <li>rollout 轮数先升后稳，平均约 <strong>21–23 轮</strong>；而回复长度基本不变——作者据此认为提升来自「更多轮的结构化交互」，不是测试时加长输出。</li>
+        <li>Calculate、Think、Transfer to Human Agent 三个通用工具的调用频次都下降；作者解释为减少了对「对完成任务贡献有限」的工具的依赖。</li>
+        <li>KL 曲线随训练上升（模型逐渐偏离冷启动模型）；MUA-RL-8B 波动明显大于 14B/32B，作者归因于小模型容量有限。梯度范数曲线显示训练稳定。</li>
+        <li>Figure 5 的曲线未转录（纵轴数值以图形式给出，正文只描述了趋势）。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>小模型追上大模型；冷启动在最难的域反而掉分</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些提升是稳的，哪些只出现在个别格子。</p>
+
+  <div class="tabs" id="bench-tabs">
+    <button class="tab active" data-bench="retail">TAU1 Retail</button>
+    <button class="tab" data-bench="airline">TAU2 Airline</button>
+    <button class="tab" data-bench="tcr">TAU2 Telecom TCR</button>
+  </div>
+  <div class="chart" data-src="Table 1">
+    <div class="crow"><div class="cname">Qwen3-32B</div><div class="cbars">
+      <div class="cbar"><div class="track"><div class="fill" id="f-base" style="height:65.4%"></div></div><div class="num" id="n-base">47.6</div></div>
+      <div class="cbar"><div class="track"><div class="fill" id="f-cold" style="height:80.9%"></div></div><div class="num" id="n-cold">58.9</div></div>
+      <div class="cbar"><div class="track"><div class="fill" id="f-mua" style="height:99.7%"></div></div><div class="num" id="n-mua">72.6</div></div>
+    </div></div>
+    <div class="cx"><span>Non-thinking</span><span>Cold-start</span><span>MUA-RL</span></div>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft);margin-top:-6px">
+    柱高按当前标签下的最大值归一。TAU1 Retail（Table 1）：MUA-RL-32B 比原始 Qwen3-32B 高 <strong>25.0 个百分点</strong>（72.6 − 47.6，相对 +52.5%），
+    比冷启动高 <strong>13.7 个百分点</strong>（72.6 − 58.9，相对 +23.3%）。
+    TAU2 Telecom（Table 1）：MUA-RL-32B 的任务成功率 28.3 高于原始 Qwen3-32B 的 24.8，但仍低于 GPT-4.1（38.9）；
+    比冷启动高 <strong>9.0 个百分点</strong>（28.3 − 19.3，相对 +46.6%），比原始模型高 <strong>3.5 个百分点</strong>（28.3 − 24.8，相对 +14.1%）。
+  </p>
+
+  <h3>Table 1 转录（TAU1 / TAU2；每个模型均为 non-thinking）</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Model</th><th>TAU1 Retail</th><th>TAU1 Airline</th><th>TAU2 Retail</th><th>TAU2 Airline</th><th>TAU2 Telecom</th><th>Telecom TCR</th></tr></thead>
+    <tbody>
+      <tr><td>GPT-4o-2024-11-20</td><td class="num">63.0</td><td class="num">45.5</td><td class="num">67.3</td><td class="num">46.9</td><td class="num">24.1</td><td class="num">–</td></tr>
+      <tr><td>GPT-4.1</td><td class="num">66.5</td><td class="num">42.5</td><td class="num">70.2</td><td class="num">53.0</td><td class="num">38.9</td><td class="num">–</td></tr>
+      <tr><td>DeepSeek-V3-0324</td><td class="num">70.4</td><td class="num">42.4</td><td class="num">64.7</td><td class="num">37.0</td><td class="num">32.9</td><td class="num">–</td></tr>
+      <tr><td>Qwen3-235B-A22B</td><td class="num">65.2</td><td class="num">32.0</td><td class="num">64.9</td><td class="num">36.0</td><td class="num">24.6</td><td class="num">–</td></tr>
+      <tr><td>Qwen3-8B</td><td class="num">40.0</td><td class="num">11.0</td><td class="num">41.0</td><td class="num">12.5</td><td class="num">19.1</td><td class="num">22.9%</td></tr>
+      <tr><td>Qwen3-8B Cold-start</td><td class="num">36.7</td><td class="num">12.0</td><td class="num">31.4</td><td class="num">16.0</td><td class="num">9.0</td><td class="num">12.1%</td></tr>
+      <tr class="best"><td>MUA-RL-8B</td><td class="num">56.5</td><td class="num">29.5</td><td class="num">49.8</td><td class="num">19.0</td><td class="num">21.8</td><td class="num">25.2%</td></tr>
+      <tr><td>Qwen3-14B</td><td class="num">46.9</td><td class="num">13.0</td><td class="num">43.1</td><td class="num">14.8</td><td class="num">29.9</td><td class="num">46.6%</td></tr>
+      <tr><td>Qwen3-14B Cold-start</td><td class="num">50.8</td><td class="num">23.0</td><td class="num">53.7</td><td class="num">24.0</td><td class="num">23.5</td><td class="num">32.9%</td></tr>
+      <tr class="best"><td>MUA-RL-14B</td><td class="num">65.9</td><td class="num">42.0</td><td class="num">66.0</td><td class="num">38.0</td><td class="num">33.4</td><td class="num">54.3%</td></tr>
+      <tr><td>Qwen3-32B</td><td class="num">47.6</td><td class="num">18.5</td><td class="num">50.2</td><td class="num">23.5</td><td class="num">24.8</td><td class="num">23.7%</td></tr>
+      <tr><td>Qwen3-32B Cold-start</td><td class="num">58.9</td><td class="num">36.0</td><td class="num">58.2</td><td class="num">31.1</td><td class="num">19.3</td><td class="num">21.6%</td></tr>
+      <tr class="best"><td>MUA-RL-32B</td><td class="num">72.6</td><td class="num">46.5</td><td class="num">67.3</td><td class="num">45.4</td><td class="num">28.3</td><td class="num">45.1%</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">高亮行标的是 MUA-RL 系列，不代表每格都是全表最高：TAU2 Retail 与 TAU2 Telecom 的最高值属于 GPT-4o/GPT-4.1。Table 1 中的 Qwen3-30B-A3B、Qwen3-4B 两行未转录。</p>
+
+  <h3>Table 2 转录（BFCL-V3 Multi Turn / ACEBench Agent，Overall）</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Model</th><th>BFCL Base</th><th>Miss Func</th><th>Miss Param</th><th>Long Ctx</th><th>BFCL Overall</th><th>ACEBe Multi Turn</th><th>ACEBe Multi Step</th><th>ACEBe Overall</th></tr></thead>
+    <tbody>
+      <tr><td>GPT-4.1</td><td class="num">48.0</td><td class="num">34.0</td><td class="num">35.0</td><td class="num">45.5</td><td class="num">40.5</td><td class="num">83.3</td><td class="num">90.0</td><td class="num">86.7</td></tr>
+      <tr><td>DeepSeek-V3-0324</td><td class="num">41.0</td><td class="num">21.0</td><td class="num">23.0</td><td class="num">34.5</td><td class="num">29.8</td><td class="num">73.3</td><td class="num">75.0</td><td class="num">74.2</td></tr>
+      <tr><td>Qwen3-8B</td><td class="num">20.0</td><td class="num">4.0</td><td class="num">13.0</td><td class="num">10.0</td><td class="num">11.8</td><td class="num">33.3</td><td class="num">45.0</td><td class="num">39.2</td></tr>
+      <tr><td>Qwen3-8B Cold-start</td><td class="num">24.0</td><td class="num">11.0</td><td class="num">16.5</td><td class="num">10.0</td><td class="num">15.4</td><td class="num">36.7</td><td class="num">55.0</td><td class="num">45.9</td></tr>
+      <tr class="best"><td>MUA-RL-8B</td><td class="num">21.0</td><td class="num">11.5</td><td class="num">15.0</td><td class="num">11.0</td><td class="num">14.6</td><td class="num">46.7</td><td class="num">60.0</td><td class="num">53.3</td></tr>
+      <tr><td>Qwen3-32B</td><td class="num">29.5</td><td class="num">11.0</td><td class="num">20.0</td><td class="num">18.0</td><td class="num">19.6</td><td class="num">60.0</td><td class="num">85.0</td><td class="num">72.5</td></tr>
+      <tr><td>Qwen3-32B Cold-start</td><td class="num">35.0</td><td class="num">21.0</td><td class="num">28.5</td><td class="num">19.5</td><td class="num">26.0</td><td class="num">53.3</td><td class="num">100.0</td><td class="num">76.6</td></tr>
+      <tr class="best"><td>MUA-RL-32B</td><td class="num">42.0</td><td class="num">20.0</td><td class="num">30.0</td><td class="num">21.5</td><td class="num">28.4</td><td class="num">70.0</td><td class="num">95.0</td><td class="num">82.5</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">为控制篇幅只转录 8B/32B 两组及两个强基线；14B 组与 Qwen3-30B-A3B、Qwen3-235B-A22B 行未转录（原文 Table 2 可查）。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 1</span></div>
+      <h4>冷启动在 Telecom 上掉分</h4>
+      <p>Qwen3-32B 在 TAU2 Telecom 从 24.8 掉到冷启动的 19.3（−5.5 个百分点），14B 从 29.9 掉到 23.5（−6.4）；8B 也从 19.1 掉到 9.0（−10.1）。
+      作者归因于冷启动数据带来了「domain-specific patterns and biases」，在训练分布外难以泛化。MUA-RL 之后三个规模都超过冷启动，32B 达 28.3（比冷启动 +9.0 个百分点）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 2</span></div>
+      <h4>8B 在 BFCL 上没赢冷启动</h4>
+      <p>MUA-RL-8B 的 BFCL-V3 Overall 是 14.6，低于冷启动的 15.4（−0.8 个百分点），也低于 32B 冷启动的 26.0。
+      而在 ACEBench Agent 上 8B 从冷启动 45.9 升到 53.3（+7.4 个百分点）。论文未专门讨论 8B 在 BFCL 上的这一回退。</p>
+    </div>
+  </div>
+
+  <h3>Table 3 消融转录（第 3 列起为相对 Qwen3-32B 和相对 MUA-RL-32B 的变化）</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Model</th><th>TAU2 Retail</th><th>TAU2 Airline</th><th>TAU2 Telecom</th><th>BFCL Base</th><th>BFCL Overall</th><th>ACEBe Overall</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen3-32B</td><td class="num">50.2</td><td class="num">23.5</td><td class="num">24.8</td><td class="num">29.5</td><td class="num">19.6</td><td class="num">72.5</td></tr>
+      <tr><td>+ MUA-RL w/o RL</td><td class="num">58.2 (↑8.0, ↓9.1)</td><td class="num">31.1 (↑7.6, ↓14.3)</td><td class="num">19.3 (↓5.5, ↓9.0)</td><td class="num">35.0 (↑5.5, ↓7.0)</td><td class="num">26.0 (↑6.4, ↓2.4)</td><td class="num">76.6 (↑4.1, ↓5.9)</td></tr>
+      <tr><td>+ MUA-RL w/o cold-start</td><td class="num">61.6 (↑11.4, ↓5.7)</td><td class="num">41.0 (↑17.5, ↓4.4)</td><td class="num">28.1 (↑3.3, ↓0.2)</td><td class="num">29.5 (0.0, ↓12.5)</td><td class="num">19.3 (↓0.3, ↓9.1)</td><td class="num">82.5 (↑10.0, 0.0)</td></tr>
+      <tr class="best"><td>MUA-RL-32B</td><td class="num">67.3</td><td class="num">45.4</td><td class="num">28.3</td><td class="num">42.0</td><td class="num">28.4</td><td class="num">82.5</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    去掉任意一阶段都会掉分：w/o cold-start 在 TAU2 Retail 拿 61.6（比完整模型低 5.7），在 BFCL Overall 只有 19.3（比 Qwen3-32B 基线还低 0.3）；
+    w/o RL（即只冷启动）在 Table 3 所列各项均低于完整模型。正文把这两者概括为「eliminating any stage leads to notable performance degradation」。
+    值得注意的是 Table 3 里 w/o cold-start 的 BFCL Overall（19.3）甚至低于原始基线（19.6），正文没有单独讨论。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>用户是 GPT-4o，训练域只有两个</h2></div>
+  <p class="sec-sub">读完这节你应该知道：什么条件下结果可以照搬，什么条件下要打问号。</p>
+  <ul>
+    <li><strong>用户模拟器的质量即上限。</strong>训练期用户是 GPT-4o-2024-11-20，评测期 TAU1/TAU2 与 ACEBench 的用户是 GPT-4.1。真实的人会情绪化、前后不一；论文没有真人类评估，也没有让模拟用户刻意「不配合」的鲁棒性实验。</li>
+    <li><strong>奖励被改成二元。</strong>§4.1 明确去掉了 TAU1 原有的对话内容要求，因为作者观察到这些要求「impede the model’s ability to learn correct tool invocation patterns」。这意味着训练信号比评测信号弱：评测仍按原 TAU 验证项给分。</li>
+    <li><strong>训练域窄。</strong>只有 TAU1 的 115 retail + 50 airline 题在训；TAU1 Airline 也不作为评测指标报告，无法知道 agent 是否在训练题上过拟合。TAU2 的 Telecom（双向控制）从未在训练中出现，这正是论文泛化论证的基础。</li>
+    <li><strong>规模小、单次运行。</strong>每组 TAU 结果重复 4 次取平均，但未见方差或置信区间；8B 在 BFCL 上低于冷启动（14.6 vs 15.4），说明「任一阶段都有效」的结论对规模不稳健。</li>
+    <li><strong>只覆盖 non-thinking、FC 模式。</strong>全部模型为 Qwen3 Non-thinking，未验证 thinking 模式下是否有效；也不覆盖多模态输入或开放域任务。</li>
+    <li><strong>成本未报告。</strong>训练基于 VeRL，接入真实数据库；但 GPU 数、训练时长、与 SFT 的对比都缺失，复现时无法估算开销。</li>
+  </ul>
+</section>
+
+<footer>
+  <div>MUA-RL: Multi-turn User-interacting Agent Reinforcement Learning for agentic tool use（arXiv:2508.18669v1，2025-08-26；以 v1 为准）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.18669">https://arxiv.org/abs/2508.18669</a><br>
+    笔记：<a href="/mua-rlmulti-turn-user-interacting-agent-reinforcement-learning-for-agentic-tool-use/">为 MUA-RL 做一篇精读笔记</a><br>
+    页面与笔记的差异：<br>
+    · 笔记称「Qwen3 系列 8B/14B/32B 性能均显著优于……」，但原文 Table 2 中 MUA-RL-8B 的 BFCL-V3 Overall 为 14.6，低于冷启动的 15.4。<br>
+    · 笔记表格把 MUA-RL-32B 的 TAU2 Telecom TCR 写成「28.3」，原文 Table 1 中 28.3 是 Telecom 成功率，TCR 为 45.1%。<br>
+    · 笔记称 32B 在 TAU2 Airline「超过了 GPT-4o-2024-11-20 的 46.9，也高于 DeepSeek-V3-0324（37.0）」，但同一段写 MUA-RL-32B 为 45.4，低于 46.9；原文 Table 1 同样为 45.4 vs 46.9。<br>
+    · 笔记中「MUA-RL-14B 在 TAU2 Telecom 的 TCR 达 54.3%，远高于其冷启动版本的 32.9%」核对 Table 1，TCR 为 54.3% vs 32.9%，差值 21.4 个百分点。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  // ---------- 交互 1：GRPO 组统计 ----------
+  var sim = document.getElementById('sim');
+  if (sim) {
+    var baseR = [1, 0, 0.5, 0];
+    var ratio = 1.0;
+    var r5El = document.getElementById('r5');
+    var epsEl = document.getElementById('eps');
+    var betaEl = document.getElementById('beta');
+    var r5v = document.getElementById('r5-v');
+    var epsv = document.getElementById('eps-v');
+    var betav = document.getElementById('beta-v');
+    var stat = document.getElementById('stat');
+    var obj = document.getElementById('obj');
+    var avals = [];
+    var btns = sim.querySelectorAll('[data-ratio-button]');
+
+    for (var k = 0; k < 5; k++) { avals.push(document.getElementById('a' + k)); }
+
+    function compute(rs) {
+      var n = rs.length;
+      var mean = 0, i;
+      for (i = 0; i < n; i++) { mean += rs[i]; }
+      mean /= n;
+      var v = 0;
+      for (i = 0; i < n; i++) { v += (rs[i] - mean) * (rs[i] - mean); }
+      var sd = Math.sqrt(v / n); // 总体标准差
+      var A = [];
+      if (sd === 0) {
+        for (i = 0; i < n; i++) { A.push(0); }
+      } else {
+        for (i = 0; i < n; i++) { A.push((rs[i] - mean) / sd); }
+      }
+      return { mean: mean, sd: sd, A: A };
+    }
+
+    function render() {
+      var r5 = parseInt(r5El.value, 10) / 100;
+      var eps = parseFloat(epsEl.value);
+      var beta = parseFloat(betaEl.value);
+      r5v.textContent = r5.toFixed(2);
+      epsv.textContent = eps.toFixed(2);
+      betav.textContent = beta.toFixed(3);
+
+      var rs = baseR.concat([r5]);
+      var res = compute(rs);
+      var maxAbs = 0;
+      var i;
+      for (i = 0; i < 5; i++) {
+        var a = res.A[i];
+        var clipR = Math.max(1 - eps, Math.min(1 + eps, ratio));
+        var objA = ratio * a;
+        var clipA = clipR * a;
+        var term = Math.min(objA, clipA); // min(ρA, clip(ρ)A)，A 全精度
+        var kl = ratio - 1 - Math.log(ratio);
+        var L = term - beta * kl;
+        if (Math.abs(a) > maxAbs) { maxAbs = Math.abs(a); }
+        var slot = document.querySelector('.slot[data-i="' + i + '"]');
+        if (avals[i]) {
+          avals[i].textContent = 'A=' + (res.sd === 0 ? '0.0000' : a.toFixed(4)) + ' · L=' + L.toFixed(4);
+        }
+        var bar = document.getElementById('b' + i);
+        if (bar) {
+          bar.style.width = maxAbs === 0 ? '0%' : Math.round(Math.abs(a) / Math.max(maxAbs, 1e-9) * 100) + '%';
+          bar.className = a >= 0 ? 'b1' : 'b3';
+        }
+        if (slot) { slot.classList.toggle('hit', Math.abs(a) >= maxAbs - 1e-9 && a > 0); }
+      }
+      var distinct = {};
+      for (i = 0; i < 5; i++) { distinct[rs[i]] = 1; }
+      var nd = Object.keys(distinct).length;
+      if (res.sd === 0) {
+        stat.textContent = 'N=5 · mean ' + res.mean.toFixed(2) + ' · std 0.0000 · 组内奖励全部相同，Eq.3 分母为 0，adv 无定义（交互中记 0）';
+      } else {
+        stat.textContent = 'N=5 · mean ' + res.mean.toFixed(4) + ' · std ' + res.sd.toFixed(4) + '（总体）· ' +
+          (nd > 1 ? '组内有 ' + nd + ' 种奖励，adv 非零' : '');
+      }
+      if (res.sd === 0) {
+        obj.textContent = 'std=0：原文未定义此情况，页面按 0 处理，loss 只剩 KL 项';
+      } else if (ratio === 1.0) {
+        obj.textContent = 'ρ=1.0：裁剪不生效，Lᵢ = ρᵢAᵢ − β(ρᵢ−1−ln ρᵢ) = Aᵢ（KL=0）';
+      } else {
+        var clipR2 = Math.max(1 - eps, Math.min(1 + eps, ratio));
+        obj.textContent = 'ρ=' + ratio.toFixed(1) + '，clip 边界 [' + (1 - eps).toFixed(2) + ', ' + (1 + eps).toFixed(2) + ']：ρ 被截到 ' +
+          clipR2.toFixed(2) + '，KL=ρ−1−lnρ=' + (ratio - 1 - Math.log(ratio)).toFixed(4);
+      }
+    }
+
+    for (var b = 0; b < btns.length; b++) {
+      btns[b].addEventListener('click', function (e) {
+        var t = e.currentTarget;
+        for (var j = 0; j < btns.length; j++) { btns[j].classList.remove('active'); }
+        t.classList.add('active');
+        ratio = parseFloat(t.getAttribute('data-ratio-button'));
+        render();
+      });
+    }
+    r5El.addEventListener('input', render);
+    epsEl.addEventListener('input', render);
+    betaEl.addEventListener('input', render);
+    render();
+  }
+
+  // ---------- 交互 2：benchmark 切换 ----------
+  var DATA = {
+    retail:  { label: 'TAU1 Retail',  base: 47.6, cold: 58.9, mua: 72.6 },
+    airline: { label: 'TAU2 Airline', base: 23.5, cold: 31.1, mua: 45.4 },
+    tcr:     { label: 'TAU2 Telecom TCR', base: 23.7, cold: 21.6, mua: 45.1 }
+  };
+  var tabs = document.querySelectorAll('#bench-tabs .tab');
+  function paintBench(key) {
+    var d = DATA[key];
+    if (!d) { return; }
+    var mx = Math.max(d.base, d.cold, d.mua);
+    var pairs = [['f-base', 'n-base', d.base, 'var(--c1)'],
+                 ['f-cold', 'n-cold', d.cold, 'var(--c2)'],
+                 ['f-mua', 'n-mua', d.mua, 'var(--accent)']];
+    for (var i = 0; i < pairs.length; i++) {
+      var f = document.getElementById(pairs[i][0]);
+      var n = document.getElementById(pairs[i][1]);
+      if (f) { f.style.height = (mx > 0 ? d[pairs[i][0] === 'f-base' ? 'base' : (pairs[i][0] === 'f-cold' ? 'cold' : 'mua')] / mx * 100 : 0) + '%'; f.style.background = pairs[i][3]; }
+      if (n) { n.textContent = (pairs[i][0] === 'f-mua' && key === 'tcr') ? d.mua + '%' : d[pairs[i][0] === 'f-base' ? 'base' : (pairs[i][0] === 'f-cold' ? 'cold' : 'mua')]; }
+    }
+  }
+  for (var t = 0; t < tabs.length; t++) {
+    tabs[t].addEventListener('click', function (e) {
+      var el = e.currentTarget;
+      for (var j = 0; j < tabs.length; j++) { tabs[j].classList.remove('active'); }
+      el.classList.add('active');
+      paintBench(el.getAttribute('data-bench'));
+    });
+  }
+  paintBench('retail');
+})();
+</script>
+</body>
+</html>

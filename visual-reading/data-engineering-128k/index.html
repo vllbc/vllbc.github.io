@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Engineering for 128K Context · 80K 训 5B token，外推到 128K</title>
+<meta name="description" content="arXiv 2402.10171v1 精读：LLaMA-2 7B/13B 用 1–5B token 的按领域长度上采样 SlimPajama 做持续预训练，7B 在 80K 上训 5B，Needle-in-a-Haystack 128K 测试拿到 88.0（13B 64K 训 90.0），MMLU 基本不掉。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：只放交互与两处排版的局部样式 */
+.hero .topics{font-size:13.5px;color:var(--text-soft);margin-top:10px}
+.hero .topics b{color:var(--text);font-weight:600}
+.small{font-size:13px;color:var(--text-soft)}
+.note-pop{font-size:13.5px;color:var(--text-muted);background:var(--bg-tint);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin:18px 0}
+.infer{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.06em;padding:0 5px;border-radius:4px;background:var(--c2-soft);color:var(--c2);vertical-align:1px;font-family:"JetBrains Mono",monospace}
+table.tight th,table.tight td{padding:7px 10px}
+
+/* 交互 A：NIAH 网格 */
+.niah-grid{display:grid;gap:3px;margin:14px 0 6px}
+.niah-grid .cell{height:16px;border-radius:3px;background:var(--bg-soft);box-shadow:inset 0 0 0 1px var(--border-strong)}
+.niah-grid .cell.ok{background:var(--accent);box-shadow:none}
+.niah-axis{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft)}
+.niah-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin-top:8px}
+.niah-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+
+/* 交互 B：泡点位置条 */
+.bd-bar{height:12px;border-radius:6px;background:var(--text);position:relative;margin:34px 0 10px}
+.bd-dot{position:absolute;top:-22px;transform:translateX(-50%);text-align:center;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--accent-deep);line-height:1.2}
+.bd-dot b{display:block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin:3px auto 0}
+.bd-scale{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">128K Data Engineering</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">数据配方</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>长上下文 · arXiv 2402.10171v1</span>
+  <h1>Data Engineering for 128K Context：80K 长度上训 5B token，再外推到 128K 精确检索</h1>
+  <p class="hero-sub">
+    论文的赌注是：在任意位置使用长上下文信息的<strong>能力，在 4K 预训练时就已经基本具备</strong>，持续预训练只需要把它「解锁」出来。做法不改架构，只调 RoPE base，改的是数据——在保持领域比例不变的前提下，按领域把长文档挑出来上采样，再训 1–5B token。注意长度口径：7B 实际在 <strong>80K</strong> 上训练、在 128K 文档上测试；Figure 3/§5.2 显示 100–500M token 时模型在 80K 内检索尚可，但泛化不到 80K–128K，需训到 5B 才能外推到 128K。
+  </p>
+  <div class="topics"><b>7 位作者 · 6 家机构</b>（Edinburgh / MIT-IBM / Melbourne / OSU / UW / MIT / UIUC）· 基底 LLaMA-2 7B 与 13B</div>
+  <div class="meta">
+    <span>Yao Fu, Rameswar Panda, Xinyao Niu, Xiang Yue, Hannaneh Hajishirzi, Yoon Kim, Hao Peng · 2024-02-15</span>
+    <a href="https://arxiv.org/abs/2402.10171v1" target="_blank" rel="noopener">arXiv:2402.10171v1 ↗</a>
+    <a href="https://github.com/FranxYao/Long-Context-Data-Engineering" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    开源模型号称支持 100K，但在 Needle-in-a-Haystack（NIAH）上塌掉：LongLoRA 100K 70.0、YaRN Mistral 128K 57.4，而 GPT-4-Turbo 128K 是 87.1（Table 3）。论文认为差距主要不在架构；数据量也只要 1–5B token，远低于前人动辄数百 B 的持续预训练。
+  </p>
+  <p>
+    <strong>关键在「喂什么样的数据」，而非堆数据量</strong>：Figure 3 里 token 从 100M（NIAH 37.8）加到 500M（81.1）就解锁了 80K 内的大部分检索，但未能外推到 80K–128K；5B 达到峰值 88.0 并泛化到 128K，10B 反而回落到 84.0（Figure 3）。<span class="infer">推断</span>（Figure 3、§5.2 明确说 500M–1B 不泛化到 80K–128K，故「解锁 128K」这一结论需 5B 才成立）。
+  </p>
+  <p>
+    <strong>数据质量 = 领域平衡 × 长度上采样</strong>：在各领域内部把长于 4K 的序列占比从约 30% 提到约 70%，领域比例沿用 SlimPajama（网页 82%、代码 4.5%、Wikipedia 4.5%、书 4.5%、Arxiv 2.5%、StackExchange 2.0%）。
+  </p>
+  <p>
+    代价很直白：全参数持续预训练，7B 训 80K 长度（13B 训 64K），8×80G A100 上约 5 天。短上下文能力用 MMLU 兜底：7B 43.3、13B 52.4。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 3">88.0</div>
+      <div class="k">Ours LLaMA-2 7B 的 NIAH 准确率（80K 训练、128K 测试；同表 GPT-4-Turbo 87.1、YaRN Mistral 7B 57.4）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 3">84.0</div>
+      <div class="k">同样配方训到 10B token 的 NIAH 准确率，5B 时 88.0；相对 5B 下降 4.0 个百分点。这一设定下的回落。</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">43.3</div>
+      <div class="k">Ours LLaMA-2 7B 的 MMLU（同表 LongLoRA 7B 37.9、GPT-4-Turbo 86.4）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>128K 窗要解决的不是「装不装得下」，而是「中间那一段找不找得到」</h2></div>
+  <p class="sec-sub">读完后你应该知道：为什么业界的共识是用几百 B token 去「注入」长上下文能力，以及论文为什么认为这是花错了力气。</p>
+
+  <p>NIAH 把一句话（needle）随机插进一篇长文（haystack）的任意位置，要求模型原样复述（Kamradt, 2023）。Figure 1 把结果画成网格：横轴是文档长度 1K→128K，纵轴是针所在深度 0%→100%，绿格=找到，红格=没找到，胜利条件几乎是全绿。</p>
+
+  <p>2023 年底的现实是：LongLoRA 100K 的 NIAH 只有 70.0，YaRN Mistral 128K 只有 57.4，LongChat v1.5 32K 只有 18.0（Table 3），前沿级别的表现只见于 GPT-4 128K（87.1）。同时，LLaMA Long 与并行的 XVERSE 采用<strong>约 5000 亿 token（§1 原文 500 billion）</strong>做持续预训练，成本接近从头预训练。</p>
+
+  <p>论文的出发点是一个可证伪的假设：在 128K 内任意位置使用信息的能力，<strong>大部分在 4K 的大规模预训练里已经获得</strong>，持续预训练只是把它「解锁」（原文 unlock，§1、§5.2）。如果假设成立，需要的不是 5000 亿 token，而是一小份能把这个能力接出来的数据。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人都对了一半：一个缺领域平衡，一个缺长度上采样</h2></div>
+  <p class="sec-sub">读完后你应该知道：Table 1 把各家的差异归结为「训练长度」「数据混合」「长度上采样」三件事，本文在每一行上都选了另一项。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">YaRN Mistral 128K</span><h4>只有书，没有领域平衡</h4></div>
+      <p>只用 PG19 书籍数据持续预训练（Table 1）。长文管够了，但领域被单一化。Table 5 里作者用 Book↑ 方法验证了同一现象：书域 loss 降 0.175，GitHub 域升 0.029。</p>
+      <p><strong>NIAH 128K 恰为 57.4</strong>（Table 3），比它的通用能力（MMLU 59.4）低 2.0 个百分点。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">LongLoRA 100K</span><h4>保留了自然长文，但没有上采样</h4></div>
+      <p>把文档切到 128K、不做长度上采样（Table 1），并使用稀疏注意力。论文认为它的问题在于「只靠自然存在的长依赖不够」（§3）。</p>
+      <p><strong>NIAH 100K 为 70.0</strong>（Table 3），MMLU 37.9；两个数分别比 Ours 7B 低 18.0 与 5.4 个百分点。Figure 4 里「原始混合 vs 按源上采样」的对照，补的正是长度上采样这一格。</p>
+    </div>
+  </div>
+
+  <p>Together LLaMA-2 32K 与 LongChat v1.5 32K 输在训练长度：32K 训练只泛化到约 40K（§2），NIAH 分别为 27.9 与 18.0（Table 3）。</p>
+
+  <div class="tbl-scroll">
+    <table class="tight">
+      <thead>
+        <tr><th>工作</th><th>训练长度</th><th>数据混合</th><th>长度上采样</th><th class="num">NIAH</th><th class="num">MMLU</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Together LLaMA-2 7B</td><td>32K</td><td>与本文相似</td><td>—</td><td class="num">27.9</td><td class="num">44.8</td></tr>
+        <tr><td>LongChat v1.5 7B</td><td>32K，对话数据</td><td>对话</td><td>—</td><td class="num">18.0</td><td class="num">42.3</td></tr>
+        <tr><td>YaRN Mistral 7B</td><td>—</td><td>PG19 书</td><td>—</td><td class="num">57.4</td><td class="num">59.4</td></tr>
+        <tr><td>LongLoRA 7B</td><td>100K</td><td>RedPajama</td><td>无</td><td class="num">70.0</td><td class="num">37.9</td></tr>
+        <tr class="best"><td>Ours LLaMA-2 7B</td><td>80K</td><td>SlimPajama</td><td>按源上采样</td><td class="num">88.0</td><td class="num">43.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small">NIAH 与 MMLU 两列逐字取自 Table 3；前三列的信息取自 Table 1、§2。YaRN 的训练长度原文未给出，以「—」表示。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>配方只有一句话：保住领域比例，在各领域内部把长文档挑出来</h2></div>
+  <p class="sec-sub">读完后你应该知道：五种数据策略分别动了「长度分布」和「领域分布」中的哪一个，以及为什么只有按源上采样两头都不破坏。</p>
+
+  <p>§3 把<strong>文档长度</strong>与<strong>来源领域</strong>拆成两个可以分别操纵的因素：书和 GitHub 代码最长，其次是 Arxiv，C4 与 StackExchange 偏短；动长度就会动领域，反之亦然。在这个二维平面上，五种策略各站一个位置（Figure 2 画的就是它们的长度与领域分布）：</p>
+
+  <div class="tbl-scroll">
+    <table class="tight">
+      <thead>
+        <tr><th>策略</th><th>长度分布</th><th>领域分布</th><th>检索表现</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Cut at 4K</td><td>截断到 4K</td><td>不变</td><td>预训练的常规做法，会切掉约 30% 天然长文</td></tr>
+        <tr><td>Cut at 128K</td><td>保留自然长文</td><td>不变</td><td>Figure 4 上排：loss 与本文接近，精确检索失败</td></tr>
+        <tr><td>Global Upsampling</td><td>长文增多</td><td>被轻微改变</td><td>Together 采用；Table 5 中短上下文六个域变差</td></tr>
+        <tr><td>Upsample Arxiv / Book / GitHub</td><td>长文增多</td><td>大幅改变</td><td>YaRN、MPT-storyteller 采用；跨域不迁移</td></tr>
+        <tr class="best"><td>Per-source Upsampling（本文）</td><td>各域内长于 4K 的占比约 30% → 约 70%</td><td>保持 SlimPajama 原比例</td><td>Figure 4 下排：同样 loss，检索接近全绿</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small">前三列取自 §3、Figure 2 的图注与 Table 5 的结论；「检索表现」一列是文字读数，不是表内数字。</p>
+
+  <h3>「只切不采」不够，而「只采不管领域」也不行</h3>
+  <p>Figure 4 是两个 LLaMA-2 7B、同样 80K 长度、同样 5B token，只差数据混合的对照。原始混合的验证 loss 在 1K / 16K / 32K / 64K / 128K 为 1.80 / 1.56 / 1.42 / 1.33 / 1.37，按源上采样为 1.80 / 1.56 / 1.41 / 1.32 / 1.36——<strong>每列差不超过 0.01</strong>，但 NIAH 是上排（原始混合）在约 64K 之后大面积变红、下排（按源上采样）接近全绿。</p>
+  <p>Table 5 则用 <strong>逐域 loss 变化</strong>衡量各策略相对原始混合的伤害，门槛是 ±0.01（>+0.01 为变差，<−0.01 为变好，中间为无显著差异）。4K–128K 段的 Book↑ 把自己的书域 loss 压低了 0.175，却把 GitHub 抬高了 0.029，导致越界；按源上采样在这一段七个域里六个变好或持平——C4 −0.010、CC −0.010、Stack −0.006、Arxiv −0.011、Wiki −0.044、Book −0.014——只有 GitHub 高出 0.002，落在无显著差异区。</p>
+
+  <details id="t5">
+    <summary>Table 5 逐格数据：各策略相对原始混合的 loss 差<span class="sum-sub">7B、5B token、80K 打包</span></summary>
+    <div class="details-body">
+      <div class="tbl-scroll">
+        <table class="tight">
+          <thead>
+            <tr><th>策略</th><th class="num">C4</th><th class="num">CC</th><th class="num">Stack</th><th class="num">Arxiv</th><th class="num">Wiki</th><th class="num">Book</th><th class="num">Github</th></tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="8" class="small">0–4K 上下文：原始混合 loss</td></tr>
+            <tr><td>Original</td><td class="num">2.038</td><td class="num">1.760</td><td class="num">1.519</td><td class="num">1.660</td><td class="num">1.424</td><td class="num">2.085</td><td class="num">0.907</td></tr>
+            <tr><td colspan="8" class="small">0–4K 上下文：相对原始混合的变化（正号=变差）</td></tr>
+            <tr class="best"><td>v.s. Per-source</td><td class="num">+0.002</td><td class="num">+0.008</td><td class="num">−0.001</td><td class="num">−0.008</td><td class="num">−0.040</td><td class="num">−0.065</td><td class="num">−0.008</td></tr>
+            <tr><td>v.s. Global</td><td class="num">+0.008</td><td class="num">+0.010</td><td class="num">+0.015</td><td class="num">−0.020</td><td class="num">−0.020</td><td class="num">−0.140</td><td class="num">+0.015</td></tr>
+            <tr><td>v.s. Code↑</td><td class="num">+0.010</td><td class="num">+0.016</td><td class="num">+0.010</td><td class="num">+0.006</td><td class="num">−0.026</td><td class="num">+0.030</td><td class="num">−0.023</td></tr>
+            <tr><td>v.s. Book↑</td><td class="num">+0.010</td><td class="num">+0.016</td><td class="num">+0.021</td><td class="num">+0.000</td><td class="num">−0.010</td><td class="num">−0.175</td><td class="num">+0.029</td></tr>
+            <tr><td>v.s. Arxiv↑</td><td class="num">+0.006</td><td class="num">+0.016</td><td class="num">+0.013</td><td class="num">−0.060</td><td class="num">−0.030</td><td class="num">+0.040</td><td class="num">+0.025</td></tr>
+            <tr><td colspan="8" class="small">4K–128K 上下文：原始混合 loss</td></tr>
+            <tr><td>Original</td><td class="num">1.560</td><td class="num">1.650</td><td class="num">0.786</td><td class="num">1.075</td><td class="num">1.313</td><td class="num">1.852</td><td class="num">0.447</td></tr>
+            <tr><td colspan="8" class="small">4K–128K 上下文：相对原始混合的变化（正号=变差）</td></tr>
+            <tr class="best"><td>v.s. Per-source</td><td class="num">−0.010</td><td class="num">−0.010</td><td class="num">−0.006</td><td class="num">−0.011</td><td class="num">−0.044</td><td class="num">−0.014</td><td class="num">+0.002</td></tr>
+            <tr><td>v.s. Global</td><td class="num">−0.010</td><td class="num">−0.006</td><td class="num">−0.001</td><td class="num">−0.016</td><td class="num">−0.040</td><td class="num">−0.018</td><td class="num">−0.007</td></tr>
+            <tr><td>v.s. Code↑</td><td class="num">−0.008</td><td class="num">−0.002</td><td class="num">−0.003</td><td class="num">−0.007</td><td class="num">−0.042</td><td class="num">−0.010</td><td class="num">−0.029</td></tr>
+            <tr><td>v.s. Book↑</td><td class="num">−0.010</td><td class="num">−0.006</td><td class="num">+0.001</td><td class="num">−0.007</td><td class="num">−0.037</td><td class="num">−0.30</td><td class="num">+0.000</td></tr>
+            <tr><td>v.s. Arxiv↑</td><td class="num">−0.008</td><td class="num">−0.002</td><td class="num">+0.002</td><td class="num">−0.036</td><td class="num">−0.039</td><td class="num">−0.010</td><td class="num">−0.004</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small">逐格照抄 Table 5。原文 4K–128K 段 Book↑ × Book 一格印作「− 0.30」，按其余各格的统一精度保留为 −0.30。</p>
+    </div>
+  </details>
+
+  <h3>自己动手：数据量一档一档加上去，看「失败格数」怎么减</h3>
+  <p>Figure 3 是同一配方、只改训练 token 数的六张 NIAH 网格。切换 token 数，看准确率先快后慢、并在 10B 处回落。本页网格是按顶部准确率<strong>换算出的示意</strong>：每行失败格数 <code>r = round(100 − 准确率)</code>，封顶 12（每行 12 列），失败格从最右列往左填。100–500M 三档的 <code>round(100 − acc)</code>（62 / 41 / 19）都超过 12 被封顶，所以网格在前五档看起来一样「整行失败」，差异只能从读数与 Figure 3 的真实准确率读出。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="niah-btns">
+      <button class="rule-btn" data-scale="100m">100M<span class="r-sub">acc 37.8</span></button>
+      <button class="rule-btn" data-scale="300m">300M<span class="r-sub">acc 59.0</span></button>
+      <button class="rule-btn" data-scale="500m">500M<span class="r-sub">acc 81.1</span></button>
+      <button class="rule-btn" data-scale="1b">1B<span class="r-sub">acc 85.3</span></button>
+      <button class="rule-btn active" data-scale="5b">5B<span class="r-sub">acc 88.0</span></button>
+      <button class="rule-btn" data-scale="10b">10B<span class="r-sub">acc 84.0</span></button>
+    </div>
+
+    <div class="readout" data-src="Figure 3" style="margin-top:0">
+      <div class="r-head">NIAH 网格 · <span id="niah-title">5B tokens</span></div>
+      <span id="niah-msg"></span>
+    </div>
+
+    <div class="niah-grid" id="niah-grid"></div>
+    <div class="niah-axis"><span>← 文档长 1K</span><span>128K →</span></div>
+    <div class="niah-legend">
+      <span><i style="background:var(--accent)"></i>本文色：示意成功（原文绿格）</span>
+      <span><i style="background:var(--bg-soft);box-shadow:inset 0 0 0 1px var(--border-strong)"></i>灰格：示意失败（原文红格）</span>
+      <span>三行 = 针深度 <code>0% / 50% / 100%</code></span>
+    </div>
+    <div class="readout" data-src="Figure 3">
+      <div class="r-head">读数</div>
+      <span id="niah-read"></span>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个网格是怎么画出来的？<span class="sum-sub">换算规则与它不代表什么</span></summary>
+    <div class="details-body">
+      <p>论文在 Figure 3 的每张网格上方只给<strong>一个</strong>总体准确率（37.8 / 59.0 / 81.1 / 85.3 / 88.0 / 84.0），没有逐格数值。本页的示意规则：</p>
+      <ul>
+        <li>网格共 3 行（针深度 0% / 50% / 100%）× 12 列（长度刻度 1K → 128K），共 36 格。</li>
+        <li>每行失败格数 <code>r = round(100 − 准确率)</code>（取整、封顶 12）；失败格总数 = <code>3r</code>，每行成功格 = <code>12 − r</code>，读数里的「成功格 / 36」= <code>(12 − r) × 3</code>。</li>
+        <li>失败格从<strong>最右（128K）</strong>往左整列填充（近似论文的「文档越长越难」），所以每行右侧恒为灰、左侧染成强调色。</li>
+      </ul>
+      <p>各档 <code>round(100 − acc)</code>：100M 62、300M 41、500M 19、1B 15、5B 12、10B 16；封顶后 <code>r</code> 全部为 12。<span class="infer">推断</span>（由 Figure 3 顶部准确率换算）。因此本页网格在六档下形状相同，<strong>只作趋势示意，不映射准确率</strong>；各档差异请看读数里的真实准确率与第二组交互。</p>
+      <p>「成功格 / 36」是示意图内部计数的结果，<strong>不等于</strong>论文网格顶部的准确率（后者是论文自己统计的，本页不重算）。失败格落在哪几列是构造的。<span class="infer">推断</span>（失败格位置按论文「文档越长越难」的一般现象布置，图中并未逐格核对）。</p>
+    </div>
+  </details>
+
+  <h3>自己动手：把准确率对训练 token 数画出来</h3>
+  <p>用滑块选择 token 数，读出这一点的准确率、相对上一档的差和相对 5B（88.0）的差。<strong>注意六档并不等距</strong>：100M → 300M → 500M 是等距的，之后跳到 1B、5B、10B。</p>
+
+  <div class="sim">
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>训练 token 数 <span class="v" id="ps-v">5B</span></label>
+        <input type="range" id="ps" min="0" max="5" step="1" value="4">
+      </div>
+    </div>
+    <div class="slots s3" id="ps-slots"></div>
+    <div class="readout" data-src="Figure 3">
+      <div class="r-head">读数 · <span id="ps-tok">5B tokens</span></div>
+      <span id="ps-read"></span>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算两组：与 JS 同一公式、同一口径<span class="sum-sub">保留 2 位小数</span></summary>
+    <div class="details-body">
+      <p>口径：相对上一档的差 = <code>acc[i] − acc[i−1]</code>（单位：百分点）；Δ vs 5B = <code>acc[i] − 88.0</code>。两项都是差值，不是速率；因为起始几档等距（各差 200M），前三个 Δ 才恰好等于「每 200M」的斜率。保留 2 位小数，JS 与这里逐位一致。</p>
+      <ul>
+        <li><strong>300M → 500M：</strong>81.1 − 59.0 = <code>+22.10</code> 个百分点；相对 5B：81.1 − 88.0 = <code>−6.90</code>。</li>
+        <li><strong>500M → 1B：</strong>85.3 − 81.1 = <code>+4.20</code> 个百分点；相对 5B：85.3 − 88.0 = <code>−2.70</code>。</li>
+        <li><strong>5B → 10B：</strong>84.0 − 88.0 = <code>−4.00</code> 个百分点；相对 5B 同样是 <code>−4.00</code>（上一档就是 5B）。</li>
+      </ul>
+      <p class="small">标准差：本交互只做加减，不涉及均值或标准差，故不涉及 ÷N 与 ÷(N−1) 的口径选择。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>80K 的「暴力」训练只比 4K 慢约 3 倍，学术级资源就能跑</h2></div>
+  <p class="sec-sub">读完后你应该知道：为什么二次复杂度的注意力没让 80K 训练变得不可承受，以及论文给出的完整训练配置。</p>
+
+  <p>注意力是二次复杂度，直觉上 80K 该比 4K 慢约 400 倍。论文的解释是：训练时间的大头是 IO——CPU→GPU（offloading）、GPU→GPU（NVLink）、HBM→SM（FlashAttention 式分块）——这些都与序列长度<strong>线性</strong>相关；真正的二次注意力计算在 SM 上高度并行，被线性 IO 成本掩盖，于是「训 80K 只比训 4K 慢 3x」（§4）。</p>
+
+  <p>代价落在显存上：这套 HuggingFace Transformers + DeepSpeed Zero3 的配置已是框架上限，再长就 OOM；Zero 优化器是数据并行，<strong>加 GPU 也换不来更长上下文</strong>，显存主要被 KV cache 吃掉。要上 200K 得换序列并行（§4）。</p>
+
+  <p>训练本身很朴素：数据无视文档边界打包成 80K 块（跨文档拼接），batch 固定 <strong>4M token</strong>——原文强调这与 4K 训练的 batch 相同，靠「每块更长、每 batch 块数更少」保证一致；7B 在 80K 下训 5B token；恒定学习率 2e-5；唯一的架构改动是调 RoPE base（沿用 Xiong et al., 2023）。13B 只训 64K。</p>
+
+  <p><strong>步数口径（§4）：</strong>原文写「5B（数据量）/ 4M（batch size）= <strong>2000</strong> optimization steps」，这个算式本身在算术上不成立——5B / 4M = <strong>1250</strong>，要得到 2000 步需 5B / 2.5M。页面不改写原文的 2000，但也不把 1250 硬说成论文口径，两组数并列标注。若按 7B 80K 的实际配置（batch 4M token ÷ 80K/块 = 50 块）计，1250 步对应的正是 5B token：<code>4M × 1250 = 5B</code>。<span class="infer">推断</span>（2000 可能来自 batch 2.5M 或含其他行的统计；v1 §4 未给 2000 的解释，Figure 3 的 token 分档按比例换算与 1250 步/5B 自洽：100M ≈ 125 步、300M ≈ 375 步、500M ≈ 625 步、1B = 250 步、10B = 2500 步，见折叠）。</p>
+
+  <details>
+    <summary>步数复算：5B token 在 4M batch 下到底多少步<span class="sum-sub">python3 复算，逐档标口径</span></summary>
+    <div class="details-body">
+      <div class="tbl-scroll">
+        <table class="tight">
+          <thead>
+            <tr><th>数据量</th><th>batch</th><th>块大小 / 每 batch 块数</th><th class="num">步数 = 数据 / batch</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>100M</td><td>4M token</td><td>80K / 50 块</td><td class="num">100M / 4M = 25<span class="infer">A</span></td></tr>
+            <tr><td>300M</td><td>4M token</td><td>80K / 50 块</td><td class="num">300M / 4M = 75<span class="infer">A</span></td></tr>
+            <tr><td>500M</td><td>4M token</td><td>80K / 50 块</td><td class="num">500M / 4M = 125<span class="infer">A</span></td></tr>
+            <tr><td>1B</td><td>4M token</td><td>80K / 50 块</td><td class="num">1B / 4M = 250<span class="infer">A</span></td></tr>
+            <tr class="best"><td>5B</td><td>4M token</td><td>80K / 50 块</td><td class="num">5B / 4M = 1250<span class="infer">A</span>（原文写 2000，算式不成立）</td></tr>
+            <tr><td>10B</td><td>4M token</td><td>80K / 50 块</td><td class="num">10B / 4M = 2500<span class="infer">A</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="small">注「A」：步数=<code>数据 token 数 ÷ batch token 数</code>，全部按 4M token/步推算；Figure 3 各档 token 数取自图头上方标注，步数为换算而非原文给出。原文只对 5B 一档给了 <code>5B / 4M = 2000</code> 的算式，其余各档原文未写步数。若误用 80K 序列长度作除数（即把 1 步当成 1 个 80K 块），5B / 80K ≈ 62500，与任何原文数字都不对应，故采用 4M batch 口径。</p>
+    </div>
+  </details>
+
+  <p>Table 2 列出每个（模型，上下文）组合在两种硬件配置下的耗时，均按 10B token 记账（实际训练 5B）：</p>
+
+  <div class="tbl-scroll">
+    <table class="tight">
+      <thead>
+        <tr><th>硬件</th><th>模型</th><th>上下文</th><th class="num">时间 / 10B token</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>8 × 80G A100</td><td>LLaMA-2 7B</td><td>4K</td><td class="num">3 天</td></tr>
+        <tr class="best"><td>8 × 80G A100</td><td>LLaMA-2 7B</td><td>80K</td><td class="num">10 天</td></tr>
+        <tr class="best"><td>8 × 80G A100</td><td>LLaMA-2 13B</td><td>4K</td><td class="num">5 天</td></tr>
+        <tr class="best"><td>8 × 80G A100</td><td>LLaMA-2 13B</td><td>64K</td><td class="num">13 天</td></tr>
+        <tr><td>2 × 8 × 80G A100</td><td>LLaMA-2 7B</td><td>4K</td><td class="num">2 天</td></tr>
+        <tr><td>2 × 8 × 80G A100</td><td>LLaMA-2 7B</td><td>80K</td><td class="num">7 天</td></tr>
+        <tr><td>2 × 8 × 80G A100</td><td>LLaMA-2 13B</td><td>4K</td><td class="num">4 天</td></tr>
+        <tr><td>2 × 8 × 80G A100</td><td>LLaMA-2 13B</td><td>64K</td><td class="num">10 天</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="small">逐行照抄 Table 2。按同表计算慢倍数：7B 的 80K÷4K = 10 / 3 ≈ 3.3 倍；13B 的 64K÷4K = 13 / 5 = 2.6 倍。</p>
+
+  <div class="note-pop">
+    <strong>口径提醒：</strong>「约 5 天」是摘要与 Table 2 标题里的说法（8×80G A100 上训 7B）；但同表按 <em>10B token</em> 记账，主配置的 7B 80K 是 10 天，而实际只训 5B。两个数各按各的口径成立，别混用。
+  </div>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>从 SlimPajama 到 128K 模型：五步，只有一步决定因果</h2></div>
+  <p class="sec-sub">读完后你应该知道：配方里哪一步是论文真正验证过的变量，哪些只是工程实现细节。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 300" role="img" aria-label="数据配方流程图" style="width:100%;height:auto">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+      <g>
+        <rect x="10" y="60" width="150" height="130" rx="12" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1.5"></rect>
+        <text x="85" y="88" text-anchor="middle" font-size="13" font-weight="700" fill="var(--c1)">① 取语料</text>
+        <text x="85" y="110" text-anchor="middle" font-size="12" fill="var(--text-muted)">SlimPajama</text>
+        <text x="85" y="130" text-anchor="middle" font-size="11" fill="var(--text-soft)">网页 82%（CC 67 + C4 15）</text>
+        <text x="85" y="147" text-anchor="middle" font-size="11" fill="var(--text-soft)">代码 4.5 / Wiki 4.5 / 书 4.5</text>
+        <text x="85" y="164" text-anchor="middle" font-size="11" fill="var(--text-soft)">Arxiv 2.5 / Stack 2.0</text>
+      </g>
+      <line x1="162" y1="125" x2="196" y2="125" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <g>
+        <rect x="198" y="60" width="150" height="130" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+        <text x="273" y="88" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-deep)">② 领域内上采样</text>
+        <text x="273" y="110" text-anchor="middle" font-size="12" fill="var(--text-muted)">长于 4K 的序列</text>
+        <text x="273" y="130" text-anchor="middle" font-size="12" fill="var(--text-muted)">约 30% → 约 70%</text>
+        <text x="273" y="150" text-anchor="middle" font-size="11" fill="var(--accent-deep)">领域比例不动</text>
+      </g>
+      <line x1="350" y1="125" x2="384" y2="125" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <g>
+        <rect x="386" y="60" width="150" height="130" rx="12" fill="var(--bg-surface)" stroke="var(--c2)" stroke-width="1.5"></rect>
+        <text x="461" y="88" text-anchor="middle" font-size="13" font-weight="700" fill="var(--c2)">③ 打包</text>
+        <text x="461" y="110" text-anchor="middle" font-size="12" fill="var(--text-muted)">跨文档边界拼成</text>
+        <text x="461" y="130" text-anchor="middle" font-size="12" fill="var(--text-muted)">80K 块（13B：64K）</text>
+        <text x="461" y="150" text-anchor="middle" font-size="11" fill="var(--text-soft)">batch 4M token</text>
+      </g>
+      <line x1="538" y1="125" x2="572" y2="125" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <g>
+        <rect x="574" y="60" width="150" height="130" rx="12" fill="var(--bg-surface)" stroke="var(--c3)" stroke-width="1.5"></rect>
+        <text x="649" y="88" text-anchor="middle" font-size="13" font-weight="700" fill="var(--c3)">④ 全参数训练</text>
+        <text x="649" y="110" text-anchor="middle" font-size="12" fill="var(--text-muted)">5B token · batch 4M</text>
+        <text x="649" y="130" text-anchor="middle" font-size="12" fill="var(--text-muted)">lr 2e-5 · 改 RoPE base</text>
+        <text x="649" y="150" text-anchor="middle" font-size="11" fill="var(--text-soft)">8×80G A100</text>
+      </g>
+      <line x1="726" y1="125" x2="760" y2="125" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <g>
+        <rect x="762" y="60" width="128" height="130" rx="12" fill="var(--text)" stroke="var(--text)" stroke-width="1.5"></rect>
+        <text x="826" y="88" text-anchor="middle" font-size="13" font-weight="700" fill="#F5F1E8">⑤ 评测</text>
+        <text x="826" y="110" text-anchor="middle" font-size="12" fill="#D9D2C4">NIAH @128K</text>
+        <text x="826" y="130" text-anchor="middle" font-size="12" fill="#D9D2C4">BookQA、MMLU</text>
+        <text x="826" y="150" text-anchor="middle" font-size="11" fill="#B9AFA0">80K 训 → 128K 测</text>
+      </g>
+      <text x="85" y="220" text-anchor="middle" font-size="11" fill="var(--text-soft)">决定领域平衡</text>
+      <text x="273" y="220" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">本文唯一改动的变量</text>
+      <text x="461" y="220" text-anchor="middle" font-size="11" fill="var(--text-soft)">工程细节</text>
+      <text x="649" y="220" text-anchor="middle" font-size="11" fill="var(--text-soft)">算力与可复现性</text>
+      <text x="826" y="220" text-anchor="middle" font-size="11" fill="var(--text-soft)">loss 不够，要看网格</text>
+      <line x1="10" y1="248" x2="890" y2="248" stroke="var(--border)" stroke-width="1"></line>
+      <text x="10" y="272" font-size="11" fill="var(--text-soft)">Figure 4 只改了 ②：原始混合 vs 按源上采样，loss 每列差 ≤ 0.01，NIAH 网格却一红一绿。</text>
+    </svg>
+    <figcaption>
+      图 1：依据 §3、§4、§5 重绘的配方流程（非论文原图）。下方彩色注释是该步在论文论证中的角色，步骤之间是串行关系。
+    </figcaption>
+  </figure>
+
+  <p>这条流程解释了一个容易被忽略的点：Table 5 与 Figure 3、4 测的都是<strong>验证 loss</strong>，但论文反复强调，只看 loss 会掩盖检索能力的差别（§5.3）。同一配方下 loss 只差 0.01 的两份数据，NIAH 一个上排红、一个下排绿。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>NIAH 追平 GPT-4，MMLU 守住；下游 BookQA 仍是短板</h2></div>
+  <p class="sec-sub">读完后你应该知道：88.0 与 90.0 是在什么条件下取得的，以及它们与通用能力之间的取舍。</p>
+
+  <p>主结果 Table 3：7B 用 80K 训练、13B 用 64K。「Ctx.」一列是各模型自己声明的上下文，Ours 两行写的是训练长度；NIAH 统一在 128K 文档上测，MMLU 是短上下文通用能力测试。</p>
+
+  <div class="tbl-scroll">
+    <table class="tight">
+      <thead>
+        <tr><th>模型</th><th>Ctx.</th><th class="num">NIAH</th><th class="num">MMLU</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-4-Turbo</td><td>128K</td><td class="num">87.1</td><td class="num">86.4</td></tr>
+        <tr><td>GPT-3.5-Turbo</td><td>16K</td><td class="num">—</td><td class="num">67.3</td></tr>
+        <tr><td>YaRN Mistral 7B</td><td>128K</td><td class="num">57.4</td><td class="num">59.4</td></tr>
+        <tr><td>Together LLaMA-2 7B</td><td>32K</td><td class="num">27.9</td><td class="num">44.8</td></tr>
+        <tr><td>LongChat v1.5 7B</td><td>32K</td><td class="num">18.0</td><td class="num">42.3</td></tr>
+        <tr><td>LongLoRA 7B</td><td>100K</td><td class="num">70.0</td><td class="num">37.9</td></tr>
+        <tr class="best"><td>Ours LLaMA-2 7B</td><td>80K</td><td class="num">88.0</td><td class="num">43.3</td></tr>
+        <tr><td>LongLoRA 13B</td><td>64K</td><td class="num">54.1</td><td class="num">50.1</td></tr>
+        <tr class="best"><td>Ours LLaMA-2 13B</td><td>64K</td><td class="num">90.0</td><td class="num">52.4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">NIAH</span><h4>7B 高 GPT-4 0.9 个百分点</h4></div>
+      <p>88.0 − 87.1 = <strong>+0.9</strong>；7B 比 YaRN Mistral 7B 高 30.6 个百分点（相对后者 +53.3%）。13B 90.0，比同为 64K 训练的 LongLoRA 13B（54.1）高 35.9 个百分点。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">MMLU</span><h4>短上下文守得住</h4></div>
+      <p>7B 43.3，比 LongLoRA 7B（37.9）高 5.4 个百分点；13B 52.4，比 LongLoRA 13B（50.1）高 2.3 个百分点。但都远低于 GPT-4-Turbo 的 86.4。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">BookQA</span><h4>下游差距没关上</h4></div>
+      <p>128K InfiniBench BookQA（Table 4）：Ours 7B 27.4、Ours 13B 31.1；GPT-4-Turbo 37.4。13B 距 GPT-4 仍有 6.3 个百分点（相对 16.8%）。</p>
+    </div>
+  </div>
+
+  <h3>数据量：先快后慢，5B 见顶</h3>
+  <p>Figure 3 固定配方、只改训练 token 数：100M → 500M 把 NIAH 从 37.8 拉到 81.1（+43.3 个百分点）；500M → 5B 只再多 6.9（到 88.0）；5B → 10B 反而降 4.0 到 84.0。论文据此判定 500M 就「解锁了大部分能力」，5B 是饱和点，10B 开始在 80K 训练区间上过拟合。</p>
+  <p>但 Figure 3 的 loss 不配合这个叙事：10B 那一格的 loss 在 1K–128K 为 1.79 / 1.55 / 1.40 / 1.31 / 1.35，5B 是 1.80 / 1.56 / 1.41 / 1.32 / 1.36，几乎逐列相同，NIAH 却从 88.0 掉到 84.0——又一次「loss 看不出差别」。</p>
+
+  <h3>BookQA：同一张表里的越级</h3>
+  <p>Ours 7B（27.4）高于 LongLoRA 7B（24.3，+3.1 个百分点）与 YaRN Mistral 7B（26.3，+1.1 个百分点），而 YaRN 的基底 Mistral 7B 本身比 LLaMA-2 7B 强（§5 的说法）；Ours 13B（31.1）比 YaRN（26.3）高 4.8 个百分点，相对 +18.3%。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它能「解锁」检索，不代表能「推理」长文</h2></div>
+  <p class="sec-sub">读完后你应该知道：这套方案的适用条件是什么，哪些场景不宜直接套用它的结论。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>评测主力是 NIAH，考的是复述不是理解</h4></div>
+    <p>主结论建立在单句检索上，真实长文任务只报了 BookQA。论文自己把 100K 级指令微调列为未解问题（§6），并指出目前还没有开源的 100K 指令微调模型。把 88.0 外推到长文档推理、多文档问答，超出了原文的范围。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>只在 LLaMA-2 7B/13B 上验证</h4></div>
+    <p>「能力已在预训练中获得」是<strong>针对这个基座的假设</strong>，论文没有证明它对 Mistral、MoE 或更大模型同样成立。数据量结论（500M 解锁、5B 饱和、10B 过拟合）也只在 80K 训练长度、4M batch、lr 2e-5 这组设定下得到，换尺度未必复现。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>结构上限卡在 80K</h4></div>
+    <p>训练长度受限于 HF+DeepSpeed Zero3 的显存，论文明确说更长会 OOM，且加 GPU 无法延长上下文（§4）。所谓「128K 能力」实际是 80K 训练 + 长度外推，Figure 1 的网格也显示 100K 之后开始变红。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>代价小，但不是零</h4></div>
+    <p>按源上采样把 0–4K 的 Wiki（−0.040）与 Book（−0.065）loss 压下去了，但 C4 与 CC 各 +0.008、Stack −0.001、Github −0.008——都贴着 ±0.01 的门槛。这组数说明的是「不破坏领域平衡」，而不是「短上下文毫无代价」<span class="infer">推断</span>（由 Table 5 中 0–4K 段 Per-source 行的符号与门槛反推）。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话收束：<strong>这篇工作的贡献是证明「长上下文是一条数据工程问题」，而不是给出长上下文能力本身的上限。</strong></p>
+</section>
+
+<footer>
+  <div>Data Engineering for Scaling Language Models to 128K Context · Yao Fu, Rameswar Panda, Xinyao Niu, Xiang Yue, Hannaneh Hajishirzi, Yoon Kim, Hao Peng · arXiv 2024</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2402.10171v1" target="_blank" rel="noopener">arXiv:2402.10171v1</a>（本页全部图号、表号、数值以 v1 为准；v1 是 arXiv 上的版本，2024-02-15）<br>
+    代码：<a href="https://github.com/FranxYao/Long-Context-Data-Engineering" target="_blank" rel="noopener">FranxYao/Long-Context-Data-Engineering</a><br>
+    笔记：<a href="/data-engineering-for-scaling-language-models-to-128k-context/">Data Engineering for Scaling Language Models to 128K Context</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    数据量口径：§1 称 LLaMA Long 与 XVERSE 用约「500 billion tokens」持续预训练；v1 Table 2 的标题与正文写的是「400B tokens」。本页统一采用 §1 的 500B（约 5000 亿）。§1 称 500B；v1 Table 2 为 400B。笔记写的「400B token」与 Table 2 一致，不是错误。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* =========================================================
+     交互 A：Figure 3 的 NIAH 网格
+     常量逐字取自 Figure 3 六张网格上方的准确率
+     ========================================================= */
+  var SCALE = [
+    { key: '100m', label: '100M tokens', acc: '37.8', red: 12 },
+    { key: '300m', label: '300M tokens', acc: '59.0', red: 12 },
+    { key: '500m', label: '500M tokens', acc: '81.1', red: 12 },
+    { key: '1b',   label: '1B tokens',   acc: '85.3', red: 12 },
+    { key: '5b',   label: '5B tokens',   acc: '88.0', red: 12 },
+    { key: '10b',  label: '10B tokens',  acc: '84.0', red: 12 }
+  ];
+  /* acc 只用于显示（字符串）；red = min(round(100 − acc), 12)：62/41/19/15/12/16 → 62/41/19 封顶为 12（手算写在折叠里） */
+  var COLS = 12;
+  var DEPTHS = [0, 50, 100];
+  var LIMIT = 36;               /* 3 行 × 12 列 */
+
+  var grid = document.getElementById('niah-grid');
+  var msg = document.getElementById('niah-msg');
+  var read = document.getElementById('niah-read');
+  var title = document.getElementById('niah-title');
+
+  function byKey(key) {
+    for (var i = 0; i < SCALE.length; i++) { if (SCALE[i].key === key) { return SCALE[i]; } }
+    return null;
+  }
+
+  function renderGrid(red) {
+    if (!grid) { return; }
+    if (!grid.getAttribute('data-built')) {
+      for (var n = 0; n < LIMIT; n++) {
+        var d = document.createElement('div');
+        d.className = 'cell';
+        grid.appendChild(d);
+      }
+      grid.setAttribute('data-built', '1');
+      grid.setAttribute('style', 'grid-template-columns: repeat(' + String(COLS) + ', minmax(0, 1fr))');
+    }
+    var all = grid.children;
+    for (var k = 0; k < LIMIT; k++) {
+      var cell = all[k];
+      if (!cell) { continue; }
+      var row = Math.floor(k / COLS);
+      var col = k % COLS;
+      /* 只用减一法判定 col < red；两个变量直接比较在该页环境会静默出错 */
+      var ok = (col - red) < 0;
+      if (ok) { cell.className = 'cell ok'; } else { cell.className = 'cell'; }
+      cell.setAttribute('title', '针深度 ' + String(DEPTHS[row]) + '% · 由左数第 ' + String(col + 1) + ' / 12 个长度刻度 · ' + (ok ? '示意成功' : '示意失败'));
+    }
+  }
+
+  function updateNiah(key) {
+    var s = byKey(key);
+    if (!s) { return; }
+    renderGrid(s.red);
+    if (title) { title.textContent = s.label; }
+    if (msg) {
+      msg.innerHTML = '顶部准确率 <strong>' + s.acc + '%</strong>（Figure 3）；每行失败格 ' + String(s.red) + ' 格（封顶示意）';
+    }
+    if (read) {
+      var okPerRow = COLS - s.red;
+      var txt = '每行成功格 ' + String(okPerRow) + ' / ' + String(COLS) + '，合计 ' + String(okPerRow * 3) + ' / 36（封顶示意）';
+      txt += '；网格按 round(100 − acc) 换算并封顶 12，不映射准确率；真实准确率 ' + s.acc + '%';
+      if (key === '5b') { txt += '，5B 是 Figure 3 的饱和点，且外推到 128K'; }
+      read.textContent = txt;
+    }
+  }
+
+  var niahBtns = document.querySelectorAll('#niah-btns .rule-btn');
+  if (niahBtns.length && grid) {
+    for (var b = 0; b < niahBtns.length; b++) {
+      niahBtns[b].addEventListener('click', function () {
+        for (var i = 0; i < niahBtns.length; i++) { niahBtns[i].classList.remove('active'); }
+        this.classList.add('active');
+        updateNiah(this.getAttribute('data-scale'));
+      });
+    }
+    updateNiah('5b');
+  }
+
+  /* =========================================================
+     交互 B：准确率 × 训练 token 数
+     常量来自 Figure 3 各网格标题；滑块按档位索引
+     ========================================================= */
+  var slider = document.getElementById('ps');
+  var psV = document.getElementById('ps-v');
+  var psTok = document.getElementById('ps-tok');
+  var psRead = document.getElementById('ps-read');
+  var psSlots = document.getElementById('ps-slots');
+
+  /* 每档：acc（显示用字符串）、相对上一档的差、相对 5B 的差——全为百分点、两位小数；
+     首字符为符号，数字部分字面粘贴自 python3 复算（见折叠「手算两组」），JS 只换负号为 U+2212 */
+  var PS = [
+    { acc: '37.8', up: null,       vs5: '-050.20' },
+    { acc: '59.0', up: '+021.20',  vs5: '-029.00' },
+    { acc: '81.1', up: '+022.10',  vs5: '-06.90' },
+    { acc: '85.3', up: '+04.20',   vs5: '-02.70' },
+    { acc: '88.0', up: '+02.70',   vs5: '+00.00' },
+    { acc: '84.0', up: '-04.00',   vs5: '-04.00' }
+  ];
+
+  function signed(txt) {
+    if (txt === null) { return '—'; }
+    var sign = (txt.charAt(0) === '-') ? '\u2212' : '+';
+    return sign + txt.slice(1).replace(/^0+(?=\d)/, '');
+  }
+
+  function renderPs() {
+    if (!slider) { return; }
+    var i = parseInt(slider.value, 10);
+    if (isNaN(i) || i < 0 || i >= SCALE.length) { i = 4; }
+    var s = SCALE[i];
+    var p = PS[i];
+    if (psV) { psV.textContent = s.label.replace(' tokens', ''); }
+    if (psTok) { psTok.textContent = s.label; }
+    if (psRead) {
+      var h = '<div>准确率 <strong>' + p.acc + '%</strong>（Figure 3，' + s.label + '）</div>';
+      h += '<div>相对上一档的差：<strong>' + signed(p.up) + '</strong> 个百分点</div>';
+      h += '<div>Δ vs 5B（88.0）：<strong>' + signed(p.vs5) + '</strong> 个百分点</div>';
+      psRead.innerHTML = h;
+    }
+    if (psSlots) {
+      psSlots.innerHTML =
+        '<div class="slot"><div class="slot-name">ACC</div><div class="slot-val">' + p.acc + '%</div></div>' +
+        '<div class="slot"><div class="slot-name">相对上一档的差</div><div class="slot-val">' + signed(p.up) + '</div></div>' +
+        '<div class="slot"><div class="slot-name">Δ vs 5B</div><div class="slot-val">' + signed(p.vs5) + '</div></div>';
+    }
+  }
+
+  if (slider) {
+    slider.addEventListener('input', renderPs);
+    renderPs();
+  }
+})();
+</script>
+</body>
+</html>

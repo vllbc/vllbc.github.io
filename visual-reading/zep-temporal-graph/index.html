@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zep · 给 Agent 一张会过期的时间知识图谱</title>
+<meta name="description" content="Zep 用 Graphiti 把对话存成三层时序知识图谱：每条事实边带 valid/invalid 与 created/expired 四个时间戳，冲突时不删除旧事实，只让它失效。LongMemEval 上 gpt-4o 从 60.2% 提升到 71.2%，平均上下文从 115k 降到 1.6k。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有：双时态时间线模拟器 */
+.bt-rows{display:flex;flex-direction:column;gap:7px;margin:18px 0 4px}
+.bt-row{display:grid;grid-template-columns:190px 1fr;gap:12px;align-items:center}
+.bt-label{font-size:12px;font-family:"JetBrains Mono",monospace;color:var(--text-muted);line-height:1.4}
+.bt-track{position:relative;height:28px;background:var(--bg-soft);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.bt-bar{position:absolute;top:5px;bottom:5px;border-radius:4px;background:var(--border-strong);opacity:.55;transition:left .18s ease,width .18s ease,background .18s ease}
+.bt-bar.on{background:var(--accent);opacity:1}
+.bt-bar.future{background:transparent;border:1.5px dashed var(--border-strong);opacity:.9}
+.bt-playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--text);opacity:.75;pointer-events:none}
+.bt-axis{display:grid;grid-template-columns:190px 1fr;gap:12px;margin-bottom:4px}
+.bt-ticks{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft)}
+.bt-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--text-muted);margin-top:12px}
+.bt-legend i{display:inline-block;width:18px;height:8px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.bt-legend .sw-on{background:var(--accent)}
+.bt-legend .sw-off{background:var(--border-strong);opacity:.55}
+.bt-legend .sw-future{border:1.5px dashed var(--border-strong);background:transparent}
+@media (max-width:640px){
+  .bt-row{grid-template-columns:1fr;gap:4px}
+  .bt-axis{grid-template-columns:1fr}
+  .bt-axis .spacer{display:none}
+  .bt-label{font-size:11.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Zep</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#bitemporal">双时态</a>
+      <a href="#compute">怎么算</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2501.13956</span>
+  <h1>Zep：给 Agent 一张会「过期」的时间知识图谱</h1>
+  <p class="hero-sub">
+    静态 RAG 把记忆当成不变的文本块，但用户的地址、职位、偏好都会变。Zep 用 <strong>Graphiti</strong> 把对话拆成实体与事实，给每条边记两套时间——<strong>世界何时为真</strong>、<strong>系统何时知道</strong>。冲突时旧事实只失效、不删除。代价是构图阶段大量 LLM 调用。
+  </p>
+  <div class="meta">
+    <span>Preston Rasmussen 等 · Zep / Graphiti</span>
+    <a href="https://arxiv.org/abs/2501.13956" target="_blank" rel="noopener">arXiv 2501.13956 ↗</a>
+    <a href="https://github.com/getzep/graphiti" target="_blank" rel="noopener">Graphiti 代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    普通 RAG 隐含三个假设：语料基本不变、相关性等于语义相似、事实一旦写入就长期有效。Agent 记忆三条都撞上——对话在持续发生，业务数据在更新，用户会搬家、换工作、改偏好。
+  </p>
+  <p>
+    Zep 的做法是把记忆做成<strong>时序知识图谱</strong>：底层 episode 存原始消息，中间层存实体和事实边，顶层存社区摘要。每条事实边带四个时间戳，分属两条轴：<em>T 是世界时间</em>，<em>T′ 是系统摄入时间</em>。
+  </p>
+  <p>
+    新事实与旧事实矛盾时，旧边<strong>不删除</strong>：只把 <code>t_invalid</code> 写成新边的 <code>t_valid</code>，把 <code>t′_expired</code> 写成新边的 <code>t′_created</code>。历史可查，当前状态也清楚。
+  </p>
+  <p>
+    检索不是单纯向量相似：cosine + BM25 + 图上的 BFS，再重排，最后把事实与时间范围拼成上下文。代价也很明确：单会话助理类问题反而下降 <strong>17.7%</strong>，结构化业务数据的联合推理没有基准验证。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">94.8%</div>
+      <div class="k">DMR 准确率（gpt-4-turbo）<br>MemGPT 93.4% / 全上下文 94.4%</div>
+    </div>
+    <div class="metric">
+      <div class="v">71.2%</div>
+      <div class="k">LongMemEval 准确率（gpt-4o）<br>全上下文 60.2%，论文称 +18.5%</div>
+    </div>
+    <div class="metric">
+      <div class="v">1.6k</div>
+      <div class="k">平均上下文 token<br>全上下文 115k；延迟 28.9s → 2.58s</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>静态 RAG 假设事实不会变，Agent 的记忆恰好一直在变</h2></div>
+  <p class="sec-sub">先建立一个共同认知：记忆的难点不是「找不到」，而是「不知道哪条现在还算数」。</p>
+
+  <p>普通 RAG 把文档切成块、向量化、按相似度取回。这套流程隐含三个假设：语料基本不变；相关性等于语义相似；一条事实一旦写入就长期有效。企业 Agent 三条都撞上——对话在持续发生，业务数据在更新，用户的地址、职位、偏好会变。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一个具体场景</span><h4>用户说「我搬到 NYC 了」</h4></div>
+    <p>向量库里同时躺着「User 住在 Boston」和「User 住在 NYC」。两句话语义高度相似，都会被召回；但只有一条是当前事实。没有有效区间，模型只能靠上下文顺序猜，或者把两条都写进 prompt，让 LLM 自己判断。对话越长，这种冲突越多。</p>
+  </div>
+
+  <p>另一条路是把全部历史塞进上下文。LongMemEval 的平均对话长度约 <code>115,000</code> token；论文的 full-context 基线在 gpt-4o 上延迟 <code>28.9</code> 秒。成本之外，长上下文还会稀释关键信息。于是问题变成：<strong>如何在不丢历史的前提下，让每条事实带上「何时为真」和「系统何时知道」。</strong></p>
+
+  <p>这两个时间不必重合。用户可能 6 月就搬了家，Zep 7 月才从对话里得知；这段时间里，世界时间已经翻页，系统时间还停在上一页。如果系统只存一个「当前值」，它既说不清自己当时知道什么，也无法在事后审计「为什么当时答错了」。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>MemGPT 会分页，GraphRAG 会聚类，但都没把「失效」写进边</h2></div>
+  <p class="sec-sub">两套方案各解决了一半：一个管上下文，一个管结构；时间维度都缺席。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">MemGPT</span><h4>把记忆做成操作系统的分页</h4></div>
+      <p>主上下文之外再开一层 archival storage，靠函数调用在两层之间换页。优点是能在有限窗口里维持长期对话，DMR 上用 gpt-4-turbo 达到 <code>93.4%</code>。</p>
+      <p><strong>卡在哪：</strong>记忆单元仍是文本，检索靠相似度或摘要。事实没有显式的有效区间；新信息与旧信息冲突时，也没有一条边级的失效规则。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">GraphRAG</span><h4>把语料做成实体图</h4></div>
+      <p>从语料抽实体和关系，做社区检测，再用 map-reduce 生成社区摘要。优点是能回答「这批文档整体在讲什么」这类全局问题。</p>
+      <p><strong>卡在哪：</strong>它为静态语料设计：图构建一次，社区用 Leiden 划分，事实边不带双时态，也不处理「新事实让旧事实失效」。语料一变，图谱就要重建。</p>
+    </div>
+  </div>
+
+  <p>普通向量 RAG 更直接：块 + 余弦相似度。它连实体都没有，更谈不上时间。三者共同的缺口是：<strong>事实的生命周期没有被建模。</strong>Zep 的切入点不是「再加一个检索器」，而是把「失效」变成图上一次显式的写操作。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="bitemporal">
+  <div class="sec-head"><span class="sec-num">03</span><h2>给每条边记两套时间：世界何时为真，系统何时知道</h2></div>
+  <p class="sec-sub">Zep 的核心不是「用了知识图谱」，而是把「失效」变成一次写操作，而不是删除。</p>
+
+  <p>论文把时间拆成两条轴。<strong>T</strong> 是事件在现实世界发生的顺序；<strong>T′</strong> 是 Zep 摄入数据的顺序，也就是数据库的审计轨迹。每条事实边同时带四个时间戳：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">T · 世界时间</span><h4>事实在现实中何时成立</h4></div>
+      <p><code>t_valid</code>：事实开始为真的时刻。</p>
+      <p><code>t_invalid</code>：事实不再为真的时刻。</p>
+      <p>回答「用户现在住哪」用它。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">T′ · 系统时间</span><h4>Zep 何时写入、何时标记失效</h4></div>
+      <p><code>t′_created</code>：这条边写入 Zep 的时刻。</p>
+      <p><code>t′_expired</code>：这条边在 Zep 里被标记失效的时刻。</p>
+      <p>回答「系统当时知道什么」用它。</p>
+    </div>
+  </div>
+
+  <p>两者不必重合。用户可能 6 月就搬了家，Zep 7 月才从对话里得知；这段时间里，世界时间已经翻页，系统时间还停在上一页。论文的边失效规则只做两件事：</p>
+
+  <div class="eq">
+    t_invalid(<span class="hl-a">旧边</span>) ← t_valid(<span class="hl-c">新边</span>)<br>
+    t′_expired(<span class="hl-a">旧边</span>) ← t′_created(<span class="hl-c">新边</span>)
+  </div>
+  <div class="eq-cap">论文明确给出第一行；第二行是 T′ 审计轴的记录方式——旧边在新边写入时被标记失效</div>
+
+  <p>具体做法是：LLM 把新边与语义相关的旧边逐条比对，找出时间上重叠且互相矛盾的对；确认矛盾后，旧边的 <code>t_invalid</code> 被设为新边的 <code>t_valid</code>。在系统时间轴 T′ 上，旧边的 <code>t′_expired</code> 也在新边写入时被填上。结果是一条边从「无终点」变成「有终点」，历史仍然可查。</p>
+
+  <p>这也解释了为什么 Zep 要保留原始 episode：语义边会失效，但原始消息不该被改写。查询时既可以看当前有效的事实，也可以沿双向索引回到当时的原话。</p>
+
+  <h3>自己动手：拖动同一条时间轴，看两条时间线何时分叉</h3>
+  <p>下面用一组示意事实演示这套规则。切换 <strong>T</strong> 与 <strong>T′</strong>，拖动时间轴；再点「注入新事实」，观察旧边如何被写上终点。虚线表示这条边还没有进入图谱。</p>
+
+  <div class="sim" id="bt-sim">
+    <div class="sim-top" id="bt-modes">
+      <button class="rule-btn active" data-mode="world">世界时间 T<span class="r-sub">事实何时为真</span></button>
+      <button class="rule-btn" data-mode="system">系统时间 T′<span class="r-sub">Zep 何时知道</span></button>
+    </div>
+
+    <div class="bt-axis">
+      <div class="spacer"></div>
+      <div class="bt-ticks">
+        <span>2023-01</span><span>2023-07</span><span>2024-01</span><span>2024-07</span><span>2025-01</span>
+      </div>
+    </div>
+
+    <div class="bt-rows" id="bt-rows"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>时间轴 <span class="v" id="bt-date">2024-03</span></label>
+        <input type="range" id="bt-slider" min="0" max="24" step="1" value="14">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" data-inject="nyc">注入新事实：搬到 NYC</button>
+      <button class="act" data-inject="tea">注入新事实：改喝茶</button>
+      <button class="act ghost" id="bt-reset">重置</button>
+    </div>
+
+    <div class="bt-legend">
+      <span><i class="sw-on"></i>当前视图下有效</span>
+      <span><i class="sw-off"></i>不在当前区间</span>
+      <span><i class="sw-future"></i>尚未写入图谱</span>
+    </div>
+
+    <div class="readout" id="bt-msg">
+      <div class="r-head">当前视图</div>
+    </div>
+  </div>
+
+  <p><strong>建议按这个顺序试：</strong></p>
+  <ul>
+    <li>停在 2024-03，两条时间线一致：Boston、Coffee、Mochi 都有效。</li>
+    <li>点「注入新事实：搬到 NYC」。系统时间停在 2024-06：世界时间已经认为 NYC 有效，但系统要到 2024-07 才写入这条边，所以图里仍认为 Boston 有效。</li>
+    <li>把时间轴拖到 2024-07，两条时间线重新合上。旧边 Boston 没有被删除，只是多了 <code>t_invalid</code> 和 <code>t′_expired</code>。</li>
+    <li>再点「改喝茶」，在 2024-09 到 2024-10 之间会看到同样的分叉。</li>
+  </ul>
+
+  <details>
+    <summary>这组日期是论文里的吗？<span class="sum-sub">点开看示意数据与真实规则的边界</span></summary>
+    <div class="details-body">
+      <p>不是。Boston → NYC、Coffee → Tea 的具体月份是为演示构造的，论文只给出规则，没有给出这组例子。规则本身取自论文：新边与语义相关的旧边比对，时间重叠且矛盾时，旧边的 <code>t_invalid</code> 被设为新边的 <code>t_valid</code>；系统时间轴上，旧边的 <code>t′_expired</code> 在新边写入时被填上；旧边保留。</p>
+      <p>模拟把「系统收到新事实」简化成一个按钮，省略了实体消解、事实抽取和 LLM 矛盾判断。真实系统里，这些步骤都可能出错：实体没对齐、关系抽错、日期解析错，都会让失效规则作用在错误的边上。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么算 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>构图不在 GPU 上训，而是在摄入时反复调用 LLM</h2></div>
+  <p class="sec-sub">Zep 没有训练阶段；它的成本主要花在把每条消息变成实体、事实和失效判断。</p>
+
+  <p>一条消息进入 Zep 后，构图按固定流水线走：</p>
+  <ul>
+    <li><strong>实体抽取：</strong>当前消息与最近 <code>n = 4</code> 条消息一起送进 LLM，提供两轮对话上下文；说话人自动成为实体；再用一次 reflexion 式反思降低漏抽和幻觉，并生成实体摘要。</li>
+    <li><strong>实体消解：</strong>实体名嵌入 <code>1024</code> 维向量，先做余弦检索，再对名称和摘要做全文检索；候选交给 LLM 判断是否同一实体，并生成更新后的名称与摘要。</li>
+    <li><strong>事实抽取与去重：</strong>抽实体之间的关系；边的去重搜索被限制在<strong>相同实体对</strong>之间，避免把不同实体的相似边混在一起，也缩小搜索空间。</li>
+    <li><strong>时间抽取与失效：</strong>用消息的 <code>t_ref</code> 解析绝对和相对日期（如「下周四」「两周前」）；新边与语义相关旧边比对，时间重叠且矛盾时触发上面的失效规则。</li>
+    <li><strong>社区更新：</strong>用 label propagation 而不是 Leiden；新节点按邻居多数票归入社区，只做一步递归，再更新社区摘要。</li>
+  </ul>
+
+  <p>工程上几个刻意的选择：写图用<strong>预定义 Cypher 查询</strong>，而不是让 LLM 生成查询，保证 schema 一致；社区用 label propagation 是为了支持增量更新，代价是社区会逐渐偏离完整重算的结果，所以仍需要周期性全量刷新；构图模型用 <code>gpt-4o-mini</code>，嵌入和重排用 <code>BGE-m3</code>。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">成本在哪</span><h4>没有反向传播，只有推理账单</h4></div>
+    <p>实体抽取、反思、消解、事实抽取、矛盾判断、社区摘要，每一步都是 LLM 调用。论文没有给出每条消息的调用次数或 token 成本，也没有做消融；因此无法从论文数字里拆出「双时态」单独贡献了多少。能确认的是：这是一套推理时的构图系统，不是训练出来的记忆模型。</p>
+  </div>
+
+  <p>这也决定了它的扩展性讨论方式不同于训练模型：瓶颈不在 GPU 显存，而在摄入吞吐、LLM 调用成本和图数据库写入。论文把延迟作为一等指标报告，但没有给出千万级用户下的成本曲线。</p>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三层图负责存，三步检索负责取</h2></div>
+  <p class="sec-sub">架构解决「记忆放哪」，检索解决「这一次该拿什么」。</p>
+
+  <figure>
+    <svg viewBox="0 0 520 720" role="img" aria-label="Graphiti 三层知识图谱与双时态事实边示意">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="arwA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <!-- 社区层 -->
+      <rect x="30" y="24" width="460" height="64" rx="12" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.2"></rect>
+      <text x="260" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="var(--c2)">社区子图 Gc · 高层摘要</text>
+      <text x="260" y="72" text-anchor="middle" font-size="12" fill="var(--text-muted)">工作 / 生活 / 偏好；社区名做向量索引</text>
+
+      <line x1="260" y1="88" x2="260" y2="106" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arw)"></line>
+
+      <!-- 语义层 -->
+      <rect x="30" y="110" width="460" height="200" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="44" y="134" font-size="14" font-weight="700" fill="var(--text)">语义实体子图 Gs · 实体 + 事实边</text>
+
+      <rect x="50" y="180" width="66" height="34" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="83" y="202" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--accent-deep)">User</text>
+
+      <rect x="175" y="146" width="86" height="30" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1"></rect>
+      <text x="218" y="166" text-anchor="middle" font-size="12" fill="var(--text)">Boston</text>
+
+      <rect x="175" y="190" width="64" height="30" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1"></rect>
+      <text x="207" y="210" text-anchor="middle" font-size="12" fill="var(--text)">NYC</text>
+
+      <rect x="175" y="234" width="86" height="30" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1"></rect>
+      <text x="218" y="254" text-anchor="middle" font-size="12" fill="var(--text)">Coffee</text>
+
+      <line x1="116" y1="192" x2="173" y2="160" stroke="var(--c1)" stroke-width="1.4" marker-end="url(#arw)"></line>
+      <line x1="116" y1="197" x2="173" y2="204" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#arwA)"></line>
+      <line x1="116" y1="202" x2="173" y2="248" stroke="var(--c1)" stroke-width="1.4" marker-end="url(#arw)"></line>
+
+      <text x="122" y="172" font-size="10.5" fill="var(--c1)" paint-order="stroke" stroke="var(--bg-surface)" stroke-width="2.5">lives_in</text>
+      <text x="124" y="191" font-size="10.5" fill="var(--accent)" paint-order="stroke" stroke="var(--bg-surface)" stroke-width="2.5">lives_in</text>
+      <text x="122" y="228" font-size="10.5" fill="var(--c1)" paint-order="stroke" stroke="var(--bg-surface)" stroke-width="2.5">likes</text>
+
+      <text x="270" y="156" font-size="11" fill="var(--text-muted)">2023-01 → 2024-06</text>
+      <text x="270" y="172" font-size="10.5" fill="var(--accent)">t_invalid = 2024-06</text>
+      <text x="248" y="206" font-size="11" fill="var(--accent)">2024-06 →</text>
+      <text x="270" y="244" font-size="10.5" fill="var(--accent)">2024-09 失效</text>
+
+      <text x="44" y="292" font-size="11" fill="var(--text-soft)">实体消解：余弦 + 全文检索 → LLM 判重；写图用预定义 Cypher</text>
+
+      <line x1="260" y1="312" x2="260" y2="336" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arw)"></line>
+      <text x="268" y="330" font-size="10.5" fill="var(--text-soft)">抽取 / 溯源</text>
+
+      <!-- 情节层 -->
+      <rect x="30" y="338" width="460" height="88" rx="12" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="44" y="362" font-size="14" font-weight="700" fill="var(--c1)">情节子图 Ge · 原始消息 + t_ref</text>
+
+      <rect x="45" y="376" width="128" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="109" y="397" text-anchor="middle" font-size="11" fill="var(--text)">消息 2024-01-10</text>
+
+      <rect x="186" y="376" width="128" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="250" y="397" text-anchor="middle" font-size="11" fill="var(--text)">消息 2024-06-20</text>
+
+      <rect x="327" y="376" width="128" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="391" y="397" text-anchor="middle" font-size="11" fill="var(--text)">消息 2024-09-15</text>
+
+      <text x="44" y="420" font-size="11" fill="var(--text-muted)">无损存储；双向索引可从事实回到原话</text>
+
+      <!-- 双时态边 -->
+      <rect x="30" y="452" width="460" height="244" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="48" y="480" font-size="15" font-weight="700" fill="var(--text)">同一条边的两套时间</text>
+
+      <rect x="48" y="496" width="62" height="28" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1"></rect>
+      <text x="79" y="515" text-anchor="middle" font-size="11.5" fill="var(--text)">User</text>
+
+      <line x1="110" y1="510" x2="198" y2="510" stroke="var(--accent)" stroke-width="1.8" marker-end="url(#arwA)"></line>
+      <text x="154" y="503" text-anchor="middle" font-size="10.5" fill="var(--accent)">lives_in</text>
+
+      <rect x="200" y="496" width="58" height="28" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1"></rect>
+      <text x="229" y="515" text-anchor="middle" font-size="11.5" fill="var(--text)">NYC</text>
+
+      <text x="48" y="556" font-size="13" font-weight="700" fill="var(--accent)">T · 世界时间</text>
+      <text x="48" y="580" font-size="12" fill="var(--text)" font-family="JetBrains Mono, monospace">t_valid      2024-06-01</text>
+      <text x="48" y="602" font-size="12" fill="var(--text)" font-family="JetBrains Mono, monospace">t_invalid    ∅</text>
+
+      <text x="280" y="556" font-size="13" font-weight="700" fill="var(--c1)">T′ · 系统时间</text>
+      <text x="280" y="580" font-size="12" fill="var(--text)" font-family="JetBrains Mono, monospace">t′_created  2024-07-01</text>
+      <text x="280" y="602" font-size="12" fill="var(--text)" font-family="JetBrains Mono, monospace">t′_expired  ∅</text>
+
+      <line x1="48" y1="620" x2="472" y2="620" stroke="var(--border)" stroke-width="1"></line>
+
+      <text x="48" y="642" font-size="12" fill="var(--text-muted)">新事实到达时，旧边不删除：</text>
+      <text x="48" y="664" font-size="12" fill="var(--accent-deep)" font-family="JetBrains Mono, monospace">t_invalid(旧) ← t_valid(新)</text>
+      <text x="48" y="686" font-size="12" fill="var(--c1)" font-family="JetBrains Mono, monospace">t′_expired(旧) ← t′_created(新)</text>
+    </svg>
+    <figcaption>
+      图：Graphiti 的三层子图与一条事实边上的四个时间戳。原图未直接复制，按论文第 2 节文字重绘；图中日期为示意。
+    </figcaption>
+  </figure>
+
+  <p>三层各司其职：episode 存原始消息，保证可溯源；semantic 存实体和事实边，边上带四个时间戳；community 存强连通实体的摘要，负责全局性问题。三者不是三份互相独立的存储，而是同一张图 <code>G = (N, E, φ)</code> 的三个子图。</p>
+
+  <h3>检索是三个函数的复合</h3>
+  <div class="eq">
+    f(α) = χ(ρ(φ(α))) = β
+  </div>
+  <div class="eq-cap">输入查询 α，输出一段可直接塞进 LLM 的上下文 β；φ 搜索、ρ 重排、χ 组装</div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">φ Search</span></div>
+      <p>余弦相似度 + Okapi BM25 全文检索 + n 跳 BFS。三者分别抓语义相似、词面匹配、图上的上下文接近；返回事实边、实体、社区三类候选。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">ρ Rerank</span></div>
+      <p>支持 RRF、MMR、episode-mentions（按提及频率加权）、node-distance（按到中心节点的距离）、cross-encoder（最贵）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">χ Constructor</span></div>
+      <p>边输出事实 + <code>t_valid</code>/<code>t_invalid</code>；实体输出名称 + 摘要；社区输出摘要。时间范围会一起进入上下文。</p>
+    </div>
+  </div>
+
+  <p>实验里只取了 top 20 条边和实体（DMR 用 top 10）。这也是论文承认的边界：episode 与实体之间的双向索引没有被评估，检索系统的完整能力只验证了一部分。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>长对话上提升明显，但有一类问题反而变差</h2></div>
+  <p class="sec-sub">DMR 已经饱和，真正有信息量的是 LongMemEval 的分题型结果。</p>
+
+  <h3>DMR：只赢一点点，而且基准本身太短</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>记忆方案</th><th>模型</th><th style="text-align:right">准确率</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Recursive Summarization†</td><td>gpt-4-turbo</td><td class="num">35.3%</td></tr>
+        <tr><td>Conversation Summaries</td><td>gpt-4-turbo</td><td class="num">78.6%</td></tr>
+        <tr><td>MemGPT†</td><td>gpt-4-turbo</td><td class="num">93.4%</td></tr>
+        <tr><td>Full-conversation</td><td>gpt-4-turbo</td><td class="num">94.4%</td></tr>
+        <tr class="best"><td>Zep</td><td>gpt-4-turbo</td><td class="num">94.8%</td></tr>
+        <tr><td>Conversation Summaries</td><td>gpt-4o-mini</td><td class="num">88.0%</td></tr>
+        <tr><td>Full-conversation</td><td>gpt-4o-mini</td><td class="num">98.0%</td></tr>
+        <tr class="best"><td>Zep</td><td>gpt-4o-mini</td><td class="num">98.2%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>† 为 MemGPT 论文报告的结果。Zep 在 gpt-4-turbo 上 <code>94.8%</code>，比 MemGPT 的 <code>93.4%</code> 高 1.4 个百分点，也只比 full-conversation 的 <code>94.4%</code> 高 0.4 个百分点。每段对话只有 60 条消息，塞得进上下文窗口；作者自己说这个基准区分度不足。</p>
+
+  <h3>LongMemEval：准确率、延迟、上下文长度同时改善</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>记忆方案</th><th>模型</th><th style="text-align:right">准确率</th><th style="text-align:right">延迟</th><th style="text-align:right">延迟 IQR</th><th style="text-align:right">平均上下文</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Full-context</td><td>gpt-4o-mini</td><td class="num">55.4%</td><td class="num">31.3 s</td><td class="num">8.76 s</td><td class="num">115k</td></tr>
+        <tr class="best"><td>Zep</td><td>gpt-4o-mini</td><td class="num">63.8%</td><td class="num">3.20 s</td><td class="num">1.31 s</td><td class="num">1.6k</td></tr>
+        <tr><td>Full-context</td><td>gpt-4o</td><td class="num">60.2%</td><td class="num">28.9 s</td><td class="num">6.01 s</td><td class="num">115k</td></tr>
+        <tr class="best"><td>Zep</td><td>gpt-4o</td><td class="num">71.2%</td><td class="num">2.58 s</td><td class="num">0.684 s</td><td class="num">1.6k</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>gpt-4o 上 <code>60.2% → 71.2%</code>，论文称 <code>18.5%</code> 提升；gpt-4o-mini 上 <code>55.4% → 63.8%</code>，论文称 <code>15.2%</code>。延迟从 <code>28.9 s</code> 降到 <code>2.58 s</code>（约 90%），平均上下文从 <code>115k</code> 降到 <code>1.6k</code>。<strong>注意口径：</strong><code>18.5%</code> 是论文的相对提升；按表中数字，绝对差是 11.0 个百分点。</p>
+
+  <h3>分题型：时序推理涨得最多，单会话助理跌得最多</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">问题类型</th>
+          <th colspan="2" style="text-align:center">gpt-4o-mini</th>
+          <th colspan="2" style="text-align:center">gpt-4o</th>
+        </tr>
+        <tr>
+          <th style="text-align:right">Full-context</th><th style="text-align:right">Zep</th>
+          <th style="text-align:right">Full-context</th><th style="text-align:right">Zep</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>single-session-preference</td><td class="num">30.0%</td><td class="num">53.3%</td><td class="num">20.0%</td><td class="num">56.7%</td></tr>
+        <tr><td>single-session-assistant</td><td class="num">81.8%</td><td class="num">75.0%</td><td class="num">94.6%</td><td class="num">80.4%</td></tr>
+        <tr><td>temporal-reasoning</td><td class="num">36.5%</td><td class="num">54.1%</td><td class="num">45.1%</td><td class="num">62.4%</td></tr>
+        <tr><td>multi-session</td><td class="num">40.6%</td><td class="num">47.4%</td><td class="num">44.3%</td><td class="num">57.9%</td></tr>
+        <tr><td>knowledge-update</td><td class="num">76.9%</td><td class="num">74.4%</td><td class="num">78.2%</td><td class="num">83.3%</td></tr>
+        <tr><td>single-session-user</td><td class="num">81.4%</td><td class="num">92.9%</td><td class="num">81.4%</td><td class="num">92.9%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>几个值得注意的点：</p>
+  <ul>
+    <li><strong>时序推理涨得最多：</strong>temporal-reasoning 在 gpt-4o 上 <code>45.1% → 62.4%</code>（+38.4%）；single-session-preference 在 gpt-4o 上 <code>20.0% → 56.7%</code>（+184%）。这正是双时态设计针对的场景。</li>
+    <li><strong>反直觉的下跌：</strong>single-session-assistant 在 gpt-4o 上 <code>94.6% → 80.4%</code>（−17.7%），mini 上 <code>81.8% → 75.0%</code>（−9.06%）。答案就在最近一段对话里时，图检索可能不如直接把原文给模型。</li>
+    <li><strong>弱模型用不好时间：</strong>knowledge-update 在 mini 上 <code>76.9% → 74.4%</code>（−3.36%），在 gpt-4o 上 <code>78.2% → 83.3%</code>（+6.52%）。论文明确说，能力较弱的模型对 Zep 的时间数据理解不足。</li>
+  </ul>
+
+  <p>还有一个测量细节：Zep 的延迟是在波士顿的消费级笔记本上、连接 AWS us-west-2 测的，网络往返被算进了 Zep 的延迟；基线没有这段网络开销。因此 <code>90%</code> 的延迟降幅对 Zep 是偏保守的估计。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是「事实会变」，不是「记忆无限大」</h2></div>
+  <p class="sec-sub">论文自己列出的边界，比宣传语更有信息量。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>单会话助理类问题会回退</h4></div>
+    <p>single-session-assistant 是唯一在两个模型上都下降的类别：gpt-4o <code>−17.7%</code>，mini <code>−9.06%</code>。当答案就在最近一段对话里，图检索反而可能漏掉局部上下文。论文把这条列为「otherwise consistent improvements」的例外，并说需要更多工程工作。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>弱模型用不好时间数据</h4></div>
+    <p>knowledge-update 在 gpt-4o-mini 上不升反降（<code>76.9% → 74.4%</code>），在 gpt-4o 上升 <code>6.52%</code>。时间范围被写进上下文，不等于模型会用它；能力较弱的模型可能被多出来的时间字段干扰。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界三</span><h4>社区会漂移，必须周期性重算</h4></div>
+    <p>增量 label propagation 只做一步递归，新节点按邻居多数票归入社区。这样省 LLM 调用，但社区会逐渐偏离完整重算的结果。论文明确说，周期性全量刷新仍然必要。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>结构化业务数据没有被验证</h4></div>
+    <p>论文的动机是「对话历史 + 结构化业务数据」的联合记忆，但实验只测了对话。作者承认，现有基准无法评估 Zep 把对话与业务数据放在一起推理的能力。这是动机与实验之间最大的一道缝。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界五</span><h4>没有消融，归因只能靠机制推断</h4></div>
+    <p>论文没有拆开双时态、社区层、混合检索各自的贡献，也没有报告构图成本。DMR 又太短：60 条消息的对话，full-context 已经能到 <code>94.4%</code>。因此「涨了多少是因为时间建模」这个问题，论文没有直接回答。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>Zep 解决的是「同样的历史里，怎么知道哪条现在还算数」，而不是「把记忆容量做大」。</strong>它适合事实会更新、需要审计「当时知道什么」的场景；如果任务只是从固定文档里找答案，普通 RAG 或长上下文可能更简单。</p>
+</section>
+
+<footer>
+  <div>基于论文原文整理；交互中的具体日期为示意，失效规则取自论文。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2501.13956" target="_blank" rel="noopener">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</a> · arXiv 2501.13956 · 2025<br>
+    代码：<a href="https://github.com/getzep/graphiti" target="_blank" rel="noopener">getzep/graphiti</a>（Apache-2.0）<br>
+    笔记：<a href="/zepa-temporal-knowledge-graph-architecture-for-agent-memory/">ZEP：A TEMPORAL KNOWLEDGE GRAPH ARCHITECTURE FOR AGENT MEMORY</a><br>
+    勘误：笔记一处把 <code>18.5%</code> 称为「绝对准确率提升」；按表中 60.2% → 71.2%，绝对差是 11.0 个百分点，18.5% 是论文的相对提升口径。笔记另称 Graphiti 闭源，实际 Graphiti 以 Apache-2.0 开源，闭源的是 Zep 商业服务层。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('bt-sim');
+  if (!root) return;
+
+  var slider = document.getElementById('bt-slider');
+  var dateEl = document.getElementById('bt-date');
+  var rowsEl = document.getElementById('bt-rows');
+  var msgEl = document.getElementById('bt-msg');
+  if (!slider || !dateEl || !rowsEl || !msgEl) return;
+
+  var MONTHS = [];
+  (function () {
+    var y = 2023, m = 1;
+    for (var i = 0; i < 25; i++) {
+      MONTHS.push(y + '-' + (m < 10 ? '0' : '') + m);
+      m++;
+      if (m > 12) { m = 1; y++; }
+    }
+  })();
+
+  var mode = 'world';
+  var pos = 14;
+
+  function makeBaseFacts() {
+    return [
+      { id: 'boston', label: 'User — lives_in → Boston', vs: 0, ve: null, cs: 12, ce: null },
+      { id: 'coffee', label: 'User — likes → Coffee', vs: 2, ve: null, cs: 13, ce: null },
+      { id: 'mochi', label: 'User — owns → Mochi', vs: 7, ve: null, cs: 14, ce: null }
+    ];
+  }
+
+  var facts = makeBaseFacts();
+
+  function inRange(t, start, end) {
+    if (t < start) return false;
+    if (end !== null && t >= end) return false;
+    return true;
+  }
+
+  function activeWorld(t) {
+    return facts.filter(function (f) { return inRange(t, f.vs, f.ve); });
+  }
+
+  function activeSystem(t) {
+    return facts.filter(function (f) { return inRange(t, f.cs, f.ce); });
+  }
+
+  function names(list) {
+    if (!list.length) return '（无）';
+    return list.map(function (f) { return f.label; }).join('；');
+  }
+
+  function sameSet(a, b) {
+    var ai = a.map(function (f) { return f.id; }).sort().join(',');
+    var bi = b.map(function (f) { return f.id; }).sort().join(',');
+    return ai === bi;
+  }
+
+  function byId(id) {
+    for (var i = 0; i < facts.length; i++) {
+      if (facts[i].id === id) return facts[i];
+    }
+    return null;
+  }
+
+  function setMode(next) {
+    mode = next;
+    var btns = root.querySelectorAll('#bt-modes .rule-btn');
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].getAttribute('data-mode') === next;
+      btns[i].classList.toggle('active', on);
+    }
+  }
+
+  function render() {
+    var isWorld = mode === 'world';
+    rowsEl.innerHTML = '';
+
+    facts.forEach(function (f) {
+      var start = isWorld ? f.vs : f.cs;
+      var end = isWorld ? f.ve : f.ce;
+      var endPos = (end === null) ? 24 : end;
+      var on = inRange(pos, start, end);
+      var future = !isWorld && pos < f.cs;
+
+      var row = document.createElement('div');
+      row.className = 'bt-row';
+
+      var label = document.createElement('div');
+      label.className = 'bt-label';
+      label.textContent = f.label;
+
+      var track = document.createElement('div');
+      track.className = 'bt-track';
+
+      var bar = document.createElement('div');
+      bar.className = 'bt-bar' + (on ? ' on' : '') + (future ? ' future' : '');
+      bar.style.left = (start / 24 * 100) + '%';
+      bar.style.width = Math.max(2, (endPos - start) / 24 * 100) + '%';
+      bar.title = future ? '尚未写入图谱' : (on ? '当前有效' : '不在当前区间');
+      track.appendChild(bar);
+
+      var head = document.createElement('div');
+      head.className = 'bt-playhead';
+      head.style.left = (pos / 24 * 100) + '%';
+      track.appendChild(head);
+
+      row.appendChild(label);
+      row.appendChild(track);
+      rowsEl.appendChild(row);
+    });
+
+    dateEl.textContent = MONTHS[pos];
+
+    var current = isWorld ? activeWorld(pos) : activeSystem(pos);
+    var other = isWorld ? activeSystem(pos) : activeWorld(pos);
+
+    var html = '<div class="r-head">' +
+      (isWorld ? '世界时间 T' : '系统时间 T′') + ' · ' + MONTHS[pos] +
+      '</div>';
+    html += '当前视图认为有效：<strong>' + names(current) + '</strong>。';
+
+    if (sameSet(current, other)) {
+      html += ' 两条时间线在当前时刻一致。';
+    } else {
+      html += '<br><span class="warn">两条时间线在这里分叉</span>：' +
+        (isWorld ? '系统时间' : '世界时间') +
+        '认为有效的是 <strong>' + names(other) + '</strong>。' +
+        (isWorld
+          ? 'T 问「世界当时是什么样」，T′ 问「系统当时知道什么」；两者不必重合。'
+          : 'T′ 问「系统当时知道什么」，T 问「世界当时是什么样」；两者不必重合。');
+    }
+
+    msgEl.innerHTML = html;
+  }
+
+  function inject(id) {
+    if (id === 'nyc') {
+      if (byId('nyc')) return;
+      var boston = byId('boston');
+      if (boston) { boston.ve = 17; boston.ce = 18; }
+      facts.push({ id: 'nyc', label: 'User — lives_in → NYC', vs: 17, ve: null, cs: 18, ce: null });
+      pos = 17;
+      slider.value = '17';
+    } else if (id === 'tea') {
+      if (byId('tea')) return;
+      var coffee = byId('coffee');
+      if (coffee) { coffee.ve = 20; coffee.ce = 21; }
+      facts.push({ id: 'tea', label: 'User — likes → Tea', vs: 20, ve: null, cs: 21, ce: null });
+      pos = 20;
+      slider.value = '20';
+    }
+    setMode('system');
+    render();
+  }
+
+  function reset() {
+    facts = makeBaseFacts();
+    pos = 14;
+    slider.value = '14';
+    setMode('world');
+    render();
+  }
+
+  slider.addEventListener('input', function () {
+    pos = parseInt(slider.value, 10);
+    render();
+  });
+
+  var modeBtns = root.querySelectorAll('#bt-modes .rule-btn');
+  for (var i = 0; i < modeBtns.length; i++) {
+    modeBtns[i].addEventListener('click', function () {
+      setMode(this.getAttribute('data-mode'));
+      render();
+    });
+  }
+
+  var injectBtns = root.querySelectorAll('[data-inject]');
+  for (var j = 0; j < injectBtns.length; j++) {
+    injectBtns[j].addEventListener('click', function () {
+      inject(this.getAttribute('data-inject'));
+    });
+  }
+
+  var resetBtn = document.getElementById('bt-reset');
+  if (resetBtn) resetBtn.addEventListener('click', reset);
+
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Understanding TIR · 为什么 Python 解释器能越过纯文本模型的天花板</title>
+<meta name="description" content="Understanding Tool-Integrated Reasoning 形式证明：确定性工具转移让 TIR 的经验 support 与预算内可行策略集严格包含纯文本模型；并提出 ASPO，在正确答案的优势上叠加有界、可调的优势偏置，鼓励提前调用代码而不破坏训练稳定性。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+
+/* ---- 交互 1：support 模拟 ---- */
+.tstep{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:26px;padding:0 7px;border-radius:7px;font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:600;border:1px solid var(--border-strong);background:var(--bg);color:var(--text-muted);white-space:nowrap}
+.tstep.t-src{background:var(--bg-soft);color:var(--text-muted);border-style:dashed}
+.tstep.t-b{background:var(--bg-surface);color:var(--text);border-color:var(--text)}
+.tstep.t-ok{background:var(--c1-soft);border-color:var(--c1);color:var(--c1)}
+.tstep.t-bad{background:var(--c2-soft);border-color:var(--c2);color:var(--c2)}
+.tstep.t-inner{background:var(--c3-soft);border-color:var(--c3);color:var(--c3)}
+.tbtn{cursor:pointer;font-family:inherit}
+.tbtn:hover{outline:2px solid var(--accent);outline-offset:1px}
+.fine{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:8px 0 0}
+.meter{height:14px;border-radius:100px;background:var(--bg-soft);overflow:hidden;margin-bottom:4px;display:flex}
+.meter i{display:block;height:100%;min-width:2px;transition:width .3s ease}
+.meter i.m-acc{background:var(--accent)}
+.meter i.m-c1{background:var(--c1)}
+.meter i.m-c2{background:var(--c2)}
+.meter i.m-none{background:repeating-linear-gradient(135deg,var(--border) 0 5px,var(--bg-surface) 5px 10px)}
+.meter-cap{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);margin-bottom:14px}
+.meter-cap b{color:var(--text);font-weight:600}
+.status{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;padding:2px 8px;border-radius:100px;margin-top:2px}
+.status.in{background:var(--accent-soft);color:var(--accent-deep)}
+.status.out{background:var(--c1-soft);color:var(--c1)}
+
+/* ---- 交互 2：ASPO 模拟 ---- */
+.asp-table{border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin:16px 0;background:var(--bg-surface);font-size:12.5px}
+.asp-row{display:grid;grid-template-columns:52px 1fr 1fr 1fr;gap:0;padding:6px 10px;border-bottom:1px solid var(--border);font-family:"JetBrains Mono",monospace;align-items:center}
+.asp-row:last-child{border-bottom:none}
+.asp-row.asp-head{background:var(--bg-soft);font-size:10.5px;color:var(--text-muted);font-weight:600}
+.asp-row.ng{background:var(--c1-soft)}
+.asp-row.pos{background:var(--accent-soft)}
+.asp-row .ar-tag{font-size:10px;color:var(--text-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:520px){
+  .asp-row{grid-template-columns:44px 1fr 1fr 1fr;padding:5px 6px;font-size:11px}
+  .asp-row .ar-tag{font-size:9px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Understanding TIR</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">怎么论证</a>
+      <a href="#train">ASPO</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2508.19201 · Work in Progress</span>
+  <h1>Understanding Tool-Integrated Reasoning：解释器不是计算器，而是打破「无形缰绳」的那根剪刀</h1>
+  <p class="hero-sub">
+    纯文本 RL 只能在基座模型原本就能生成的轨迹里重排概率——Wu et al. 称之为 <strong>invisible leash</strong>。
+    这篇论文把「TIR 为什么有用」写成了两个定理：确定性工具转移让支持集<strong>严格扩张</strong>，token 效率差距让预算内的可行策略集也<strong>严格扩张</strong>。
+    为了让训出来的模型更早、更频繁地用工具，论文又提出 <strong>ASPO</strong>，绕开奖励函数，直接给优势加一个有界偏置。
+  </p>
+  <div class="meta">
+    <span>Heng Lin（腾讯 / 清华）· Zhongwen Xu（腾讯）· v1, 2025-08-26</span>
+    <a href="https://arxiv.org/abs/2508.19201" target="_blank" rel="noopener">arXiv 2508.19201 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    从 RL 的角度看，RLVR 只会改变基座模型已有轨迹上的概率：<strong>support 只会收缩，不会扩张</strong>（论文引用 Wu et al. 的 Theorem 3.3）。论文的破局点是工具调用：模型发出一段代码，解释器返回的结果<strong>不是模型采样的</strong>，这是一条确定性的、不可用文本伪造的状态转移，于是 TIR 的 support 严格包含纯文本模型的 support（Theorem 3.4）。
+  </p>
+  <p>
+    可到达不等于用得起。论文再用一个 random oracle 把证明拆成 <code>q<sub>text</sub>(y*) = p<sub>TIR</sub>(y*) · 2<sup>−m</sup></code>，接着用 <strong>token 效率</strong>把结论推到预算里：程序表示常常是 <code>O(1)</code>，自然语言模拟是 <code>Ω(N)</code>。于是存在问题规模 <code>n<sub>B</sub></code>，使 TIR 的可行 support 严格大于纯文本模型（Theorem 3.7）。
+  </p>
+  <p>
+    实验上，Qwen3-8B 用 1 万道 DAPO 题训练，TIR 在 Omni-MATH-512 上 <em>pass@256 = 0.8203 vs 0.6836</em>，并且在高抽象（G1–G2）的题上依然领先约 9%。第二部分的 <em>ASPO</em> 把正确答案的优势再叠一个裁剪后的偏置，首次调用代码的位置从 4,000 token 提前到 1,000，代码轮数从 1.3 翻倍到 3.3，AIME25 avg@16 与基线无法区分。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">15.4%<small> vs 1.8%</small></div>
+      <div class="k">Omni-MATH-512（k=256）<br>能力扩张 15.4%，萎缩仅 1.8%（Figure 3）</div>
+    </div>
+    <div class="metric">
+      <div class="v">+13.7<small> pp</small></div>
+      <div class="k">Omni-MATH-512 pass@256<br>TIR 0.8203 / 纯文本 0.6836（Table 6）</div>
+    </div>
+    <div class="metric">
+      <div class="v">1.3 → 3.3</div>
+      <div class="k">ASPO 后每题平均代码轮数<br>首次调用从 4,000 提前到 1,000 token（Figure 6）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>纯文本 RL 只能在基座模型已有的轨迹里挪概率</h2></div>
+  <p class="sec-sub">先把「无形缰绳」讲清楚：它说的不是 RL 不努力，而是 RL 能改写的东西只限于基座模型原本就给过正概率的那部分轨迹。</p>
+
+  <p>
+    记 <code>𝒴</code> 为所有可能的生成轨迹，<code>𝒱</code> 为词表。模型 <code>p(y|x)</code> 的 <strong>support</strong> 是
+    <code>supp(p) = { y ∈ 𝒴 | p(y|x) &gt; 0 }</code>；给定阈值 <code>ε &gt; 0</code>，<strong>经验 support</strong> 是
+    <code>supp<sub>ε</sub>(p) = { y ∈ 𝒴 | p(y|x) ≥ ε }</code>（Definition 3.1 / 3.2）。
+  </p>
+
+  <p>
+    论文沿用 Wu et al. 的结论（Theorem 3.3）：从基座模型 <code>q</code> 出发做 RLVR，训出来的策略 <code>π<sub>θ</sub></code> 满足
+    <code>supp(π<sub>θ</sub>) ⊆ supp(q)</code>。也就是说，如果一条正确轨迹 <code>y*</code> 在基座模型里的概率恰好是 0，RLVR 永远找不到它。
+    这就是「无形缰绳」：你可以调整缰绳里的概率分配，但没法走出绳子的长度。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">经验证据</span><h4>同一条绳子，在 Yue et al. 的 pass@<i>k</i> 曲线里也能看到</h4></div>
+    <p>
+      论文引用的另一组结论是：RL 训过的文本模型 pass@1 往往更高，但能力包络不一定变宽，<code>k</code> 大到一定程度后甚至被基座模型反超。
+      换句话说，RL 改写的是<strong>分布的形状</strong>，不是支撑集的边界。论文要回答的问题因此很具体：<strong>工具集成能不能把这条边界往外推？</strong>
+    </p>
+  </div>
+
+  <p>
+    这篇论文并不提出新的 TIR 训练框架——ReTool、ToRL、SimpleTIR 已经在做这件事。它要做的是把「工具为什么有用」写成可检验的理论，再拿一个 8B 模型在数学竞赛题上验证，最后处理一个工程问题：训出来的模型虽然会用工具，但用得<strong>太晚、太少</strong>。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有两条路都没回答「为什么」，而奖励塑形想直接引导行为会翻车</h2></div>
+  <p class="sec-sub">一路是经验上成功的 TIR 系统，一路是 RL 能力的理论分析；它们各自停在「有效」和「受限」，中间缺一个把两者接起来的证明。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">TIR 训练系统</span><h4>ReTool / ToRL / SimpleTIR</h4></div>
+      <p>ReTool 用 RL 学多轮工具调用，强调数据效率；ToRL 把工具集成 RL 往更复杂的场景扩展；SimpleTIR 做端到端的多次调用、从基座模型零样本训起（“Zero” setting）。</p>
+      <p><strong>停在哪：</strong>都在展示「训了以后更好」，但没有说明工具<strong>在机制上</strong>改变了什么，也没有给出什么时候会失效的边界。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">RL 能力的理论分析</span><h4>invisible leash / 是否学到新能力</h4></div>
+      <p>Yue et al. 用 pass@<i>k</i> 追问 RL 是否真的带来了基座模型之外的新能力；Wu et al. 给出「support preservation」的形式化结论，解释了 RLVR 为什么可能被困在原地。</p>
+      <p><strong>停在哪：</strong>它们把结论停留在<strong>纯文本</strong>环境。工具引入的状态转移不在这个框架的射程内。</p>
+    </div>
+  </div>
+
+  <h3>另一条路：直接改奖励，让模型早点调代码</h3>
+  <p>
+    TIR 模型常见的默认行为是「先用文字把推理走完，最后一步再调解释器算个数」。论文想鼓励更早的调用，最直接的做法是在 GRPO 式的组内奖励里加一项提前调用的奖励：
+  </p>
+  <div class="eq">
+    R<sub>i</sub> = 1 + r′<sub>i</sub>,
+    &nbsp;&nbsp; r′<sub>i</sub> = δ · clip( (p<sub>i</sub> − mean(<b>p</b>)) / std(<b>p</b>), −c, c )
+  </div>
+  <div class="eq-cap">Eq. 1 · p<sub>i</sub> 是第 i 个回答的首次代码调用位置；δ 取负值，越早调用越奖励</div>
+
+  <p>
+    问题出在归一化上。若一个 group 里的样本<strong>全部答对</strong>，主信号「1」会被减去组均值而完全消失：
+  </p>
+  <div class="eq">
+    A<sub>i</sub> = ( R<sub>i</sub> − mean(<b>R</b>) ) / std(<b>R</b>)
+    = ( r′<sub>i</sub> − mean(<b>r′</b>) ) / std(<b>r′</b>)
+  </div>
+  <div class="eq-cap">推导自论文 §3.3 正文：常数 1 被归一化吃掉，辅助信号被放大到主信号的量级</div>
+
+  <p>这带来三个后果，论文原文逐条列出：</p>
+  <ul>
+    <li>关于「答案是否正确」的主信号消失；</li>
+    <li>辅助信号 <code>r′</code> 被放大到与原主信号同量级；</li>
+    <li>标准化之后，大约一半的正确答案因为调用得比组均值晚而拿到<strong>负优势</strong>，被重度惩罚。</li>
+  </ul>
+  <p>这就是为什么「引导行为」在这一步不是调参问题，而是算法设计问题。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两个定理：support 严格扩张，预算内可行 support 也严格扩张</h2></div>
+  <p class="sec-sub">第一部分论证「可能」：给定同一基座模型，TIR 能到达纯文本到达不了的轨迹。第二部分论证「用得起」：即使文本理论上能模拟，它的 token 成本也付不起。</p>
+
+  <h3>定理 3.4：strict expansion of empirical support</h3>
+  <p>
+    TIR 模型写作 <code>(M, 𝒪)</code>：语言模型 <code>M</code> 发出工具调用 <code>y<sub>call</sub></code>，外部 oracle <code>𝒪</code>（例如 Python 解释器）确定性返回
+    <code>y<sub>out</sub> = 𝒪(y<sub>call</sub>)</code> 作为下一个状态。论文的核心命题是：存在 <code>ε &gt; 0</code> 和一族问题，使得
+    <code>supp<sub>ε</sub>(q<sub>text</sub>) ⊂ supp<sub>ε</sub>(p<sub>TIR</sub>)</code>。
+  </p>
+  <p>证明分两步，第二步是理解全文的关键：</p>
+  <ul>
+    <li><strong>包含（⊆）：</strong>TIR 模型可以选择永远不调用工具，因此它能生成纯文本模型的任何轨迹。</li>
+    <li><strong>严格（⊊）：</strong>构造一个需要计算 <code>y<sub>out</sub> = H(x)</code> 的问题，<code>H</code> 是 random oracle（产生 <code>m</code> 位输出，同一输入永远返回同一结果）。纯文本模型只能猜，猜中的概率是 <code>2<sup>−m</sup></code>；TIR 调用 oracle 一次即可确定性拿到。因此</li>
+  </ul>
+  <div class="eq">
+    <span class="hl-a">q<sub>text</sub>(y*|x)</span> = <span class="hl-c">p<sub>TIR</sub>(y*|x)</span> · 2<sup>−m</sup>
+  </div>
+  <div class="eq-cap">只需选足够大的 m，就能让 ε 卡在两者之间：y* ∉ supp<sub>ε</sub>(q<sub>text</sub>)，而 y* ∈ supp<sub>ε</sub>(p<sub>TIR</sub>)</div>
+
+  <p>下面这个玩具把一道题的候选轨迹画成若干步。纯文本模型写完后缀，前面必须接上 m 个由 oracle 决定的值——它只能一位一位地猜。切换题目类型，看这 m 个值分别「由谁决定」。灰格表示 token 预算 <code>B</code> 放进不去的超长轨迹——问题规模变大时，文本方案先被挤掉的就是这部分。</p>
+
+  <div class="sim" id="sup-sim">
+    <div class="sim-top" id="sup-kinds">
+      <button class="rule-btn active" data-kind="hash" type="button">哈希值<span class="r-sub">H 的输出</span></button>
+      <button class="rule-btn" data-kind="inner" type="button">中间结果<span class="r-sub">代码算出的数</span></button>
+      <button class="rule-btn" data-kind="flip" type="button">随机位的奇偶<span class="r-sub">不可约的全局量</span></button>
+    </div>
+
+    <p class="fine" style="margin-top:0" id="sup-intro"></p>
+
+    <div class="sim-top" style="margin:14px 0 6px;align-items:center">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-soft);letter-spacing:.06em">TRACE · 一条候选轨迹</span>
+      <span id="sup-trace-note" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-soft);margin-left:auto"></span>
+    </div>
+    <div id="sup-trace" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;max-height:150px;overflow-y:auto;overflow-x:auto;padding-bottom:2px"></div>
+
+    <div class="two-col" style="margin-top:6px">
+      <div class="card" style="padding:16px 16px 12px">
+        <div class="card-head"><span class="pill p1">q<sub>text</sub></span><h4 id="sup-text-title">纯文本：m 位逐位猜</h4></div>
+        <div class="meter" id="sup-text-meter"></div>
+        <div class="meter-cap" id="sup-text-cap"></div>
+      </div>
+      <div class="card" style="padding:16px 16px 12px">
+        <div class="card-head"><span class="pill pa">p<sub>TIR</sub></span><h4 id="sup-tir-title">调用 oracle：一次拿到</h4></div>
+        <div class="meter" id="sup-tir-meter"></div>
+        <div class="meter-cap" id="sup-tir-cap"></div>
+      </div>
+    </div>
+
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>oracle 输出位数 m <span class="v" id="sup-m-v">4</span></label>
+        <input type="range" id="sup-m" min="1" max="128" step="1" value="4">
+      </div>
+    </div>
+    <p class="fine" style="margin-top:0">概率按指示条上的分段表示：每一段是一位，m 越大越细。上方数字给出精确值。</p>
+    <div class="actions">
+      <button class="act primary" type="button" id="sup-reset">重新猜一次</button>
+      <button class="act" type="button" id="sup-code">让 TIR 模型不调 oracle</button>
+    </div>
+    <div class="readout" id="sup-readout">
+      <div class="r-head">当前轨迹</div>
+      <div id="sup-msg"></div>
+    </div>
+    <div class="legend" style="margin-top:10px">
+      <span><i style="background:var(--c1)"></i>猜对 / 文本可写</span>
+      <span><i style="background:var(--c2)"></i>猜错</span>
+      <span><i style="background:var(--accent)"></i>oracle 返回</span>
+      <span><i style="background:var(--border)"></i>未到 / 无需猜</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个玩具和原证明差在哪？<span class="sum-sub">点开看</span></summary>
+    <div class="details-body">
+      <p>原证明用的是 random oracle：<code>m</code> 位新输入返回均匀随机的 <code>m</code> 位输出。玩具把 <code>2<sup>−m</sup></code> 理解成「连续猜中 <code>m</code> 位」——这正好回答了「为什么每条轨迹倒霉一次就够了」：同一条轨迹的 m 位若有一位猜错，整条轨迹就从 support 里掉出去，即使其它位都对。</p>
+      <p>三种题目只在<strong>这 m 位由谁决定</strong>上不同：中间结果理论上能用很长的文本模拟出来，哈希值与随机位奇偶不行。这对应下一节 token 效率要处理的边界。原证明没有「模型逐个猜位」的过程，它直接在轨迹概率上乘 <code>2<sup>−m</sup></code>；这里的「猜对 / 猜错」只是把那个乘数展开成可数的东西。</p>
+    </div>
+  </details>
+
+  <h3>定理 3.7：token 预算下的 strict supremacy</h3>
+  <p>
+    定义轨迹成本 <code>cost(y)</code> 为 prompt、生成、工具 I/O 的总 token 数，要求 <code>cost(y) ≤ B</code>。再把计算上等价（实现同一个核心算法）的轨迹归为一类 <code>[y]</code>（Definition 3.5）。策略类 <code>[y]</code> 属于模型 M 在预算 B 下的 feasible support，当且仅当类中<strong>至少存在一条</strong>轨迹 <code>y′</code> 满足 <code>M(y′|x) &gt; 0</code> 且 <code>cost(y′) ≤ B</code>（Definition 3.6）。
+  </p>
+  <p>论文用四张表对比程序化表示与自然语言模拟的 token 成本（Table 1–4）：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>任务（表号）</th><th>程序化（Python）</th><th>自然语言模拟</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>简单迭代（Table 1）</td><td class="num">O(1)</td><td class="num">Ω(N)</td></tr>
+        <tr><td>大型线性方程组（Table 2）</td><td class="num">O(1)</td><td class="num">Ω(n²) 描述 / Ω(n³) 全量叙述</td></tr>
+        <tr><td>动态规划（Table 3，Fibonacci）</td><td class="num">O(1)</td><td class="num">Ω(N)</td></tr>
+        <tr><td>图搜索（Table 4，BFS）</td><td class="num">O(1)</td><td class="num">Ω(V + E)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    对任何纯文本成本随规模增长的算法类，总能挑一个规模 <code>n<sub>B</sub></code> 让文本模拟超过任意有限预算 <code>B</code>，而程序表示仍是 <code>O(1)</code>、留在预算内。
+    于是 <code>supp<sub>B</sub>(q<sub>text</sub>) ⊂ supp<sub>B</sub>(p<sub>TIR</sub>)</code>。这不是「文本算不出来」，而是「文本<strong>说得出来但付不起</strong>」。
+  </p>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>ASPO：不动奖励，在正确性优势上叠一个有界偏置</h2></div>
+  <p class="sec-sub">要在 GRPO 类算法里引导行为，要绕过两层不稳定的归一化——奖励的组内标准化，和位置信号的标准差。</p>
+
+  <p>
+    ASPO 先在标准流程里算出基于正确性的优势 <code>A<sub>correct,i</sub></code>，然后<strong>只对「既正确又含代码」的回答</strong>加一项偏置：
+  </p>
+  <div class="eq">
+    <span class="hl-c">A<sub>i</sub></span> = <span class="hl-a">A<sub>correct,i</sub></span>
+    + clip( δ · (p<sub>i</sub> − mean(<b>p</b>)) / mean(<b>L</b>), &nbsp;−k·A<sub>correct,i</sub>, &nbsp;+k·A<sub>correct,i</sub> )
+  </div>
+  <div class="eq-cap">Eq. 2 · <b>p</b>：组内正确且含代码回答的首次调用位置；<b>L</b>：同组回答总长度；δ &lt; 0 鼓励早调用；k 把偏置限制在基础优势的 k 倍以内</div>
+
+  <p>三个设计点各自对应 §3.3 里的一个失效模式：</p>
+  <ul>
+    <li><strong>裁剪项写成 ±k·A<sub>correct,i</sub>，而不是固定常数 ±c。</strong>A<sub>correct</sub> 为正时，最终优势 <code>A<sub>i</sub> ≥ (1−k)·A<sub>correct</sub> &gt; 0</code>（k=0.9 时仍是原值的 10% 以上），正确的回答<strong>不会被翻成负值</strong>；同时偏置最多占主信号的 <code>k/(1−k)</code>，永远压不过正确性。</li>
+    <li><strong>分母用 mean(L) 而不是 std(p)。</strong>论文指出，组内首次调用位置若挤在一起，很小的 <code>std(p)</code> 会把偏置放大到失控；mean(L) 稳定且量纲对得上（位置相对于长度）。</li>
+    <li><strong>只改「正确且含代码」的样本。</strong>答错的样本不进塑形，避免「为了早调代码而不把题做对」的奖励 hack。</li>
+  </ul>
+
+  <p>下面用一个 8 条全对的 group 复现 §3.3 的推导。默认停在「改奖励」：只要 δ 不为 0，晚调用的正确答案就会拿到负优势。切到 ASPO，再拖动 k，看偏置怎样被限制在正确性优势之内。</p>
+
+  <div class="sim" id="asp-sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>δ（负值为早调用奖励）<span class="v" id="asp-d-v">−1.5</span></label>
+        <input type="range" id="asp-d" min="-3" max="0" step="0.1" value="-1.5">
+      </div>
+      <div class="ctrl">
+        <label>k（偏置上限 / 基础优势）<span class="v" id="asp-k-v">0.7</span></label>
+        <input type="range" id="asp-k" min="0" max="1" step="0.05" value="0.7">
+      </div>
+    </div>
+    <div class="sim-top" id="asp-modes" style="margin-top:4px">
+      <button class="rule-btn active" data-mode="reward" type="button">改奖励 + 组内标准化<span class="r-sub">Eq. 1，会翻车</span></button>
+      <button class="rule-btn" data-mode="aspo" type="button">ASPO<span class="r-sub">Eq. 2，裁剪偏置</span></button>
+    </div>
+    <div class="asp-table" id="asp-table"></div>
+    <p class="fine" id="asp-scen"></p>
+    <div class="slots s3" id="asp-stats"></div>
+    <div class="readout" id="asp-readout">
+      <div class="r-head">这个设置下发生了什么</div>
+      <div id="asp-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>模拟用的数字与论文实验的差别<span class="sum-sub">点开看</span></summary>
+    <div class="details-body">
+      <p>模拟固定为 8 条回答、全部正确、同样的计算正确性优势，用来展示论文 §3.3 点名的「组内全部正确」场景。论文记录的 AIME25 不稳定（Figure 5(a) 训练曲线塌陷）是在真实训练里出现的，全对 group 不一定是它的唯一原因。</p>
+      <p>「改奖励」模式严格按 Eq. 1 的化简式计算：<code>A = (r′ − mean)/std</code>，对应原文「常数 1 被归一化消除」的推导。ASPO 模式按 Eq. 2，以 mean(L) 归一化位置；模拟里 L 直接给出 token 数，论文没有公开这些数。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条训练链：同题对比 → 工具轨迹 → pass@<i>k</i> 与可行性 → ASPO 塑形</h2></div>
+  <p class="sec-sub">论文的两部分论证串在一起，就是一种更早、更频繁调用解释器的 TIR 训练范式。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 300" role="img" aria-label="训练流程：Qwen3-8B 与 DAPO 训练数据分别训练纯文本与 TIR 两个模型，TIR 模型在推理中反复调用 Python 解释器，二者在 AIME 与 Omni-MATH 上比较 pass@k 与可解性流转，并用 ASPO 调整代码调用时机">
+      <defs>
+        <marker id="tir-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+        <marker id="tir-arrow-a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <text x="112" y="20" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">1 · 共用起点</text>
+      <text x="362" y="20" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">2 · 两条训练路径</text>
+      <text x="610" y="20" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">3 · 评测与调工具行为</text>
+
+      <rect x="8" y="34" width="208" height="96" rx="12" class="pipe-box"></rect>
+      <text x="112" y="62" text-anchor="middle" class="pipe-t" font-weight="600">Qwen3-8B</text>
+      <text x="112" y="86" text-anchor="middle" class="pipe-s">DAPO 算法 · 3 epochs</text>
+      <text x="112" y="106" text-anchor="middle" class="pipe-s">DAPO 数据抽样 10,000 题</text>
+      <text x="112" y="122" text-anchor="middle" class="pipe-s pipe-m">96 题 × 8 回答</text>
+
+      <rect x="8" y="160" width="208" height="88" rx="12" class="pipe-box"></rect>
+      <text x="112" y="186" text-anchor="middle" class="pipe-t" font-weight="600">ASPO 超参</text>
+      <text x="112" y="208" text-anchor="middle" class="pipe-s pipe-m">保守：δ=−2.0, k=0.7</text>
+      <text x="112" y="228" text-anchor="middle" class="pipe-s pipe-m">激进：δ=−2.5, k=0.9</text>
+
+      <path d="M220 82 L260 82 L260 90 L296 90" class="pipe-line" marker-end="url(#tir-arrow)"></path>
+      <path d="M220 82 L260 82 L260 182 L296 182" class="pipe-line" marker-end="url(#tir-arrow)"></path>
+
+      <rect x="300" y="56" width="208" height="66" rx="12" class="pipe-c1"></rect>
+      <text x="404" y="82" text-anchor="middle" class="pipe-t" font-weight="600">纯文本 RL</text>
+      <text x="404" y="104" text-anchor="middle" class="pipe-s">只用词表 𝒱 生成</text>
+
+      <rect x="300" y="150" width="208" height="100" rx="12" class="pipe-c2"></rect>
+      <text x="404" y="176" text-anchor="middle" class="pipe-t" font-weight="600">TIR 模型 (M, 𝒪)</text>
+      <text x="404" y="198" text-anchor="middle" class="pipe-s">代码 ↔ Python 解释器</text>
+      <text x="404" y="218" text-anchor="middle" class="pipe-s">y_out = 𝒪(y_call) 确定性返回</text>
+      <text x="404" y="238" text-anchor="middle" class="pipe-s">多轮，≤ 16,384 token</text>
+
+      <path d="M512 89 L560 89 L560 76 L600 76" class="pipe-line" marker-end="url(#tir-arrow)"></path>
+      <path d="M512 200 L560 200 L560 176 L600 176" class="pipe-line" marker-end="url(#tir-arrow)"></path>
+      <path d="M512 200 L556 200 L556 236 L600 236" class="pipe-line" stroke="var(--accent)" marker-end="url(#tir-arrow-a)"></path>
+
+      <rect x="604" y="44" width="108" height="70" rx="12" class="pipe-box"></rect>
+      <text x="658" y="68" text-anchor="middle" class="pipe-t" font-weight="600">pass@k</text>
+      <text x="658" y="88" text-anchor="middle" class="pipe-s">AIME24/25 · OM-512</text>
+      <text x="658" y="104" text-anchor="middle" class="pipe-s pipe-m">k ≤ 256</text>
+
+      <rect x="604" y="142" width="108" height="70" rx="12" class="pipe-box"></rect>
+      <text x="658" y="166" text-anchor="middle" class="pipe-t" font-weight="600">可解性流转</text>
+      <text x="658" y="184" text-anchor="middle" class="pipe-s">扩张 / 萎缩</text>
+      <text x="658" y="201" text-anchor="middle" class="pipe-s">Algo Friendliness</text>
+
+      <rect x="604" y="222" width="108" height="58" rx="12" class="pipe-accent"></rect>
+      <text x="658" y="246" text-anchor="middle" class="pipe-t" font-weight="600">ASPO 塑形</text>
+      <text x="658" y="266" text-anchor="middle" class="pipe-s">早调用 · 多轮</text>
+
+      <path d="M112 160 L112 136" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#tir-arrow)"></path>
+    </svg>
+    <figcaption>
+      图 1：论文的实验与训练流程（示意）。纯文本与 TIR 共用 Qwen3-8B 与 DAPO；TIR 侧唯一的差别是轨迹里可以插入代码与解释器返回。右下角的 ASPO 是第二部分的算法，作用在优势函数上。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么不比绝对准确率？</strong> 论文自己说明：目标是理解 TIR 的机制，不是刷榜，所以只从 DAPO 数据里抽 10,000 道英文题，对比的也是两条路径之间<strong>相对</strong>的差异。</li>
+          <li><strong>为什么用 pass@<i>k</i>？</strong> 它衡量的是「潜在可解性」而不是单次采样质量，正好对应第一节的 support 概念——如果 support 真的被扩张了，曲线应当整体上移而不是只在 k=1 附近交叉。论文观察到两条曲线在 k 到 256 都不相交。</li>
+          <li><strong>可解性流转怎么算？</strong> 对 Omni-MATH-512 的每道题在 k=256 下判断是否可解，把从纯文本到 TIR 的变化分成扩张、保留、萎缩、双方都不可解四种（沿用 Wu et al. 的分类）。</li>
+          <li><strong>ASPO 在哪里生效？</strong> 它不改变轨迹结构，只改变正确回答的优势值，所以可以不重训直接替换掉 Eq. 1 的奖励塑形。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>整条 pass@<i>k</i> 曲线上移，连不擅长计算的题也一起涨</h2></div>
+  <p class="sec-sub">Table 6 给出全部数字：TIR 在三个基准、九个 k 值上全部领先；Figure 3 的桑基图显示净扩张远大于萎缩。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>k</th><th style="text-align:right">AIME24<br>TIR</th><th style="text-align:right">AIME24<br>纯文本</th><th style="text-align:right">AIME25<br>TIR</th><th style="text-align:right">AIME25<br>纯文本</th><th style="text-align:right">OM-512<br>TIR</th><th style="text-align:right">OM-512<br>纯文本</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td class="num">0.7829</td><td class="num">0.6331</td><td class="num">0.6841</td><td class="num">0.5184</td><td class="num">0.5128</td><td class="num">0.3585</td></tr>
+        <tr><td>8</td><td class="num">0.8825</td><td class="num">0.8050</td><td class="num">0.8792</td><td class="num">0.7262</td><td class="num">0.6869</td><td class="num">0.5153</td></tr>
+        <tr><td>32</td><td class="num">0.9173</td><td class="num">0.8496</td><td class="num">0.9339</td><td class="num">0.7810</td><td class="num">0.7545</td><td class="num">0.5942</td></tr>
+        <tr class="best"><td>256</td><td class="num">0.9667</td><td class="num">0.9000</td><td class="num">0.9667</td><td class="num">0.8667</td><td class="num">0.8203</td><td class="num">0.6836</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine">Table 6 原表覆盖 k = 1, 2, 4, …, 256；这里保留 4 行，其余 2 / 4 / 16 / 64 / 128 未列出。评测温度 0.6，最大长度 16,384。</p>
+
+  <p>三个基准的走向一致，但增量分布很有信息量：</p>
+  <ul>
+    <li><strong>AIME24：</strong>k=1 领先 15.0 个百分点，k=256 领先 6.7 个百分点。TIR 在 k=128（0.9480）到 k=256（0.9667）之间收敛。</li>
+    <li><strong>AIME25：</strong>k=1 领先 16.6 个百分点，k=256 领先 10.0 个百分点。AIME25 的纯文本基线在 k=256 只到 0.8667，是三个基准里 baseline 最弱的一个。</li>
+    <li><strong>Omni-MATH-512：</strong>k=1 领先 15.4 个百分点，k=256 领先 13.7 个百分点。它也是 TIR 曲线离饱和最远的基准，0.8203 说明仍有三分之一的题在 256 次采样里没有一次解出。</li>
+  </ul>
+
+  <h3>可解性流转：扩张 15.4%，萎缩 1.8%</h3>
+  <p>
+    Figure 3 显示，在 k=256 下纯文本模型解出 68.4%，TIR 解出 82.0%。逐题拆分：TIR 新解出的题占 15.4%，双方都解出的保留 66.6%，纯文本能解而 TIR 失败（萎缩）只有 1.8%，双方都未解出 16.2%。
+    附录 Figure 7 把「已解出」再按解出概率分档：TIR 一侧解出概率落在 (0.75, 1] 的题从 28.5% 升到 43.8%，而 (0, 0.25] 从 25.8% 降到 20.9%——不只是「多会几道」，还有一批准解出的题变得很稳。
+  </p>
+
+  <h3>算法友好度：最不友好的组也涨约 9%</h3>
+  <p>
+    论文用 Table 5 的五级 rubric（5 = 教科书算法直接可用，1 = 本质上抽象、不可计算）请 Gemini 2.5 Pro 给 Omni-MATH-512 逐题打分，再分成 G1–G5。
+    原文 §4.3 的表述是：即使在最低友好度的 G1–G2（分数 1.0–2.5）上，TIR 的 pass@256 仍领先约 9%。
+    所有图（Figure 1、2、4–6）的曲线只给了坐标轴与刻度，没有数值标签；Figure 1 / 5 / 6 与 Figure 4 的曲线读数均不对应任何表格，因此页面不引用其具体数值。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">反直觉</span><h4>「工具只是高级计算器」这个解释被否掉了</h4></div>
+    <p>
+      如果 TIR 只是在替模型做算术，收益应该集中在 G4–G5。论文观察到的分布恰恰相反：优势在中等友好度上也很大，最低友好度仍有约 9%。
+      第三种解释是「代码把某个已知算法直接落地」，论文在 §4.4 的案例里给出了反例——模型常常先用数学洞察把题目变形，<strong>再</strong>写代码（Table 7），或者先写短代码试算、再据此构造严格证明（Table 8）。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>定理成立的前提很干净，而实验只覆盖了其中一小块</h2></div>
+  <p class="sec-sub">两个定理都是「存在性」结论：存在问题族、存在规模。真实环境下它们何时失效，论文只做了部分讨论。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>证明依赖「工具能提供模型无法自造的信息」</h4></div>
+    <p>
+      Theorem 3.4 的严格性来自 random oracle：输出空间足够大，纯文本模型猜中概率是 <code>2<sup>−m</sup></code>。对低熵的工具返回值（例如校验和的奇偶、一个二选一），这个论证就退化。
+      附录把结论推广到搜索、校验器、外部记忆、具身环境和带噪声工具，但这些只是 informal proposition，没有实验。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>可行 support 的扩张要靠「规模」</h4></div>
+    <p>
+      Theorem 3.7 的严格性需要问题规模超过 <code>n<sub>B</sub></code>。AIME、Omni-MATH 的题都不大，所以实验测到的是<strong>可解概率的提升</strong>，而不是「纯文本模型在预算内付不起」那一类扩张。真正的 feasible support 论证适用的场景是长迭代、大系统、大图搜索这类题目。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>单一模型、单一工具、一个训练集</h4></div>
+    <p>
+      全部实验基于 Qwen3-8B + Python 解释器 + 10,000 道 DAPO 题，任务是数学竞赛。论文以「机制研究」为由解释了数据规模，但没有给出其他模型规模、其他工具或其他任务上的结果。算法友好度标签由 Gemini 2.5 Pro 生成，引入了一个未校准的外部评判者。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>ASPO 的行为改变幅度未量化</h4></div>
+    <p>
+      论文给出了首次调用位置、代码轮数、代码占比、代码通过率的变化方向与部分数字，但 Figure 6 只画曲线不给数值；「保守」与「激进」两组的差异程度也只用「可调」描述，没有给出每次 δ、k 组合的具体读数。
+    </p>
+  </div>
+
+  <h3>什么时候别指望它：先问三个问题</h3>
+  <ul>
+    <li><strong>任务需要的信息，工具真的能提供吗？</strong> 往返读写是确定性的、模型无法伪造的，证明才成立。</li>
+    <li><strong>纯文本模型是「做不到」还是「说不清」？</strong> 前者依靠工具（定理 3.4），后者需要规模足够大才付得起账（定理 3.7）。</li>
+    <li><strong>主要矛盾是「会不会用」还是「用得好不好」？</strong> 如果工具已经是默认行为，ASPO 能改的是时机和频率；如果默认行为根本没用上工具，需要先看训练数据与奖励是否能引导模型探索工具调用。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>论文把「工具为什么有用」从经验观察变成了两个严格包含关系，再用 ASPO 把「什么时候用」变成一个有界的优势偏置。</strong> 理论给了方向，实验给了量级，剩下的空白在问题规模、工具种类和评测者的鲁棒性上。
+  </p>
+</section>
+
+<footer>
+  <div>Understanding Tool-Integrated Reasoning · Heng Lin (Tencent, Tsinghua) · Zhongwen Xu (Tencent) · arXiv 2508.19201</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.19201" target="_blank" rel="noopener">arXiv:2508.19201</a>（v1, 2025-08-26，题目页标注 Work in Progress；无公开代码链接）<br>
+    笔记：<a href="/understanding-tool-integrated-reasoning/">Understanding Tool-Integrated Reasoning</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记写「前人（Wu et al., 2017）」；原文引用的工作大部分是 2025 年的预印本（Wu et al. 的 invisible leash 是 arXiv 2507.14843），2017 是 PPO 的年份。<br>
+    2. 笔记说「等级1-2 的问题上 TIR 约 9% 的优势」并以 G1「k=256 约 0.6 vs 0.51」为例；原文是「分数 1.0–2.5」即 G1–G2 两组合计约 9%，且 Figure 4 没有数值标签，0.6/0.51 无法从论文中读出。<br>
+    3. 笔记在 Question 2 引用的 ASPO 公式漏掉了外层「−k·A<sub>correct</sub>, +k·A<sub>correct</sub>」裁剪上下界；笔记 Question 1 的公式又用减号连接裁剪项，原文 Eq. 2 是加号（<code>A<sub>correct,i</sub> + clip(…)</code>）。<br>
+    4. 笔记说「两个模型都使用相同的基座模型和 DAPO 算法」——正确；但原文 Figure 2 的曲线上文称为「TIR model (RL trained)」与「pure-text baseline (Qwen3 8B)」，并没有说明纯文本基线是否也经过 DAPO 训练，页面只按论文文字描述实验设置。<br>
+    5. 笔记未提：论文的训练规模仅为 10,000 题 / 3 epochs、96 题 × 8 回答，以及 pass@k 是论文自己标注「低方差估计」的 Chen et al. 估计量。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   通用
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+
+/* ============================================================
+   1) Support 模拟：一条候选轨迹 = 源 + m 个 oracle 位 + 后缀
+   ============================================================ */
+(function () {
+  var host = document.getElementById('sup-sim');
+  if (!host) return;
+
+  var KINDS = {
+    hash: {
+      intro: '题目要求给出 <code>y<sub>out</sub> = H(x)</code>，H 是 random oracle。轨迹中段那 m 个位置只能由 oracle 给出；轨迹的其余部分（条件、引理、检验方式）纯文本模型都能自己写对。',
+      yes: '这 m 位纯文本只能猜',
+      count: function (m) { return m; }
+    },
+    inner: {
+      intro: '题目要求给出代码运行出的中间结果。这一类值有唯一答案，理论上能用很长的文本一步步算出来——纯文本模型的每一步都「可写」，只是成本随问题规模上升。',
+      yes: '手算可写',
+      count: function (m) { return m; }
+    },
+    flip: {
+      intro: '题目要求所有哈希值末位之和的奇偶。它依赖 H 在全部输入上的取值，轨迹里大部分位置都必须由 oracle 确定——除了首尾由题目直接给定的两步。',
+      yes: '这 m 位纯文本只能猜',
+      count: function (m) { var n = 0; for (var i = 0; i < m; i++) n += isSrc('flip', i) ? 0 : 1; return n; }
+    }
+  };
+
+  var state = { kind: 'hash', m: 4, seed: 1, noCode: false, vals: [], srcIdx: [] };
+
+  function isSrc(kind, i) { return kind === 'flip' && (i < 2 || i === 4); }
+  function isOracle(kind, i) { return !isSrc(kind, i); }
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function pointOf(kind, i) {
+    if (isSrc(kind, i)) return 0;
+    if (kind === 'inner') return -1;
+    return state.vals[i];
+  }
+
+  function fresh() {
+    var rnd = mulberry32(state.seed * 7919 + state.m * 131 + state.kind.charCodeAt(0) * 17);
+    state.vals = [];
+    for (var i = 0; i < state.m; i++) state.vals.push(rnd() < 0.5 ? -1 : 0);
+  }
+
+  function pFmt(p) {
+    if (p >= 1e-3) return p.toFixed(4);
+    return p.toExponential(1).replace('e-', ' × 10⁻').replace('e+', ' × 10');
+  }
+
+  function chip(cls, text, title) {
+    var s = document.createElement('span');
+    s.className = 'tstep ' + cls;
+    s.textContent = text;
+    if (title) s.title = title;
+    return s;
+  }
+
+  function renderTrace() {
+    var el = document.getElementById('sup-trace');
+    if (!el) return;
+    el.innerHTML = '';
+    el.appendChild(chip('t-src', '题面'));
+    el.appendChild(chip('t-src', 'x'));
+    el.appendChild(chip('t-src', '…'));
+    for (var i = 0; i < state.m; i++) {
+      var s;
+      if (isSrc(state.kind, i)) {
+        s = chip('t-inner', '给定', '由题目直接给出');
+      } else if (state.kind === 'inner') {
+        s = chip('t-inner', '算', '可以手算写出');
+      } else {
+        var v = state.vals[i];
+        if (state.noCode) {
+          var t = v === -1 ? '猜 ?' : (v === 0 ? '猜 0' : '猜 1');
+          s = chip(v === 1 ? 't-ok' : 't-bad', t);
+        } else {
+          s = chip('t-ok', 'y' + (i + 1));
+        }
+        s.className += ' tbtn';
+        (function (idx) {
+          s.addEventListener('click', function (e) {
+            e.preventDefault();
+            if (state.noCode || state.kind !== 'hash' && state.kind !== 'flip') return;
+            state.vals[idx] = state.vals[idx] === -1 ? 0 : (state.vals[idx] === 0 ? 1 : -1);
+            render();
+          });
+        })(i);
+      }
+      el.appendChild(s);
+    }
+    el.appendChild(chip('t-src', '…'));
+    el.appendChild(chip('t-src', '后缀'));
+
+    var note = document.getElementById('sup-trace-note');
+    if (note) {
+      var n = KINDS[state.kind].count(state.m);
+      note.textContent = 'm = ' + state.m + ' · 需 oracle 的位 = ' + n + (state.kind !== 'inner' && state.m <= 12 ? ' · 点方块可改猜测' : '');
+    }
+    var title = document.getElementById('sup-text-title');
+    if (title) title.textContent = state.kind === 'inner' ? '纯文本：逐步手算' : '纯文本：m 位逐位猜';
+    var tt = document.getElementById('sup-tir-title');
+    if (tt) tt.textContent = state.kind === 'inner' ? 'TIR：代码一次算出' : '调用 oracle：一次拿到';
+  }
+
+  function meter(el, mode) {
+    if (!el) return;
+    el.innerHTML = '';
+    for (var i = 0; i < state.m; i++) {
+      var seg = document.createElement('i');
+      var src = isSrc(state.kind, i);
+      if (mode === 'tir' && !state.noCode && !src) seg.className = 'm-acc';
+      else if (state.kind === 'inner') seg.className = 'm-c2';
+      else if (src) seg.className = 'm-c1';
+      else seg.className = mode === 'text' && state.vals[i] === 1 ? 'm-c1' : 'm-c2';
+      if (!state.noCode && mode === 'text' && !src) seg.className = 'm-none';
+      seg.style.flex = '1 1 0';
+      seg.style.minWidth = '2px';
+      el.appendChild(seg);
+    }
+  }
+
+  function render() {
+    var kind = state.kind;
+    var intro = document.getElementById('sup-intro');
+    if (intro) intro.innerHTML = KINDS[kind].intro;
+    renderTrace();
+
+    meter(document.getElementById('sup-text-meter'), 'text');
+    meter(document.getElementById('sup-tir-meter'), 'tir');
+
+    var hits = 0;
+    for (var i = 0; i < state.m; i++) if (isOracle(kind, i) && state.vals[i] === 1) hits++;
+    var nOracle = KINDS[kind].count(state.m);
+    var pRaw = Math.pow(2, -nOracle);
+    var textOk = kind === 'inner' || (!state.noCode ? hits === nOracle : hits === nOracle);
+    if (kind !== 'inner') textOk = hits === nOracle;
+
+    var tc = document.getElementById('sup-text-cap');
+    if (tc) {
+      if (kind === 'inner') tc.innerHTML = '全部 <b>' + nOracle + '</b> 位都能手算写出 · 概率≈1，但长度随规模增长';
+      else if (!state.noCode) tc.innerHTML = 'oracle 位不由文本决定 · 文本无法命中这 <b>' + nOracle + '</b> 位';
+      else tc.innerHTML = '猜中 <b>' + hits + '/' + nOracle + '</b> 位 · 整条轨迹能活下来的概率 <b>2<sup>−' + nOracle + '</sup> = ' + pFmt(pRaw) + '</b>';
+    }
+    var rc = document.getElementById('sup-tir-cap');
+    if (rc) {
+      if (kind === 'inner') rc.innerHTML = '一个循环 · 结果确定 · 代码长度与 m 无关';
+      else if (state.noCode) rc.innerHTML = '模型选择不调 oracle · 退化为纯文本 · 猜中 <b>' + hits + '/' + nOracle + '</b> 位';
+      else rc.innerHTML = '调用 <b>1</b> 次 · 确定性拿到全部 <b>' + nOracle + '</b> 位';
+    }
+
+    var msg = document.getElementById('sup-msg');
+    if (!msg) return;
+    var eps = 0.01;
+    var inText = kind === 'inner' ? true : (!state.noCode ? false : (textOk && pRaw >= eps));
+    var inTir = kind === 'inner' ? true : (!state.noCode || inText);
+    var textStatus = state.kind === 'inner' ? '文本轨迹：可写，随规模变长'
+      : !state.noCode ? '文本轨迹：无法命中 oracle 位'
+      : '文本轨迹：' + (inText ? '命中，在 supp<sub>ε</sub> 内' : '未命中，不在 supp<sub>ε</sub>');
+    var tirStatus = state.noCode ? 'TIR 轨迹：不调 oracle，同纯文本'
+      : state.kind === 'inner' ? 'TIR 轨迹：一次调用的轨迹'
+      : (inTir ? 'TIR 轨迹：在 supp<sub>ε</sub> 内' : 'TIR 轨迹：不在 supp<sub>ε</sub>');
+    var st = '<span class="status ' + (inTir ? 'in' : 'out') + '">' + textStatus + '</span> ' +
+             '<span class="status ' + (inTir ? 'in' : 'out') + '">' + tirStatus + '</span>';
+    var body;
+    if (kind === 'hash') {
+      body = 'Theorem 3.4 的严格性就在这里：轨迹的前缀与后缀文本都能写对，但只要需要 oracle 的位有一位没猜中，整条轨迹就被判错。m 每加一位，命中率再除 2；' +
+        (state.m >= 8 ? '当前的 <code>2<sup>−' + nOracle + '</sup></code> 已经低于 ε = 0.01。' : '把 m 拖到 7 以上，命中率就会低于 ε = 0.01。') +
+        'TIR 只多了一次调用。';
+    } else if (kind === 'inner') {
+      body = '这一步的结果唯一且可推，因此文本模型「做得到」——这正是 Theorem 3.7 处理的情形：差距不在可能性，而在 <strong>可支付性</strong>。规模变大时，需要逐项写出的位数（灰格占指示条的比例）随之增长，代码的长度却几乎不变。';
+    } else {
+      body = '全局奇偶量无法由局部推理推出，文本模型除了猜只有猜。当前缩放下，TIR 轨迹有 ' + nOracle + ' 位由 oracle 确定，猜错的概率远高于猜对。';
+    }
+    msg.innerHTML = body + '<br><br>' + st;
+  }
+
+  document.querySelectorAll('#sup-kinds .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#sup-kinds .rule-btn').forEach(function (x) { x.classList.remove('active'); });
+      btn.classList.add('active');
+      state.kind = btn.dataset.kind;
+      state.mcu = 0;
+      if (state.kind === 'flip') sliderAdjust(9);
+      fresh();
+      render();
+    });
+  });
+
+  function sliderAdjust(v) {
+    var sl = document.getElementById('sup-m');
+    if (!sl) return;
+    sl.value = String(v);
+    state.m = v;
+    var mvv = document.getElementById('sup-m-v');
+    if (mvv) mvv.textContent = v;
+  }
+
+  var slider = document.getElementById('sup-m');
+  if (slider) {
+    slider.addEventListener('input', function (e) {
+      state.m = Math.max(1, parseInt(e.target.value, 10) || 1);
+      var v = document.getElementById('sup-m-v');
+      if (v) v.textContent = state.m;
+      fresh();
+      render();
+    });
+  }
+
+  var resetBtn = document.getElementById('sup-reset');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      state.noCode = true;
+      state.seed = (state.seed * 31 + 7) % 100003;
+      fresh();
+      render();
+      state.noCode = false;
+    });
+  }
+  var codeBtn = document.getElementById('sup-code');
+  if (codeBtn) {
+    codeBtn.addEventListener('click', function () {
+      state.noCode = !state.noCode;
+      codeBtn.textContent = state.noCode ? '让 TIR 模型调用 oracle' : '让 TIR 模型不调 oracle';
+      render();
+    });
+  }
+
+  state.noCode = true;
+  fresh();
+  state.noCode = false;
+  render();
+})();
+
+/* ============================================================
+   2) ASPO 模拟：8 条全对回答
+   ============================================================ */
+(function () {
+  var sim = document.getElementById('asp-sim');
+  if (!sim) return;
+
+  /* 组内：位置 p（token）、总长度 L（token）。模拟假设这些；论文未公开。 */
+  var POOL = [
+    { rev: 'r1', p: 1200, L: 9000 },
+    { rev: 'r2', p: 1800, L: 10000 },
+    { rev: 'r3', p: 2400, L: 8000 },
+    { rev: 'r4', p: 3000, L: 11000 },
+    { rev: 'r5', p: 3600, L: 9500 },
+    { rev: 'r6', p: 4200, L: 8500 },
+    { rev: 'r7', p: 5400, L: 12000 },
+    { rev: 'r8', p: 6600, L: 10000 }
+  ];
+
+  function fmt(x) {
+    var s = x >= 0 ? x.toFixed(2) : '−' + Math.abs(x).toFixed(2);
+    return s;
+  }
+
+  function mean(arr) {
+    var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i];
+    return s / arr.length;
+  }
+
+  function std(arr) {
+    var m = mean(arr), s = 0;
+    for (var i = 0; i < arr.length; i++) s += (arr[i] - m) * (arr[i] - m);
+    return Math.sqrt(s / arr.length) || 1e-9;
+  }
+
+  var state = { mode: 'reward', d: -1.5, k: 0.7 };
+
+  function compute() {
+    var n = POOL.length;
+    var ps = POOL.map(function (r) { return r.p; });
+    var Ls = POOL.map(function (r) { return r.L; });
+    var pBar = mean(ps);
+    var lBar = mean(Ls);
+    var sp = std(ps);
+    var A_c = 1; /* 全对 → 组内正确性优势取示意常数 1；真实 DAPO 取决于所在组 */
+
+    var rp = ps.map(function (p) { return state.d * (p - pBar) / sp; });
+    var rpBar = mean(rp);
+    var rs = std(rp);
+
+    return POOL.map(function (r, i) {
+      var adj, A;
+      if (state.mode === 'reward') {
+        /* Eq.1 化简：A = (r' - mean)/std */
+        A = (rp[i] - rpBar) / rs;
+        adj = A - A_c; /* 相对主优势的变化量 */
+      } else {
+        var raw = state.d * (r.p - pBar) / lBar;
+        var lim = state.k * A_c;
+        adj = Math.max(-lim, Math.min(lim, raw));
+        A = A_c + adj;
+      }
+      return { rev: r.rev, p: r.p, L: r.L, A: A, adj: adj, late: r.p > pBar };
+    });
+  }
+
+  function render() {
+    var rows = compute();
+    var table = document.getElementById('asp-table');
+    if (!table) return;
+    var modeLabel = state.mode === 'reward' ? 'Eq.1 改奖励' : 'Eq.2 ASPO';
+    var html = '<div class="asp-row asp-head"><span>回答</span><span>' + modeLabel + ' 前的优势</span><span>偏置 / 标准化值</span><span>最终优势</span></div>';
+    var neg = 0, pos = 0;
+    rows.forEach(function (r) {
+      var isNeg = r.A < 0;
+      if (isNeg) neg++; else pos++;
+      html += '<div class="asp-row ' + (isNeg ? 'ng' : 'pos') + '">' +
+        '<span>' + r.rev + '</span>' +
+        '<span>+' + fmt(1) + '</span>' +
+        '<span>' + (r.adj >= 0 ? '+' : '') + fmt(r.adj) + '</span>' +
+        '<span><b>' + (r.A >= 0 ? '+' : '') + fmt(r.A) + '</b>' + (r.late ? ' <span class="ar-tag">晚于均值</span>' : '') + '</span>' +
+        '</div>';
+    });
+    table.innerHTML = html;
+
+    var stats = document.getElementById('asp-stats');
+    if (stats) {
+      stats.innerHTML =
+        '<div class="slot"><div class="slot-name">被翻成负优势</div><div class="slot-val" style="color:' + (neg > 0 ? 'var(--c1)' : 'var(--accent)') + '">' + neg + ' / ' + rows.length + '</div></div>' +
+        '<div class="slot"><div class="slot-name">仍为正优势</div><div class="slot-val">' + pos + ' / ' + rows.length + '</div></div>' +
+        '<div class="slot"><div class="slot-name">最大偏置 / 主优势</div><div class="slot-val">' + (Math.max.apply(null, rows.map(function (r) { return Math.abs(r.adj); }))).toFixed(2) + ' / 1.00</div></div>';
+    }
+
+    var scen = document.getElementById('asp-scen');
+    if (scen) {
+      scen.innerHTML = '示意组：8 条回答全部正确，首次调用位置 1,200–6,600 token，总长度 8,000–12,000 token。δ = ' +
+        (state.d < 0 ? '−' + Math.abs(state.d).toFixed(1) : state.d.toFixed(1)) + '，k = ' + state.k.toFixed(2) + '。';
+    }
+
+    var msg = document.getElementById('asp-msg');
+    if (!msg) return;
+    if (state.mode === 'reward') {
+      var big = rows.some(function (r) { return Math.abs(r.A) > 2; });
+      msg.innerHTML = '组内全对 → 常数 1 被减掉，优势完全由 <code>r′</code> 的标准化决定。' +
+        '晚于均值的回答 <strong>拿到负优势</strong>（' + neg + '/' + rows.length + '），即使它们答对了；' +
+        (big ? '而且幅度不受控：|A| 已经超过 2，比应有的主信号量级大得多。' : '而且绝对幅度完全取决于组内位置的离散程度，与「答对了」无关。') +
+        (state.d === 0 ? ' δ=0 时偏置为零，此时这只是「全对组没有学习信号」的另一种表现。' : '') +
+        '<br><span class="status out">正确的回答被惩罚</span> <span class="status out">辅助信号盖过主信号</span>';
+    } else {
+      var adjEarly = rows[0].adj, adjLate = rows[rows.length - 1].adj;
+      var boundPct = Math.round(state.k * 100);
+      var clamped = rows.some(function (r) { return Math.abs(r.adj) >= state.k - 1e-9; });
+      msg.innerHTML = '偏置被裁到 <code>[−k, +k]</code> 之内（k=' + state.k.toFixed(2) + '），最终优势至少保留主优势的 <strong>' + Math.round((1 - state.k) * 100) + '%</strong>。' +
+        '最早调用的回答拿到 ' + (adjEarly >= 0 ? '+' : '') + fmt(adjEarly) + '，最晚的 ' + fmt(adjLate) + (clamped ? '（已顶到裁剪边界）' : '') +
+        '，<strong>没有一个正优势被翻负</strong>。k 越大，被裁剪的回答越多，最大偏置就停在 ' + boundPct + '%。' +
+        (state.k >= 0.95 ? ' <span class="warn">k 接近 1 时，最晚调用的正确答案优势只剩不到 ' + Math.round((1 - state.k) * 100) + '%，裁剪项几乎吃掉全部主信号。</span>' : '') +
+        '<br><span class="status in">主信号保留</span> <span class="status in">偏置有界且可调</span>';
+    }
+  }
+
+  document.querySelectorAll('#asp-modes .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#asp-modes .rule-btn').forEach(function (x) { x.classList.remove('active'); });
+      btn.classList.add('active');
+      state.mode = btn.dataset.mode;
+      render();
+    });
+  });
+
+  var dEl = document.getElementById('asp-d');
+  if (dEl) dEl.addEventListener('input', function (e) {
+    state.d = parseFloat(e.target.value);
+    var v = document.getElementById('asp-d-v');
+    if (v) v.textContent = state.d < 0 ? '−' + Math.abs(state.d).toFixed(1) : state.d.toFixed(1);
+    render();
+  });
+  var kEl = document.getElementById('asp-k');
+  if (kEl) kEl.addEventListener('input', function (e) {
+    state.k = parseFloat(e.target.value);
+    var v = document.getElementById('asp-k-v');
+    if (v) v.textContent = state.k.toFixed(2);
+    render();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

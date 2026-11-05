@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleTIR · 丢掉「既没写代码也没给答案」的轨迹，多轮工具 RL 就稳了</title>
+<meta name="description" content="SimpleTIR 把多轮 TIR 强化学习的崩溃归因于工具反馈引起的分布漂移与低概率 token，提出在策略更新前过滤掉含「void turn」的整条轨迹。Qwen2.5-7B 从零 RL，AIME24 22.1 → 50.5。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+  .trace{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 16px;font-family:"JetBrains Mono",monospace;font-size:12px}
+  .trace span{border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:4px 8px;color:var(--text-muted)}
+  .trace span.v{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+  .trace span.off{opacity:.45;border-style:dashed}
+  .toggle{display:flex;gap:8px;margin:14px 0 4px;flex-wrap:wrap}
+  .sample-box{font-size:13.5px;color:var(--text-muted);line-height:1.8}
+  .sample-box code{background:var(--bg-soft);padding:1px 5px;border-radius:4px;font-size:12.5px}
+  .sample-box p{margin:0}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SimpleTIR</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent · Zero RL · arXiv 2509.02479</span>
+  <h1>SimpleTIR：丢掉「既没写代码、也没给答案」的那条轨迹，多轮工具 RL 就稳了</h1>
+  <p class="hero-sub">
+    端到端强化学习训练多轮工具集成推理（TIR）时，训练经常中途崩盘、分数塌到 0。论文把病根指向<strong>工具反馈引起的分布漂移</strong>——它让模型在后续回合采样出极低概率的 token，进而引发梯度范数爆炸。
+    解法只加了一条规则：<strong>任何一回合既没有完整代码块、也没有最终答案，整条轨迹不进策略更新</strong>。
+  </p>
+  <div class="meta">
+    <span>Zhenghai Xue, Longtao Zheng 等 · NTU / TikTok</span>
+    <a href="https://arxiv.org/abs/2509.02479" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/ltzheng/SimpleTIR" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    单轮 TIR 训练是平滑的；一改成多轮，工具输出被拼进下一轮 prompt，它来自外部解释器、偏离预训练分布，模型随之「漂」，开始生成<strong>极低概率 token</strong>，并在一轮轮循环里累积放大。
+  </p>
+  <p>
+    论文的 Proposition 3.1 说，logits 上的策略梯度 ∝ <strong>未裁剪的重要性比 ρ</strong>，以及一个<strong>对低概率 token 高度敏感的概率项 √(1 − 2P(c) + ΣP(j)²)</strong>。对负奖励轨迹，低概率 token 的 ρ 可以涨到无穷；即便裁剪，概率项也会让梯度居高不下。所以只 mask 反馈 token 不够。
+  </p>
+  <p>
+    作者的观察是：这种漂移常常表现为一回合「既没有完整代码块、也没有最终答案」（partial code、重复文本、过早 eos）。<em>由此把整条轨迹从策略更新里滤掉</em>，既挡掉大风度梯度，也避免早期正确步骤被后期塌陷「连坐」。
+  </p>
+  <p>
+    它<strong>不是</strong>新算法：GRPO + feedback masking 照旧，只多一个过滤开关，可与其它 RL 改进正交叠加。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">22.1 → 50.5</div>
+      <div class="k">AIME24 均分（Qwen2.5-7B 从零 RL）<br>原文口径：text-only baseline 22.1 → 50.5（+28.4）</div>
+    </div>
+    <div class="metric">
+      <div class="v">50.5 − 20.8</div>
+      <div class="k">同一套过滤消融（Table 2，组内最高分差）<br>Naive 多轮 20.8 → SimpleTIR 50.5（+29.7）</div>
+    </div>
+    <div class="metric">
+      <div class="v">50.5 − 39.6</div>
+      <div class="k">同为零 RL 的 ZeroTIR-7B 对比（Table 1）<br>AIME24 39.6 → 50.5（+10.9）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>多轮 TIR 的 RL，崩在「工具输出」这一环</h2></div>
+  <p class="sec-sub">读完这节应知道：为什么把单轮改成多轮，训练就从平滑变成爆炸——而且和代码质量无关。</p>
+
+  <p>TIR 的循环是「推理 → 写代码 → 沙箱执行 → 读回结果 → 再推理」。论文把轨迹写成
+    <code>o = (q, l<sub>0</sub>, f<sub>0</sub>, …, l<sub>K−1</sub>, f<sub>K−1</sub>)</code>，其中 <code>l<sub>k</sub></code> 是模型第 k 轮生成的回答，<code>f<sub>k</sub></code> 是工具反馈；并用两层 MDP（回合级 + token 级）描述它，统一一个策略 <code>π<sub>θ</sub></code> 求解。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">单轮</span><h4>训练平滑</h4></div>
+      <p>模型只生成一段回答，最多带一个代码块。反馈只被「读」一次，不会被当作下一轮的输入条件。Figure 2 显示：单轮 naive 训练平滑上升。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">多轮</span><h4>反馈回灌，漂移累积</h4></div>
+      <p><code>f<sub>k</sub></code> 被拼进第 k+1 轮 prompt。它来自外部解释器，可能显著偏离 LLM 学到的数据分布；以这种 OOD 输入为条件，后续生成就开始<strong>高度随机</strong>，选中 token 的概率被压得异常低。</p>
+    </div>
+  </div>
+
+  <p>Figure 3 的压测很直观：Turn 1 的 token 概率普遍较高，Turn 2、3 模型自己的文本里开始出现低概率片段，到 Turn 4 整段塌成无意义输出、概率极低。</p>
+
+  <p>而多轮 TIR 本来就做 <strong>feedback masking</strong>：工具 token 不参与 loss 计算（<code>m<sub>i,t</sub> = 0</code>）。论文指出这<strong>不够</strong>——mask 只挡住了反馈 token 自己的梯度，挡不住它<strong>污染后续生成</strong>。这就是本文要补的洞。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路：冷启动「扶稳」，或者想直接规整梯度</h2></div>
+  <p class="sec-sub">这节对照两类做法各自卡在哪，也解释为什么作者坚持不走 SFT 冷启动。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>SFT 冷启动 + RL</h4></div>
+      <p><strong>代表：</strong>ReTool 先在 Qwen2.5-Math-32B-Instruct 上做冷启动 SFT 再 RL；ToRL、Effective TIR 则在数学专精基座上做 RL。</p>
+      <p><strong>强项：</strong>确实稳，32B 上分数也高。Table 1 里 ReTool-32B 的 AIME24 是 67.0，高于 SimpleTIR-32B 的 59.9；7B 上 ReTool 未报告。</p>
+      <p><strong>代价：</strong>SFT 把模型的推理形态锚定在标注范例上，削弱 Zero RL 的「涌现」这一核心收益。论文要的是不依赖冷启动的人类数据。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>直接规整梯度 / 概率</h4></div>
+      <p><strong>候选：</strong>按高重要性比（importance ratio）过滤、或按低 token 概率过滤。直觉上——既然病根是低概率 token，把它们筛掉就行。</p>
+      <p><strong>卡点：</strong>Figure 5（下）里这两种过滤都压不住梯度爆炸，训练分数曲线仍然乱跳。论文归因于两点：<em>阈值难调</em>，且它们<em>不解决 credit assignment</em>。</p>
+      <p>此外梯度裁剪（clip=1）在这套设置里已经开着，仍然爆。</p>
+    </div>
+  </div>
+
+  <p>所以作者要找的不是「更细的 token 级信号」，而是<strong>一个鲁棒、语义清晰、还能顺带修掉 credit assignment 的轨迹级判据</strong>。这就是下一节的 void turn。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心方法：用「void turn」当轨迹级开关</h2></div>
+  <p class="sec-sub">这篇论文只有一个公式是它自己的，其余都沿用 GRPO；先看懂公式，再对着模拟器亲手验证一次。</p>
+
+  <h3>训练目标本身没变</h3>
+  <p>策略用 GRPO 训练，优势是组内相对奖励 <code>Â<sub>i</sub> = (r<sub>i</sub> − mean(r)) / std(r)</code>。目标只对「模型生成」的 token 累积 loss：</p>
+
+  <div class="eq">
+    𝒥<sub>TIR</sub>(θ) = E<sub>q, {o<sub>i</sub>}~π<sub>old</sub></sub> [ (1/G) Σ<sub>i</sub> (1/Σ<sub>t</sub> m<sub>i,t</sub>) Σ<sub>t</sub> <span class="hl-c">m<sub>i,t</sub></span> · L<sub>CLIP</sub>(θ, i, t) ]
+  </div>
+  <div class="eq-cap">Eq. 1 · m<sub>i,t</sub> 是反馈 mask：属于某个回答 l<sub>k</sub> 的 token 取 1，工具反馈 token 取 0；L<sub>CLIP</sub> 即标准 PPO 的裁剪代理目标</div>
+
+  <h3>为什么低概率 token 会把梯度顶爆</h3>
+  <div class="eq">
+    ‖∇<sub>z<sub>t</sub></sub>𝒥<sub>TIR</sub>‖<sub>2</sub> ∝ m<sub>i,t</sub>/Σ<sub>j</sub>m<sub>i,j</sub> · <span class="hl-c">ρ<sub>i,t</sub>(θ)</span> · g<sub>i,t</sub> · |Â<sub>i</sub>| · <span class="hl-c">√(1 − 2P(c) + Σ<sub>j∈𝒜</sub> P(j)<sup>2</sup>)</span>
+  </div>
+  <div class="eq-cap">Eq. 3 · Proposition 3.1，对 pre-softmax logits z<sub>t</sub> 求梯度；ρ<sub>i,t</sub> = π<sub>θ</sub>(o<sub>i,t</sub>|o<sub>i,&lt;t</sub>) / π<sub>old</sub>(o<sub>i,t</sub>|o<sub>i,&lt;t</sub>)，g<sub>i,t</sub> 是「未裁剪时」才激活的门</div>
+
+  <ul>
+    <li><strong>未裁剪的重要性比 ρ。</strong>对<em>负奖励</em>轨迹（Â<sub>i</sub> &lt; 0），ρ 在上方无界。若 token c 在旧策略下概率极小，哪怕新策略只挪一点点，ρ 也可能爆炸——这就是训练里看到的梯度尖峰。</li>
+    <li><strong>概率项 √(1 − 2P(c) + ΣP(j)²)。</strong>即便 PPO 裁剪生效、ρ 被夹住，这一项在 P(c) 很低时仍可接近满分。若分布本身很尖（其余概率挤在少数 token 上，ΣP² 大），P(c)→0 时它≈1，梯度不会自然缩小。</li>
+  </ul>
+
+  <p>论文对 <code>ρ</code> 做 PPO 概率比裁剪（clip 0.2/0.28，即 ε = 0.2 与 0.28），但<strong>第二项完全不受裁剪影响</strong>；而按 importance ratio 去过滤，又只做了第一项的一半。两条路都堵不住。</p>
+
+  <h3>void turn：既没代码块、也没最终答案的一轮</h3>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">定义</span><h4>void turn = 既没产出完整代码块、也没产出最终答案的一轮回答</h4></div>
+    <p>论文给的典型成因：partial code、重复文本、过早采样到 <code>eos</code> 导致的残缺回答。它在成功轨迹里很少见，在异常轨迹里很常见，因此是一个强判据。</p>
+    <p><strong>算法：</strong>逐条检查采样到的轨迹，任何一回合是 void turn → 在 GRPO 更新前<strong>把整条轨迹从 batch 中 mask 掉</strong>。一个动作同时做了两件事：挡住低概率 token 的大梯度回流，并纠正错配的 credit assignment（早期正确步骤不再被后期塌陷拖累）。</p>
+  </div>
+
+  <h3>自己动手：一条轨迹，两种处理</h3>
+  <p>下面把 Figure 4 的流程做成可操作版本。轨迹里有四回合，其中一回合是 void turn。切换处理方式，看这条轨迹还能不能进入策略更新、梯度里还剩多少低概率 token——以及它同时带来什么副作用。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="sim-btns">
+      <button class="rule-btn" data-mode="naive">Naive Multi-Turn<span class="r-sub">不做轨迹过滤</span></button>
+      <button class="rule-btn" data-mode="lowprob">Low Prob Filtering<span class="r-sub">只 mask 最低概率 token</span></button>
+      <button class="rule-btn active" data-mode="stop">Stop w/o Filtering<span class="r-sub">遇 void turn 停生成，仍参与更新</span></button>
+      <button class="rule-btn" data-mode="simpletir">SimpleTIR<span class="r-sub">整条轨迹滤掉</span></button>
+    </div>
+
+    <div class="trace" id="trace"></div>
+
+    <div class="slots s5" id="slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>G 组内轨迹数 <span class="v" id="g-v">16</span></label>
+        <input type="range" id="g-n" min="8" max="32" step="8" value="16">
+      </div>
+      <div class="ctrl">
+        <label>void 轨迹的组内占比 <span class="v" id="p-v">50%</span></label>
+        <input type="range" id="void-p" min="0" max="25" step="1" value="8">
+      </div>
+    </div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前状态</div>
+      <div id="sim-msg">拖动滑块，比较四种处理下这条轨迹的去向。</div>
+    </div>
+  </div>
+
+  <p><strong>手算验证</strong>（默认：G = 16，void 占 8 条）：</p>
+  <ul>
+    <li><strong>Naive：</strong>16 条全部进更新，其中 8 条带低概率 token 的梯度回流。</li>
+    <li><strong>Low Prob：</strong>只 mask 了这条轨迹中 1 个最低概率 token（T4），T3 的 partial code、T4 其余塌陷 token 仍会回流，轨迹继续参与更新。</li>
+    <li><strong>Stop w/o Filtering：</strong>T3 是 void turn，生成在 T3 后被提前截停，但这条轨迹仍参与更新——它几乎拿不到正奖励，负优势下 T1、T2 也被一起扣分，这正是论文说的 credit assignment 错配。</li>
+    <li><strong>SimpleTIR：</strong>8/16 条有效轨迹进入更新，带 void turn 的 8 条彻底 mask。Table 2 的消融正是这个顺序：Naive 20.8 &lt; Low Prob 23.3 &lt; Stop w/o Filtering 26.1 ≈ High Ratio 26.3 &lt; SimpleTIR 50.5（AIME24，1000 步内最高分）——最后一步的跳变只来自「整条轨迹丢弃」。</li>
+  </ul>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么训：零 RL 开局，五回合起步，靠工程细节兜底</h2></div>
+  <p class="sec-sub">这段给出复现所需的全部关键配置，并指出「省交互回合」才是这套方法的实际收益之一。</p>
+
+  <h3>训练设置</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">数据与框架</span><h4>VerL + Search-R1</h4></div>
+      <p>训练集为 SimpleRL 的 Math3-5 与 DeepscaleR；代码执行用异步的 Sandbox Fusion。基座是<strong>未对齐</strong>的 Qwen2.5-7B / 32B，全程不做 SFT。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">关键超参</span><h4>附录 C.2 / 表 6a</h4></div>
+      <p>rollout 温度 1.0，每 prompt n = 16 次 rollout，采样 batch 1280；训练 batch 512；PPO clip 0.2/0.28，epochs 4；lr 1e-6，梯度裁剪 global-norm = 1；γ = 1、GAE λ = 1；KL 系数 0、熵系数 0。</p>
+    </div>
+  </div>
+
+  <h3>回合数与长度：先短后长</h3>
+  <ul>
+    <li>初始最大回答长度 16384，最多 5 回合代码执行；当平均回答长度进入平台期，再升到 24K、最多 10 回合。</li>
+    <li>Figure 5（上）里 10 回合版本在第 200 步从 5 回合版本继续训练。作者观察到：更多回合能提升平均回答长度和 Math500 分数，但 <strong>AIME24 并未明显受益</strong>——不同类型题目需要的推理形态不同。</li>
+  </ul>
+
+  <h3>三个防止「模式失真」的工程细节</h3>
+  <div class="card">
+    <div class="card-head"><span class="pill p3">实现</span><h4>不用 chat template，改用极简前缀</h4></div>
+    <p>为避免基座模型遇到 OOD 特殊 token，工具输出前只加一句 <code>"Code Execution Result:"</code>；每段生成的代码前预置一个 <code>final_answer</code> 函数，让简单题在一回合内收尾；代码块成形后立即停止生成，并在下一回合前追加<strong>真实</strong>的工具反馈，防止模型幻觉工具输出。</p>
+    <p>后两点还让 void turn 的检测变得很直接：一回合要么有完整代码块（进而被执行）、要么有 <code>final_answer</code> / <code>\boxed{}</code>，否则就是 void。</p>
+  </div>
+
+  <p>代价方面：论文自述训练依赖<strong>高并行度的沙箱</strong>，并且完整异步的 rollout 与奖励计算仍是开放问题（Limitations）。过滤本身几乎零开销——只是把样本从更新前的 batch 里拿掉。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>流程：一次更新里的四个动作</h2></div>
+  <p class="sec-sub">Figure 4 的顺序：交互 → 轨迹过滤 → 策略更新；void turn 同时触发「停止生成」和「整条丢弃」。</p>
+  <figure>
+    <svg viewBox="0 0 860 330" role="img" aria-label="SimpleTIR 训练流程图">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+
+      <!-- 1. 交互 -->
+      <rect x="14" y="60" width="170" height="150" rx="12" fill="var(--bg-tint)" stroke="var(--border-strong)"></rect>
+      <foreignObject x="24" y="68" width="150" height="140">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:13px;line-height:1.5;color:var(--text)">
+          <div class="mono" style="font-size:11px;color:var(--text-soft);letter-spacing:.08em">STEP 1</div>
+          <strong>多轮交互</strong>
+          <div style="color:var(--text-muted);margin-top:6px">推理 → 代码 → 沙箱执行 → <code>Code Execution Result:</code> 回灌</div>
+        </div>
+      </foreignObject>
+
+      <!-- 2. 轨迹 -->
+      <rect x="218" y="40" width="150" height="190" rx="12" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+      <foreignObject x="228" y="48" width="130" height="180">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:13px;line-height:1.55;color:var(--text)">
+          <div class="mono" style="font-size:11px;color:var(--text-soft);letter-spacing:.08em">STEP 2</div>
+          <strong>采样轨迹</strong>
+          <div style="color:var(--text-muted);margin-top:6px">Reasoning 1 · Code 1 ·<br>Reasoning 2 · <span style="color:var(--accent-deep);font-weight:600">Incomplete Code</span></div>
+        </div>
+      </foreignObject>
+
+      <!-- 3. 过滤 -->
+      <rect x="402" y="24" width="170" height="160" rx="12" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <foreignObject x="412" y="32" width="150" height="150">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:13px;line-height:1.5;color:var(--text)">
+          <div class="mono" style="font-size:11px;color:var(--accent-deep);letter-spacing:.08em">STEP 3 · 过滤</div>
+          <strong>有 void turn</strong>
+          <div style="color:var(--text-muted);margin-top:4px">→ 停止生成<br>→ 整条轨迹 mask</div>
+        </div>
+      </foreignObject>
+
+      <!-- 4. 更新 -->
+      <rect x="606" y="70" width="170" height="150" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <foreignObject x="616" y="78" width="150" height="140">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:13px;line-height:1.5;color:var(--text)">
+          <div class="mono" style="font-size:11px;color:var(--text-soft);letter-spacing:.08em">STEP 4</div>
+          <strong>GRPO 更新</strong>
+          <div style="color:var(--text-muted);margin-top:6px">仅对 mask 后剩下的有效轨迹做策略更新</div>
+        </div>
+      </foreignObject>
+
+      <!-- 有效轨迹支路（下环回） -->
+      <rect x="410" y="244" width="154" height="46" rx="10" fill="var(--bg)" stroke="var(--border)"></rect>
+      <foreignObject x="420" y="252" width="134" height="34">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:12px;line-height:1.4;color:var(--text-muted)">
+          无 void turn → 进入更新
+        </div>
+      </foreignObject>
+
+      <!-- 箭头 -->
+      <line x1="184" y1="135" x2="212" y2="135" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <line x1="368" y1="135" x2="396" y2="135" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <line x1="572" y1="104" x2="600" y2="130" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <line x1="487" y1="184" x2="487" y2="238" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <path d="M564 267 L 680 267 L 680 226" fill="none" stroke="#8C857B" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr)"></path>
+
+      <!-- 红色丢弃分支 -->
+      <path d="M487 184 L 487 310" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4"></path>
+      <foreignObject x="330" y="288" width="150" height="24">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:12px;line-height:1.3;color:var(--accent-deep);font-weight:600">
+          丢弃：不进入策略更新
+        </div>
+      </foreignObject>
+
+      <!-- 图例 -->
+      <foreignObject x="612" y="290" width="180" height="40">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-size:11.5px;line-height:1.4;color:var(--text-soft)">
+          <span style="display:inline-block;width:10px;height:3px;background:var(--accent);vertical-align:middle;margin-right:5px"></span>过滤路径<br>
+          <span style="display:inline-block;width:10px;height:0;border-top:2px dashed #8C857B;vertical-align:middle;margin-right:5px"></span>更新路径
+        </div>
+      </foreignObject>
+    </svg>
+    <figcaption>
+      Figure 4（重绘）：互动 → 轨迹过滤 → 强化学习。原图的要点是：void turn 判定发生在策略更新<em>之前</em>，置灰的是整条轨迹，而不是某几个 token。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么停在「回合」粒度：</strong>每一步 token 级的信号在低概率区域本身就很噪；而「这一轮有没有推进」能够在回合级别干净判断，且不易被阈值调参左右。</li>
+          <li><strong>为什么能顺带修 credit assignment：</strong>稀疏终端奖励下，最终失败会对整条轨迹给一个负值。若保留含 void turn 的轨迹，早期正确的高概率回合也被扣分；丢掉整条轨迹后，只有「真正能拿到正优势」的样本在塑造策略。</li>
+          <li><strong>为什么它和 GRPO 正交：</strong>过滤只改变进入更新的样本集合；组内优势在<em>采样轨迹</em>上计算，而不是在过滤后子集上重新归一。作者刻意没动这一块，以免干扰算法本身。</li>
+          <li><strong>代价：</strong>会丢掉一些含有价值早期步骤的轨迹；若绝大多数轨迹都含 void turn，则可能没有样本可学。这是论文自己列出的局限性方向。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：同是零 RL，AIME24 比 ZeroTIR-7B 高 10.9 分</h2></div>
+  <p class="sec-sub">数字全部取自 Table 1 / Table 2 / Table 3，均为 average@32；「-」表示原文未提供。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>模型 (7B)</th><th>TIR</th><th>Zero RL</th><th>起点</th>
+          <th style="text-align:right">AIME24</th><th style="text-align:right">AIME25</th><th style="text-align:right">MATH500</th>
+          <th style="text-align:right">Olympiad</th><th style="text-align:right">AMC23</th><th style="text-align:right">HMMT25</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-7B</td><td>✗</td><td>/</td><td>Base</td><td class="num">3.2</td><td class="num">1.1</td><td class="num">51.9</td><td class="num">15.4</td><td class="num">21.7</td><td class="num">0.0</td></tr>
+        <tr><td>SimpleRL-Zoo-7B</td><td>✗</td><td>✓</td><td>Base</td><td class="num">15.6</td><td class="num">-</td><td class="num">78.2</td><td class="num">40.4</td><td class="num">62.5</td><td class="num">-</td></tr>
+        <tr><td>ToRL-7B</td><td>✓</td><td>✗</td><td>Math-Inst</td><td class="num">40.2</td><td class="num">27.9</td><td class="num">82.2</td><td class="num">49.9</td><td class="num">75.0</td><td class="num">-</td></tr>
+        <tr><td>Effective TIR-7B</td><td>✓</td><td>✗</td><td>Math</td><td class="num">42.3</td><td class="num">29.2</td><td class="num">86.4</td><td class="num">-</td><td class="num">74.2</td><td class="num">-</td></tr>
+        <tr><td>ZeroTIR-7B</td><td>✓</td><td>✓</td><td>Base</td><td class="num">39.6</td><td class="num">25.0</td><td class="num">80.2</td><td class="num">-</td><td class="num">-</td><td class="num">22.5</td></tr>
+        <tr class="best"><td>SimpleTIR-7B</td><td>✓</td><td>✓</td><td>Base</td><td class="num">50.5</td><td class="num">30.9</td><td class="num">88.4</td><td class="num">54.8</td><td class="num">79.1</td><td class="num">29.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="margin-top:-8px">Table 1（节选，Qwen2.5-7B 部分）· TIR：训练与评测是否用工具；Zero RL：是否从 base 直接 RL</p>
+
+  <p>32B 规模上，SimpleTIR-32B 的 AIME24 是 59.9、MATH500 是 92.9；同为零 RL 的 ZeroTIR-32B 分别是 48 和 87.8。但冷启动路线仍未被完全追平：ReTool 的 AIME24 达到 67.0，AIME25 是 49.3；SimpleTIR-32B 的 AIME25 为 49.2，几乎持平。</p>
+
+  <h3>消融：差在「轨迹级」这一步</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>设置（7B）</th><th style="text-align:right">AIME24</th><th style="text-align:right">MATH500</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>SimpleTIR</td><td class="num">50.5</td><td class="num">88.4</td></tr>
+        <tr><td>Naive Multi-Turn</td><td class="num">20.8</td><td class="num">73.1</td></tr>
+        <tr><td>Low Prob Filtering</td><td class="num">23.3</td><td class="num">72.8</td></tr>
+        <tr><td>High Ratio Filtering</td><td class="num">26.3</td><td class="num">75.0</td></tr>
+        <tr><td>Stop Generation w/o Filtering</td><td class="num">26.1</td><td class="num">77.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="margin-top:-8px">Table 2 · 因消融方法训练不稳定，报告 1000 个梯度步内的最高分</p>
+
+  <p>两点反直觉：其一，<strong>「遇 void turn 就停生成」还不够</strong>（26.1）——保留轨迹依然被 credit assignment 拖累，必须<em>整条丢弃</em>；其二，token 级的两种过滤都只在 20–26 区间打转，说明问题不在于「挑出哪些 token」，而在于「哪条轨迹值得学」。</p>
+
+  <h3>零 RL 的副作用之一是「推理形态更多样」</h3>
+  <p>作者用 Claude-3.7-Sonnet 标注正确回答中的推理模式（Table 3）：SimpleTIR-32B 相比冷启动的 ReTool，渐进式推理 46.5% vs 18.9%，错误修正 38.0% vs 25.8%，交叉验证 86.0% vs 82.4%。频率之和可超 100%，因为一条回答可含多种模式。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候这套过滤不够用</h2></div>
+  <p class="sec-sub">作者 Limitations 写了四条，加上从原文数据本身能读出的一条，共五个边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>void turn 判据只适用于「能清晰判定一轮是否有产出」的多轮 TIR</h4></div>
+    <p>论文自述：void turn 作为低概率 token 的指示器，<strong>未必能直接迁移</strong>到多轮 TIR 之外的任务。网页浏览、API 调用、机器人控制等场景里，「这一轮有没有推进」远没有「有没有代码块/最终答案」那么好判定。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>回合数上限 10，长程 agent 任务会不够</h4></div>
+    <p>数学推理最多训练 10 回合，但复杂 agent 任务可能需要更多交互。回合越深，漂移累积的机会也越多。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>它本身不提升能力上限，只是把不稳定拿开</h4></div>
+    <p>同基座、同起点下，冷启动 + RL 的 ReTool 在 AIME24（67.0）、AIME25（49.3）上仍高于 SimpleTIR-32B。SimpleTIR 的优势是<strong>不需要人类冷启动数据</strong>，以及推理模式更多样，而不是绝对分数更高。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>工程依赖与异步化尚未解决</h4></div>
+    <p>训练依赖高并行沙箱；完全异步的 rollout 与奖励计算仍是开放问题，涉及 rollout 效率、显存管理与 credit assignment。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界五</span><h4>数据效率是隐性成本</h4></div>
+    <p>「整条丢弃」会连同其中有效的早期步骤一起扔掉。<strong>本页推断：</strong>若难点题目初期几乎采样不到无 void turn 的轨迹，可学的样本会骤减——论文未单独报告这类样本在训练中的比例，这一风险的大小取决于实际题集的难度分布。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>SimpleTIR 把「病根在数据」这一思路落成了一个回合级开关</strong>。它不改变 RL 算法，也不扩大模型能力，而是让 Zero RL 在多轮工具场景下第一次能跑稳、并跑出分数。</p>
+</section>
+
+<footer>
+  <div>本文基于论文原文整理。图中流程为根据 Figure 4 重绘，交互模拟为教学示意，非原实验数据；所有比较数字均可追溯到 Table 1 / 2 / 3。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.02479" target="_blank" rel="noopener">SimpleTIR: End-to-End Reinforcement Learning for Multi-Turn Tool-Integrated Reasoning</a> · Zhenghai Xue, Longtao Zheng, Qian Liu, Yingru Li, Xiaosen Zheng, Zejun Ma, Bo An · NTU / TikTok · arXiv 2509.02479 (v2, 2025-09-03)<br>
+    代码：<a href="https://github.com/ltzheng/SimpleTIR" target="_blank" rel="noopener">ltzheng/SimpleTIR</a><br>
+    笔记：<a href="/simpletirend-to-end-reinforcement-learning-for-multi-turn-tool-integrated-reasoning/">SimpleTIR：End-to-End Reinforcement Learning for Multi-Turn Tool-Integrated Reasoning</a>
+  </div>
+  <div class="src" style="color:var(--accent-deep)">
+    笔记勘误（原文未改）：笔记称「Math3-5 来自 SimpleRL」并只列了 Math500 / AIME24 / AIME25，实际评测还包含 AMC23 与 HMMT Feb 25；笔记也漏写了 AMC23=79.1、HMMT25=29.7 这两个 7B 结果。其余数字（22.1、50.5、59.9、92.9、39.6）与原文一致。笔记没有给出 arXiv 编号，本文核实为 2509.02479。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============ 1) 轨迹处理模拟器 ============ */
+  var turns = [
+    { label: 'T1', ok: true,  low: false },
+    { label: 'T2', ok: true,  low: false },
+    { label: 'T3', ok: false, low: true  },
+    { label: 'T4', ok: false, low: true  }
+  ];
+  var mode = 'stop';
+  var VOID_TURNS = [2, 3];  // 0-indexed: T3（void）与 T4（塌陷）
+
+  function $(id) { return document.getElementById(id); }
+
+  function getG() { var e = $('g-n'); return e ? parseInt(e.value, 10) : 16; }
+  function getVoidP() { var e = $('void-p'); return e ? parseInt(e.value, 10) : 8; }
+
+  function fmtPct(n) { return (n * 100).toFixed(0) + '%'; }
+
+  function compute() {
+    var G = getG();
+    var v = getVoidP();
+    if (v > G) v = G;
+    var valid = G - v;
+    var res = {
+      G: G, voidN: v, valid: valid,
+      enters: true, lowTokenGrads: 0, creditRisk: false,
+      droppedTurns: [], msg: ''
+    };
+    var i;
+
+    if (mode === 'naive') {
+      res.enters = true;
+      res.lowTokenGrads = v;
+      res.creditRisk = true;
+      res.msg = G + '/' + G + ' 条轨迹全部进入 GRPO 更新，其中 <strong>' + v + '</strong> 条带 void turn、低概率 token 的梯度直接回流。早期正确回合被后期塌陷「连坐」，正是训练崩盘的两条通路。';
+    } else if (mode === 'lowprob') {
+      res.enters = true;
+      res.lowTokenGrads = v;
+      res.creditRisk = true;
+      res.msg = '只 mask 了本轨迹中<strong>最低概率的 1 个 token</strong>（T4），T3 的 partial code 与 T4 其余塌陷 token 的回流仍在。轨迹继续参与更新（有效样本 ' + valid + '/' + G + '，带病样本 ' + v + '）。';
+    } else if (mode === 'stop') {
+      res.enters = true;
+      res.lowTokenGrads = v;
+      res.creditRisk = true;
+      res.droppedTurns = [2, 3];
+      res.msg = 'T3 检测到 void turn，生成在 T3 后截停，T4 不再产生。但轨迹<strong>仍然进入更新</strong>且几乎拿不到正奖励——负优势下 T1、T2 也被一起扣分，credit assignment 依旧错配。有效样本 ' + valid + '/' + G + '。';
+    } else {
+      res.enters = false;
+      res.lowTokenGrads = 0;
+      res.creditRisk = false;
+      res.droppedTurns = [0, 1, 2, 3];
+      res.msg = '整条轨迹被 mask：进入更新的只有 <strong>' + valid + '/' + G + '</strong> 条干净轨迹，带 void turn 的 ' + v + ' 条不再贡献任何梯度。低概率 token 的大梯度被从源头挡掉，早期正确回合也不再被误罚。';
+    }
+    return res;
+  }
+
+  function renderTrace(r) {
+    var host = $('trace');
+    if (!host) return;
+    host.innerHTML = '';
+    turns.forEach(function (t, idx) {
+      var s = document.createElement('span');
+      s.textContent = t.label + (t.ok ? ' 正常' : ' void/塌陷');
+      if (r.droppedTurns.indexOf(idx) !== -1) {
+        s.className = 'off';
+      } else if (t.low) {
+        s.className = mode === 'lowprob' && idx === 3 ? 'off' : 'v';
+      }
+      host.appendChild(s);
+    });
+  }
+
+  function renderSlots(r) {
+    var host = $('slots');
+    if (!host) return;
+    host.innerHTML = '';
+    var cells = [
+      { name: '进入更新', val: r.enters ? r.valid + ' / ' + r.G : '0 / ' + r.G, hit: !r.enters ? false : true, bar: r.valid / r.G, warn: !r.enters },
+      { name: '被丢弃',   val: !r.enters ? r.voidN + ' 条' : '0 条', hit: !r.enters, bar: !r.enters ? r.voidN / r.G : 0, warn: !r.enters },
+      { name: '低概率梯度', val: r.lowTokenGrads > 0 ? r.lowTokenGrads + ' 条回流' : '已阻断', hit: r.lowTokenGrads > 0, bar: r.lowTokenGrads / (r.G || 1), warn: r.lowTokenGrads > 0 },
+      { name: 'credit 误罚', val: r.creditRisk ? '有风险' : '已消除', hit: r.creditRisk, bar: r.creditRisk ? 0.5 : 0, warn: r.creditRisk },
+      { name: '有效样本率', val: fmtPct(r.valid / (r.G || 1)), hit: false, bar: r.valid / (r.G || 1), warn: false }
+    ];
+    cells.forEach(function (c) {
+      var slot = document.createElement('div');
+      slot.className = 'slot';
+      var name = document.createElement('div');
+      name.className = 'slot-name';
+      name.textContent = c.name;
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.textContent = c.val;
+      if (c.warn) val.style.color = 'var(--accent-deep)';
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var fill = document.createElement('i');
+      fill.className = c.warn ? 'b1' : 'b2';
+      fill.style.width = Math.max(0, Math.min(100, c.bar * 100)) + '%';
+      bar.appendChild(fill);
+      slot.appendChild(name);
+      slot.appendChild(val);
+      slot.appendChild(bar);
+      host.appendChild(slot);
+    });
+  }
+
+  function render() {
+    var r = compute();
+    renderTrace(r);
+    renderSlots(r);
+    var msg = $('sim-msg');
+    if (msg) {
+      msg.innerHTML = r.msg;
+      if (r.valid === 0 && mode === 'simpletir') {
+        msg.innerHTML += ' <span class="warn">注意：所有轨迹都是 void，此时没有可学的样本——这是过滤法的真实风险。</span>';
+      }
+    }
+    var gv = $('g-v'); if (gv) gv.textContent = String(r.G);
+    var pv = $('p-v'); if (pv) pv.textContent = String(r.voidN);
+  }
+
+  var btns = document.querySelectorAll('#sim-btns .rule-btn');
+  if (btns.length) {
+    btns.forEach(function (b) {
+      b.addEventListener('click', function () {
+        btns.forEach(function (x) { x.classList.remove('active'); });
+        b.classList.add('active');
+        mode = b.getAttribute('data-mode') || 'stop';
+        render();
+      });
+    });
+  }
+
+  var gEl = $('g-n');
+  if (gEl) gEl.addEventListener('input', render);
+  var vEl = $('void-p');
+  if (vEl) vEl.addEventListener('input', render);
+  render();
+
+  /* ============ 2) 图说明展开 ============ */
+  window.toggleFig = function (el) {
+    if (!el) return;
+    var fig = el.closest ? el.closest('figure') : null;
+    if (!fig) return;
+    var detail = fig.querySelector('.figure-detail');
+    if (!detail) return;
+    var open = detail.classList.toggle('active');
+    el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+  };
+})();
+</script>
+</body>
+</html>

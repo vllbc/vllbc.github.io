@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GMPO · 把 token 级奖励的算术平均换成几何平均</title>
+<meta name="description" content="Geometric-Mean Policy Optimization 把 GRPO 的算术平均换成几何平均，让重要性采样率的梯度权重从逐 token 变化变成整条序列共享一个标量，在数学与多模态推理上更稳、平均 Pass@1 更高。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet"></noscript>
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页局部微调 */
+figure svg{max-width:620px;margin:0 auto}
+section.block{scroll-margin-top:70px}
+.tbl-scroll.wide table{min-width:620px}
+.sim .two-col{margin:16px 0 4px}
+.sim .card .big{font-family:"JetBrains Mono",monospace;font-size:22px;font-weight:600;line-height:1.3;margin:2px 0 6px}
+.sim .card .big.c1{color:var(--c1)}
+.sim .card .big.ca{color:var(--accent)}
+.wchart-wrap{margin-top:6px}
+.res-panel[hidden]{display:none}
+.tabs .tab{white-space:nowrap}
+@media (max-width:520px){
+  .slots{grid-template-columns:repeat(2,1fr)}
+  figure svg{max-width:100%}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GMPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心公式</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2507.20673 · 2025</span>
+  <h1>GMPO：把 token 级奖励的算术平均换成几何平均</h1>
+  <p class="hero-sub">
+    GRPO 对一条序列里所有 token 的重要性加权奖励做<strong>算术平均</strong>。一个 token 的 ρ 冲到 10，平均值只被摊薄一点点，但它在梯度里的权重就是 10。
+    GMPO 把 <code>Σ</code> 换成 <code>Π</code> 再开 <code>|o|</code> 次方，整条序列的每个 token 共享同一个几何平均数作为权重。
+    代价几乎为零，换来的是更窄的 ρ 区间和更高的探索熵。
+  </p>
+  <div class="meta">
+    <span>Yuzhong Zhao 等 · UCAS / CUHK / HKUST / Microsoft Research</span>
+    <a href="https://arxiv.org/abs/2507.20673" target="_blank" rel="noopener">arXiv 2507.20673 ↗</a>
+    <a href="https://github.com/callsys/GMPO" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    不稳定的源头不在采样，在 <strong>loss 里的那一次平均</strong>。GRPO 的目标是 token 级重要性加权奖励的算术平均，它对少数极端 <code>ρ</code> 非常敏感。
+  </p>
+  <p>
+    GMPO 只改一处：把算术平均换成<strong>几何平均</strong>。目标值域因此被 AM–GM 不等式压在 GRPO 之下，梯度权重也从「每个 token 各算各的 <code>ρ<sub>t</sub></code>」变成「整条序列一个 <code>GM(ρ)</code>」。
+  </p>
+  <p>
+    因为不再需要靠窄裁剪压住离群值，论文把裁剪区间放宽到 <em>e<sup>−0.4</sup> ~ e<sup>0.4</sup></em>，探索空间反而变大——熵更高、KL 更小、梯度范数更平。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">+4.1%</div>
+      <div class="k">R1-Distill-Qwen-7B 五基准平均 Pass@1<br>63.4 vs GRPO 59.3</div>
+    </div>
+    <div class="metric">
+      <div class="v">52.7</div>
+      <div class="k">Qwen2.5-Math-7B 同设置平均<br>GRPO 51.2</div>
+    </div>
+    <div class="metric">
+      <div class="v">e<sup>±0.4</sup></div>
+      <div class="k">token 级裁剪区间<br>GRPO 为 (0.8, 1.2)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>算术平均把离群 token 的权重，原样留在了梯度里</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么「loss 看起来没炸」和「更新已经炸了」可以同时发生。</p>
+
+  <p>GRPO 对每个问题采样一组 rollout，用组内奖励的均值和标准差把奖励归一化成优势 <code>Â<sub>i</sub></code>。对第 <code>i</code> 条 rollout 的第 <code>t</code> 个 token，重要性采样率是</p>
+
+  <div class="eq">
+    ρ<sub>i,t</sub>(θ) = π<sub>θ</sub>(o<sub>i,t</sub> | q, o<sub>i,&lt;t</sub>) / π<sub>θ<sub>old</sub></sub>(o<sub>i,t</sub> | q, o<sub>i,&lt;t</sub>)
+  </div>
+  <div class="eq-cap">比值偏离 1 越多，说明这条 rollout 上的策略已经偏离采样时的旧策略越远</div>
+
+  <p>去掉 KL 项和裁剪项之后，GRPO 的目标就是 token 级重要性加权奖励的算术平均（原文 Eq. 2）：</p>
+
+  <div class="eq">
+    J<sup>*</sup><sub>GRPO</sub>(π<sub>θ</sub>) = E<sub>q,{o<sub>i</sub>}</sub> [ (1/G) Σ<sub>i=1</sub><sup>G</sup> (1/|o<sub>i</sub>|) Σ<sub>t=1</sub><sup>|o<sub>i</sub>|</sup> <span class="hl-c">ρ<sub>i,t</sub>(θ) Â<sub>i</sub></span> ]
+  </div>
+  <div class="eq-cap">两个平均叠在一起：先在序列内对 token 求平均，再在组内对 rollout 求平均</div>
+
+  <p>关键在下一步。对参数求梯度，<code>ρ</code> 的导数会重新乘回一个 <code>ρ</code>（原文 Lemma 1：<code>∇ρ = ρ·∇log π</code>），于是序列内的 <code>1/|o|</code> 和求和一起，变成了这样一个形式（原文 Eq. 5）：</p>
+
+  <div class="eq">
+    ∇<sub>θ</sub>J<sup>*</sup><sub>GRPO</sub> = (1/(G·|o<sub>i</sub>|)) Σ<sub>t</sub> <span class="hl-a">ρ<sub>i,t</sub>(θ)</span> · Â<sub>i</sub> · ∇<sub>θ</sub> log π<sub>θ</sub>(o<sub>i,t</sub> | q, o<sub>i,&lt;t</sub>)
+  </div>
+  <div class="eq-cap">每个 token 的梯度权重，是它自己的那个 ρ<sub>i,t</sub></div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心不对称</span><h4>loss 里被摊薄，梯度里没有</h4></div>
+    <p>一个 token 的 <code>ρ</code> 涨到 10，它在 loss 里的贡献只多出 <code>(10−1)/|o|</code>——序列有 3000 个 token 时，曲线几乎看不出来。但在梯度里，这个 token 那一项的系数就是 10，没有任何摊薄。于是监控曲线平静，参数更新却已经被单个 token 拽走。</p>
+  </div>
+
+  <p>论文的图 1 记录的就是这个现象：GRPO 训练过程中 <code>ρ<sub>t</sub>(θ)</code> 的取值范围随步数不断扩大，极端值频繁出现；GMPO 的 <code>ρ</code> 区间则保持在更窄的带内，离群值明显更少。作者据此把问题定义为：<strong>目标函数对重要性加权奖励的离群值过敏</strong>，而不是采样或奖励本身有问题。</p>
+
+  <p>这也解释了为什么单纯加裁剪不是终点：裁剪是在梯度已经算出来之后做截断，它压住了幅度，但没有改变「每个 token 各用一个 ρ」这个结构。下一节看前人都试过什么。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成的路，改的都是「约束」，不是「平均」</h2></div>
+  <p class="sec-sub">看完这节你应该知道：为什么把裁剪调紧或调松、把聚合搬到序列级，都绕不开同一个问题。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>继续用算术平均，只动裁剪</h4></div>
+      <p>GRPO 用一个不宽的区间 <code>(0.8, 1.2)</code> 把 <code>ρ</code> 按住。DAPO 的做法是 clip-higher，把上界从 1.2 放到 1.28，给探索留一点缝。</p>
+      <p><strong>能解决：</strong>单步更新过猛，训练初期不容易崩。</p>
+      <p><strong>卡在：</strong>裁剪区间一窄，策略很快变得确定，熵掉下去，探索没了；区间一宽，算术平均又原样把离群值放大回来。稳定和探索被绑在同一个旋钮上，只能二选一。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>把聚合搬到序列级连乘</h4></div>
+      <p>DeepSeek-R1 直接最大化序列级奖励 <code>(Π<sub>t</sub> ρ<sub>i,t</sub>) Â<sub>i</sub></code>，裁剪也放在序列级：<code>clip(Πρ, ε<sub>low</sub>, ε<sub>high</sub>)</code>。</p>
+      <p><strong>能解决：</strong>不再逐 token 放大单个比值。</p>
+      <p><strong>卡在：</strong>连乘会随序列长度伸缩——论文图 6 显示，正奖励轨迹的序列级比值在缺省 <code>1/|o|</code> 归一化时会随回答变长而变得非常大。而且序列级裁剪一旦触发，<strong>整条序列所有 token 的梯度一起归零</strong>，代价过于粗暴。</p>
+    </div>
+  </div>
+
+  <p>两条路的共同前提是：聚合方式不动，只约束它的输入。GMPO 换的是聚合本身——<strong>把算术平均换成几何平均</strong>，同时保留 token 级裁剪。这样长度伸缩被 <code>1/|o|</code> 次方抵掉，而裁剪仍然只作用于单个 token，不会一刀切掉整条序列。</p>
+
+  <p>论文用图 3 把这件事量化了：在相同的训练步数下，GRPO <code>(0.8, 1.2)</code> 的 <code>ρ</code> 区间比 GMPO <code>(e<sup>−0.4</sup>, e<sup>0.4</sup>)</code> 更宽，序列级裁剪的 GMPO 变体又比 token 级裁剪更宽。裁剪更宽、区间反而更窄，这是后面所有结论的起点。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把 Σ 换成 Π 再开 |o| 次方，梯度权重变成整条序列一个数</h2></div>
+  <p class="sec-sub">这一节只有三件事：目标函数怎么写、值域为什么更窄、梯度权重为什么更稳。</p>
+
+  <p>GMPO 的目标函数（原文 Eq. 3）把序列内的求和换成连乘，再开 <code>|o<sub>i</sub>|</code> 次方；<code>sgn(Â<sub>i</sub>)</code> 负责把优化方向取回来：</p>
+
+  <div class="eq">
+    J<sup>*</sup><sub>GMPO</sub>(π<sub>θ</sub>) = E [ (1/G) Σ<sub>i</sub> ( Π<sub>t=1</sub><sup>|o<sub>i</sub>|</sup> <span class="hl-c">|ρ<sub>i,t</sub>(θ) Â<sub>i</sub>|</span> )<sup>1/|o<sub>i</sub>|</sup> · sgn(Â<sub>i</sub>) ]
+  </div>
+  <div class="eq-cap">Eq. 3 · 取绝对值是为了让负数也能进连乘；符号最后由 sgn 统一还原</div>
+
+  <p>加上 token 级裁剪后就是实际训练用的形式（原文 Eq. 4）：对每个 token 先做 <code>min[ρÂ, clip(ρ, ε<sub>low</sub>, ε<sub>high</sub>)Â]</code>，再取绝对值、连乘、开方、乘符号。论文取 <code>(ε<sub>low</sub>, ε<sub>high</sub>) = (e<sup>−0.4</sup>, e<sup>0.4</sup>)</code>，约等于 <code>(0.67, 1.49)</code>。</p>
+
+  <h3>值域：AM–GM 给出一个硬上界</h3>
+  <p>由算术平均 ≥ 几何平均，直接得到</p>
+
+  <div class="eq">
+    |J<sup>*</sup><sub>GMPO</sub>(π<sub>θ</sub>)| ≤ E[ (1/G) Σ<sub>i</sub> (1/|o<sub>i</sub>|) Σ<sub>t</sub> |ρ<sub>i,t</sub>(θ) Â<sub>i</sub>| ] = |J<sup>*</sup><sub>GRPO</sub>(π<sub>θ</sub>)|
+  </div>
+  <div class="eq-cap">同样的输入，GMPO 的目标值绝对值永远不超过 GRPO——这是论文所说「值域更窄、方差更低」的形式化依据</div>
+
+  <p>举个能手算的例子：一条序列 8 个 token，其中 7 个 <code>ρ=1</code>，1 个 <code>ρ=6</code>。算术平均是 <code>13/8 = 1.625</code>，几何平均是 <code>6<sup>1/8</sup> ≈ 1.251</code>。差距不大，但梯度的差距是 6 倍对 1.25 倍。</p>
+
+  <h3>梯度：权重从「逐 token」变成「整条序列一个标量」</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">GRPO</span><h4>每个 token 用自己的 ρ</h4></div>
+      <div class="eq" style="margin:8px 0 6px;padding:14px 12px;font-size:12.5px;text-align:left">
+        ∇J = (1/(G|o<sub>i</sub>|)) Σ<sub>t</sub> <span class="hl-a">ρ<sub>i,t</sub></span> Â<sub>i</sub> ∇log π<sub>θ</sub>(o<sub>i,t</sub>)
+      </div>
+      <p>一个 token 的 <code>ρ</code> 极端，它那一项的梯度就极端，直接把更新方向拽过去。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">GMPO</span><h4>整条序列共用一个 GM(ρ)</h4></div>
+      <div class="eq" style="margin:8px 0 6px;padding:14px 12px;font-size:12.5px;text-align:left">
+        ∇J = (1/(G|o<sub>i</sub>|)) Σ<sub>t</sub> <span class="hl-c">(Π<sub>k</sub> ρ<sub>i,k</sub>)<sup>1/|o<sub>i</sub>|</sup></span> Â<sub>i</sub> ∇log π<sub>θ</sub>(o<sub>i,t</sub>)
+      </div>
+      <p>括号里和 <code>t</code> 无关。不管第几个 token，系数都是同一个数。</p>
+    </div>
+  </div>
+  <div class="eq-cap">Eq. 5 与 Eq. 6，为清晰起见都省略了裁剪项；完整推导见原文附录 A 的 Lemma 1–3</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">读公式时容易漏掉的一点</span><h4>被「几何平均」的其实只有 ρ，不是 Â</h4></div>
+    <p>把 Eq. 3 里的绝对值拆开：<code>Â<sub>i</sub></code> 在序列内是常数，连乘 <code>|Â<sub>i</sub>|</code> 共 <code>|o<sub>i</sub>|</code> 次再开 <code>|o<sub>i</sub>|</code> 次方，正好还原成 <code>|Â<sub>i</sub>|</code>。所以</p>
+    <p style="text-align:center"><code>(Π<sub>t</sub> |ρ<sub>i,t</sub>Â<sub>i</sub>|)<sup>1/|o|</sup> = |Â<sub>i</sub>| · (Π<sub>t</sub> ρ<sub>i,t</sub>)<sup>1/|o|</sup></code></p>
+    <p>几何平均作用在 <strong>重要性采样率</strong> 上，优势的幅度是一次方进入的。原文 Algorithm 1 的最后一行 <code>loss = -advantage * importance_sampling_ratio</code> 也印证了这一点：先算出 <code>exp(mean(log ρ))</code>，再乘 advantage。</p>
+  </div>
+
+  <h3>自己动手：一个离群 token 会怎样改写梯度权重</h3>
+  <p>下面是一条 8 个 token 的序列。滑块控制序列内 <code>ρ</code> 的离散度和某一个 token 的离群倍数；组内正确数决定 <code>Â</code> 的大小，切换正负样本可以看 <code>sgn</code> 怎么工作。图里对比的是 Eq. 5 与 Eq. 6 中、乘在 <code>∇log π</code> 前面的那个系数。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="side-btns">
+      <button class="rule-btn active" data-side="pos">正确 rollout<span class="r-sub">Â &gt; 0</span></button>
+      <button class="rule-btn" data-side="neg">错误 rollout<span class="r-sub">Â &lt; 0</span></button>
+    </div>
+
+    <div class="slots" id="tok-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>序列内 ρ 离散度 σ <span class="v" id="spread-v">0.30</span></label>
+        <input type="range" id="spread" min="0" max="0.8" step="0.05" value="0.3">
+      </div>
+      <div class="ctrl">
+        <label>第 5 个 token 的离群倍数 <span class="v" id="mult-v">6.0×</span></label>
+        <input type="range" id="mult" min="1" max="10" step="0.5" value="6">
+      </div>
+      <div class="ctrl">
+        <label>组内答对条数 k / 8 <span class="v" id="k-v">6</span></label>
+        <input type="range" id="k" min="1" max="7" step="1" value="6">
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <div class="card-head"><span class="pill p1">GRPO</span><h4>逐 token 权重</h4></div>
+        <div class="big c1" id="grpo-j">—</div>
+        <p class="sub" id="grpo-meta">—</p>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="pill pa">GMPO</span><h4>全序列同一权重</h4></div>
+        <div class="big ca" id="gmpo-j">—</div>
+        <p class="sub" id="gmpo-meta">—</p>
+      </div>
+    </div>
+
+    <div class="wchart-wrap">
+      <div class="chart" id="wchart"></div>
+      <div class="cx" id="wcx"></div>
+      <div class="legend">
+        <span><i style="background:var(--c1)"></i>GRPO 权重 ρ<sub>t</sub>·|Â|</span>
+        <span><i style="background:var(--accent)"></i>GMPO 权重 GM(ρ)·|Â|</span>
+      </div>
+    </div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前这一条序列</div>
+      <div id="sim-msg">拖动上面的滑块，或者点右侧另一个 rollout 类型。</div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" data-act="outlier">把离群拉到 10×</button>
+      <button class="act" data-act="flat">拉平序列</button>
+      <button class="act ghost" data-act="reset">重置</button>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个模拟做了哪些简化？<span class="sum-sub">点开看与真实训练条件的差异</span></summary>
+    <div class="details-body">
+      <p>序列长度固定为 8，真实训练里一条回答最多 3000 个 token。长度越长，几何平均对单个离群值越不敏感：一个 <code>ρ=6</code> 的 token 在 8 个 token 里把 GM 拉到 <code>6<sup>1/8</sup>≈1.25</code>，在 1000 个 token 里只拉到 <code>6<sup>1/1000</sup>≈1.0018</code>。</p>
+      <p>模拟里的 8 个 <code>ρ</code> 由一个固定向量乘上离散度得到，不来自真实策略；<code>Â</code> 由二值奖励的组内归一化公式算出，和论文一致：<code>Â = (r − mean) / std</code>。当 <code>k</code> 条正确时，正确样本的 <code>Â = √((8−k)/k)</code>，错误样本为 <code>−√(k/(8−k))</code>。</p>
+      <p>真实训练中 <code>ρ</code> 的极端值分布在时间和 token 两个维度上，图里只截取了一条序列的一个瞬间。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>只改一行 loss：log 空间求和，一次 exp</h2></div>
+  <p class="sec-sub">工程上它没有多一次采样、没有 critic、没有额外前向；代价是一条序列上多一次求和。</p>
+
+  <p>原文 Algorithm 1 只有十来行，核心是把「连乘再开方」搬到对数域。直接对 3000 个 <code>ρ</code> 做连乘会下溢，取对数后变成求和，数值上稳定得多：</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">Algorithm 1</span><h4>逐行拆开</h4></div>
+    <ol>
+      <li><code>sgn_A = 1 if advantage &gt; 0 else -1</code>：先把优势的符号取出来。</li>
+      <li><code>sgn_A * (log π<sub>new</sub> − log π<sub>old</sub>)</code>：把符号并进对数比，等价于对 <code>ρ·sgn(Â)</code> 取对数。</li>
+      <li><code>clamp(·, −ε, ε)</code> 再 <code>min(·, ·)</code>：这就是 PPO 那个「取更保守一侧」的 min，只不过作用在每个 token 上，ε 默认 0.4。</li>
+      <li>把符号乘回去，得到每个 token 裁剪后的 <code>log ρ</code>。</li>
+      <li><code>exp( sum(mask) / mask.sum() )</code>：对有效 token 求平均再取指数——一次性得到 <code>GM(ρ)</code>。</li>
+      <li><code>loss = −advantage × ratio</code>：整条序列只乘一次 advantage。</li>
+    </ol>
+  </div>
+
+  <p>对比 GRPO，多出来的计算量是 <code>O(|o|)</code> 的累加和一次 <code>exp</code>，反向传播时所有 token 共享同一个标量系数。论文没有给出 wall-clock 或显存对比，所以「开销可忽略」是结构上的判断，不是论文里的测量数字。</p>
+
+  <h3>训练设置（原文 §4.1）</h3>
+  <ul>
+    <li>数据：MATH Levels 3–5，8,523 道题；每题采样 8 条 rollout，最长 3,000 token。</li>
+    <li>每一轮 RL：旧策略产出 1,024 条 rollout，当前策略更新 8 次，batch size 128。</li>
+    <li>7B 以下模型用 8×A800 训练；奖励是二值的，答对 1、答错 0。</li>
+    <li>MoE 实验另用 DeepScaleR（约 4 万题）与 CountDown，配置见原文附录 B。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">一个容易被忽略的细节</span><h4>1/|o| 这个幂次不是装饰</h4></div>
+    <p>如果只写 <code>Π<sub>t</sub> |min[ρÂ, clip(ρ)Â]|</code> 而不开 <code>|o|</code> 次方，序列级比值会随回答长度迅速放大——论文图 6 展示的正是正奖励轨迹上这个量随长度失控的过程。去掉这个归一化项，平均分从 52.7 掉到 52.0（Table 4 第 4 行）。</p>
+  </div>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一轮训练里，GMPO 只在最后一步换了聚合方式</h2></div>
+  <p class="sec-sub">从采样到更新，两条路共享前四步；分叉只发生在「怎么把逐 token 的量压成一个标量」。</p>
+
+  <figure>
+    <svg viewBox="0 0 460 620" role="img" aria-label="GMPO 一轮训练流程：采样、奖励归一化、逐 token 比率，然后分叉为 GRPO 的算术平均与 GMPO 的几何平均">
+      <!-- 顶部流程 -->
+      <rect x="140" y="8" width="180" height="52" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2"/>
+      <text x="230" y="30" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--text)">prompt q</text>
+      <text x="230" y="47" text-anchor="middle" font-size="11" style="fill:var(--text-soft)">从训练集 Q 取一道题</text>
+
+      <path d="M230 60 L230 78" style="stroke:var(--text-soft);stroke-width:1.3;fill:none"/>
+      <polygon points="226,74 234,74 230,82" style="fill:var(--text-soft)"/>
+
+      <rect x="128" y="84" width="204" height="56" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2"/>
+      <text x="230" y="107" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--text)">π_old 采样 G = 8 条 rollout</text>
+      <text x="230" y="124" text-anchor="middle" font-size="11" style="fill:var(--text-soft)">每条最长 3,000 token</text>
+
+      <path d="M230 140 L230 158" style="stroke:var(--text-soft);stroke-width:1.3;fill:none"/>
+      <polygon points="226,154 234,154 230,162" style="fill:var(--text-soft)"/>
+
+      <rect x="136" y="164" width="188" height="56" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2"/>
+      <text x="230" y="187" text-anchor="middle" font-size="13" font-weight="600" style="fill:var(--text)">reward r ∈ {0, 1}</text>
+      <text x="230" y="204" text-anchor="middle" font-size="11" style="fill:var(--text-soft)">组内归一化 → 优势 Â_i</text>
+
+      <path d="M230 220 L230 240" style="stroke:var(--text-soft);stroke-width:1.3;fill:none"/>
+      <path d="M117 240 L343 240" style="stroke:var(--text-soft);stroke-width:1.3;fill:none"/>
+      <path d="M117 240 L117 250" style="stroke:var(--c1);stroke-width:1.3;fill:none"/>
+      <polygon points="113,246 121,246 117,254" style="fill:var(--c1)"/>
+      <path d="M343 240 L343 250" style="stroke:var(--accent);stroke-width:1.3;fill:none"/>
+      <polygon points="339,246 347,246 343,254" style="fill:var(--accent)"/>
+
+      <!-- 两条泳道 -->
+      <text x="117" y="272" text-anchor="middle" font-size="12" font-weight="700" style="fill:var(--c1)">GRPO · 算术平均</text>
+      <text x="343" y="272" text-anchor="middle" font-size="12" font-weight="700" style="fill:var(--accent)">GMPO · 几何平均</text>
+
+      <rect x="26" y="280" width="182" height="56" rx="10" style="fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.1"/>
+      <text x="117" y="302" text-anchor="middle" font-size="12.5" font-weight="600" style="fill:var(--text)">token 级裁剪</text>
+      <text x="117" y="320" text-anchor="middle" font-size="11.5" font-family="JetBrains Mono,monospace" style="fill:var(--c1)">(0.8, 1.2)</text>
+
+      <rect x="252" y="280" width="182" height="56" rx="10" style="fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.1"/>
+      <text x="343" y="302" text-anchor="middle" font-size="12.5" font-weight="600" style="fill:var(--text)">token 级裁剪 · log 空间</text>
+      <text x="343" y="320" text-anchor="middle" font-size="11.5" font-family="JetBrains Mono,monospace" style="fill:var(--accent-deep)">e⁻⁰·⁴ ~ e⁰·⁴</text>
+
+      <path d="M117 336 L117 354" style="stroke:var(--c1);stroke-width:1.3;fill:none"/>
+      <polygon points="113,350 121,350 117,358" style="fill:var(--c1)"/>
+      <path d="M343 336 L343 354" style="stroke:var(--accent);stroke-width:1.3;fill:none"/>
+      <polygon points="339,350 347,350 343,358" style="fill:var(--accent)"/>
+
+      <rect x="26" y="358" width="182" height="66" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2"/>
+      <text x="117" y="380" text-anchor="middle" font-size="12.5" font-weight="600" style="fill:var(--text)">求和再平均</text>
+      <text x="117" y="399" text-anchor="middle" font-size="11" font-family="JetBrains Mono,monospace" style="fill:var(--text-muted)">(1/|o|) Σ ρ_t</text>
+      <text x="117" y="415" text-anchor="middle" font-size="10.5" style="fill:var(--text-soft)">再乘 Â</text>
+
+      <rect x="252" y="358" width="182" height="66" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2"/>
+      <text x="343" y="380" text-anchor="middle" font-size="12.5" font-weight="600" style="fill:var(--text)">求平均再取指数</text>
+      <text x="343" y="399" text-anchor="middle" font-size="11" font-family="JetBrains Mono,monospace" style="fill:var(--text-muted)">exp((1/|o|) Σ log ρ_t)</text>
+      <text x="343" y="415" text-anchor="middle" font-size="10.5" style="fill:var(--text-soft)">再乘 Â</text>
+
+      <path d="M117 424 L117 442" style="stroke:var(--c1);stroke-width:1.3;fill:none"/>
+      <polygon points="113,438 121,438 117,446" style="fill:var(--c1)"/>
+      <path d="M343 424 L343 442" style="stroke:var(--accent);stroke-width:1.3;fill:none"/>
+      <polygon points="339,438 347,438 343,446" style="fill:var(--accent)"/>
+
+      <rect x="26" y="446" width="182" height="66" rx="10" style="fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.2"/>
+      <text x="117" y="468" text-anchor="middle" font-size="12.5" font-weight="600" style="fill:var(--text)">梯度权重</text>
+      <text x="117" y="487" text-anchor="middle" font-size="11" font-family="JetBrains Mono,monospace" style="fill:var(--c1)">ρ_t</text>
+      <text x="117" y="503" text-anchor="middle" font-size="10.5" style="fill:var(--text-soft)">每个 token 各不相同</text>
+
+      <rect x="252" y="446" width="182" height="66" rx="10" style="fill:var(--bg-soft);stroke:var(--accent);stroke-width:1.2"/>
+      <text x="343" y="468" text-anchor="middle" font-size="12.5" font-weight="600" style="fill:var(--text)">梯度权重</text>
+      <text x="343" y="487" text-anchor="middle" font-size="11" font-family="JetBrains Mono,monospace" style="fill:var(--accent)">GM(ρ)</text>
+      <text x="343" y="503" text-anchor="middle" font-size="10.5" style="fill:var(--text-soft)">整条序列同一个数</text>
+
+      <rect x="26" y="532" width="408" height="46" rx="10" style="fill:var(--bg-tint);stroke:var(--border);stroke-width:1"/>
+      <text x="230" y="552" text-anchor="middle" font-size="11.5" style="fill:var(--text-muted)">同一个标量系数乘在每条轨迹所有 token 的</text>
+      <text x="230" y="568" text-anchor="middle" font-size="11.5" style="fill:var(--text-muted)">∇log π 上，离群 token 不再单独放大</text>
+
+      <text x="230" y="606" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--accent)">→ 用 ∇ 更新 π_θ，进入下一轮</text>
+    </svg>
+    <figcaption>图 1：按原文 Eq. 1–6 与 Algorithm 1 重绘的训练流程。左侧蓝色为 GRPO 的聚合路径，右侧陶土红为 GMPO；两者只在最后两步不同。</figcaption>
+  </figure>
+
+  <p>把它放回 PPO 的框架看会更清楚：策略梯度方法本来就要给每个 token 的 <code>∇log π</code> 乘一个系数。GRPO 让系数随 token 变化，GMPO 把它压成每序列一个标量。真正被换掉的是「系数怎么算」，不是「要不要算梯度」。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均分全面小胜，但单个 benchmark 并不是每项都赢</h2></div>
+  <p class="sec-sub">先看三张表，再看四个容易被平均分掩盖的细节。</p>
+
+  <div class="tabs" id="res-tabs">
+    <button class="tab active" data-panel="p1">语言模型 · Table 1</button>
+    <button class="tab" data-panel="p2">多模态与 MoE · Table 2</button>
+    <button class="tab" data-panel="p3">消融 · Table 4 / 5</button>
+  </div>
+
+  <div class="res-panel" id="p1">
+    <div class="tbl-scroll wide">
+      <table>
+        <thead>
+          <tr><th>模型</th><th style="text-align:right">AIME24</th><th style="text-align:right">AMC</th><th style="text-align:right">MATH500</th><th style="text-align:right">Minerva</th><th style="text-align:right">Oly.</th><th style="text-align:right">Avg.</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>GRPO-1.5B</td><td class="num">23.3</td><td class="num">49.4</td><td class="num">75.2</td><td class="num">25.7</td><td class="num">39.0</td><td class="num">42.5</td></tr>
+          <tr><td>GMPO-1.5B</td><td class="num">20.0</td><td class="num">53.0</td><td class="num">77.6</td><td class="num">30.1</td><td class="num">38.7</td><td class="num">43.9</td></tr>
+          <tr><td>GRPO-7B</td><td class="num">40.0</td><td class="num">59.0</td><td class="num">83.4</td><td class="num">32.4</td><td class="num">41.3</td><td class="num">51.2</td></tr>
+          <tr><td>GMPO-7B</td><td class="num">43.3</td><td class="num">61.4</td><td class="num">82.0</td><td class="num">33.5</td><td class="num">43.6</td><td class="num">52.7</td></tr>
+          <tr><td>GRPO-7B (R1-Distill)</td><td class="num">43.3</td><td class="num">67.5</td><td class="num">89.0</td><td class="num">39.7</td><td class="num">56.7</td><td class="num">59.3</td></tr>
+          <tr class="best"><td>GMPO-7B (R1-Distill)</td><td class="num">46.6</td><td class="num">78.3</td><td class="num">91.4</td><td class="num">37.9</td><td class="num">62.5</td><td class="num">63.4</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-soft)">Pass@1，%。评测时 temperature = 0.0，每题只生成一个答案。AIME24 共 30 题，一道题约等于 3.3 分。</p>
+  </div>
+
+  <div class="res-panel" id="p2" hidden>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr><th>设置</th><th>基准</th><th style="text-align:right">GRPO</th><th style="text-align:right">GMPO</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Qwen2.5-VL-Instruct-7B</td><td>Geometry3K</td><td class="num">53.3</td><td class="num">54.7</td></tr>
+          <tr class="best"><td>Qwen3-32B (MoE)</td><td>MATH500</td><td class="num">94.6</td><td class="num">96.7</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-soft)">多模态评测 temperature = 0.5，每题生成 16 个答案；MoE 的完整设置见原文附录 B。</p>
+  </div>
+
+  <div class="res-panel" id="p3" hidden>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>#</th><th>训练目标（Qwen2.5-Math-7B）</th><th style="text-align:right">Avg.</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>Pre-RL 模型</td><td class="num">26.5</td></tr>
+          <tr><td>1</td><td>GRPO（算术平均）</td><td class="num">51.2</td></tr>
+          <tr><td>2</td><td>GMPO，不裁剪</td><td class="num">52.3</td></tr>
+          <tr><td>3</td><td>GMPO，序列级裁剪</td><td class="num">52.6</td></tr>
+          <tr><td>4</td><td>GMPO，去掉 1/|o| 归一化</td><td class="num">52.0</td></tr>
+          <tr class="best"><td>5</td><td>GMPO（token 级裁剪）</td><td class="num">52.7</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="tbl-scroll wide" style="margin-top:18px">
+      <table>
+        <thead><tr><th>裁剪区间 (ε<sub>low</sub>, ε<sub>high</sub>)</th><th style="text-align:right">AIME24</th><th style="text-align:right">AMC</th><th style="text-align:right">MATH500</th><th style="text-align:right">Minerva</th><th style="text-align:right">Oly.</th><th style="text-align:right">Avg.</th></tr></thead>
+        <tbody>
+          <tr><td>(e<sup>−0.2</sup>, e<sup>0.2</sup>)</td><td class="num">36.6</td><td class="num">60.2</td><td class="num">84.2</td><td class="num">35.7</td><td class="num">45.0</td><td class="num">52.4</td></tr>
+          <tr class="best"><td>(e<sup>−0.4</sup>, e<sup>0.4</sup>)</td><td class="num">43.3</td><td class="num">61.4</td><td class="num">82.0</td><td class="num">33.5</td><td class="num">43.6</td><td class="num">52.7</td></tr>
+          <tr><td>(e<sup>−0.8</sup>, e<sup>0.8</sup>)</td><td class="num">40.0</td><td class="num">60.2</td><td class="num">82.2</td><td class="num">33.5</td><td class="num">44.7</td><td class="num">52.1</td></tr>
+          <tr><td>(−∞, +∞)</td><td class="num">40.0</td><td class="num">63.9</td><td class="num">80.6</td><td class="num">33.5</td><td class="num">43.7</td><td class="num">52.3</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <h3>四个被平均分掩盖的细节</h3>
+  <ul>
+    <li><strong>不是每项都赢。</strong>1.5B 的 AIME24 上 GMPO 是 20.0，比 GRPO 的 23.3 低 3.3 分——正好一道题。R1-Distill 的 Minerva 低 1.8（37.9 vs 39.7），Qwen2.5-Math-7B 的 MATH500 低 1.4（82.0 vs 83.4）。平均分 +1.4 到 +4.1 的收益，在只有 30 题的 AIME24 上并不构成单点优势。</li>
+    <li><strong>真正起作用的可能不是裁剪。</strong>不裁剪的 GMPO 拿到 52.3，已经高于带裁剪的 GRPO 51.2。消融表第 1 行和第 2 行说明：换聚合方式带来的增益（+1.1），大于裁剪带来的增益（+0.4）。</li>
+    <li><strong>裁剪不是越宽越好。</strong>区间放到 <code>e<sup>±0.8</sup></code> 只有 52.1，完全放开是 52.3，<code>e<sup>±0.4</sup></code> 的 52.7 最好。论文的解释是更宽的区间让 ρ 波动变大，探索收益被不稳定性吃掉。</li>
+    <li><strong><code>1/|o|</code> 归一化值 0.7 分。</strong>去掉它从 52.7 掉到 52.0。几何平均和长度归一化是一套的，不能只取一半。</li>
+  </ul>
+
+  <p>训练曲线层面，论文图 4 报告了四个方向一致的观察：GMPO 的 token 熵更高（探索更久）、梯度范数更平、相对 pre-RL 模型的 KL 更小、验证分数更高。在 MoE 的 CountDown 任务上，这个差距变成了定性差别——图 5 里 GRPO 在约 250 步后崩溃，GMPO 保持稳定。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它稳的是「聚合方式」，不是所有不稳定的来源</h2></div>
+  <p class="sec-sub">论文没有做的实验，和它做了但不支持外推的部分，分开放。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>整条序列共用一个权重，是优点也是盲点</h4></div>
+    <p>Eq. 6 里每个 token 的系数完全相同。如果一条序列内部质量差异很大——前半段推理正确、后半段跑偏——GMPO 没有机制给正确的 token 更大权重、给跑偏的 token 更小权重。它压住的是<strong>跨序列的离群值</strong>，不是<strong>序列内部的不均匀</strong>。GRPO 的逐 token 权重在这一点上反而更细。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>任务面很窄：数学 + 几何</h4></div>
+    <p>训练数据只有 MATH Levels 3–5、DeepScaleR、CountDown 和 Geometry3K；评测是五个数学基准加一个视觉问答基准。代码生成、通用对话、多轮 agent 任务都没有数据。奖励全部可验证、二值，稀疏或带噪的奖励模型场景没有覆盖。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>规模最大到 32B，没有缩放曲线</h4></div>
+    <p>实验覆盖 1.5B、7B、32B（MoE），没有更大的模型，也没有不同规模下增益如何变化的曲线。7B 到 32B 之间只有 MATH500 一个点（94.6 → 96.7），不足以支撑「越大越有效」的说法。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>工程开销没有被测量</h4></div>
+    <p>论文说实现简单、在 log 空间计算保证数值稳定，但没有吞吐、显存、单步耗时的对比，也没有报告多次运行的方差或随机种子。表里的每个数字都是一次训练的结果，AIME24 这种 30 题的基准，一道题的波动就接近 3.3 分。要用在线上训练系统里，这些得自己补测。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>GMPO 改的是「怎么把逐 token 的量聚合成一个标量」，它让这个标量对单个极端 ρ 不敏感，代价是放弃了序列内部的差异化加权。</strong>这也解释了为什么它的收益稳定但不大——问题被缩小了，没有被消除。</p>
+</section>
+
+<footer>
+  <div>Geometric-Mean Policy Optimization · 页面按论文原文（arXiv v3, 2025-10-18）整理，流程图为重绘。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.20673" target="_blank" rel="noopener">arXiv 2507.20673</a> · Yuzhong Zhao 等 · UCAS / CUHK / HKUST / Microsoft Research<br>
+    代码：<a href="https://github.com/callsys/GMPO" target="_blank" rel="noopener">callsys/GMPO</a><br>
+    笔记：<a href="/geometric-mean-policy-optimization/">Geometric-Mean Policy Optimization</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong style="color:var(--text)">笔记勘误</strong>（未改动原笔记）：<br>
+    1. 笔记把 GMPO 目标函数写成 <code>(Πρ)<sup>1/|o|</sup> sgn(Â)|Â|<sup>1/|o|</sup></code>，原文 Eq. 3 是 <code>(Π|ρÂ|)<sup>1/|o|</sup> sgn(Â)</code>，化简后 <code>|Â|</code> 是一次方，几何平均只作用在 ρ 上。<br>
+    2. 笔记把熵、KL、训练奖励的曲线记作图 3；原文图 3 是不同裁剪范围下的 ρ 区间，这些曲线在图 4。<br>
+    3. 笔记把目标函数消融表记作 Table 3；原文 Table 3 是与 SOTA 的对比，消融是 Table 4。<br>
+    4. 笔记写「GMPO-7B 提升 4.1%（59.3→63.4）」，这组数字对应 R1-Distill 变体；Qwen2.5-Math-7B 上的提升是 1.5%（51.2→52.7）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 梯度权重对比模拟器
+   ============================================================ */
+(function () {
+  var Z = [-0.9, 0.2, -0.3, 0.7, 0.0, -0.5, 0.4, -0.1];
+  var OUT = 4;
+  var N = 8;
+
+  var spreadEl = document.getElementById('spread');
+  var multEl = document.getElementById('mult');
+  var kEl = document.getElementById('k');
+  var slotsEl = document.getElementById('tok-slots');
+  var chartEl = document.getElementById('wchart');
+  var cxEl = document.getElementById('wcx');
+  var readoutEl = document.getElementById('sim-msg');
+  if (!spreadEl || !multEl || !kEl || !slotsEl || !chartEl) return;
+
+  var side = 'pos';
+
+  function readState() {
+    var sigma = parseFloat(spreadEl.value);
+    var m = parseFloat(multEl.value);
+    var k = parseInt(kEl.value, 10);
+    var rho = [];
+    var i;
+    for (i = 0; i < N; i++) {
+      rho.push(Math.exp(sigma * Z[i]) * (i === OUT ? m : 1));
+    }
+    var sum = 0, logsum = 0, maxR = 0;
+    for (i = 0; i < N; i++) {
+      sum += rho[i];
+      logsum += Math.log(rho[i]);
+      if (rho[i] > maxR) maxR = rho[i];
+    }
+    var mean = sum / N;
+    var gm = Math.exp(logsum / N);
+    var p = k / N;
+    var A = side === 'pos' ? Math.sqrt((1 - p) / p) : -Math.sqrt(p / (1 - p));
+    return { rho: rho, mean: mean, gm: gm, A: A, k: k, p: p, sigma: sigma, m: m, maxR: maxR };
+  }
+
+  function fmt(x, d) {
+    if (typeof d !== 'number') d = 2;
+    return x.toFixed(d);
+  }
+
+  function renderSlots(s) {
+    var host = slotsEl;
+    host.innerHTML = '';
+    var maxR = s.maxR;
+    for (var i = 0; i < N; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot' + (i === OUT && s.m > 1.5 ? ' hit' : '');
+
+      var name = document.createElement('div');
+      name.className = 'slot-name';
+      name.textContent = 't' + (i + 1) + (i === OUT ? ' · 离群' : '');
+
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.textContent = 'ρ ' + fmt(s.rho[i]);
+
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var b1 = document.createElement('i');
+      b1.className = 'b1';
+      b1.style.width = Math.max(3, Math.round(s.rho[i] / maxR * 100)) + '%';
+      bar.appendChild(b1);
+
+      slot.appendChild(name);
+      slot.appendChild(val);
+      slot.appendChild(bar);
+      host.appendChild(slot);
+    }
+  }
+
+  function renderChart(s) {
+    var absA = Math.abs(s.A);
+    var wG = s.rho.map(function (r) { return r * absA; });
+    var wM = s.gm * absA;
+    var maxW = Math.max.apply(null, wG.concat([wM]));
+    if (maxW <= 0) maxW = 1;
+
+    chartEl.innerHTML = '';
+    var rows = [
+      { name: 'GRPO', color: 'var(--c1)', vals: wG },
+      { name: 'GMPO', color: 'var(--accent)', vals: wG.map(function () { return wM; }) }
+    ];
+
+    rows.forEach(function (row) {
+      var crow = document.createElement('div');
+      crow.className = 'crow';
+      var cname = document.createElement('div');
+      cname.className = 'cname';
+      cname.textContent = row.name;
+      var cbars = document.createElement('div');
+      cbars.className = 'cbars';
+
+      row.vals.forEach(function (v) {
+        var cbar = document.createElement('div');
+        cbar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = row.color;
+        fill.style.height = Math.max(2, v / maxW * 100) + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = fmt(v, 1);
+        cbar.appendChild(track);
+        cbar.appendChild(num);
+        cbars.appendChild(cbar);
+      });
+
+      crow.appendChild(cname);
+      crow.appendChild(cbars);
+      chartEl.appendChild(crow);
+    });
+
+    if (cxEl) {
+      cxEl.innerHTML = s.rho.map(function (r, i) { return '<span>t' + (i + 1) + '</span>'; }).join('');
+    }
+  }
+
+  function renderReadout(s) {
+    if (!readoutEl) return;
+    var absA = Math.abs(s.A);
+    var maxW = s.maxR * absA;
+    var gmW = s.gm * absA;
+    var ratio = gmW > 0 ? maxW / gmW : 0;
+    var dir = s.A > 0 ? '正' : '负';
+    var html = '';
+    html += '组内 ' + s.k + '/8 条正确，p = ' + fmt(s.p, 3) + '，'
+      + '选中的是' + (s.A > 0 ? '正确' : '错误') + ' rollout，'
+      + 'Â = ' + (s.A > 0 ? '+' : '') + fmt(s.A) + '（' + dir + '优势）。';
+    html += '<br>第 5 个 token 的 ρ 是 <strong>' + fmt(s.maxR) + '</strong>，'
+      + '在 GRPO 梯度里的系数是 <strong>' + fmt(maxW) + '</strong>；'
+      + 'GMPO 给整条序列每个 token 的系数都是 <strong>' + fmt(gmW) + '</strong>，'
+      + '两者相差 <strong>' + fmt(ratio) + ' 倍</strong>。';
+    if (s.A < 0) {
+      html += '<br>Â 为负时，连乘里用的是 |ρÂ|，方向由 sgn(Â) 还原——'
+        + '这也是为什么 Eq. 3 里的绝对值不可省略。';
+    }
+    readoutEl.innerHTML = html;
+  }
+
+  function renderCards(s) {
+    var grpoJ = document.getElementById('grpo-j');
+    var gmpoJ = document.getElementById('gmpo-j');
+    var grpoM = document.getElementById('grpo-meta');
+    var gmpoM = document.getElementById('gmpo-meta');
+    var absA = Math.abs(s.A);
+
+    var med;
+    var sorted = s.rho.slice().sort(function (a, b) { return a - b; });
+    med = (sorted[3] + sorted[4]) / 2;
+
+    if (grpoJ) grpoJ.textContent = 'J = ' + fmt(s.mean * s.A);
+    if (gmpoJ) gmpoJ.textContent = 'J = ' + fmt(s.gm * s.A);
+    if (grpoM) grpoM.textContent = '权重极差 max/median = ' + fmt(s.maxR / med) + '×  |  Â = ' + fmt(s.A);
+    if (gmpoM) gmpoM.textContent = '权重极差 max/median = 1.00×  |  |Â| = ' + fmt(absA);
+  }
+
+  function render() {
+    var s = readState();
+    document.getElementById('spread-v').textContent = fmt(s.sigma);
+    document.getElementById('mult-v').textContent = fmt(s.m, 1) + '×';
+    document.getElementById('k-v').textContent = String(s.k);
+    renderSlots(s);
+    renderChart(s);
+    renderCards(s);
+    renderReadout(s);
+  }
+
+  document.querySelectorAll('#side-btns .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#side-btns .rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      side = btn.dataset.side;
+      render();
+    });
+  });
+
+  [spreadEl, multEl, kEl].forEach(function (el) {
+    el.addEventListener('input', render);
+  });
+
+  document.querySelectorAll('.sim .act').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var act = btn.dataset.act;
+      if (act === 'outlier') {
+        multEl.value = '10';
+        spreadEl.value = '0.3';
+      } else if (act === 'flat') {
+        multEl.value = '1';
+        spreadEl.value = '0';
+      } else if (act === 'reset') {
+        multEl.value = '6';
+        spreadEl.value = '0.3';
+        kEl.value = '6';
+        side = 'pos';
+        document.querySelectorAll('#side-btns .rule-btn').forEach(function (b) {
+          b.classList.toggle('active', b.dataset.side === 'pos');
+        });
+      }
+      render();
+    });
+  });
+
+  render();
+})();
+
+/* ============================================================
+   2) 结果表格切换
+   ============================================================ */
+(function () {
+  var tabs = document.querySelectorAll('#res-tabs .tab');
+  if (!tabs.length) return;
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      ['p1', 'p2', 'p3'].forEach(function (id) {
+        var panel = document.getElementById(id);
+        if (!panel) return;
+        panel.hidden = (id !== btn.dataset.panel);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

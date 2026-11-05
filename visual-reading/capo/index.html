@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAPO · 让强模型裁判每一步，把整条奖励拆到 token</title>
+<meta name="description" content="CAPO 用现成的 70B 级 LLM 当生成式过程奖励模型，单次前向一次批评 rollout 的每一步，经投票得到错误步骤索引，再以非对称权重 C=2、P=1 给错误步骤的 token 扣分，在 Qwen2.5-7B 上把数学平均 pass@1 从 31.3 提到 37.0。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+
+/* ---- rollout 模拟器：步骤带 + 批评列表 ---- */
+.step-strip{display:flex;flex-wrap:wrap;gap:6px;margin:16px 0}
+.step-chip{border:1px solid var(--border);background:var(--bg);border-radius:8px;padding:6px 9px;font-size:12px;line-height:1.45;min-width:0}
+.step-chip .si{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft);display:block}
+.step-chip.err{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 2px rgba(192,78,45,.08)}
+.step-chip.err .si{color:var(--accent-deep)}
+.crit-list{display:flex;flex-direction:column;gap:6px;margin:14px 0 4px}
+.crit{display:grid;grid-template-columns:104px 1fr 70px;gap:10px;align-items:center;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);font-size:12px}
+.crit .cl{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft)}
+.crit .cs{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;color:var(--text)}
+.crit .cw{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-muted);text-align:right}
+.vote-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:12px 0 4px}
+.vote-cell{border:1px solid var(--border);border-radius:8px;padding:6px 4px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:11px;line-height:1.4;background:var(--bg)}
+.vote-cell .cnt{font-size:12px;font-weight:600}
+.vote-cell.flag{border-color:var(--accent);background:var(--accent-soft)}
+.vote-cell.flag .cnt{color:var(--accent-deep)}
+.fine{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:8px 0 0}
+
+@media (max-width:560px){
+  .crit{grid-template-columns:82px 1fr 54px;gap:6px;font-size:11px}
+  .vote-grid{grid-template-columns:repeat(3,1fr)}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">CAPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2508.02298</span>
+  <h1>CAPO：请一个更大的模型批改每一步，再把惩罚落到那几步的 token 上</h1>
+  <p class="hero-sub">
+    RLVR 只给整条回答一个 0/1，答对但中间算错和答对且步步正确拿到同样的奖励。CAPO 不再预测每一步的「未来价值」——那要额外训练 critic 或 PRM，
+    既贵又容易被钻空子——而是让现成的 <strong>70B 级 LLM 一次前向</strong>读完 rollout，列出哪几步错了，只给这几步的 token 扣分，再在 GRPO 的组内归一化上做一次裁剪更新。
+  </p>
+  <div class="meta">
+    <span>Guofu Xie, Yunsheng Shi, Hongtao Tian, Ting Yao, Xiao Zhang, Jun Xu · 中国人民大学高瓴人工智能学院 · 腾讯微信搜索</span>
+    <a href="https://arxiv.org/abs/2508.02298" target="_blank" rel="noopener">arXiv 2508.02298 ↗</a>
+    <a href="https://github.com/andyclsr/CAPO" target="_blank" rel="noopener">代码 andyclsr/CAPO ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    GRPO 把整条回答当成一个动作，同一个 <code>r<sup>i</sup></code> 复制给每个 token（§2）。于是「答对但推理有错」和「答对且全程正确」在梯度上没有区别，模型学不会稳定地走对的路。
+  </p>
+  <p>
+    CAPO 的关键判断是：过程信用<strong>不该去估价值，而该去查对错</strong>。让 GenPRM 在一次前向里对每个步骤给出确定性的批评（第几步错了），采样 N 份再投票，把索引交出来——没有蒙特卡洛，也没有可被策略反推的概率打分。
+  </p>
+  <p>
+    然后是非对称的奖励塑形：先给所有 token <code>r<sub>v</sub>·C</code>，再给错误步骤的 token 扣 <code>P</code>，且 <code>C &gt; P</code>。只要答对，过程再糟也比答错强；在这个前提下才比过程。
+  </p>
+  <p>
+    代价是每条 rollout 额外若干次 70B 前向（主实验 N=4）和一个会出错的裁判；收益是所有 backbone 的 All Mean 都高于 GRPO-Rule，最明显地出现在难题与 1B 模型上，幅度 0.7–2.9 个百分点。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">31.3 → 37.0</div>
+      <div class="k">Qwen2.5-7B 数学平均 pass@1<br>GRPO-Rule → CAPO-MajorVote（Table 2）</div>
+    </div>
+    <div class="metric">
+      <div class="v">18.3 → 21.8</div>
+      <div class="k">Llama-3-1B OOD 平均<br>GRPO-Rule → CAPO-Intersection（Table 3）</div>
+    </div>
+    <div class="metric">
+      <div class="v">N → 35.0</div>
+      <div class="k">Qwen2.5-1.5B OOD 平均<br>批评数 2 / 4 / 8：33.2 / 34.1 / 35.0（Figure 3）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一个 0/1 奖励平摊给整条回答，等于放弃信用分配</h2></div>
+  <p class="sec-sub">先建立一个共同认知：结果正确不等于推理正确，而现在的 RLVR 分不出两者的差别。</p>
+
+  <p>
+    RLVR 的做法很干净：规则验证器（数学题里是 Math-verify）给出二值奖励，对为 1、错为 0，用 GRPO 在组内做标准化。
+    论文 §2 把这种做法写成一个式子：<code>Â<sub>t</sub><sup>i</sup> = (r<sup>i</sup> − mean(R<sup>i</sup>)) / std(R<sup>i</sup>)</code>，对这条回答里的<strong>每一个</strong> token <code>t</code> 都相同。
+  </p>
+
+  <p>
+    问题在于，同一道题的回答质量差别很大，而差别恰恰在回答内部。附录 E 给了四份 rollout：两份都答对，其中一份推演干净直接，另一份绕了弯、走了错路却碰巧算对；
+    另两份都答错，其中一份只在最后差一个数，另一份从第一步策略就全错。GRPO 会把前两份按同一份正奖励更新，后两份按同一份负奖励更新。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">核心代价</span><h4>正确的步骤没有被强化，个别错误也没有被单独惩罚</h4></div>
+    <p>
+      §2 的说法是：缺少细粒度反馈，模型无法区分「部分正确」和「完全错误」的推理，也难以强化对的步骤、惩罚个别的错。从 RL 的角度看，这相当于把序列决策简化成一个 contextual dueling bandit——整条回答是一个动作，信用分配这一步被跳过了。
+    </p>
+  </div>
+
+  <p>
+    所以真正要回答的问题不是「怎么把奖励变密」，而是：<strong>能不能在不引入新训练模型、又不被策略钻空子的前提下，指出一条回答里哪几步错了？</strong> 论文的答案几乎是字面意义上的——找一个大得多的模型，让它读一遍并给出步骤编号。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>细粒度信用有两条老路，一条靠估计、一条靠标注，都不够可靠</h2></div>
+  <p class="sec-sub">论文把它们和自己的方法放进 Table 1 的五个维度里对照：数据、调用次数、可靠性、测试时扩展、细粒度。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">估计型</span><h4>PPO 的价值函数、基于 Shapley / 注意力的奖励密集化</h4></div>
+      <p>PPO 用 value model 给每个 state 估未来回报；奖励密集化（Chan et al. 2024 的注意力信用、Cao et al. 2025 的 Shapley 信用）把序列级奖励拆到 token。</p>
+      <p><strong>卡在哪：</strong>它们都在<strong>估计</strong>一个不可验证的量。价值模型自身有两种优化目标，信用不可靠；密集化依赖一个奖励模型，策略可以学会利用它的偏差——也就是 reward hacking。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PRM 型</span><h4>过程奖励模型，逐步打分</h4></div>
+      <p>PRM 能给出步骤级奖励，但要做两件事：高质量的人工步骤标注，以及在线 RL 里每一步都调用一次模型（Table 1 记为 N 次）。</p>
+      <p><strong>卡在哪：</strong>它把过程奖励当作「当前状态的未来回报」来预测，受采样有限和 policy / completion 模型错配影响，噪声大。更糟的是在 Best-of-N 上优化 PRM 会出现「过程→结果漂移」（Zhang et al. 2025b），过程监督反而退化成只看答案。</p>
+    </div>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法（Table 1）</th><th>高质量数据</th><th style="text-align:right">推理调用次数</th><th>可靠奖励</th><th>测试时扩展</th><th>细粒度信用</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PPO</td><td>不需要</td><td class="num">1</td><td>否</td><td>否</td><td>是</td></tr>
+        <tr><td>奖励密集化 RL</td><td>不需要</td><td class="num">1</td><td>否</td><td>否</td><td>是</td></tr>
+        <tr><td>PRM</td><td>需要</td><td class="num">N</td><td>否</td><td>否</td><td>是</td></tr>
+        <tr class="best"><td>CAPO</td><td>不需要</td><td class="num">1</td><td>是</td><td>是</td><td>是</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine">「可靠奖励」在原文是 “Providing Reliable Rewards”。CAPO 的「1 次」指每条 rollout 合并一次批评调用；主实验实际采样 N=4 份批评再投票，这一点见 04 节。表中的 N 是大于 1 的数。</p>
+
+  <p>
+    这张表的含义是：前三条路各缺一格，而 CAPO 声称全满。它能不能满格，取决于两个设计——一个确定性的裁判（3.1），和一个不让过程信号压过结果的奖励结构（3.2）。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>裁判只答「哪几步错」，奖励用 C &gt; P 保证「答对永远赢」</h2></div>
+  <p class="sec-sub">三个部件：单次前向的 GenPRM 批评、投票聚合成错误步骤集合、非对称的 token 级奖励与组内归一化。</p>
+
+  <h3>3.1 过程信用：让 LLM-as-GenPRM 一次生成全部步骤的判断</h3>
+  <p>
+    对训练题 <code>q</code> 从 <code>π<sub>θ<sub>old</sub></sub></code> 采样 <code>n</code> 条 rollout <code>{y<sub>i</sub>}</code>。每条 rollout 按 <code>\n\n</code> 切成步骤，包上 <code>&lt;step_k&gt;…&lt;/step_k&gt;</code> 标签，连同题目和批评 prompt <code>I</code> 一起发给 GenPRM，采样 <code>k</code> 份批评：
+  </p>
+  <div class="eq">
+    {c<sub>j</sub>}<sub>j=1..k</sub> ~ π<sub>GenPRM</sub>(· | I, q, y<sub>i</sub>)
+    &nbsp;&nbsp;&nbsp;⟶&nbsp;&nbsp;&nbsp;
+    S<sub>i,j</sub> = ExtractIndices(c<sub>j</sub>)
+  </div>
+  <div class="eq-cap">§3.1 · 一份批评是一个文本，从中抽出「错误步骤编号」的集合 S<sub>i,j</sub></div>
+
+  <p>
+    关键是批评的<strong>形状</strong>：prompt（附录 F）要求裁判先写 “Judgment: Is the solution correct? X”，再在 <code>&lt;incorrect_steps&gt;</code> 标签里用逗号列出错误步骤编号。
+    它回答的是「第几步错了」，而不是「这一步值多少分」。前者是可验证的离散判断，后者是概率估计——这就是论文说的“deterministic, binary evaluation”。
+  </p>
+
+  <p>k 份批评用投票聚合成一个最终集合 <code>S<sub>i</sub><sup>*</sup></code>。论文正文给出两种：</p>
+  <div class="eq">
+    <span class="hl-b">交集</span> S<sub>i</sub><sup>∩</sup> = ⋂<sub>j</sub> S<sub>i,j</sub>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    <span class="hl-b">多数</span> S<sub>i</sub><sup>maj</sup> = { s | count(s) ≥ k/2 }
+  </div>
+  <div class="eq-cap">§3.1 + 附录 E · 另有三类：贪心（k=1）、并集（⋃，高召回）、平均（每步扣 weight = count(s)/k，不做硬阈值）</div>
+
+  <p>
+    五种聚合对应五种偏置：交集要求每份批评都点名，<strong>精度最高、召回最低</strong>；并集只要有一份点名就算错，召回最高；多数介于两者之间；贪心只用一份批评，最容易被噪声带偏；平均不设阈值，把点名次数变成扣分力度。
+    这份集合最后被翻译成 token 集合 <code>T<sub>err</sub><sup>i</sup></code>：错误步骤覆盖的全部 token。
+  </p>
+
+  <h3>3.2 信用分配：先给整条，再扣错步</h3>
+  <p>token 级奖励就是 Eq. 1：一个整条奖励，加上一个只落在错误步骤上的惩罚。</p>
+  <div class="eq">
+    R<sub>t</sub><sup>i</sup> = <span class="hl-a">r<sub>v</sub> · W<sub>whole</sub></span> − <span class="hl-c">𝕀(t ∈ T<sub>err</sub><sup>i</sup>) · W<sub>process</sub></span>
+  </div>
+  <div class="eq-cap">Eq. 1 · r<sub>v</sub> ∈ {0,1} 来自规则验证器；W<sub>whole</sub>、W<sub>process</sub> 论文简称 C、P</div>
+
+  <p>
+    取 <code>C = 2, P = 1</code>，四种情形的奖励正好是 <code>{+2, +1, 0, −1}</code>。论文用 MORL 的线性标量化来表述这个选择，但真正约束它的只有一条不等式：<strong>C &gt; P</strong>。
+    只要 C 严格大于 P，「答对但过程错」的 +1 就一定高于「答错但过程对」的 0——任何一条通往正确答案的轨迹都排在所有通往错误答案的轨迹前面。过程信号只在同一结果的样本之间做区分。
+  </p>
+
+  <p>
+    为什么不能对称？对称的 C = P = 2 时，「答对、过程错」= 2 − 2 = 0，「答错、过程对」= 0 − 0 = 0，两种完全不同的情形拿到同一个奖励，模型无从分辨。
+  </p>
+
+  <h3>组内归一化：把奖励变成 advantage</h3>
+  <div class="eq">
+    <span class="hl-c">Â<sub>t</sub><sup>i</sup></span> = ( R<sub>t</sub><sup>i</sup> − mean<sub>all tokens</sub>(R) ) / std<sub>all tokens</sub>(R)
+  </div>
+  <div class="eq-cap">Eq. 2 · 均值与标准差在整批 n 条 rollout 的全部 token 上算——不是按 token 位置分组，而是所有 token 共享一个统计量</div>
+
+  <p>
+    这一步和 GRPO 同构，只是统计量从「每条回答一个标量」变成了「每个 token 一个值」。由于 −P 只落在错误步骤上，答对但有小错的轨迹，其错误 token 会拿到<strong>低于组均值</strong>的 advantage，其他 token 高于均值；GRPO 不会做这种拆分。
+  </p>
+
+  <p>
+    作者在 §3.2 里记录了两条经验观察，解释了 C &gt; P 不只是「保险」：<strong>Observation 1</strong>——早期从过程学更难，攒够了正确步骤也未必通向正确答案，甚至拖慢训练；<strong>Observation 2</strong>——后期过程信号变得关键，用来在拿到同一结果的众多回答里继续区分优劣。
+    附录 Figure 4 给出了反例：C=2、P=5 的过程主导配置下，模型学会的是变啰嗦，而不是做对。
+  </p>
+
+  <h3>自己动手：同一道题、同一个裁判，只换投票规则</h3>
+  <p>
+    下面是论文附录 F 的一条真实案例的简化演示。题目是「求 v 使 (−21−√301)/10 是 5x²+21x+v 的根」，rollout 在第 5 步漏了一个符号，后面每一步都沿用错误的式子。
+    GenPRM 的 prompt 要求它独立检查每一步，所以批评的名单是 <code>step_5</code> 到 <code>step_11</code>，不会在第 5 步之后全部停下。
+    演示里用 4 份批评、10 个步骤：灰 = 没点名，强调色 = 点名。点任意步骤看它的 token 奖励，切投票规则看规则如何改写名单。
+  </p>
+
+  <div class="sim" id="capo-sim">
+    <div class="sim-top" id="vote-btns">
+      <button class="rule-btn active" data-mode="intersection" type="button">Intersection<span class="r-sub">⋂ 全部点名</span></button>
+      <button class="rule-btn" data-mode="union" type="button">Union<span class="r-sub">⋃ 任一命名</span></button>
+      <button class="rule-btn" data-mode="majority" type="button">Majority<span class="r-sub">count ≥ k/2</span></button>
+      <button class="rule-btn" data-mode="greedy" type="button">Greedy<span class="r-sub">只取第 1 份</span></button>
+      <button class="rule-btn" data-mode="average" type="button">Average<span class="r-sub">权重 count/k</span></button>
+    </div>
+
+    <div class="crit-list" id="crit-list"></div>
+
+    <div class="vote-grid" id="vote-grid"></div>
+
+    <div class="step-strip" id="step-strip" role="list"></div>
+
+    <div class="slots s2" id="sim-slots"></div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前选中</div>
+      <div id="sim-calc"></div>
+    </div>
+
+    <p class="fine">默认选中 step_5：它是真正的出错点，4 份批评全部点名，任何规则都会判错。再点 step_6（3/4 点名，交集放过、多数与并集判错）和 step_4（仅 1/4 点名，只有并集判错），就能看出投票规则张力的来源。</p>
+  </div>
+
+  <details>
+    <summary>这个演示简化了什么？<span class="sum-sub">点开看与论文设置的差异</span></summary>
+    <div class="details-body">
+      <p>步骤文字取自附录 F 的案例（求 <code>v</code> 使 <code>(−21−√301)/10</code> 是 <code>5x²+21x+v</code> 的根），原文 rollout 有 13 步，GenPRM 判错 step_5–step_11；演示压成 10 步、4 份批评，为的是让四种投票规则给出不同结论。四份批评是演示构造的变体，不是论文里的真实采样。</p>
+      <p>投票规则取自论文定义的五种：交集、并集、多数（count(s) ≥ k/2）、贪心（k=1）、平均（weight = count(s)/k）。论文正文只说「平均」给每个步骤一个连续惩罚权重，没有写它如何进入 Eq. 1；演示按 <code>r<sub>v</sub>·C − weight·P</code> 呈现，这是对原文的直接延伸，不是原文公式。</p>
+      <p>C=2、P=1 取自 §3.2 的示例，也是 Table 4 消融里最优的一行。演示假设整条回答答对（r<sub>v</sub> = 1），所以 token 奖励只可能是 +2 或 +1——看不到「答错、过程对」的 0 和「答错、过程错」的 −1，那两档只需把 r<sub>v</sub> 换成 0。</p>
+      <p>真实步骤按 <code>\n\n</code> 切分再包 <code>&lt;step_k&gt;</code> 标签（附录 C、D），Qwen 系列推理格式天然这样分隔；演示按同一规则画成 10 段。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>多出来的是一次 70B 前向与 N 份批评，训练循环本身仍是 GRPO</h2></div>
+  <p class="sec-sub">CAPO 没有新模型、没有新数据、不训练裁判；工程代价集中在裁判侧，可拆到别处跑。</p>
+
+  <p>
+    把 CAPO 放回一个 GRPO 迭代里，策略侧的动作完全没变：采样、算规则奖励、算 advantage、做带裁剪比的更新。变化只有一处——advantage 从「每条回答一个数」变成「每个 token 一个数」，而这个数里多了一项由裁判给出的惩罚。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th style="white-space:nowrap">环节</th><th>GRPO</th><th>CAPO</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>裁判模型</td><td>无</td><td>Qwen 系列用 Qwen2.5-72B-Instruct；Llama 系列用 Llama-3-70B-Instruct，均未微调</td><td>§4.1</td></tr>
+        <tr><td>裁判采样</td><td>—</td><td>temperature 0.7、top-p 0.9、max tokens 2048</td><td>附录 D · Table 6</td></tr>
+        <tr><td>批评份数</td><td>—</td><td>主实验 N=4</td><td>§4.1</td></tr>
+        <tr><td>步骤切分</td><td>—</td><td>按 <code>\n\n</code> 切分，包 <code>&lt;step_k&gt;</code> 标签</td><td>附录 C、D</td></tr>
+        <tr><td>逐 token 奖励</td><td>只有 <code>r<sub>v</sub></code></td><td>Eq. 1：<code>r<sub>v</sub>·C − 𝕀(错步)·P</code></td><td>§3.2</td></tr>
+        <tr><td>advantage</td><td>按回答组归一化</td><td>Eq. 2：全部 token 统一归一化</td><td>§3.2</td></tr>
+        <tr><td>采样</td><td colspan="2">每题 16 条 rollout，global batch 192，rollout 温度 0.7 / top-p 0.9</td><td>附录 D · Table 5</td></tr>
+        <tr><td>KL 系数</td><td colspan="2">0.01；格式奖励 0.2；PPO 小 epoch 4</td><td>附录 D · Table 5</td></tr>
+        <tr><td>训练数据</td><td colspan="2">Llama-3-1B→MATH 7.5k；Llama-3-3B→DAPO-Math 9.8k；Qwen2.5-1.5B→MATH；Qwen2.5-7B→DAPO-Math（Qwen 先做 NuminaMath-CoT 860k SFT）</td><td>§4.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    成本账要说清楚：Table 1 把 CAPO 记成「1 次推理调用」，指的是每条 rollout 只需一次性读完所有步骤、不再按步调用；但它在一次调用里采样 N 份批评，主实验 N=4，Figure 3 的最优点 N=8。
+    换句话说，相对 GRPO 多出的是 <strong>N ×（每条 rollout 的一次 70B 前向）</strong>，与回答长度无关地摊在每个训练样本上。附录 C 的对策是：本地显存紧张时把 GenPRM 走 API，把这部分推理成本移出训练机。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么成本还能接受</span><h4>它跟「强模型指导弱模型」这条已有路线一致</h4></div>
+    <p>
+      附录 C 把 CAPO 放进「用 70B 级模型或闭源 API 指导策略模型」的既有实践里：数据增强、轨迹精修、批评者。CAPO 的差别在于单次调用就拿到<strong>全部步骤</strong>的过程监督，而不是每步一次。
+    </p>
+  </div>
+
+  <p>
+    两个未细化的实现细节值得记住：第一，裁判被要求「独立检查每一步，不能因为上一步错了就判这一步错」——prompt 里的这条指令让裁判定位的是<strong>新的错误</strong>，而不是错误的传播；第二，评价用的是贪心解码的 pass@1、三次运行取平均，所以下面的差距不能简单读成「模型能力的提升幅度」。
+  </p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条串行的数据流：rollout → 批评 → 投票 → token 奖励 → 一个 advantage</h2></div>
+  <p class="sec-sub">把 03 节的三个部件按训练顺序排开，就是论文 Figure 2 的完整回路。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 430" role="img" aria-label="CAPO 数据流：策略采样 rollout，按空行切步，GenPRM 一次前向生成 N 份批评，投票得到错误步骤集合，映射到 token 后按 Eq.1 算逐 token 奖励，Eq.2 做组内归一化，进入带裁剪比的策略更新">
+      <defs>
+        <marker id="capo-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+
+      <text x="104" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">1 · 采样与切步</text>
+      <text x="286" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">2 · 裁判</text>
+      <text x="468" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">3 · 信用</text>
+      <text x="636" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">4 · 更新</text>
+
+      <!-- column 1 -->
+      <rect x="8" y="38" width="192" height="196" rx="12" class="pipe-box"></rect>
+      <text x="104" y="62" text-anchor="middle" class="pipe-t" font-weight="600">策略 π_θold</text>
+      <text x="104" y="82" text-anchor="middle" class="pipe-s">同一题采样 n 条回答</text>
+      <rect x="22" y="94" width="164" height="58" rx="8" class="pipe-c1"></rect>
+      <text x="104" y="115" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">y_i</text>
+      <text x="104" y="134" text-anchor="middle" class="pipe-s">按 \n\n 切步，包 step_k</text>
+      <rect x="22" y="162" width="164" height="58" rx="8" class="pipe-box"></rect>
+      <text x="104" y="183" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">r_v ∈ {0,1}</text>
+      <text x="104" y="202" text-anchor="middle" class="pipe-s">Math-verify 规则判断</text>
+
+      <!-- column 2 -->
+      <rect x="216" y="38" width="140" height="150" rx="12" class="pipe-c2"></rect>
+      <text x="286" y="62" text-anchor="middle" class="pipe-t" font-weight="600">LLM-as-GenPRM</text>
+      <text x="286" y="82" text-anchor="middle" class="pipe-s">70B 级，不微调</text>
+      <text x="286" y="104" text-anchor="middle" class="pipe-s">一次前向读完所有步骤</text>
+      <text x="286" y="126" text-anchor="middle" class="pipe-s">生成 N 份批评</text>
+      <text x="286" y="150" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">S_i,j</text>
+      <text x="286" y="170" text-anchor="middle" class="pipe-s">每份 = 错误步骤编号</text>
+
+      <rect x="216" y="204" width="140" height="76" rx="12" class="pipe-c2"></rect>
+      <text x="286" y="228" text-anchor="middle" class="pipe-t" font-weight="600">投票</text>
+      <text x="286" y="248" text-anchor="middle" class="pipe-s">⋂ ⋃ 多数 贪心 平均</text>
+      <text x="286" y="268" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">→ S_i*</text>
+
+      <!-- column 3 -->
+      <rect x="372" y="38" width="192" height="120" rx="12" class="pipe-accent"></rect>
+      <text x="468" y="62" text-anchor="middle" class="pipe-t" font-weight="600">错误步骤 → token</text>
+      <text x="468" y="82" text-anchor="middle" class="pipe-t pipe-m">T_err^i</text>
+      <text x="468" y="104" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">R_t^i = r_v·C − 𝕀·P</text>
+      <text x="468" y="126" text-anchor="middle" class="pipe-s">C = 2 &gt; P = 1</text>
+      <text x="468" y="146" text-anchor="middle" class="pipe-s">Eq. 1</text>
+
+      <rect x="372" y="174" width="192" height="106" rx="12" class="pipe-accent"></rect>
+      <text x="468" y="198" text-anchor="middle" class="pipe-t" font-weight="600">组内逐 token 归一化</text>
+      <text x="468" y="220" text-anchor="middle" class="pipe-t pipe-m">Â_t^i = (R − μ) / σ</text>
+      <text x="468" y="242" text-anchor="middle" class="pipe-s">μ、σ 取自全部 token</text>
+      <text x="468" y="262" text-anchor="middle" class="pipe-s">Eq. 2</text>
+
+      <!-- column 4 -->
+      <rect x="580" y="38" width="132" height="120" rx="12" class="pipe-box"></rect>
+      <text x="646" y="62" text-anchor="middle" class="pipe-t" font-weight="600">裁剪目标</text>
+      <text x="646" y="84" text-anchor="middle" class="pipe-s">min(ρ·Â,</text>
+      <text x="646" y="104" text-anchor="middle" class="pipe-s">clip(ρ)·Â)</text>
+      <text x="646" y="128" text-anchor="middle" class="pipe-s">+ KL(π_θ‖π_ref)</text>
+      <text x="646" y="148" text-anchor="middle" class="pipe-s">avg over n, L_i</text>
+
+      <rect x="580" y="196" width="132" height="84" rx="12" class="pipe-box"></rect>
+      <text x="646" y="222" text-anchor="middle" class="pipe-t" font-weight="600">更新 π_θ</text>
+      <text x="646" y="244" text-anchor="middle" class="pipe-s">下一轮重新采样</text>
+      <text x="646" y="264" text-anchor="middle" class="pipe-s">裁判成本在回路外</text>
+
+      <!-- arrows -->
+      <path d="M200 120 L211 120" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M200 192 L211 192 L211 170" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M286 188 L286 200" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M356 242 L366 242 L366 104 L372 104" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M468 158 L468 170" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M564 228 L574 228 L574 108 L580 108" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M646 158 L646 196" class="pipe-line" marker-end="url(#capo-arrow)"></path>
+      <path d="M646 280 L646 372 L104 372 L104 240" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#capo-arrow)"></path>
+      <text x="375" y="394" text-anchor="middle" class="pipe-s">下一轮 rollout：同一条题重新采样 n 条，重新请裁判</text>
+    </svg>
+    <figcaption>
+      图 1：CAPO 数据流（依论文 Figure 2、§3 公式与附录 C 重绘）。蓝：策略侧；紫：裁判与投票；陶土红：信用计算——这是相对 GRPO 新增的唯一一环。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么评委不预测未来回报？</strong> 裁判的输出只是一个错误步骤编号列表。它不参与拟合任何价值函数，所以不存在「策略反向推导裁判的软评分」这条捷径；而规则验证器仍然决定答案对错，结果奖励的可验证性没有改变（§3.1）。</li>
+          <li><strong>裁判同时拿到标准答案。</strong> 附录 C 说 prompt 给出 ground-truth solution，把任务从「这段推理本身对不对」变成「在已知正确答案的前提下，找出推理在哪一步偏离」。代价是裁判需要标准答案，而适用场景本身就要有标准答案。</li>
+          <li><strong>代价在回路外。</strong> 裁判前向可以走 API（附录 C），不占策略训练的显存；但它与策略训练在同一轮内串行，决定每轮迭代的墙钟时间。</li>
+          <li><strong>形式上和 GRPO 完全同构。</strong> 只是把「每条回答一组标量」换成「整批 token 一组值」。这正是论文说 CAPO 能轻易套在 DAPO、VAPO、Reinforce++ 上的原因：改的是 R<sub>t</sub> 的计算，不是更新规则。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    这条流程里最容易被忽略的一点：<strong>投票发生在 token 奖励之前</strong>，且投票结果只改变「哪些 token 扣 P」。因此不同投票机制之间的差别，本质上是同一套奖励上的几种噪声处理方式，而不是几种不同的训练目标。06 节的投票结果也印证了这一点——所有变体都在 GRPO 之上，差异体现在幅度和适用模型。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>每个 backbone 都能找到一个胜过 GRPO 的变体，但涨的是数学，不是 OOD</h2></div>
+  <p class="sec-sub">最好的变体比 GRPO-Rule 的 All Mean 高 0.7–2.9 个百分点；更大的差别藏在难题、裁判数量与权重配置里。</p>
+
+  <h3>主结果：每个模型取最好的 CAPO 变体，对比 GRPO-Rule</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>最优 CAPO 变体</th><th style="text-align:right">OOD 均值</th><th style="text-align:right">数学均值</th><th style="text-align:right">All Mean</th><th style="text-align:right">GRPO-Rule All</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-7B</td><td>CAPO-MajorVote</td><td class="num">40.8</td><td class="num">37.0</td><td class="num">37.8</td><td class="num">36.1</td></tr>
+        <tr><td>Llama-3-3B</td><td>CAPO-MajorVote</td><td class="num">38.3</td><td class="num">31.0</td><td class="num">31.0</td><td class="num">29.7</td></tr>
+        <tr><td>Qwen2.5-1.5B</td><td>CAPO-Intersection</td><td class="num">34.1</td><td class="num">32.3</td><td class="num">32.3</td><td class="num">31.3</td></tr>
+        <tr><td>Llama-3-1B</td><td>CAPO-Intersection</td><td class="num">21.8</td><td class="num">18.8</td><td class="num">18.8</td><td class="num">15.9</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine">
+    均值由 Table 2 / Table 3 的单元格重算；OOD 均值 = GPQA Diamond、ARC-c、MMLU-Pro 的算术平均，数学均值 = 该表 Math 列（7B 与 3B 含 AIME24，1.5B 与 1B 的表中没有 AIME）。重算结果与原文报告的增量一致：7B「+3.5 数学 / +2.5 全部」、3B「+2.1 / +1.8」、1B「+3.5 OOD / +2.9 全部」、1.5B「数学 +1.7」。
+  </p>
+
+  <p>把单元格拆开看，几个不对称很明显：</p>
+  <ul>
+    <li><strong>数学涨得多，OOD 基本不动。</strong> Qwen2.5-7B 数学均值 31.3 → 37.0，但 OOD 从 41.0 略降到 40.8；7B 上最好的 OOD 是 GRPO-GenORM 的 41.5，SFT 也有 41.3。论文的「泛化」证据主要体现在 1B 模型与个别基准（如 1B 的 ARC-c 21.6 → 34.0），而不是所有模型上 OOD 一致上升。</li>
+    <li><strong>难题受益最大。</strong> Qwen2.5-7B 的 AIME24 从 3.6 涨到 10.8，Llama-3-3B 的 AMC23 从 16.9 涨到 26.8（均为 CAPO-MajorVote）；而 MATH-500 只从 59.9 到 63.4。难度越高，同一条回答内部「对了几步」越有区分价值。</li>
+    <li><strong>并非每个变体都更好。</strong> Qwen2.5-1.5B 的 CAPO-Greedy 在 OOD 只有 32.2、All 31.0，低于 GRPO-Rule 的 31.3；Llama-3-3B 的 CAPO-Greedy 的数学均值 20.6，也低于 GRPO-Rule 的 21.6。正文的「一致优于」建立在<strong>每个模型的某个变体</strong>上。</li>
+  </ul>
+
+  <h3>投票规则随模型规模翻转</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">附录 E · 小模型</span><h4>1B / 1.5B：严格的交集最好</h4></div>
+      <p>Llama-3-1B：Intersection 18.8，MajorVote 17.0，Greedy 16.9，GRPO-Rule 15.9。Qwen2.5-1.5B：Intersection 32.3，MajorVote 32.0，Greedy 31.1。</p>
+      <p>论文的解释：能力弱的模型需要高精度的纠偏压力，只学最无争议的正确步骤。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">附录 E · 大模型</span><h4>7B / 3B：宽松的多数与并集更好</h4></div>
+      <p>Qwen2.5-7B：MajorVote 37.8、Union 36.8、Greedy 36.8、Average 36.7，Intersection 36.3（All Mean）。Llama-3-3B：MajorVote 31.0、Intersection 30.7。</p>
+      <p>论文的解释：强模型更复杂，交集里只要一份批评误判就会锁死探索。</p>
+    </div>
+  </div>
+  <p class="fine">以上 All Mean 均由 Table 7 / Table 8（附录，含 Greedy / Average / Union）或 Table 3 / Table 2 的单元格重算。注意 7B 上 Intersection 只是较低，并不低于 GRPO-Rule。</p>
+
+  <h3>裁判数量：越多越好，且带来的是「约束而不是教条」</h3>
+  <p>
+    Figure 3 在 Qwen2.5-1.5B 的 CAPO-Intersection 上把批评数从 2 加到 8。OOD 均值 33.2 → 34.1 → 35.0，GPQA Diamond 17.5 → 20.5 → 22.1，ARC-c 60.4 → 60.0 → 61.1。
+    交集规则下，批评越多越难「全员点名」，所以有效错误集合在变小、惩罚在变轻——论文把这条趋势解释为：更多批评把噪声抹掉，让判断更准。
+    附录对比的 GRPO-GenORM 在同样加大 N 时收益要小得多、也不稳定（Figure 5、Table 10：OOD 均值 32.1 → 33.0 → 33.6）。
+  </p>
+
+  <h3>权重消融：C=2, P=1 最优，对称与流程主导都掉</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>配置（Qwen2.5-1.5B，Table 4）</th><th style="text-align:right">OOD 均值</th><th style="text-align:right">数学均值</th><th style="text-align:right">All Mean</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CAPO (C=2, P=0.1)</td><td class="num">33.4</td><td class="num">28.8</td><td class="num">31.1</td></tr>
+        <tr><td>CAPO (C=2, P=5)</td><td class="num">33.0</td><td class="num">27.4</td><td class="num">30.2</td></tr>
+        <tr><td>CAPO (C=2, P=2) 对称</td><td class="num">32.8</td><td class="num">28.5</td><td class="num">30.7</td></tr>
+        <tr class="best"><td>CAPO (C=2, P=1)</td><td class="num">34.1</td><td class="num">29.4</td><td class="num">31.8</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine">Table 4 只有 MATH-500、OlympiadBench、AMC23 三列数学，均值按这三列算；OOD 列与主表一致（GPQA / ARC-c / MMLU-Pro）。</p>
+  <p>
+    排序在数学列上是干净的一边倒：<code>P=1 &gt; P=0.1 &gt; P=2 &gt; P=5</code>。P=0.1 的过程信号几乎消失，退回近似 GRPO；P=2 对称造成 0 奖励重叠；P=5 过程主导，附录 Figure 4 显示模型变得啰嗦而准确率下降。
+    但 OOD 列并不严格单调（P=0.1 为 33.4，高于 P=2 的 32.8），论文的结论主要建立在数学任务和「层次结构」的论证上。
+  </p>
+
+  <details>
+    <summary>反直觉发现：把标准答案给裁判，不总是更好<span class="sum-sub">Table 9 · Qwen2.5-7B · CAPO-Intersection</span></summary>
+    <div class="details-body">
+      <p>
+        附录 C 把「向 GenPRM 提供 ground-truth solution」当作提高可靠性的关键设计；附录 E 的 Table 9 却在 Qwen2.5-7B 的 CAPO-Intersection 上给出近乎持平的对照：不给标准答案（w/o gt）时 GPQA 24.4、ARC-c 69.9、MMLU-Pro 36.0，数学为 MATH-500 62.1、AIME24 30.6、AMC23 32.8，OOD 43.5、数学 32.4、All 37.9；给标准答案（w gt）时依次为 24.2、69.1、35.4，数学 62.3、31.2、34.5，OOD 42.9、数学 33.1、All 38.0。
+      </p>
+      <p>差别多在随机波动范围内（GPQA 在 Table 12 中 CAPO-Intersection 为 22.2 ± 1.3），论文自身的结论也很克制：「并不总能带来明显优势，反而在通用推理上略有下降」。作者把它归因于标准答案与策略模型的解空间分布差得太远，反而给裁判注入噪声。</p>
+      <p>这一点和附录 C 的「提供标准答案把任务变成错误定位」在叙述上不完全一致；页面在 07 节把它列为一个未解决的张力。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它假设「有对错可查、有更强的裁判、步骤切得动」，三条都不总是成立</h2></div>
+  <p class="sec-sub">CAPO 的增益来自把信用变成可验证的判断；它的边界也来自同一个选择——只能处理「能查对错」的过程。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>裁判的上限就是训练的上限</h4></div>
+    <p>
+      附录 C 把可靠性建立在两点上：裁判要比策略强很多（70B+ 指导 1B–7B 的师生关系），以及裁判能拿到标准答案。学生越接近裁判，误判就越可能以「正确步骤被点名」的形式进入奖励。
+      论文没有单独测量裁判的错误率（错报或漏报），也没有给出裁判系统性偏错时的缓解手段；投票只能抹平随机噪声，抹不平系统性偏差。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>代价贴在每个样本上，不随回答变短而变小</h4></div>
+    <p>
+      每条 rollout 都要请 70B 读一遍，主实验 N=4、Figure 3 的最优点 N=8；调用次数随 rollout 数线性增加，与回答长度和训练步数无关。
+      附录 C 的对策是用 API 外包，但这只是换了付款方；论文没有给出相对 GRPO 的墙钟时间或 token 成本数据，也没有在 1B / 1.5B 小模型上讨论收益与成本是否划算。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>步骤切分是硬编码的，实验只在数学上</h4></div>
+    <p>
+      附录 C 和 D 说得很直白：当前实现按 <code>\n\n</code> 切步，再包 <code>&lt;step_k&gt;</code> 标签，因为 Qwen 系列天然这样组织推理。作者把「让裁判自己切步再评估」写成未来工作。
+      全部四个数学基准加三个 OOD 基准都是单轮、有标准答案的题；开放写作、多轮工具调用这类没有明确步骤边界、也没有唯一答案的任务没有实验。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>增益不大，且几乎全在数学列</h4></div>
+    <p>
+      All Mean 上最好的 CAPO 变体比 GRPO-Rule 只高 0.7–2.9 个百分点；7B 上 OOD 不升反降 0.5（41.3 → 40.8），1.5B 的 Greedy 变体在 All 上比 GRPO 低 0.3。
+      增长几乎全部来自数学列，而 OOD 只是同一套数学训练后模型的附带评测；论文没有在 OOD 任务自身上训练 CAPO。
+    </p>
+  </div>
+
+  <p style="margin-top:22px">
+    还有一处叙述上的张力，值得单列：附录 C 说给裁判标准答案能显著简化任务、提高可靠性，附录 E 的 Table 9 却在 7B 上看到一次近乎持平的对照——OOD 与数学各自朝相反方向微动。
+    两个结论可以并存，但论文没有给出让读者判断「什么时候标准答案帮得上忙」的标准。
+  </p>
+
+  <h3>什么时候别用：先问三个问题</h3>
+  <ul>
+    <li><strong>每一步的对错能查吗？</strong> 不能（开放写作、主观评价），裁判就只能凭感觉，而这一步的惩罚 P 会直接改写梯度。</li>
+    <li><strong>能拿出一个显著强于策略的裁判吗？</strong> 拿不出，师生差距不成立，CAPO 退化为高成本的 GRPO。</li>
+    <li><strong>能清晰切分步骤吗？</strong> 切不动，T<sub>err</sub> 会把惩罚落到错误的 token 上，奖励塑形的意义就只剩「整条加噪声」。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>CAPO 把「估计过程价值」换成「验证过程对错」</strong>。这让信用分配变得可验证、也几乎不改变训练代码，但它把可靠性、成本与适用面全部押在裁判和切步规则上——它解决的是「有对错」的问题，而不是「没有对错」的问题。
+  </p>
+</section>
+
+<footer>
+  <div>CAPO: Towards Enhancing LLM Reasoning through Generative Credit Assignment · Guofu Xie, Yunsheng Shi, Hongtao Tian, Ting Yao, Xiao Zhang, Jun Xu · 中国人民大学高瓴人工智能学院（Gaoling School of AI, RUC）· 腾讯微信搜索 · arXiv 2508.02298v4（2025-10-20）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.02298" target="_blank" rel="noopener">arXiv:2508.02298</a><br>
+    代码：<a href="https://github.com/andyclsr/CAPO" target="_blank" rel="noopener">andyclsr/CAPO</a><br>
+    笔记：<a href="/capotowards-enhancing-llm-reasoning-through-verifiable-generative-credit-assignment/">CAPO：Towards Enhancing LLM Reasoning through Verifiable Generative Credit Assignment</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按 arXiv 2508.02298v4 原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记标题写「Verifiable Generative Credit Assignment」；arXiv 正式标题是「Generative Credit Assignment」，「verifiable」出现在摘要对奖励的描述里，不在标题中。<br>
+    2. 笔记把 R<sub>t</sub> 描述为「每个 token 的最终奖励」，并写「答案正确、过程完美奖励 +2」。Eq. 1 和 §3.2 的措辞是初始化/分配奖励，+2 是 C=2、P=1 下塑形后的值；之后还要按 Eq. 2 在整个 token 组上做减均值除标准差，进入策略更新的是 advantage，不是 +2 本身。<br>
+    3. 笔记说裁判示例是「Qwen2.5-72B 或 Llama-3-70B」——与 §4.1 一致（Qwen 系列用 Qwen2.5-72B-Instruct，Llama 系列用 Llama-3-70B-Instruct，均未微调）；v4 的 Figure 5 图注有一处 “LLM-as-GenRRM” 的拼写笔误，不影响结论。<br>
+    4. 笔记称「Table 1 表明 CAPO 是唯一在可验证奖励与高效性（调用次数为 1）上同时胜出的方法」；Table 1 的列名是 “Providing Reliable Rewards”（提供可靠奖励），「可验证」是引言里的措辞，两者不完全等价。同时主实验每条 rollout 采样 N=4 份批评，「1 次」指一次性读出全部步骤，不含 N 的倍数（见 04 节）。<br>
+    5. 笔记写「在 OOD 任务上，CAPO-Intersection 达到 0.412，也高于基线的 0.410」——对应 Qwen2.5-7B；原文正文给的是 OOD 与数学的分别增量，未直接写这两个均值，按 Table 2 重算为 CAPO-Intersection 41.1、GRPO-Rule 41.0，差值仅 0.1。<br>
+    6. 笔记写「Llama-3-1B 上 CAPO-Intersection 平均分 0.170 vs GRPO-Rule 0.144（约 18%）」；Table 3 中 All Mean 应为 CAPO-Intersection 18.8 vs GRPO-Rule 15.9，+2.9 个百分点（原文描述的「约 +2.9 points」）。<br>
+    7. 笔记开头提出「针对 adv 直接加权是否更直接」的疑问；原文的做法是：Eq. 2 的组内归一化就是把逐 token 奖励转成 advantage，惩罚只落在错误步骤的 token 上，不需要额外的 adv 加权步骤（见 03 节）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 投票 → 错误步骤 → 逐 token 奖励 模拟器
+   真实例：附录 F 中「response 错误」那一条（二次方程求根问题）
+   实际错误在第 5 步（符号），裁判给出的名单是 step_5 … step_11
+   ============================================================ */
+(function () {
+  var C_W = 2;
+  var P_W = 1;
+  var RV = 1;
+
+  /* 13 步，文字摘自论文附录 F 的 [Solution To Judge] */
+  var STEPS = [
+    { id: 0,  label: '代入 x',        text: '把 x = (−21−√301)/10 代入 5x²+21x+v', toks: 3 },
+    { id: 1,  label: '展开',          text: '5((−21−√301)/10)² + 21((−21−√301)/10) + v = 0', toks: 3 },
+    { id: 2,  label: '化简',          text: '化简为 5(−21−√301)²/100 − 21(−21−√301)/10 + v = 0', toks: 3 },
+    { id: 3,  label: '展开平方',      text: '(−21−√301)² = 441+42√301+301', toks: 3 },
+    { id: 4,  label: '合并',          text: '5(742+42√301)/100 + (441+21√301)/10 + v', toks: 3 },
+    { id: 5,  label: '符号出错',      text: '通分：把 21(−21−√301)/10 当成 +（应为 −）', toks: 3 },
+    { id: 6,  label: '放大分子',      text: '(3710+210√301+441+21√301)/100 + v = 0', toks: 3 },
+    { id: 7,  label: '合并同类项',    text: '分子合并为 4151+231√301', toks: 3 },
+    { id: 8,  label: '解 v',          text: 'v = −(4151+231√301)/100', toks: 3 },
+    { id: 9,  label: '结论',          text: '写出 boxed 答案', toks: 2 }
+  ];
+
+  /* 4 份批评在论文给出的名单 {5..11} 上的变体；第 4、5 步是出错点及直接受影响步 */
+  var CRITIQUES = [
+    { name: 'Crit 1', wrong: [5, 6, 7, 8, 9] },
+    { name: 'Crit 2', wrong: [4, 5, 6, 7, 8, 9] },
+    { name: 'Crit 3', wrong: [5, 6, 7, 8, 9] },
+    { name: 'Crit 4', wrong: [6, 7, 8, 9] }
+  ];
+  var K = CRITIQUES.length;
+
+  var selected = 5;
+  var mode = 'intersection';
+
+  function counts() {
+    var c = {};
+    STEPS.forEach(function (s) { c[s.id] = 0; });
+    CRITIQUES.forEach(function (q) {
+      q.wrong.forEach(function (i) { c[i] = (c[i] || 0) + 1; });
+    });
+    return c;
+  }
+
+  function vote() {
+    var c = counts();
+    var flagged = {};
+    var mark = {};
+    STEPS.forEach(function (s) {
+      var w = 0;
+      if (mode === 'intersection') {
+        w = c[s.id] === K ? 1 : 0;
+      } else if (mode === 'union') {
+        w = c[s.id] >= 1 ? 1 : 0;
+      } else if (mode === 'majority') {
+        w = (c[s.id] >= K / 2) ? 1 : 0;
+      } else if (mode === 'greedy') {
+        w = CRITIQUES[0].wrong.indexOf(s.id) > -1 ? 1 : 0;
+      } else if (mode === 'average') {
+        w = c[s.id] / K;
+      }
+      flagged[s.id] = w;
+      mark[s.id] = w > 0.0001;
+    });
+    return { flagged: flagged, mark: mark, counts: c };
+  }
+
+  function fmtW(w) { return w.toFixed(2); }
+
+  function renderCritiques() {
+    var host = document.getElementById('crit-list');
+    if (!host) return;
+    var html = '';
+    CRITIQUES.forEach(function (q, j) {
+      var names = q.wrong.map(function (i) { return 'step_' + (i + 1); }).join(', ');
+      html += '<div class="crit"><span class="cl">c<sub>' + (j + 1) + '</sub></span>'
+        + '<span class="cs">' + names + '</span>'
+        + '<span class="cw">' + q.wrong.length + ' 步</span></div>';
+    });
+    host.innerHTML = html;
+  }
+
+  function renderVoteGrid(v) {
+    var host = document.getElementById('vote-grid');
+    if (!host) return;
+    var html = '';
+    STEPS.forEach(function (s) {
+      var n = v.counts[s.id] || 0;
+      var hit = v.mark[s.id];
+      html += '<div class="vote-cell' + (hit ? ' flag' : '') + '">'
+        + '<div class="cnt">' + n + '/' + K + '</div>'
+        + '<div>step_' + (s.id + 1) + '</div>'
+        + (mode === 'average' ? '<div>w=' + fmtW(v.flagged[s.id]) + '</div>' : '')
+        + '</div>';
+    });
+    host.innerHTML = html;
+  }
+
+  function renderSteps(v) {
+    var host = document.getElementById('step-strip');
+    if (!host) return;
+    var html = '';
+    STEPS.forEach(function (s) {
+      var hit = v.mark[s.id];
+      var sel = s.id === selected;
+      html += '<div class="step-chip' + (hit ? ' err' : '') + '" role="listitem" data-step="' + s.id + '"'
+        + ' style="cursor:pointer;' + (sel ? 'outline:2px solid var(--text);outline-offset:1px;' : '') + '">'
+        + '<span class="si">step_' + (s.id + 1) + ' · ' + s.label + '</span>'
+        + '<span>' + s.text + '</span></div>';
+    });
+    host.innerHTML = html;
+
+    host.querySelectorAll('[data-step]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        selected = parseInt(el.getAttribute('data-step'), 10);
+        renderAll();
+      });
+    });
+  }
+
+  function renderSlots(v) {
+    var host = document.getElementById('sim-slots');
+    if (!host) return;
+    var s = STEPS[selected];
+    var w = v.flagged[s.id];
+    var r = RV * C_W - w * P_W;
+    var badCount = 0;
+    STEPS.forEach(function (x) { if (v.mark[x.id]) badCount++; });
+    var items = [
+      { name: '被判错的步骤', val: badCount + ' / ' + STEPS.length, color: 'var(--c2)' },
+      { name: 'step_' + (s.id + 1) + ' 的 R<sub>t</sub>', val: (r >= 0 ? '+' : '') + r.toFixed(2), color: 'var(--accent)', hit: true }
+    ];
+    host.innerHTML = items.map(function (it) {
+      return '<div class="slot' + (it.hit ? ' hit' : '') + '">' +
+        '<div class="slot-name">' + it.name + '</div>' +
+        '<div class="slot-val" style="color:' + it.color + '">' + it.val + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  function renderReadout(v) {
+    var host = document.getElementById('sim-calc');
+    if (!host) return;
+    var s = STEPS[selected];
+    var n = v.counts[s.id] || 0;
+    var w = v.flagged[s.id];
+    var r = RV * C_W - w * P_W;
+    var rText = (r >= 0 ? '+' : '') + r.toFixed(2);
+    var html = '<p><strong>step_' + (s.id + 1) + '</strong>（' + s.label + '），4 份批评里被点名 <span class="mono">' + n + ' 次</span>。</p>';
+
+    if (mode === 'average') {
+      html += '<p>Average：<span class="mono">weight = ' + n + ' / ' + K + ' = ' + fmtW(w) + '</span>，'
+        + '<span class="mono">R<sub>t</sub> = 1 × 2 − ' + fmtW(w) + ' × 1 = ' + rText + '</span>。'
+        + '没有硬阈值：越一致被点名，扣得越多。</p>';
+    } else if (w > 0) {
+      html += '<p>该规则判定这一步<strong>为错</strong>（权重 1），token 奖励 <span class="mono">R<sub>t</sub> = 1 × 2 − 1 = ' + rText + '</span>：'
+        + '答对的整条奖励还在，只在这几个 token 上扣了 P = 1。</p>';
+    } else {
+      html += '<p>该规则<strong>不</strong>把这一步判错，token 奖励 <span class="mono">R<sub>t</sub> = 1 × 2 − 0 = ' + rText + '</span>，与一条全对回答里的 token 相同。</p>';
+    }
+
+    if (mode === 'intersection' && n > 0 && n < K) {
+      html += '<p class="warn">Intersection 要求 ' + K + ' 份全部点名：这里只有 ' + n + '/' + K + '，所以被放过了。</p>';
+    }
+    if (mode === 'greedy') {
+      html += '<p>Greedy 只信第 1 份批评（' + CRITIQUES[0].wrong.map(function (i) { return 'step_' + (i + 1); }).join(', ') + '），其余 ' + (K - 1) + ' 份完全不参与。</p>';
+    }
+    html += '<p style="margin-bottom:0"><strong>' + summaryText(v) + '</strong></p>';
+    host.innerHTML = html;
+  }
+
+  function summaryText(v) {
+    var errs = [];
+    STEPS.forEach(function (s) { if (v.mark[s.id]) errs.push(s.id); });
+    if (!errs.length) return '结论：本规则没有点名任何步骤，所有 token 同拿 +2，等价于 GRPO 的整条奖励。';
+    if (mode === 'average') {
+      return '结论：本规则没有硬阈值，' + errs.length + ' 个被点名过的步骤按权重各自扣分，其余 token 保持 +2。';
+    }
+    return '结论：被判错的 ' + errs.length + ' 个步骤（step_' + errs.map(function (i) { return i + 1; }).join('、step_')
+      + '）的 token 拿 +1，其余拿 +2。';
+  }
+
+  function renderAll() {
+    var v = vote();
+    renderCritiques();
+    renderVoteGrid(v);
+    renderSteps(v);
+    renderSlots(v);
+    renderReadout(v);
+  }
+
+  document.querySelectorAll('#vote-btns .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#vote-btns .rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      mode = btn.getAttribute('data-mode');
+      renderAll();
+    });
+  });
+
+  renderAll();
+})();
+
+/* ============================================================
+   2) 图注展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest ? el.closest('figure') : null;
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning to Refine · 让并行采样后的「再综合」成为可训练技能</title>
+<meta name="description" content="arXiv 2509.00084v2 精读：Refinement Gap 随规模上升；GSR 用 QwQ-32B 教师构造 368K 混合 SFT 数据，Qwen2.5-7B-Instruct 在 4 个候选上自精炼，AIME24 selfRef@4 达 66.0%，不训平均 39.4 到训后 73.6。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{
+  display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;
+  padding:1px 6px;margin:0 4px;border-radius:100px;background:var(--c2-soft);color:var(--c2);
+  letter-spacing:.04em;
+}
+.quote{border-left:3px solid var(--border-strong);padding:2px 0 2px 14px;margin:14px 0;color:var(--text-muted);font-size:14px}
+.quote .src{display:block;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);margin-top:4px}
+.tbl-cap{font-size:12.5px;color:var(--text-soft);margin:18px 0 0;font-family:"JetBrains Mono",monospace}
+.note-box{font-size:13.5px;color:var(--text-muted);background:var(--bg-soft);border-radius:var(--radius);padding:12px 16px;margin:16px 0}
+.note-box strong{color:var(--text)}
+details.zero{background:var(--c2-soft);border-color:var(--c2)}
+details.zero summary::before{color:var(--c2)}
+.sim-sub{font-size:13px;color:var(--text-soft);margin-top:12px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Learning to Refine</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">训练与成本</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Test-time scaling · arXiv 2509.00084v2</span>
+  <h1>Learning to Refine：让「看完 4 个候选再写一份新解」变成训练出来的技能</h1>
+  <p class="hero-sub">
+    多数投票和 Best-of-N 只能在候选里<strong>挑</strong>，k 个候选全错就全错。并行自精炼能让模型看完所有候选再综合一份新答案，但作者先在 1.5B–72B 间量出：这份「超出投票」的部分随模型规模变大，与基础能力只弱相关。
+    于是他们把大模型的精炼策略蒸馏给 7B，并把「直接解题」与「看过候选再精炼」<strong>混在一次 SFT 里</strong>。
+  </p>
+  <div class="meta">
+    <span>Qibin Wang, Pu Zhao, Shaohan Huang 等 · Microsoft / PKU</span>
+    <a href="https://arxiv.org/abs/2509.00084v2" target="_blank" rel="noopener">arXiv 2509.00084v2 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文先定义 <strong>Refinement Gap Δ = selfRef@k − maj@k</strong>（Eq. 1：同一批 k 个候选上，加不加「看完再综合」的差），在 AIME24/AIME25 上扫 Qwen2.5-Instruct 与 R1-Distill / QwQ。结论：Δ 随规模上升，与 pass@1 弱相关（§2）。
+  </p>
+  <p>
+    <strong>GSR</strong> 顺着这个结论：让 QwQ-32B 给 7B <em>自己的候选</em>写精炼答案，<em>并重点保留候选全错的困难样本</em>；训练时精炼损失与直接解题损失按 λ=0.5 加权（Eq. 3）。推理时同一个模型先采 4 个候选，再综合成一份新答案，不需要外部奖励模型。
+  </p>
+  <p>
+    收益集中在低质量候选：AIME24 上 4 个候选<em>全错</em>时仍答对 <strong>5.9%</strong>，论文称其他方法全为 0；反例同样明确：MATH500 上 selfRef@4（93.4）低于 BoN@4（93.5）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">73.6<small>%</small></div>
+      <div class="k">GSR-7B 五基准平均 selfRef@4（Table 1）<br>不加训练的精炼 39.4 / 同模型 maj@4 70.5 / 最强 BoN（RM-R1-7B）70.9</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+6.0<small> 点</small></div>
+      <div class="k">AIME24 selfRef@4 66.0 − maj@4 60.0（绝对点差）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 5">5.9<small>%</small></div>
+      <div class="k">AIME24 4 候选全错（N<sub>c</sub>=0，16 / 272 组）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>并行采样的聚合方法，上限都被候选集锁死</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么「从 k 个候选里挑」不会超过候选里最好的那条，以及为什么论文要先问「自精炼到底值不值」。</p>
+
+  <p>测试时扩展（TTS）不改参数，只在推理时多花算力。并行路线里最常见的两种做法：</p>
+  <ul>
+    <li><strong>多数投票 maj@k</strong>：取 k 个候选最终答案里出现最多的（Wang et al., 2023）。</li>
+    <li><strong>Best-of-N BoN@k</strong>：引入外部验证器、通常是奖励模型，给候选打分取最高（§1）。</li>
+  </ul>
+  <div class="quote">“However, these prevailing strategies are inherently bounded by the quality of the set of candidates (Khairi et al., 2025). They are limited to produce a solution that transcends the quality of candidate proposals, which becomes particularly problematic when all candidates are flawed.”<span class="src">§1</span></div>
+  <p>两种方法都只能返回某一条候选，k 条全错就没救。串行自我精炼（模型反复改自己的答案）曾是替代路线，但论文引 Huang et al. (2024)：没有外部反馈时模型很难自我纠错，有时还会变差（§1）。研究重心因此转向<strong>并行聚合</strong>：一次输入多个候选，合成一份新答案。</p>
+
+  <p>但这里有个测量问题：同样 k 条候选，多数投票本身就能带来明显提升，精炼多出来的那部分到底归功于什么并不清楚（§2）。这就是 RQ1：「Do we really need parallel self-refinement?」——要回答它，得先有一个「排除投票贡献」的度量。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两路：训一个融合模块，或直接提示模型自精炼</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两路前人各解决了一半，这篇补的是「自精炼增益从哪来、能不能训进小模型」，以及支撑这个判断的 Δ 数据。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">前人 A</span><h4>专门训练的合成器</h4></div>
+      <p>LLM-Blender、LMCor、AFT、CoT-based-Synthesizer 等（§5）：另外训一个生成模型，专门把多条解融成一条。本文对比的 <code>Synthesizer-8B</code> 属于这一类。</p>
+      <p><strong>论文的判断：</strong>“these methods focus exclusively on the task of improving parallel solutions, while neglecting to train the model to solve problems directly.”（§5）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">前人 B</span><h4>提示式并行自精炼</h4></div>
+      <p>不做训练，只在提示里塞进 k 个候选让模型综合。代表就是未训练的 Qwen2.5-7B-Instruct。</p>
+      <p><strong>结果（Table 1）：</strong>五基准平均 selfRef@4 39.4，与它自己的 maj@4 39.4 持平，表中 Δ 记为 ±0.0；AIME24 上 Δ 为 −1.1。</p>
+    </div>
+  </div>
+
+  <div class="note-box"><strong>还有一类：分层聚合。</strong>把候选分组、组内聚合、跨组再迭代。论文认为它「not indeed scaling on input and have a time complexity of 𝒪(N)」（§4.6）。</div>
+
+  <h3>度量：Refinement Gap 与它的三个观察</h3>
+  <div class="eq">Δ(ℳ, 𝒟, k) = <span class="hl-c">selfRef@k</span>(ℳ, 𝒟) − <span class="hl-a">maj@k</span>(ℳ, 𝒟)</div>
+  <div class="eq-cap">Eq. 1（§2）：同一模型、同一数据集、同一批 k 个候选上的差值；选择多数投票作基线，因为它是同一组解的确定性算子</div>
+
+  <div class="quote">
+    “(1) Parallel self-refinement consistently raises the ceiling beyond the base capability measured by pass@1 across all models and benchmarks evaluated.”<br>
+    “(2) The Refinement Gap Δ exhibits a clear scaling trend across instruction and thinking models. Further, we empirically observe a regime shift around 14B.”<br>
+    “(3) The Refinement Gap Δ is weakly correlated with the base capability of the models. For instance, on AIME24, DeepSeek-R1-Distill-Qwen-7B attains a higher base capability (54.4%) yet has Δ̄ = −0.8, while Qwen2.5-32B-Instruct attains a larger Δ̄ = 3.1 despite a much lower pass@1 (18.6%).”
+    <span class="src">§2 观察 (1)(2)(3) 原文</span>
+  </div>
+
+  <p>第 (3) 条是全文最反直觉的一张对照：7B 思考模型 pass@1 有 54.4%，Δ̄ 却是负的；32B 指令模型 pass@1 只有 18.6%，Δ̄ 反而更大。综合能力不能替代「从别人的解里提炼」的能力。</p>
+  <p>需要注意：原文 54.4% 仅标注为 base capability，18.6% 明写为 pass@1；二者口径来源不对称，本页按原文标注照录。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 290" role="img" aria-label="按 §2 与 §4.2 文字标出的 Refinement Gap，不是原图">
+      <rect x="70" y="30" width="760" height="210" fill="none" stroke="var(--border)"/>
+      <rect x="440" y="30" width="390" height="210" fill="var(--accent-soft)" opacity=".35"/>
+      <line x1="70" y1="240" x2="830" y2="240" stroke="var(--border-strong)"/>
+      <line x1="70" y1="170" x2="830" y2="170" stroke="var(--text-soft)" stroke-dasharray="4 4"/>
+      <text x="78" y="163" font-size="10.5" fill="var(--text-soft)" font-family="JetBrains Mono">Δ̄ = 0</text>
+      <text x="255" y="50" font-size="11" fill="var(--text-soft)" text-anchor="middle" font-family="JetBrains Mono">≈ 14B 以下：低增益区间</text>
+      <text x="635" y="50" font-size="11" fill="var(--accent-deep)" text-anchor="middle" font-family="JetBrains Mono">≈ 14B 及以上：高增益区间（「regime shift」）</text>
+
+      <circle cx="255" cy="184" r="7" fill="var(--c1)"/>
+      <text x="255" y="262" font-size="11" text-anchor="middle" fill="var(--text)" font-family="JetBrains Mono">R1-Distill-Qwen-7B</text>
+      <text x="255" y="277" font-size="10.5" text-anchor="middle" fill="var(--text-soft)">base capability 54.4%</text>
+      <text x="272" y="172" font-size="12" fill="var(--c1)" font-weight="600" font-family="JetBrains Mono">Δ̄ = −0.8</text>
+
+      <circle cx="635" cy="107.6" r="7" fill="var(--c1)"/>
+      <text x="635" y="262" font-size="11" text-anchor="middle" fill="var(--text)" font-family="JetBrains Mono">Qwen2.5-32B-Instruct</text>
+      <text x="635" y="277" font-size="10.5" text-anchor="middle" fill="var(--text-soft)">pass@1 18.6%</text>
+      <text x="652" y="100" font-size="12" fill="var(--c1)" font-weight="600" font-family="JetBrains Mono">Δ̄ = 3.1</text>
+
+      <circle cx="330" cy="82.9" r="8" fill="var(--c1)" stroke="var(--bg-surface)" stroke-width="2"/>
+      <text x="330" y="68" font-size="12" text-anchor="middle" fill="var(--c1)" font-weight="700" font-family="JetBrains Mono">+5.5（GSR-7B）</text>
+      <text x="345" y="98" font-size="10" fill="var(--text-soft)">§4.2 · AIME24/25 平均 Δ</text>
+      <text x="22" y="135" font-size="11" fill="var(--text-muted)" font-family="JetBrains Mono" transform="rotate(-90 22 135)">Δ̄</text>
+      <text x="830" y="163" font-size="9.5" text-anchor="end" fill="var(--text-soft)" font-family="JetBrains Mono">Δ̄ 以 0 与 3.1 定标；+5.5 是超出 −0.8..3.1 区间的外推点</text>
+    </svg>
+    <figcaption>
+      按文字重绘的示意，不是 Figure 2。纵轴以 Δ̄ = 0 与 Δ̄ = 3.1 两点定标（Δ̄ = −0.8 与 +5.5 按同一比例落点）；横轴只示意「小 / 大」两个区间，不代表参数量比例。
+      其中蓝点来自 §2 第 (3) 条，GSR-7B 的 +5.5 来自 §4.2（AIME24/AIME25 的平均 Δ̄，与 §2 的单基准 Δ̄ 不是同类量）。54.4% 原文未标 pass@1。Figure 2 逐模型的原图<strong>未转录</strong>；正文只点名过这三个模型。
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>GSR：候选来自学生、精炼目标来自教师，两种损失混着训</h2></div>
+  <p class="sec-sub">读完这节你应该知道：数据怎么造、损失怎么拼、为什么要同时训「解题」和「精炼」。</p>
+
+  <h3>数据：对着学生自己的候选写目标</h3>
+  <p>对每个问题 x，先从<strong>学生自己</strong>采 k 个候选 C<sub>k</sub>，拼成增强输入 x<sub>aug</sub> = Aug(x, C<sub>k</sub>)，再去问<strong>教师</strong>写一份精炼答案 y<sup>T</sup><sub>ref</sub>（§3.2）。选教师的依据就直接取 §2 的 Δ：「we select large teacher models with high refinement gap」；实际用的是 QwQ-32B（Appendix E）。</p>
+  <p>候选集怎么拼（Appendix E）：每个问题先用 Qwen2.5-7B-Instruct 按 T=1.0、top-p 0.95 采 6 解；<strong>全部正确解都保留</strong>，剩余名额用错误解补齐成 4 个；最后把顺序打乱。</p>
+  <div class="quote">“Notably, to ensure the student learns synthesis beyond candidate responses selection, we intentionally retain hard instances where the candidate pool is of low quality and highly inconsistent. Specifically, we emphasize the cases with N<sub>c</sub> = 0 (i.e., all candidate responses are incorrect) as well as other highly inconsistent scenarios, where voting or ranking is not effective.”<span class="src">§3.2</span></div>
+  <p>消融里的对照数据集是随机抽样、没有这道强调（§4.3），所以后面「全错也能救回」与这里的选择直接相关。</p>
+  <p>另一半数据是直接解题：拿原问题问教师，得到 y<sup>T</sup><sub>dir</sub>，构成 D<sub>dir</sub>。原文的理由是「the candidate quality sets the performance ceiling for refinement」（§3.2）。</p>
+
+  <h3>损失：两个 NLL 加权，λ 取 0.5</h3>
+  <div class="eq">ℒ<sub>dir</sub>(θ) = −𝔼<sub>D<sub>dir</sub></sub> log 𝒮<sub>θ</sub>(<span class="hl-a">y<sup>T</sup><sub>dir</sub> | x</span>)</div>
+  <div class="eq">ℒ<sub>ref</sub>(θ) = −𝔼<sub>D<sub>ref</sub></sub> log 𝒮<sub>θ</sub>(<span class="hl-c">y<sup>T</sup><sub>ref</sub> | x<sub>aug</sub></span>)</div>
+  <div class="eq">ℒ(θ) = <span class="hl-c">λ · ℒ<sub>ref</sub></span> + <span class="hl-a">(1 − λ) · ℒ<sub>dir</sub></span>，&nbsp; λ = 0.5</div>
+  <div class="eq-cap">Eq. 2（两个 NLL）与 Eq. 3（加权组合），§3.3；红 = 精炼目标，蓝 = 直接解题目标；𝒮<sub>θ</sub> 是同一个学生模型</div>
+
+  <div class="sim" style="margin:18px 0;padding:18px">
+    <div class="sim-top" id="mix-tabs">
+      <button class="rule-btn" data-mix="ds">+DS<span class="r-sub">只训 ℒ<sub>dir</sub></span></button>
+      <button class="rule-btn" data-mix="ref">+Ref<span class="r-sub">只训 ℒ<sub>ref</sub></span></button>
+      <button class="rule-btn active" data-mix="both">+ours<span class="r-sub">各 10K · λ=0.5</span></button>
+    </div>
+    <div class="chart" id="mix-chart" role="img" aria-label="Table 2 三种训练配方的 pass@1 与 selfRef@4"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>pass@1</span>
+      <span><i style="background:var(--accent)"></i>selfRef@4</span>
+    </div>
+    <div class="readout" data-src="Table 2">
+      <div class="r-head" id="mix-head">+ours · Table 2</div>
+      <div id="mix-readout">切换配方，看 pass@1 与 selfRef@4 的差距怎么变。</div>
+    </div>
+  </div>
+  <p><strong>与原文的关系：</strong>数值逐格取自 Table 2（§4.3）；交互只切换三种训练配方，不改原表口径。DS = 只训 ℒ<sub>dir</sub>，Ref = 只训 ℒ<sub>ref</sub>，ours = 各 10K。</p>
+  <details style="margin-top:10px">
+    <summary>手算两组<span class="sum-sub">与页面 JS 输出逐位对照</span></summary>
+    <div class="details-body">
+      <p><strong>第一组：+DS，AIME24。</strong>pass@1 38.3，selfRef@4 44.3；差 = 44.3 − 38.3 = <code>6.0</code> 点。<br>
+      <strong>第二组：+ours，AIME25。</strong>pass@1 29.0，selfRef@4 36.5；差 = 36.5 − 29.0 = <code>7.5</code> 点。<br>
+      同表 AIME25 的 +Ref：30.0 − 23.5 = <code>6.5</code> 点。所有差值都是 selfRef@4 − pass@1，同一行、同一题集。</p>
+    </div>
+  </details>
+
+  <div class="quote">
+    “Training only the refinement objective tends to be bottlenecked by candidate quality, which in turn limits the headroom. In contrast, training only the direct-solving objective improves the base capability but does not reliably teach the model to leverage imperfect candidates, resulting in a low or unstable refinement gap Δ.”
+    <span class="src">§3.3</span>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">和普通蒸馏的区别</span><h4>目标是「对你自己的候选怎么做」，不是「直接答案长什么样」</h4></div>
+    <p>引文来自 §3.2：“Unlike vanilla distillation, this supervision teaches how to refine the student’s own candidates, rather than only imitating direct answers.” 候选由学生生成、答案由教师给，学生学的是「从我自己的错解里挑出对的片段、修掉错的」——这一点是论文对数据构造的说明，效果上能走多远则看 06 节的数字。</p>
+  </div>
+</section>
+
+<!-- ================= 4. 训练与成本 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>368K 条 SFT、3 个 epoch；输出比直接解题短约三成</h2></div>
+  <p class="sec-sub">读完这节你应该知道：数据量与超参、评估口径，以及「四份候选塞进上下文」的代价是怎么压下来的。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">直接解题</span><h4>184K 条</h4></div>
+      <p>从过滤后的池子里随机抽的「问题 → 答案」（§4.1、Appendix E Table 7）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">精炼</span><h4>184K 条</h4></div>
+      <p>53K 个问题，每个用 QwQ-32B 至多采 10 解，按正确性筛出 184K（Appendix E）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">合计</span><h4>368K 条</h4></div>
+      <p>3 epochs，AdamW，lr 1e-4，10% warmup + cosine，batch 128，最大序列 24K（Appendix D.1）。</p>
+    </div>
+  </div>
+
+  <p>来源是 OpenMathReasoning（540K 题 / 3.2M 条生成），经过滤保留 <code>pass_rate_72b_tir</code> 在 0.25–0.90 之间的 56K 题（Appendix E Table 6）——即去掉了太简单和太难的问题。消融实验单独用 20K 样本、训 5 epochs、lr 4e-5（§4.3、Appendix D.1）。</p>
+
+  <h3>上下文成本：只留候选的 summary</h3>
+  <p>思考模型每份候选都很长，四份一起塞进输入会爆上下文。论文的做法是只取每份候选的 summary、丢掉 thinking 部分（Appendix B）。summary 只占直接解题输出 token 的 6.6%–14.8%，单份平均 570–960 tokens；评估时候选输入上限 6,144 tokens（Appendix D.2）。</p>
+
+  <div class="tbl-cap">Table 4（Appendix B）：GSR-7B 的平均输出 token 数</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>输出</th><th class="num">AIME24</th><th class="num">AIME25</th><th class="num">AMC22-23</th><th class="num">MATH500</th><th class="num">Olympiad</th></tr></thead>
+      <tbody>
+        <tr><td>self-Refinement</td><td class="num">8878</td><td class="num">10477</td><td class="num">5270</td><td class="num">2745</td><td class="num">5910</td></tr>
+        <tr><td>Direct Solving</td><td class="num">13232</td><td class="num">13687</td><td class="num">7732</td><td class="num">3850</td><td class="num">8209</td></tr>
+        <tr class="best"><td>Reduction(%)</td><td class="num">−32.9%</td><td class="num">−23.5%</td><td class="num">−31.8%</td><td class="num">−28.7%</td><td class="num">−28.0%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">Reduction 行照录（原文以降幅报，表中负号即「减少」）。按表内两行用 python3 复算：1 − 8878 / 13232 = 1 − 0.6709 = 0.3291，即输出 token 减少 32.9%（13687 → 10477：1 − 0.7654 = 0.2346，23.5%；7732 → 5270：0.3184，31.8%；3850 → 2745：0.2870，28.7%；8209 → 5910：0.2801，28.0%），与表中 |Reduction| 逐格一致。</p>
+  <p>注意这是<strong>输出</strong> token：一次精炼（参考 4 份候选）的生成量比一次直接解题少。输入侧先靠 summary 抽取，单份平均 570–960 tokens，评估时再卡每份 1,566 tokens 的上限（Appendix B、D.2）。论文没有把输入 + 输出合成一个总成本数字。</p>
+
+  <h3>评估口径</h3>
+  <ul>
+    <li>先用 direct-solving 模式采样，再在同一组候选上分别算 maj@4、BoN@4、selfRef@4（§4.1、Appendix D.2）。</li>
+    <li>指标是「每 4 个候选一组、非重叠分组，取所有组的平均」；AIME24/25 每题 32 次试验，其余 16 次（Appendix D.2）。</li>
+    <li>GSR-7B：最多 32768 新 token、T=0.6、top-p 0.95；base 模型最多 4096（Appendix D.2）。两者生成预算不同。</li>
+    <li>为对齐算力预算，另报 maj@5 与 BoN@5（§4.1）。</li>
+  </ul>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条数据从「学生的错解」走到「精炼监督」的路线</h2></div>
+  <p class="sec-sub">读完这节你应该知道：训练时两条数据流在哪里汇合、推理时「生成 → 精炼」两段各对应原文哪一节。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 300" role="img" aria-label="GSR 训练数据构造与推理流程示意">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"/></marker></defs>
+
+      <text x="10" y="18" font-size="11.5" fill="var(--text-muted)" font-family="JetBrains Mono">训练数据 · §3.2 / Appendix E</text>
+      <rect x="10" y="30" width="110" height="46" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="65" y="50" font-size="12" text-anchor="middle" fill="var(--text)">问题 x</text>
+      <text x="65" y="66" font-size="10" text-anchor="middle" fill="var(--text-soft)" font-family="JetBrains Mono">53K 题</text>
+
+      <rect x="160" y="22" width="150" height="62" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"/>
+      <text x="235" y="42" font-size="11.5" text-anchor="middle" fill="var(--c1)" font-weight="600">学生 7B 采 6 解</text>
+      <text x="235" y="58" font-size="10" text-anchor="middle" fill="var(--text-muted)">全留正确 + 错解补齐</text>
+      <text x="235" y="73" font-size="10" text-anchor="middle" fill="var(--text-muted)">→ 4 候选，打乱</text>
+
+      <rect x="350" y="22" width="140" height="62" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="420" y="42" font-size="11.5" text-anchor="middle" fill="var(--text)">x + 4 候选</text>
+      <text x="420" y="58" font-size="10" text-anchor="middle" fill="var(--text-soft)">只留 summary</text>
+      <text x="420" y="73" font-size="10" text-anchor="middle" fill="var(--text-soft)">超 8192 tok 丢弃</text>
+
+      <rect x="530" y="22" width="150" height="62" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"/>
+      <text x="605" y="42" font-size="11.5" text-anchor="middle" fill="var(--c2)" font-weight="600">教师 QwQ-32B</text>
+      <text x="605" y="58" font-size="10" text-anchor="middle" fill="var(--text-muted)">每题至多 10 解</text>
+      <text x="605" y="73" font-size="10" text-anchor="middle" fill="var(--text-muted)">按正确性筛 → 184K</text>
+
+      <rect x="720" y="22" width="130" height="62" rx="8" fill="var(--bg-surface)" stroke="var(--c1)" stroke-dasharray="5 3"/>
+      <text x="785" y="42" font-size="11.5" text-anchor="middle" fill="var(--c1)">教师直接解题</text>
+      <text x="785" y="58" font-size="10" text-anchor="middle" fill="var(--text-muted)">问题 → 答案</text>
+      <text x="785" y="73" font-size="10" text-anchor="middle" fill="var(--text-muted)">184K</text>
+
+      <line x1="120" y1="53" x2="158" y2="53" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+      <line x1="310" y1="53" x2="348" y2="53" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+      <line x1="490" y1="53" x2="528" y2="53" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+      <line x1="120" y1="53" x2="120" y2="180" stroke="var(--text-soft)"/><line x1="120" y1="180" x2="718" y2="180" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+
+      <rect x="160" y="150" width="520" height="60" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="420" y="176" font-size="12.5" text-anchor="middle" fill="var(--accent-deep)" font-weight="700">ℒ = 0.5·ℒ<sub>ref</sub> + 0.5·ℒ<sub>dir</sub>（Eq. 3）· 单模型 SFT</text>
+      <text x="420" y="196" font-size="10.5" text-anchor="middle" fill="var(--text-muted)">精炼目标约束在「看过候选」的输入上，解题目标约束在原问题上</text>
+      <line x1="605" y1="84" x2="605" y2="148" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+      <line x1="785" y1="84" x2="785" y2="128" stroke="var(--text-soft)"/><line x1="785" y1="128" x2="680" y2="128" stroke="var(--text-soft)"/><line x1="680" y1="128" x2="680" y2="148" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+
+      <text x="10" y="248" font-size="11.5" fill="var(--text-muted)" font-family="JetBrains Mono">推理 · §3.1 generate-then-refine</text>
+      <rect x="160" y="232" width="230" height="50" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"/>
+      <text x="275" y="253" font-size="11.5" text-anchor="middle" fill="var(--c1)" font-weight="600">direct 模式采 k 个候选</text>
+      <text x="275" y="270" font-size="10" text-anchor="middle" fill="var(--text-muted)">主实验 k=4；§4.6 扫 k=2…10</text>
+      <rect x="440" y="232" width="230" height="50" rx="8" fill="var(--bg-surface)" stroke="var(--accent)"/>
+      <text x="555" y="253" font-size="11.5" text-anchor="middle" fill="var(--accent-deep)" font-weight="600">refine 模式：看 k 个候选出 1 份</text>
+      <text x="555" y="270" font-size="10" text-anchor="middle" fill="var(--text-muted)">无外部奖励模型</text>
+      <rect x="720" y="232" width="130" height="50" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="785" y="253" font-size="11.5" text-anchor="middle" fill="var(--text)">selfRef@k</text>
+      <text x="785" y="270" font-size="10" text-anchor="middle" fill="var(--text-soft)">Math-Verify 判对错</text>
+      <line x1="390" y1="257" x2="438" y2="257" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+      <line x1="670" y1="257" x2="718" y2="257" stroke="var(--text-soft)" marker-end="url(#arr)"/>
+      <line x1="420" y1="210" x2="420" y2="222" stroke="var(--text-soft)" stroke-dasharray="3 3"/>
+      <text x="426" y="222" font-size="9.5" fill="var(--text-soft)" font-family="JetBrains Mono">同一模型，切换 prompt</text>
+    </svg>
+    <figcaption>按 §3.2、§3.3、§3.1、Appendix E、Appendix D.2 重绘的流程图，<strong>不是原图</strong>；Figure 3 原图未转录。「同一模型、切换 prompt」见 Appendix A 的两种提示模板。</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均领先来自 AIME；候选越差差距越大；MATH500 上赢不过 BoN</h2></div>
+  <p class="sec-sub">读完这节你应该知道：在哪几个基准上拉开差距、差距的来源、以及论文自己披露的例外。</p>
+
+  <div class="tbl-cap">Table 1（§4.2）：五基准准确率；k=4 的方法共享同一批候选；maj@5 / BoN@5 用于对齐算力预算</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>方法</th><th>聚合器</th><th class="num">AIME24</th><th class="num">AIME25</th><th class="num">AMC22-23</th><th class="num">MATH500</th><th class="num">Olympiad</th><th class="num">Avg.</th></tr></thead>
+      <tbody>
+        <tr><td colspan="8" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-soft)">Qwen2.5-7B-Instruct（Base）</td></tr>
+        <tr><td>pass@1</td><td>—</td><td class="num">13.2</td><td class="num">7.2</td><td class="num">43.6</td><td class="num">75.9</td><td class="num">39.5</td><td class="num">35.9</td></tr>
+        <tr><td>maj@4</td><td>—</td><td class="num">16.7</td><td class="num">9.6</td><td class="num">47.7</td><td class="num">79.4</td><td class="num">43.5</td><td class="num">39.4</td></tr>
+        <tr><td>BoN@4</td><td>SkyworkRM-27B</td><td class="num">17.1</td><td class="num">9.2</td><td class="num">48.0</td><td class="num">78.6</td><td class="num">43.0</td><td class="num">39.2</td></tr>
+        <tr><td>selfRef@4</td><td>—</td><td class="num">15.6</td><td class="num">11.3</td><td class="num">47.5</td><td class="num">78.7</td><td class="num">43.8</td><td class="num">39.4</td></tr>
+        <tr><td>Δ（selfRef − maj）</td><td>—</td><td class="num">−1.1</td><td class="num">+1.7</td><td class="num">−0.2</td><td class="num">−0.7</td><td class="num">+0.3</td><td class="num">±0.0</td></tr>
+        <tr><td colspan="8" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-soft)">GSR-7B（After Training）</td></tr>
+        <tr><td>pass@1</td><td>—</td><td class="num">50.1</td><td class="num">37.8</td><td class="num">78.5</td><td class="num">90.6</td><td class="num">64.4</td><td class="num">64.3</td></tr>
+        <tr><td>maj@4</td><td>—</td><td class="num">60.0</td><td class="num">46.7</td><td class="num">84.6</td><td class="num">92.8</td><td class="num">68.3</td><td class="num">70.5</td></tr>
+        <tr><td>maj@5</td><td>—</td><td class="num">60.7</td><td class="num">48.3</td><td class="num">84.9</td><td class="num">93.1</td><td class="num">68.8</td><td class="num">71.1</td></tr>
+        <tr><td>BoN@4</td><td>RRM-7B</td><td class="num">60.4</td><td class="num">46.3</td><td class="num">80.4</td><td class="num">90.6</td><td class="num">64.6</td><td class="num">68.5</td></tr>
+        <tr><td>BoN@4</td><td>RM-R1-7B</td><td class="num">62.1</td><td class="num">45.4</td><td class="num">84.6</td><td class="num">93.5</td><td class="num">69.1</td><td class="num">70.9</td></tr>
+        <tr><td>BoN@4</td><td>SkyworkRM-27B</td><td class="num">58.3</td><td class="num">46.7</td><td class="num">81.6</td><td class="num">92.5</td><td class="num">67.6</td><td class="num">69.3</td></tr>
+        <tr><td>BoN@5</td><td>SkyworkRM-27B</td><td class="num">59.2</td><td class="num">46.3</td><td class="num">82.8</td><td class="num">92.7</td><td class="num">67.7</td><td class="num">69.7</td></tr>
+        <tr><td>Ref@4</td><td>Synthesizer-8B</td><td class="num">60.2</td><td class="num">44.0</td><td class="num">84.0</td><td class="num">92.0</td><td class="num">67.7</td><td class="num">69.6</td></tr>
+        <tr class="best"><td>selfRef@4</td><td>—</td><td class="num">66.0</td><td class="num">51.7</td><td class="num">85.7</td><td class="num">93.4</td><td class="num">71.0</td><td class="num">73.6</td></tr>
+        <tr><td>Δ（selfRef − maj）</td><td>—</td><td class="num">+6.0</td><td class="num">+5.0</td><td class="num">+1.1</td><td class="num">+0.6</td><td class="num">+2.7</td><td class="num">+3.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p style="font-size:13px;color:var(--text-soft)"><strong>口径先钉死：</strong>本页所有「提升」都是 Δ = selfRef@4 − maj@4，同一训练后模型、同一批候选，单位为<strong>百分点（绝对差）</strong>。python3 逐格复算：66.0 − 60.0 = 6.0；51.7 − 46.7 = 5.0；85.7 − 84.6 = 1.1；93.4 − 92.8 = 0.6；71.0 − 68.3 = 2.7；五格均值 15.4 / 5 = 3.08，原表取 +3.1。</p>
+
+  <p>另一个容易被读高的数是 73.6：相对最强 BoN（RM-R1-7B，70.9）是 <strong>+2.7 个百分点</strong>（73.6 − 70.9），相对提升 (73.6 − 70.9) / 70.9 = 3.8%；相对 maj@4（70.5）是 +3.1 点，相对提升 4.4%（3.1 / 70.5 = 4.40%）。</p>
+
+  <p>差距集中在哪？五项 Δ 里 AIME 两项合计 11.0 点，占 15.4 点的 11.0 / 15.4 = 71.4%。<span class="infer">推断</span>（依据：上表 Δ 行 +6.0、+5.0、+1.1、+0.6、+2.7）。</p>
+
+  <h3>自己切一遍：投票到精炼多出来的那一段</h3>
+  <p>下面只画 GSR-7B 表的 maj@4 与 selfRef@4 两行，蓝柱是投票、红柱是「投票后再综合」。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="sim-top" id="bench-tabs">
+      <button class="rule-btn active" data-i="0">全部 5 个基准<span class="r-sub">Table 1 · GSR-7B</span></button>
+      <button class="rule-btn" data-i="1">只看 AIME24 / AIME25<span class="r-sub">Δ 合计 11.0 点</span></button>
+    </div>
+    <div class="chart" id="bench-chart" role="img" aria-label="GSR-7B 的 maj@4（青灰）与 selfRef@4（陶土红）柱状对比，数值见 Chart 内的数字标签"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>maj@4</span>
+      <span><i style="background:var(--accent)"></i>selfRef@4</span>
+    </div>
+    <div class="readout" data-src="Table 1">
+      <div class="r-head">读数 · 百分点</div>
+      <div id="bench-readout">点任意一根柱看这一格的差。</div>
+    </div>
+  </div>
+
+  <h3>论文自己披露的例外</h3>
+  <div class="quote">“We note that in the MATH500 dataset, selfRef@4 is marginally underperformed by BoN@4 (93.4% vs. 93.5%). We hypothesize that it is due to the specific dynamics of high-accuracy regimes (90.6% on pass@1). In such a scenario, at least a correct answer is highly likely to be present in any set of candidate responses, making selection methods like Best-of-N particularly effective.”<span class="src">§4.2</span></div>
+  <p>这一格的 BoN 是 RM-R1-7B。表里同一列，maj@4（92.8）与 maj@5（93.1）都低于 selfRef@4（93.4）——例外只出现在「奖励模型挑」这一路。</p>
+  <p>另外，论文摘要写「state-of-the-art performance across five mathematical benchmarks」，而 §4.2 正文同时交代了 MATH500 上 selfRef@4 低于 BoN@4；两处并列呈现，不替摘要做补充说明。</p>
+
+  <h3>消融：精炼上限最高的来自混合训练</h3>
+  <div class="tbl-cap">Table 2（§4.3）：三种 20K 同题数据集；DS = 只训 D<sub>dir</sub>，Ref = 只训 D<sub>ref</sub>，ours = 各 10K</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th rowspan="2">训练数据</th><th colspan="2" class="num">AIME24</th><th colspan="2" class="num">AIME25</th></tr><tr><th class="num">pass@1</th><th class="num">selfRef@4</th><th class="num">pass@1</th><th class="num">selfRef@4</th></tr></thead>
+      <tbody>
+        <tr><td>baseline</td><td class="num">13.2</td><td class="num">15.6</td><td class="num">7.2</td><td class="num">9.6</td></tr>
+        <tr><td>+DS</td><td class="num">38.3</td><td class="num">44.3</td><td class="num">29.6</td><td class="num">33.2</td></tr>
+        <tr><td>+Ref</td><td class="num">26.4</td><td class="num">45.0</td><td class="num">23.5</td><td class="num">30.0</td></tr>
+        <tr class="best"><td>+ours</td><td class="num">37.5</td><td class="num">51.5</td><td class="num">29.0</td><td class="num">36.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>三件事：<strong>DS</strong> 的 pass@1 最高（38.3 / 29.6），但 selfRef@4 只比 pass@1 高 6.0 / 3.6 点；<strong>Ref</strong> 的 selfRef@4 在 AIME24 上只比 ours 低 6.5 点（51.5 − 45.0），pass@1 却只有 26.4；<strong>ours</strong> 两项 selfRef@4 都最高（51.5 / 36.5）。与 §3.3 的论证方向一致。</p>
+  <p>原文对这张表的结论：「The model trained on a DS dataset achieves the highest pass@1 scores while its’ capacity for self-refinement is severely limited.」「Our method strikes the optimal balance.」（§4.3）</p>
+  <p style="font-size:13px;color:var(--text-soft)">另需注意：Table 2 的 baseline 行写 AIME24 15.6 / AIME25 9.6，而 Table 1 的 base 模型是 AIME24 15.6 / AIME25 11.3。本页照录 Table 2，不做修正。</p>
+
+  <h3>候选越差，GSR 的优势越明显</h3>
+  <p>§4.4 按「4 个候选里有几个正确（N<sub>c</sub>）」分组。原文两端：</p>
+  <div class="quote">
+    “when a clear majority of candidates are correct (N<sub>c</sub> ≥ 3), all methods perform exceptionally well, often achieving near perfect accuracy.”<br>
+    “…our selfRef@4 achieves an impressive 60.2% accuracy, substantially outperforming majority voting (maj@4 at 18.8%) and all BoN@4 variants. Crucially, even when all candidates are incorrect (N<sub>c</sub> = 0), our approach can still produce a correct solution 5.9% of the time, whereas all baseline methods fail.”
+    <span class="src">§4.4 · 第二句是 AIME24 的 N<sub>c</sub>=1 / N<sub>c</sub>=0 段</span>
+  </div>
+
+  <div class="tbl-cap">Table 5（Appendix C）：GSR-7B 在各基准按 N<sub>c</sub> 分组的答对比例（%）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>N<sub>c</sub></th><th class="num">AIME24</th><th class="num">AIME25</th><th class="num">AMC22-23</th><th class="num">MATH500</th><th class="num">Olympiad</th></tr></thead>
+      <tbody>
+        <tr><td>4 / 4</td><td class="num">100</td><td class="num">100</td><td class="num">99.9</td><td class="num">99.8</td><td class="num">99.8</td></tr>
+        <tr><td>3 / 4</td><td class="num">97.4</td><td class="num">95.8</td><td class="num">99.3</td><td class="num">94.3</td><td class="num">94.0</td></tr>
+        <tr><td>2 / 4</td><td class="num">89.6</td><td class="num">87.1</td><td class="num">80</td><td class="num">76.4</td><td class="num">81.0</td></tr>
+        <tr><td>1 / 4</td><td class="num">60.2</td><td class="num">65.6</td><td class="num">53.6</td><td class="num">49.1</td><td class="num">50.7</td></tr>
+        <tr class="best"><td>0 / 4</td><td class="num">5.9</td><td class="num">4.5</td><td class="num">9.0</td><td class="num">3.4</td><td class="num">4.4</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">AIME24 的 N<sub>c</sub>=1 那格：python3 复算 77 / 128 = 60.16%，原表 60.2；N<sub>c</sub>=0 那格 16 / 272 = 5.88%，原表 5.9（Table 5 的 Correct / Total 列）。</p>
+  <p>跨基准：GSR 从「全错候选」中救回的答案为 3.4%（MATH500）到 9.0%（AMC22-23）（§4.4 正文）。</p>
+
+  <p><strong>输入扩展（§4.6、Figure 6）：</strong>k 从 2 扫到 10，k≤4 时已稳定；k=2 时 AIME24 的 selfRef@2 63.2%，略高于 pass@2 的 62.5%；k 更大时 selfRef@k 一直高于 maj@k，随 k 上升。Figure 6 原图<strong>未转录</strong>；正文只点名了 k=2 这一个数。</p>
+
+  <p><strong>扩到更大模型（§4.5、Table 3）：</strong>用 7B 自己候选造出的同一批混合数据（消融版 10K + 10K）训 14B 与 32B。selfRef@4 都高于各自的 maj@4：14B AIME24 68.1 vs 56.7；32B AIME25 67.3 vs 59.2。原文写「20.1% relative improvement (68.1% vs. 56.7%)」与「13.7% relative improvement (67.3% vs. 59.2%)」；python3 复算 (68.1 − 56.7) / 56.7 = 20.1%、(67.3 − 59.2) / 59.2 = 13.7%，相对提升口径（Table 3、§4.5）；对应绝对差为 11.4 点与 8.1 点，本页不把相对提升当绝对点差写。Table 3 其余 14 个单元格本页未转录（只取与这两句原句对应的格）。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它要求三个前提：数学任务、可验证奖励、候选别全废</h2></div>
+  <p class="sec-sub">读完这节你应该知道：论文自述的局限、两个需要留意的地方，以及页面上几处数字的口径差异。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">前提 1</span><h4>只在数学上验过</h4></div>
+      <p>“Due to limited computational resources, our experiments focus on mathematical reasoning domains. … it may not fully represent other reasoning scenarios (e.g., logical deduction, programming, scientific QA, or agentic tool use).”（§7）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">前提 2</span><h4>训练依赖可验证奖励</h4></div>
+      <p>“Our data construction pipeline relies on strong teacher models and the verifiable reward to filter solutions. This design may be less directly applicable to tasks that lacks reliable verification.”（§7）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">前提 3</span><h4>候选质量定天花板</h4></div>
+      <p>“the candidate quality sets the performance ceiling for refinement”（§3.2）。候选全错时 AIME24 也只有 5.9%——不比 0 大很多。</p>
+    </div>
+  </div>
+
+  <h3>N<sub>c</sub>=0 那 5.9% 的分母</h3>
+  <p>Table 5 的 AIME24 N<sub>c</sub>=0 行：正确 16、错误 256、合计 272。python3 复算 16 / 272 = 5.88%，与 5.9% 对得上；5.9% × 272 = 16.05。<span class="infer">推断</span>（依据：Table 5 的 Correct / Total 两列自洽，5.9% 应是对 272 个「N<sub>c</sub>=0 组」计的结果，而不是把 32 次试验再合并平均——后者分母不会恰好是 272）。</p>
+
+  <h3>跨领域验证：K&amp;K（§4.7、Figure 7）</h3>
+  <p>只在数学上训练的 GSR-7B 被放到 K&amp;K 逻辑谜题的 4ppl 子集（改写为多项选择）上：pass@1 从 base 的 12.9% 到 37.3%；base 的 selfRef@4 相对其 maj@4 变化 −7.6%，GSR 的 selfRef@4 相对其 maj@4 变化 +7.2%。原文只说「带箭头的图注标注的是相对变化」；Figure 7 原图未转录，原文没有给出 maj@4 的绝对数值，所以 7.2% 无法在本页换算成绝对点差。</p>
+
+  <h3>两个需要留意的地方</h3>
+  <ul>
+    <li><strong>摘要 vs §4.2：</strong>摘要写五基准 SOTA，§4.2 同时指出 MATH500 上 selfRef@4 低于 BoN@4（93.4 vs 93.5）。两处原文直接并列，本页不替任何一方补充或取舍。</li>
+    <li><strong>Table 2 baseline 与 Table 1 base：</strong>AIME25 selfRef@4 一个写 9.6、一个写 11.3；本页两张表各按原表数字转录，原文未说明这 1.7 点的来源。</li>
+  </ul>
+
+  <details class="zero">
+    <summary>页面与笔记的出入<span class="sum-sub">笔记源文件 /learning-to-refine-self-refinement-of-parallel-reasoning-in-llms/</span></summary>
+    <div class="details-body">
+      <ol>
+        <li><strong>Figure 1 案例的答案。</strong>笔记写四个候选同为 5624、忽略 c=9、GSR 最终答案 5694。v2 的 Figure 1 是摘要式案例（四个候选全错仍能综合出正确答案，原句 “Even provided with four incorrect candidates, it can still reference them, diagnose the flaws, and finally construct a correct answer.”），完整案例在 Appendix F：问题求 AB·AC，候选 384 / 26√39 / 312 / 26 → 468（F.3：“a novel solution path, distinct from all candidate responses”）；笔记里的 5624 / c=9 / 5694 在 v2 中不存在。</li>
+        <li><strong>Brackets：</strong>笔记举例数字 60.2 / 18.8 / 5.9 与 v2 §4.4 一致。</li>
+        <li><strong>「6.5 / 7.6 与 6.5 / 7.2」：</strong>笔记写「提升了 7.2%，而未经训练的基座模型反而下降了 7.6%」，v2 §4.7 正文同（两处均以各自 maj@4 为基线）。</li>
+        <li><strong>表 1 数字：</strong>笔记的 73.6、70.9、69.6、66.0 与 v2 Table 1 一致；「在 AIME24 上 Nc=0 时 5.9%」与 Table 5 一致。勘误：笔记 “đạt” 为录入错误；笔记把 Larger Models 行的 pass@1 当作对比对象，Table 1 注释这些数字来自 Yang et al. (2025c)。</li>
+        <li><strong>SSOT（唯一性表述）：</strong>笔记写「性能远超基线」「雄辩地证明」，原文对应的是 SOP 只有 ±3.1 平均差与 MATH500 一格的例外；本页按事实口径描述。</li>
+      </ol>
+    </div>
+  </details>
+</section>
+
+<footer>
+  <div>Learning to Refine: Self-Refinement of Parallel Reasoning in LLMs · Qibin Wang, Pu Zhao, Shaohan Huang, Fangkai Yang, Lu Wang, Furu Wei, Qingwei Lin, Saravanan Rajmohan, Dongmei Zhang · Microsoft / Peking University</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.00084v2" target="_blank" rel="noopener">https://arxiv.org/abs/2509.00084v2</a>（本页只引 v2，所有表号、图号、章节以 v2 为准；不带版本号的 abs 链接也以 v2 为准）<br>
+    笔记：<a href="/learning-to-refine-self-refinement-of-parallel-reasoning-in-llms/">Learning to Refine：Self-Refinement of Parallel Reasoning in LLMs</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============ 交互 1：Table 1 柱状对比 ============ */
+  var ROWS = [
+    { name: 'AIME24', maj: 60.0, ref: 66.0 },
+    { name: 'AIME25', maj: 46.7, ref: 51.7 },
+    { name: 'AMC22-23', maj: 84.6, ref: 85.7 },
+    { name: 'MATH500', maj: 92.8, ref: 93.4 },
+    { name: 'Olympiad', maj: 68.3, ref: 71.0 }
+  ];
+  var chart = document.getElementById('bench-chart');
+  var readout = document.getElementById('bench-readout');
+  var tabs = document.querySelectorAll('#bench-tabs .rule-btn');
+
+  function fmt1(x) {
+    return (Math.round(x * 10) / 10).toFixed(1);
+  }
+
+  function renderBars(list) {
+    if (!chart) return;
+    chart.innerHTML = '';
+    list.forEach(function (r) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var nm = document.createElement('div');
+      nm.className = 'cname';
+      nm.textContent = r.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      var pairs = [
+        { key: 'maj', v: r.maj, color: 'var(--c1)', label: 'maj@4' },
+        { key: 'ref', v: r.ref, color: 'var(--accent)', label: 'selfRef@4' }
+      ];
+      pairs.forEach(function (p) {
+        var cb = document.createElement('div');
+        cb.classList.add('cbar');
+        cb.setAttribute('data-bench', r.name);
+        cb.setAttribute('data-kind', p.key);
+        cb.setAttribute('aria-label', r.name + ' · ' + p.label + ' = ' + fmt1(p.v) + '%');
+        cb.style.cursor = 'pointer';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = p.color;
+        fill.style.height = p.v + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = fmt1(p.v);
+        cb.appendChild(track);
+        cb.appendChild(num);
+        cb.addEventListener('click', function () { showDiff(r, p.key); });
+        bars.appendChild(cb);
+      });
+      row.appendChild(nm);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+  }
+
+  function showDiff(r, key) {
+    if (!readout) return;
+    var diff = Math.round(r.ref * 10 - r.maj * 10) / 10;
+    var sign = diff >= 0 ? '+' : '−';
+    var pre = key === 'maj'
+      ? r.name + ' · maj@4 = ' + fmt1(r.maj) + '%'
+      : r.name + ' · selfRef@4 = ' + fmt1(r.ref) + '%，与 maj@4 之差 ' + sign + fmt1(Math.abs(diff)) + ' 点（' + fmt1(r.ref) + ' − ' + fmt1(r.maj) + '）';
+    readout.textContent = pre + '（Table 1，GSR-7B 行）';
+  }
+
+  if (chart) {
+    renderBars(ROWS);
+    Array.prototype.forEach.call(tabs, function (b) {
+      b.addEventListener('click', function () {
+        Array.prototype.forEach.call(tabs, function (o) { o.classList.remove('active'); });
+        b.classList.add('active');
+        var i = b.getAttribute('data-i');
+        renderBars(i === '1' ? ROWS.slice(0, 2) : ROWS);
+        if (readout) {
+          readout.textContent = i === '1'
+            ? '只显示 AIME24 / AIME25：两格 Δ 合计 11.0 点，占五项总差 15.4 点的 71.4%。'
+            : '点任意一根柱看这一格的差。';
+        }
+      });
+    });
+  }
+
+  /* ============ 交互 2：Table 2 训练配方 ============ */
+  var MIX = {
+    ds:   { label: '+DS',   AIME24: [38.3, 44.3], AIME25: [29.6, 33.2] },
+    ref:  { label: '+Ref',  AIME24: [26.4, 45.0], AIME25: [23.5, 30.0] },
+    both: { label: '+ours', AIME24: [37.5, 51.5], AIME25: [29.0, 36.5] }
+  };
+  var mixChart = document.getElementById('mix-chart');
+  var mixReadout = document.getElementById('mix-readout');
+  var mixHead = document.getElementById('mix-head');
+  var mixTabs = document.querySelectorAll('#mix-tabs .rule-btn');
+
+  function renderMix(key) {
+    if (!mixChart) return;
+    var m = MIX[key];
+    mixChart.innerHTML = '';
+    ['AIME24', 'AIME25'].forEach(function (name) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var nm = document.createElement('div');
+      nm.className = 'cname';
+      nm.textContent = name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      [{ v: m[name][0], color: 'var(--c1)', label: 'pass@1' },
+       { v: m[name][1], color: 'var(--accent)', label: 'selfRef@4' }].forEach(function (p) {
+        var cb = document.createElement('div');
+        cb.classList.add('cbar');
+        cb.setAttribute('data-kind', p.label);
+        cb.setAttribute('aria-label', name + ' · ' + p.label + ' = ' + fmt1(p.v) + '%');
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = p.color;
+        fill.style.height = p.v + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = fmt1(p.v);
+        cb.appendChild(track);
+        cb.appendChild(num);
+        bars.appendChild(cb);
+      });
+      row.appendChild(nm);
+      row.appendChild(bars);
+      mixChart.appendChild(row);
+    });
+    var d24 = Math.round((m.AIME24[1] - m.AIME24[0]) * 10) / 10;
+    var d25 = Math.round((m.AIME25[1] - m.AIME25[0]) * 10) / 10;
+    if (mixHead) mixHead.textContent = m.label + ' · Table 2';
+    if (mixReadout) {
+      mixReadout.textContent = 'AIME24：' + fmt1(m.AIME24[0]) + ' → ' + fmt1(m.AIME24[1]) +
+        '，差 +' + fmt1(d24) + ' 点；AIME25：' + fmt1(m.AIME25[0]) + ' → ' + fmt1(m.AIME25[1]) +
+        '，差 +' + fmt1(d25) + ' 点。';
+    }
+  }
+
+  if (mixChart) {
+    renderMix('both');
+    Array.prototype.forEach.call(mixTabs, function (b) {
+      b.addEventListener('click', function () {
+        Array.prototype.forEach.call(mixTabs, function (o) { o.classList.remove('active'); });
+        b.classList.add('active');
+        renderMix(b.getAttribute('data-mix'));
+      });
+    });
+  }
+})();
+</script>
+</body>
+</html>

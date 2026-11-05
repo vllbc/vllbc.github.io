@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimuRA · 先在世界模型里把候选动作「演一遍」，再挑出下一步</title>
+<meta name="description" content="SimuRA（v3 更名 SiRA）用基于 LLM 的世界模型在自然语言信念状态上推演候选意图，critic 打分后由 actor 落地。FlightQA 正确率从 0% 到 32.2%，比同架构反应式规划高 124%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：模拟器的推演日志 */
+.trace{
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.75;color:var(--text-muted);
+  background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:12px 14px;margin:12px 0 0;max-height:280px;overflow:auto;white-space:pre-wrap;
+}
+.trace .t-act{color:var(--c1);font-weight:600}
+.trace .t-ok{color:var(--accent);font-weight:600}
+.lab{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-soft);margin-bottom:6px}
+@media (max-width:880px){ .trace{font-size:11.5px} }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SimuRA</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#baselines">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">怎么算</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2507.23773 · 2025</span>
+  <h1>SimuRA：先在世界模型里把候选动作演一遍，再挑出下一步</h1>
+  <p class="hero-sub">
+    主流 web agent 是<strong>反应式</strong>的：看页面，直接采样下一个动作。论文认为这混淆了两件事——<strong>内部多算几个 token</strong>，和<strong>真的对「这么做会怎样」做反事实推演</strong>。
+    SimuRA（arXiv v3 已更名为 SiRA）把决策拆成感知 / 规划 / 行动三层：规划器用 LLM 世界模型在自然语言信念状态上推演候选意图，critic 给终点态打分，最高分的意图交给 actor 落地。
+  </p>
+  <div class="meta">
+    <span>Mingkai Deng, Jinyu Hou, Yilin Shen, Hongxia Jin, Graham Neubig, Zhiting Hu, Eric Xing（v1 作者页署名；v3 仅保留前两位与 Hu、Xing，见 footer）</span>
+    <a href="https://arxiv.org/abs/2507.23773" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/sailing-lab/sira" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文把最优决策写成：<em>对未来动作序列取 arg max（目标进度 + 终点价值）× 轨迹概率</em>（式 4）。反应式 agent 只做了「采一个动作」，既没有环境转移 p<sub>μ</sub>，也没有终点价值 V；SimuRA 用<strong>世界模型 f 补 p</strong>、用 <strong>critic v 补 V</strong>。
+  </p>
+  <p>
+    <strong>世界模型是零样本 LLM</strong>：状态不做向量压缩，而由编码器把页面摘要成一段自然语言<em>信念状态</em>；模拟动作也不是 <code>click('128')</code>，而是「比较直飞最低价」这类<strong>抽象意图</strong>。按意图推演、按原子动作执行。
+  </p>
+  <p>
+    三个差异很大的 web 任务上，模拟规划都赢过<em>同架构</em>的反应式对照。最扎眼的是：强推理模型 o1 / o3-mini 直接当 planner 生成长 CoT，FlightQA 上只有 1.1% / 3.3%——<strong>拉长内部计算，换不来反事实推演</strong>。
+  </p>
+  <p>
+    代价同样明确：不做任何训练，每个决策摊成数十次 LLM 调用，论文把缓存与并行列为未来工作；绝对成功率（23%–32%）说明这还只是「方向对」的证据。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">32.2<small>%</small></div>
+      <div class="k">FlightQA 正确率<br>OpenHands BrowsingAgent 为 0.0%</div>
+    </div>
+    <div class="metric">
+      <div class="v">+124<small>%</small></div>
+      <div class="k">相对同架构反应式规划<br>32.2% vs 14.4%（p &lt; 0.01）</div>
+    </div>
+    <div class="metric">
+      <div class="v">1.0<small>%</small></div>
+      <div class="k">FanOutQA 重复动作率<br>反应式 10.0% / BrowsingAgent 43.0%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>反应式 agent 把「想得久」误当成了「想得远」</h2></div>
+  <p class="sec-sub">读完这节应能回答：论文说「没有规划」，缺的到底是哪一步。</p>
+
+  <p>论文沿用经典 agent–environment 模型：agent 策略 π 从状态 s<sub>t</sub> 出动作 a<sub>t</sub>，环境 μ 按 p<sub>μ</sub>(s<sub>t+1</sub> | s<sub>t</sub>, a<sub>t</sub>) 给出下一状态。一条长度为 T 的轨迹出现的概率，就是逐级策略概率与环境转移概率相乘。据此，价值函数满足递推（式 2）：</p>
+
+  <div class="eq">
+    V<sup>g</sup><sub>π,μ</sub>(s<sub>t</sub>) = Σ<sub>(a<sub>t</sub>, s<sub>t+1</sub>, …, s<sub>T</sub>)</sub>
+    ( <span class="hl-a">Σ<sub>k=t</sub><sup>T−1</sup> γ<sup>k</sup> r(g, s<sub>k</sub>) + γ<sup>T</sup> V<sup>g</sup><sub>π,μ</sub>(s<sub>T</sub>)</span> )
+    · <span class="hl-b">p<sup>π</sup><sub>μ</sub>(a<sub>t</sub>, s<sub>t+1</sub>, …, s<sub>T</sub> | s<sub>t</sub>)</span>
+  </div>
+  <div class="eq-cap">式 2 · 青灰 = goal progress（到 T 为止的累计奖励 + 终点价值）· 紫 = trajectory（这条轨迹出现的概率）</div>
+
+  <p>于是最优 agent 的决策规则（式 4）是：对未来整段动作 a<sub>t:T−1</sub> 取 arg max，内部把每条可能轨迹的「目标进度」乘上「轨迹概率」再求和。它需要两样东西：<strong>环境如何响应（p<sub>μ</sub>）</strong>，和<strong>走到终点值多少（V）</strong>。</p>
+
+  <p>反应式 agent 实际只做了其中一小步：</p>
+  <div class="eq" style="font-size:15px">
+    a<sub>t</sub> ~ p<sub>π</sub>(a<sub>t</sub> | s<sub>t</sub>) &nbsp;&nbsp;&nbsp; —— 直接出动作，不模拟、不评估
+  </div>
+  <div class="eq-cap">等价于从候选策略 π̃ 里取第一个采样：没有 p<sub>μ</sub>，也没有 V</div>
+
+  <p>论文对这一点有一个关键判断：<strong>长链 CoT、乃至用 RL 训出的推理模型，拉长的只是「内部计算」</strong>——生成更多 token 去更好地拟合观察，而<strong>不是「规划」</strong>——提出候选、预测后果、依据预测去选择。差别的核心在于后者需要一条有据可依的<strong>反事实通道</strong>：「从 s 做 a，会发生什么」。没有它，再多思考也只是换一种方式反应，错误仍会在长轨迹上累积。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">问题定性</span><h4>不是模型不够聪明，是架构里缺了一块</h4></div>
+    <p>这直接决定了对照实验的设计：换更强的 backbone 无法证明「规划」的价值，必须<strong>在同一架构内、只替换规划模块</strong>，才能把「模拟本身」的贡献隔离出来。这就是 02 节里 System I / System II 对照的由来。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="baselines">
+  <div class="sec-head"><span class="sec-num">02</span><h2>工程脚手架与向量式世界模型，都没把「预测未来」做成独立可评估的模块</h2></div>
+  <p class="sec-sub">论文在 Related Work 里把前人分成两簇，实验里再用四组对照各自钉住短板。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">反应式（System I）</span><h4>能力从外部工程里长出来</h4></div>
+      <p>训练型（AutoWebGLM、AgentQ、UI-TARS）、prompt 工作流（AWM、Voyager）、以及 Operator / Computer Use / WebVoyager / CogAgent 等，大多以 ReAct 为骨架；多智能体工作流与 code-action 系统把任务分给专家或写成脚本。</p>
+      <p><strong>共同短板：</strong>行为总是「对观察做反应」，从不显式建模或比较未来状态。能力主要来自预定义的工具与流程，而不是推演。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">世界模型式规划</span><h4>会推演，但状态是一坨向量</h4></div>
+      <p>从棋类、Atari 到连续控制里的 model-based RL，再到 LLM 时代的数学推理、游戏与网页浏览，都用预测模型模拟候选动作的后果。</p>
+      <p><strong>共同短板：</strong>论文指出前人通常把世界状态写成<strong>整体的连续 embedding</strong>，噪声与高方差削弱决策；且大多针对窄领域，没把模拟推理当作<strong>通用</strong>规划范式。</p>
+    </div>
+  </div>
+
+  <h3>四个对照组，各自回答一个问题</h3>
+  <ul>
+    <li><strong>Simulative（System II）</strong>：完整 SimuRA，世界模型规划。</li>
+    <li><strong>Reactive（System I）</strong>：同一架构，只把规划模块换成「从策略直接取第一个采样」。状态表示、分层动作都不变，隔离出「模拟 vs 不模拟」。</li>
+    <li><strong>Unstructured CoT</strong>：planner 换成强推理模型（o1 / o3-mini）自由生长 CoT。检验「加长内部计算能否替代显式模拟」，因成本只在 FlightQA 上报告。</li>
+    <li><strong>OpenHands BrowsingAgent</strong>：外部开源 ReAct 式 agent，提供架构外对照。</li>
+  </ul>
+  <p>论文的世界模型设计正好对着上一簇的三个短板：状态不压成向量、动作不做原子级、规划不绑死某一任务——分别对应 03 节公式里的三个设计选择。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把最优决策规则落成三个 LLM 模块：编码、推演、打分</h2></div>
+  <p class="sec-sub">核心是式 8 的三层 arg max，以及让它在 LLM 上成立的两个设计选择。</p>
+
+  <p>式 4 要求真实状态 s 与真实环境 μ，现实中拿不到（除棋类等简单场景）。SimuRA 用<strong>信念状态 ŝ</strong>（由观察 o<sub>t</sub> 经编码器 h 得到）代替 s，用<strong>世界模型 f</strong> 代替 μ，得到式 5 的模拟决策规则，再落成可执行的三层 arg max（式 8）：</p>
+
+  <div class="eq">
+    <span class="hl-a">ŝ<sub>t</sub> = arg max<sub>ŝ</sub> p<sub>h</sub>(ŝ | o<sub>t</sub>)</span> &nbsp;&nbsp;&nbsp;<span style="color:var(--text-soft)">(Perception)</span><br>
+    <span class="hl-b">a′<sub>t:T′−1</sub> = arg max<sub>a′<sub>t:T′−1</sub>̃π</sub> Σ<sub>ŝ<sub>t+1:T′</sub></sub> v(ŝ<sub>T′</sub>) ∏<sub>k=t</sub><sup>T′−1</sup> p<sub>f</sub>(ŝ<sub>k+1</sub> | ŝ<sub>k</sub>, a′<sub>k</sub>)</span> &nbsp;&nbsp;&nbsp;<span style="color:var(--text-soft)">(Planning)</span><br>
+    <span class="hl-c">a<sub>t</sub> = arg max<sub>a</sub> p<sub>α</sub>(a | ŝ<sub>t</sub>, a′<sub>t</sub>)</span> &nbsp;&nbsp;&nbsp;<span style="color:var(--text-soft)">(Acting)</span>
+  </div>
+  <div class="eq-cap">式 8 · 蓝：编码器 h 给信念状态 · 紫：a′ 取自策略 π̃ 的采样，world model f 给转移概率 · 红：critic v 给终点打分</div>
+
+  <p>相比式 5，式 8 用 <strong>critic 打分 v(ŝ<sub>T′</sub>) 代替了「累计奖励 + 终点价值」的展开式</strong>——实现时让 LLM 对终点状态判个类（如 success），折算成数。策略 π̃ 只负责采样候选，搜索质量要靠外部的 DFS 来补。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">概念化</span><h4>信念状态 = 自然语言摘要</h4></div>
+      <p>编码器 h 把观察 o<sub>t</sub>（网页 accessibility tree）逐 token 生成一段摘要（式 6）；世界模型同样逐 token 生成下一段摘要（式 7）。广告、布局抖动这类噪声自然被滤掉，后续模块在一个可分解的<strong>离散概念空间</strong>里推理。论文称这减少了幻觉。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">分层</span><h4>模拟动作 ≠ 真实动作</h4></div>
+      <p>策略 π̃ 与 f 作用在抽象动作 a′ ∈ 𝒜′（如「探索网站」），actor α 把选中的 a′ 翻译成具体 a ∈ 𝒜（如 <code>click(id)</code>）。一个 a′ 可覆盖多步执行，缩短 rollout、减少误差累积，也更容易跨站点迁移。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">世界模型</span><h4>LLM 本身就是 WM</h4></div>
+      <p>f 也是 LLM，理由是 next-token 预训练「形式上与世界建模同构」。实现取 M = N = 20、搜索深度 T = t + 1、用 DFS——即每个候选意图只推演<strong>一步</strong>，靠 Critic 重复 20 次把这一步的分数估准。</p>
+    </div>
+  </div>
+
+  <h3>自己动手：谁在决定「多想」和「想准」</h3>
+  <p>把规划器简化成几个可调量：候选意图数 M、critic 采样数 N、推演深度 T′、critic 的判断质量。世界模型对每个「意图 → 后继状态」给出确定预测；终点价值是按论文机制排列的示意数字（非论文数据）。拖动参数，看点标签落在哪个候选上。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="mode-btns">
+      <button class="rule-btn" data-mode="react">反应式 System I<span class="r-sub">只取策略第一个采样</span></button>
+      <button class="rule-btn active" data-mode="sim">模拟规划 System II<span class="r-sub">M 个候选 → critic 打分</span></button>
+    </div>
+
+    <div class="slots" id="cand-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>M · 候选意图数 <span class="v" id="m-v">3</span></label>
+        <input type="range" id="m-slider" min="1" max="4" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label>N · critic 采样数 <span class="v" id="n-v">3</span></label>
+        <input type="range" id="n-slider" min="1" max="5" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label>T′ · 推演深度 <span class="v" id="t-v">1</span></label>
+        <input type="range" id="t-slider" min="1" max="3" step="1" value="1">
+      </div>
+      <div class="ctrl">
+        <label>critic 判断质量 <span class="v" id="c-v">0.60</span></label>
+        <input type="range" id="c-slider" min="0.5" max="0.9" step="0.05" value="0.6">
+      </div>
+    </div>
+
+    <div class="readout" id="decide-readout">
+      <div class="r-head">决策结果</div>
+      <div id="decide-text"></div>
+    </div>
+
+    <div class="lab" style="margin-top:14px">推演日志（critic 打分 · 可复现的伪随机采样）</div>
+    <div class="trace" id="decide-trace"></div>
+  </div>
+
+  <p style="margin-top:22px">交互对应论文的两个设计决定。<strong>M 决定「想不想多」</strong>：反应式只取策略第 1 个采样，而这个采样本身就可能把目的地写错——切到反应式后拖动任何滑块它都不会变。<strong>N 决定「想得多准」</strong>：critic 的判断有系统性低估和偶发误报，N 次采样取比例会压低噪声的影响。论文取 N = 20、T′ = 1，即<strong>不往深处走很多步，而是把一个终点的分估准</strong>。把 critic 判断质量从 0.6 拉到 0.9，再比较 N = 1 与 N = 5，可以看到少数几次采样时分数抖动很大；而把 T′ 调到 2–3，会看到「推演越深反而越容易选错」——这正是论文把 horizon 压到一步要避开的误差累积。</p>
+</section>
+
+<!-- ================= 04 怎么算 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>不训练、不训新模型——把一次决策摊成数十次 LLM 调用</h2></div>
+  <p class="sec-sub">工程可行性全在推理侧：算法是一条搜索循环，代价是调用量。</p>
+
+  <p>论文 Appendix A 的伪代码（Algorithm 1）在每一步 t：</p>
+  <ol style="padding-left:22px">
+    <li><strong>感知</strong>：编码器把 o<sub>t</sub> 摘要成 s̃<sub>t</sub>，和过去「摘要 + 已选动作」的选择性记忆拼成 ŝ<sub>t</sub>；</li>
+    <li><strong>提案</strong>：策略采样 M 个抽象动作并按意图聚类去重；</li>
+    <li><strong>推演</strong>：对每个候选，世界模型预测下一段摘要，沿 DFS 走到深度 T′；</li>
+    <li><strong>打分</strong>：到终点让 critic 重复 N 次做分类判断（如 "success" 记 1 分），折算数值后与当前最优 V<sup>⋆</sup> 比较；</li>
+    <li><strong>行动</strong>：搜索结束后把最高分抽象动作 a′<sup>⋆</sup> 连同原始观察文本交给 actor，落成具体动作 a<sub>t</sub>，并把 (s̃<sub>t</sub>, a′<sup>⋆</sup>) 写回记忆。</li>
+  </ol>
+
+  <p>论文实现取 M = N = 20、T = t + 1，基于 LLM Reasoners 库，每步要批量生成候选、为每个候选调世界模型、让 critic 重复打分——单步调用量远多于「只生成一个动作」的反应式 agent。Limitations 也承认：模块化流水线加上多候选计划穷举，使 <strong>SimuRA 比典型 LLM agent 更慢</strong>，缓存与并行属未来工作（原文未给出具体的倍数或调用量数字）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">记忆机制</span><h4>状态不是一帧截图，而是逐步累积的轨迹</h4></div>
+    <p>网页是部分可观测的，单帧摘要会丢掉先前看到的内容。SimuRA 把每帧摘要与已执行动作按时间串起来当状态。这解释了 FanOutQA 上它几乎没有重复动作（1.0%，反应式 10.0%，BrowsingAgent 43.0%）——它记得已经去过哪里、查过什么。</p>
+  </div>
+
+  <details>
+    <summary>深度只有一步，为什么还用 DFS？<span class="sum-sub">按 Appendix A 伪代码读</span></summary>
+    <div class="details-body">
+      <p>伪代码维护当前最优价值 V<sup>⋆</sup> 与最优动作序列 A′<sup>⋆</sup>，在预算耗尽前反复从根状态推演到深度 T′、用 critic 打分、更优则更新，最后取 A′<sup>⋆</sup> 的第一步。因为 T′ = t + 1，它实际上是「<strong>在多个一步分支间做搜索</strong>」，而不是「想很多步」。伪代码没有给出 DFS 预算的具体数字，论文正文也没交代——所以页面无法给出「每步搜索多少次」，只能给出 M = N = 20 这个确定的参数。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>五模块闭环：观察进、动作出，中间全靠自然语言流动</h2></div>
+  <p class="sec-sub">一张图看清每一步的数据在哪些模块之间走，以及哪一步是 SimuRA 特有的。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 430" role="img" aria-label="SimuRA 架构：环境、编码器、选择性记忆、规划器（Policy、World Model、Critic、DFS）、Actor 的闭环">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"/>
+        </marker>
+        <marker id="arwA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#C04E2D"/>
+        </marker>
+      </defs>
+
+      <!-- 环境 -->
+      <rect x="40" y="20" width="780" height="54" rx="12" fill="#F5ECD8" stroke="#D4C4A6"/>
+      <text x="62" y="53" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="#1A1816">Environment μ · 浏览器（accessibility tree，部分可观测）</text>
+
+      <!-- 观察 -->
+      <path d="M200,74 L200,124" stroke="#8C857B" stroke-width="2.2" fill="none" marker-end="url(#arw)"/>
+      <text x="210" y="106" font-family="JetBrains Mono, monospace" font-size="12" fill="#6B6660">观察 o<tspan font-size="9" dy="4">t</tspan></text>
+
+      <!-- 动作 -->
+      <path d="M700,124 L700,74" stroke="#C04E2D" stroke-width="2.2" fill="none" marker-end="url(#arwA)"/>
+      <text x="710" y="106" font-family="JetBrains Mono, monospace" font-size="12" fill="#C04E2D" font-weight="600">具体动作 a<tspan font-size="9" dy="4">t</tspan></text>
+
+      <!-- Encoder -->
+      <rect x="100" y="126" width="200" height="56" rx="10" fill="#DDE9EE" stroke="#2E5A6B"/>
+      <text x="120" y="150" font-family="JetBrains Mono, monospace" font-size="13" font-weight="600" fill="#2E5A6B">Encoder h</text>
+      <text x="120" y="170" font-family="JetBrains Mono, monospace" font-size="11" fill="#2E5A6B">o<tspan font-size="9" dy="4">t</tspan><tspan dy="-4"> → 摘要 s̃<tspan font-size="9" dy="4">t</tspan></tspan></text>
+
+      <!-- 记忆 -->
+      <rect x="100" y="224" width="200" height="64" rx="10" fill="#FFFFFF" stroke="#D4C4A6" stroke-dasharray="4 3"/>
+      <text x="120" y="248" font-family="JetBrains Mono, monospace" font-size="13" font-weight="600" fill="#6B6660">选择性记忆</text>
+      <text x="120" y="268" font-family="JetBrains Mono, monospace" font-size="11" fill="#8C857B">{(s̃<tspan font-size="9" dy="4">k</tspan><tspan dy="-4">, a′*)} 逐步累积</tspan></text>
+      <path d="M200,182 L200,224" stroke="#8C857B" stroke-width="2.2" fill="none" marker-end="url(#arw)"/>
+
+      <!-- Planner -->
+      <rect x="380" y="112" width="260" height="240" rx="14" fill="#FFFFFF" stroke="#C04E2D" stroke-width="1.6"/>
+      <text x="398" y="136" font-family="JetBrains Mono, monospace" font-size="12.5" font-weight="700" fill="#7A2E16">Planner · simulative reasoning</text>
+
+      <rect x="400" y="150" width="96" height="52" rx="8" fill="#E4E0F0" stroke="#5A4A8C"/>
+      <text x="414" y="171" font-family="JetBrains Mono, monospace" font-size="12" font-weight="600" fill="#5A4A8C">Policy π̃</text>
+      <text x="412" y="189" font-family="JetBrains Mono, monospace" font-size="10" fill="#5A4A8C">提出 a′ × M</text>
+
+      <rect x="524" y="150" width="96" height="52" rx="8" fill="#DDE9EE" stroke="#2E5A6B"/>
+      <text x="542" y="171" font-family="JetBrains Mono, monospace" font-size="12" font-weight="600" fill="#2E5A6B">WM f</text>
+      <text x="534" y="189" font-family="JetBrains Mono, monospace" font-size="10" fill="#2E5A6B">预测 ŝ′</text>
+
+      <rect x="400" y="224" width="96" height="52" rx="8" fill="#DDEBDD" stroke="#3F6B4A"/>
+      <text x="416" y="245" font-family="JetBrains Mono, monospace" font-size="12" font-weight="600" fill="#3F6B4A">Critic v</text>
+      <text x="410" y="263" font-family="JetBrains Mono, monospace" font-size="10" fill="#3F6B4A">打分 × N</text>
+
+      <rect x="524" y="224" width="96" height="52" rx="8" fill="#FFFFFF" stroke="#C04E2D" stroke-dasharray="4 3"/>
+      <text x="540" y="245" font-family="JetBrains Mono, monospace" font-size="12" font-weight="600" fill="#C04E2D">DFS 搜索</text>
+      <text x="540" y="263" font-family="JetBrains Mono, monospace" font-size="10" fill="#C04E2D">取最高分 a′*</text>
+
+      <path d="M496,176 L524,176" stroke="#8C857B" stroke-width="2" fill="none" marker-end="url(#arw)"/>
+      <path d="M572,202 L572,224" stroke="#8C857B" stroke-width="2" fill="none" marker-end="url(#arw)"/>
+      <path d="M524,250 L496,250" stroke="#8C857B" stroke-width="2" fill="none" marker-end="url(#arw)"/>
+      <path d="M448,202 L448,224" stroke="#8C857B" stroke-width="2" fill="none" marker-end="url(#arw)"/>
+      <text x="396" y="310" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#8C857B">每个候选：推一步 → 终点打分 → 比 V*</text>
+
+      <!-- ŝ 进 planner -->
+      <path d="M300,154 L380,154" stroke="#8C857B" stroke-width="2.2" fill="none" marker-end="url(#arw)"/>
+      <text x="308" y="146" font-family="JetBrains Mono, monospace" font-size="11" fill="#6B6660">ŝ<tspan font-size="9" dy="4">t</tspan></text>
+
+      <!-- 记忆 -> planner -->
+      <path d="M300,256 L380,256" stroke="#8C857B" stroke-width="2.2" fill="none" marker-end="url(#arw)"/>
+
+      <!-- Actor -->
+      <rect x="660" y="126" width="180" height="58" rx="10" fill="#F4DCD0" stroke="#C04E2D"/>
+      <text x="680" y="150" font-family="JetBrains Mono, monospace" font-size="13" font-weight="600" fill="#7A2E16">Actor α</text>
+      <text x="678" y="170" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#7A2E16">a′* + o<tspan font-size="9" dy="4">t</tspan><tspan dy="-4"> → a<tspan font-size="9" dy="4">t</tspan></tspan></text>
+
+      <!-- planner -> actor -->
+      <path d="M640,276 L750,276 L750,184" stroke="#C04E2D" stroke-width="2.2" fill="none" marker-end="url(#arwA)"/>
+      <text x="646" y="268" font-family="JetBrains Mono, monospace" font-size="11" fill="#C04E2D">a′*（抽象意图）</text>
+
+      <!-- 图注 -->
+      <text x="40" y="398" font-family="JetBrains Mono, monospace" font-size="11" fill="#8C857B">青灰 = 编码 / 世界模型分量 · 紫 = 策略 · 墨绿 = critic · 陶土红 = SimuRA 特有的规划闭环与动作落地</text>
+    </svg>
+    <figcaption>重绘自 v1 Figure 4 / Figure 5（v3 中合并为 Figure 1；描述决策过程的图）与式 8。h 把观察摘要成信念状态；规划器以 π̃ 提候选、f 预测下一状态、v 在终点打分、DFS 取最优抽象动作；α 结合原始观察落地为具体动作，并把 (s̃, a′*) 写回记忆。v1 的 Figure 5 正是把 Planner 与「自动回归规划」基线分开的那张实现图。</figcaption>
+    <span class="fig-toggle" id="arch-toggle">展开逐模块说明</span>
+    <div class="figure-detail" id="arch-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>Encoder h</strong>：o<sub>t</sub> 是浏览器视口里的 accessibility tree（纯文本）。输出自然语言摘要 s̃<sub>t</sub>，与记忆拼成 ŝ<sub>t</sub>。</li>
+          <li><strong>Policy π̃</strong>：在抽象动作空间 𝒜′（如「只比直飞」「先重置出发地」）里采样 M 个并聚类去重。</li>
+          <li><strong>World Model f</strong>：预测候选执行后页面会变成怎样的摘要。实时数据（价格、余票）无法真的查询，只能靠 LLM 推断。</li>
+          <li><strong>Critic v</strong>：在推演终点让 LLM 输出分类判断并映射为数值（如 success = 1），重复 N 次。</li>
+          <li><strong>Actor α</strong>：拿 a′* 加原始观察文本生成具体动作（如 <code>click('128')</code>），保证元素找得到。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>闭环的意义不在模块多，而在<strong>每个模块都由同一个现成 LLM 扮演、全程不训练</strong>，接口一律是自然语言：信念状态是摘要，抽象动作是意图，critic 分数是分类。换更强的 LLM，五个模块一起受益；换环境，只需换编码器和 actor——这是论文所说「model-agnostic」的意思。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>三类任务全部领先，但「领先多少」和「为什么领先」是两件事</h2></div>
+  <p class="sec-sub">先看数字，再看两个最反直觉的发现，最后看哪部分收益其实与该论文的「模拟」无关。</p>
+
+  <p>FlightQA 是「深度」任务（单一复杂站点、多约束叠加），FanOutQA 是「广度」任务（多网站聚合），WebArena 是通用指令。三个任务的工作条目数分别是 90 题、dev set 前 100 例、随机 100 例：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th>FlightQA 正确率</th>
+          <th>FanOutQA Acc.</th>
+          <th>WebArena 成功率</th>
+          <th>相对同架构反应式</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>OpenHands BrowsingAgent</td>
+          <td class="num">0.0%</td>
+          <td class="num">17.0%</td>
+          <td class="num">12.0%</td>
+          <td class="num">—</td>
+        </tr>
+        <tr>
+          <td>Unstructured CoT（o1 / o3-mini）</td>
+          <td class="num">1.1% / 3.3%</td>
+          <td class="num">未报告</td>
+          <td class="num">未报告</td>
+          <td class="num">—</td>
+        </tr>
+        <tr>
+          <td>Reactive（System I）</td>
+          <td class="num">14.4%</td>
+          <td class="num">20.2%</td>
+          <td class="num">19.0%</td>
+          <td class="num">1.00×</td>
+        </tr>
+        <tr class="best">
+          <td>Simulative（System II）</td>
+          <td class="num">32.2%</td>
+          <td class="num">29.8%</td>
+          <td class="num">23.0%</td>
+          <td class="num">+124% / +48.6% / +21.1%</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left">数据：原文 v1 的 Table 1 / Table 2 / Table 3（v3 编号同为 Table 1–3），总览见图 6（v3 Figure 4）。所有实验 2024 年 11–12 月完成，o3-mini 于 2025 年 2 月补测。</p>
+
+  <h3>FlightQA 全行（Table 1）：终点的正确率掩盖了失败方式</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th>正确</th>
+          <th>Grounded</th>
+          <th>Relevant</th>
+          <th>返回回答</th>
+          <th>Crashed</th>
+          <th>步数耗尽</th>
+          <th>重复动作</th>
+          <th>动作错误</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>BrowsingAgent</td>
+          <td class="num">0.0</td>
+          <td class="num">0.0</td>
+          <td class="num">0.0</td>
+          <td class="num">0.0</td>
+          <td class="num">3.3</td>
+          <td class="num">3.3</td>
+          <td class="num">0.0</td>
+          <td class="num">93.3</td>
+        </tr>
+        <tr>
+          <td>Reactive（System I）</td>
+          <td class="num">14.4</td>
+          <td class="num">15.6</td>
+          <td class="num">14.4</td>
+          <td class="num">16.7</td>
+          <td class="num">0.0</td>
+          <td class="num">37.8</td>
+          <td class="num">44.4</td>
+          <td class="num">1.1</td>
+        </tr>
+        <tr class="best">
+          <td>Simulative（System II）</td>
+          <td class="num">32.2</td>
+          <td class="num">36.7</td>
+          <td class="num">32.2</td>
+          <td class="num">38.9</td>
+          <td class="num">1.1</td>
+          <td class="num">40.0</td>
+          <td class="num">18.9</td>
+          <td class="num">1.1</td>
+        </tr>
+        <tr>
+          <td>CoT · o1</td>
+          <td class="num">1.1</td>
+          <td class="num">1.1</td>
+          <td class="num">1.1</td>
+          <td class="num">1.1</td>
+          <td class="num">11.1</td>
+          <td class="num">40.0</td>
+          <td class="num">37.8</td>
+          <td class="num">10.0</td>
+        </tr>
+        <tr>
+          <td>CoT · o3-mini</td>
+          <td class="num">3.3</td>
+          <td class="num">4.4</td>
+          <td class="num">3.3</td>
+          <td class="num">4.4</td>
+          <td class="num">3.3</td>
+          <td class="num">51.1</td>
+          <td class="num">32.2</td>
+          <td class="num">8.9</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left">全部为百分比，取自 v1 Table 1。“Max Steps Reached” 即「步数耗尽」。各行各列为何不恰好加总到 100，原表未说明，这里不替它解释。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 1</span><h4>强推理模型当 planner，几乎全军覆没</h4></div>
+      <p>o1 / o3-mini 生成长 CoT 的 planner 只有 <strong>1.1% / 3.3%</strong>，而反应式对照与模拟规划分别是 14.4% 与 32.2%——比反应式还差。步数耗尽率 40.0% / 51.1% 表明它们想了很久却没在页面上推进。</p>
+      <p>论文的读法：<strong>在反应式范式内扩大内部计算，替代不了对未来状态的显式模拟</strong>。作者还提到，这些模型常常不打开页面就作答，幻觉甚至能骗过 LLM 评分器。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 2</span><h4>约束爬到 7 条，两边一起「回升」</h4></div>
+      <p>v1 的 Figure 9 把正确率画成约束条数（3→8）的函数：两种方法在约束增多初期都下降，<strong>却在 7 条时突然抬升，然后再次回落</strong>。作者自己也只给出两种可能：后端 LLM 的记忆，或某些问题的隐式约束。（v3 中该图为 Figure 7。）</p>
+      <p>值得注意的是：在这一整段里，模拟规划和反应式之间的<strong>差距一直存在</strong>——这是论文主张「增益来自可泛化的反事实评估，而非任务特定调参」的主要依据。</p>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">还有一个容易被汇总表掩盖的细节：FanOutQA 上，即使去掉模拟（反应式 20.2%），也已高于外部 BrowsingAgent 的 17.0%。论文把这部分归功于<strong>结构化状态带来的更少动作错误</strong>（43% → 10%）。也就是说，SimuRA 的增长里有一部分来自状态表示和记忆，而非模拟本身——所以同架构对照才是关键证据。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它是一个更强的规划骨架，不是「通用智能体」的现成解</h2></div>
+  <p class="sec-sub">看清它在哪些场景值得用，哪些结论不能直接外推。</p>
+
+  <ul>
+    <li><strong>推理成本高</strong>：每步要多个候选 × 多次 critic 调用；论文承认它比典型 agent 慢，加速（缓存、并行）仍在未来工作里。</li>
+    <li><strong>只在浏览器、只用 2024 年的模型评估</strong>：编码器只读 accessibility tree 的文本，看不到图片和布局遮挡。论文也承认把多模态感知与规划结合很难。</li>
+    <li><strong>绝对水平很低</strong>：23.0%–32.2%。作者强调 WebArena 在 OpenHands 环境下跑、只用随机 100 例，<strong>不能与标准排行榜成绩直接比较</strong>；FanOutQA 也只取 dev set 前 100 例。</li>
+    <li><strong>世界模型不训练、不接地</strong>：f 全靠预训练 LLM 的常识去猜「点下去页面会变成怎样」。实时变化（价格、库存）或非常规页面逻辑上，推演会产生系统性偏差，而 critic 只能在这个可能已偏的终点上打分。</li>
+    <li><strong>评估器本身是 LLM</strong>：FlightQA 没有固定标准答案，由 LLM 判定 groundedness + relevance。论文自己报告幻觉能骗过评分器——绝对数字有噪声，相对比较（同一评估器、同一采样集）才更有意义。</li>
+    <li><strong>短视的推演深度</strong>：T′ = t + 1，算力主要花在「把一步的分估准」，而非「走很远」。需要长程连贯规划的任务上，这一设计的收益没有经过消融验证。</li>
+    <li><strong>记忆只保存摘要</strong>：状态是文本摘要的拼接，过长的历史与重要细节之间的取舍没有专门分析。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">什么时候别用</span><h4>简单、确定、实时的交互</h4></div>
+    <p>只有一两步、或环境响应完全可预期（脚本能写死的流程）时，模拟规划只增加延迟。它的收益集中在<strong>部分可观测、多约束、需要反事实权衡</strong>的环境——论文的最大收益正好出在 FlightQA 这类题上。</p>
+  </div>
+</section>
+
+<footer>
+  <div>SimuRA: Towards General Goal-Oriented Agent via Simulative Reasoning Architecture with LLM-Based World Model（arXiv v3 已改题为 “General Agentic Planning Through Simulative Reasoning with World Models”，方法简称改为 SiRA）</div>
+  <div class="src">
+    作者（v1，2025-07-31 提交，本页数字均出自 v1）：Mingkai Deng*, Jinyu Hou*, Yilin Shen, Hongxia Jin, Graham Neubig, Zhiting Hu, Eric Xing（* 共同一作）<br>
+    作者（v3，2026-05-21 提交）：Mingkai Deng*, Jinyu Hou*, Zhiting Hu, Eric P. Xing（* 共同一作）。Yilin Shen、Hongxia Jin、Graham Neubig 在 v3 仅出现在致谢（Samsung Research / NeuLab），不再是作者。<br>
+    机构（按 v1 作者页脚注）：IFM @ MBZUAI；Carnegie Mellon University；Samsung Research；UC San Diego<br>
+    原文：<a href="https://arxiv.org/abs/2507.23773" target="_blank" rel="noopener">https://arxiv.org/abs/2507.23773</a><br>
+    代码：<a href="https://github.com/sailing-lab/sira" target="_blank" rel="noopener">https://github.com/sailing-lab/sira</a><br>
+    笔记：<a href="/simuratowards-general-goal-oriented-agent-via-simulative-reasoning-architecture-with-llm-based-world-model/">SIMURA：Towards General Goal-Oriented Agent via Simulative Reasoning Architecture with LLM-Based World Model</a>
+  </div>
+  <div style="margin-top:14px;line-height:1.85">
+    <strong>笔记勘误（不改原文）</strong>：<br>
+    1. <strong>标题已变</strong>：arXiv 的 v3（2026-05）把标题换成 “General Agentic Planning Through Simulative Reasoning with World Models”，方法简称也由 SimuRA 改为 SiRA。按新标题或 “SIMURA” 检索 arXiv API 都查不到本文，只能以编号 <strong>2507.23773</strong> 为准；论文 id 对应 v1 标题与笔记一致。<br>
+    2. <strong>出处错配</strong>：笔记表格注明 “数据源: 原文 Table 1, 2, 3, Figure 6”。但 Figure 6 是三项任务的总览柱状图（不等于数据来源）；FlightQA 的「数据生成流程图」在 v1 是 <strong>Figure 8</strong>（v3 中为 Figure 6），笔记的配图流程截图应对应 v1 Figure 8，作者可能把图号记混。<br>
+    3. <strong>基线数字通篇正确</strong>：FlightQA 0.0 / 14.4 / 32.2、FanOutQA 17.0 / 20.2 / 29.8、WebArena 12.0 / 19.0 / 23.0 与 v1 Table 1–3 一致；「2025 年 7 月发表」与 v1 提交日（2025-07-31）相符。本页所有数字均取自 arXiv v1 原文表格。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ---------- 架构图折叠 ---------- */
+  var archToggle = document.getElementById('arch-toggle');
+  var archDetail = document.getElementById('arch-detail');
+  if (archToggle && archDetail) {
+    archToggle.addEventListener('click', function () {
+      var on = archDetail.classList.toggle('active');
+      archToggle.textContent = on ? '收起模块说明' : '展开逐模块说明';
+    });
+  }
+
+  /* ---------- 决策模拟器 ---------- */
+  var slotsEl = document.getElementById('cand-slots');
+  var readoutEl = document.getElementById('decide-text');
+  var traceEl = document.getElementById('decide-trace');
+  var modeBtns = document.getElementById('mode-btns');
+  var mSlider = document.getElementById('m-slider');
+  var nSlider = document.getElementById('n-slider');
+  var tSlider = document.getElementById('t-slider');
+  var cSlider = document.getElementById('c-slider');
+  var mV = document.getElementById('m-v');
+  var nV = document.getElementById('n-v');
+  var tV = document.getElementById('t-v');
+  var cV = document.getElementById('c-v');
+
+  if (!slotsEl || !readoutEl || !traceEl || !modeBtns || !mSlider || !nSlider || !tSlider || !cSlider) return;
+
+  /* 示意性候选表：value 为「这一步对目标的真实贴合度」，数字为教学示意。
+     按论文机制排列：世界模型只能推一步，且早期的意图本身就可能偏离目标。 */
+  var STEPS = {
+    1: [
+      { intent: '在搜索框写入「Istanbul」并回车', next: '检索出伊斯坦布尔的机票，但出发地仍为纽约', value: 0.15 },
+      { intent: '按价格升序排列当前结果', next: '结果重排，出发地仍为纽约', value: 0.35 },
+      { intent: '把出发地字段改成纽约', next: '出发地恢复为纽约，结果列表不变', value: 0.6 },
+      { intent: '在出发地栏直接选伊斯坦布尔', next: '出发地变为伊斯坦布尔，结果列表刷新', value: 0.95 }
+    ],
+    2: [
+      { intent: '检查出发地与目的地两栏', next: '两栏显示 纽约 → 伊斯坦布尔', value: 0.95 },
+      { intent: '打开日历选取下月日期', next: '日历弹出，日期未选', value: 0.5 },
+      { intent: '在结果页直接找伊斯坦布尔航班', next: '看到的仍是纽约出发的列表', value: 0.1 }
+    ],
+    3: [
+      { intent: '在日历中选定出发日', next: '出发日期高亮显示', value: 0.9 },
+      { intent: '按「最低价」筛选', next: '结果只剩低价选项', value: 0.75 },
+      { intent: '改成往返并查看返程', next: '出现返程航班列表', value: 0.55 }
+    ]
+  };
+  var TARGET = 0.8; /* 真实贴合度判定线 */
+
+  var mode = 'sim';
+  var seed = 7;
+
+  /* 线性同余伪随机：同参数同模式 → 同结果，方便复核 */
+  function rand() {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  }
+
+  /* 两行 LCG 伪随机，由种子决定 */
+  function lcg(st) {
+    var x = (st * 1664525 + 1013904223) % 4294967296;
+    x = (x * 1664525 + 1013904223) % 4294967296;
+    return x / 4294967296;
+  }
+
+  function simCandidate(i, M, N, T, pc) {
+    /* 候选 i 的子树做 DFS：内部节点展开两条子边，叶子即 T′ 步终点。
+       每条 rollout 取一条叶子路径，critic 在该终点采样 N 次，得「达标票占比」；
+       候选得分 = 各 rollout 的均分（每条叶子估值一次）。
+       critic 判断带两类噪声：以 pc 判对；另有 10% 误报达标、bias 系统性低估。 */
+    var seedSave = seed;
+    var bias = Math.min(0.16, Math.max(0, (1 - pc) * 0.4)); /* critic 系统性低估 */
+    var leaves = leafPaths(i, T);
+    var seen = {}, sum = 0, cnt = 0, best = null;
+    for (var r = 0; r < M; r++) {
+      var pi = r % leaves.length;
+      if (seen[pi]) continue;
+      seen[pi] = 1;
+      var lf = leaves[pi];
+      seed = 3001 + i * 97 + r * 13 + T * 101;
+      var obs = Math.max(0.05, lf.value - bias);
+      var good = lf.value >= TARGET, hits = 0;
+      for (var k = 0; k < N; k++) {
+        if (rand() < 0.1) { hits++; continue; }  /* 门槛：小概率把「没达标」误判为达标 */
+        if ((rand() < obs) === good) hits++;
+      }
+      sum += hits / N; cnt++;
+      if (!best) best = lf;
+    }
+    seed = seedSave;
+    return { score: cnt ? sum / cnt : 0, track: best };
+  }
+
+  /* 候选 i 的 T′ 步叶子路径：起点 = 根，每步从两个子节点里选一个；
+     子节点接到的后继状态类别由节点序号决定，世界模型因此是确定性的（同状态同预测）。 */
+  function leafPaths(i, depth) {
+    var paths = [];
+    (function dfs(node, d, acc, pts) {
+      if (d > depth) {
+        var v = 0;
+        for (var q = 0; q < pts.length; q++) v += pts[q];
+        paths.push({ path: acc, value: v / pts.length });
+        return;
+      }
+      for (var ch = 0; ch < 2; ch++) {
+        var nx = node * 2 + ch;
+        var next = STEPS[d][nx % 3];   /* 该子节点接到的后继状态类别 */
+        dfs(nx, d + 1, acc.concat([{ intent: next.intent, next: next.next }]), pts.concat([next.value]));
+      }
+    })(2 * (i + 1), 2, [{ intent: STEPS[1][i].intent, next: STEPS[1][i].next }], [STEPS[1][i].value]);
+    return paths;
+  }
+
+  function render() {
+    var M = parseInt(mSlider.value, 10);
+    var N = parseInt(nSlider.value, 10);
+    var T = parseInt(tSlider.value, 10);
+    var pc = parseFloat(cSlider.value);
+    mV.textContent = M; nV.textContent = N; tV.textContent = T; cV.textContent = pc.toFixed(2);
+
+    /* 反应式 = 策略的第一个采样（固定「Istanbul」候选）；它从头到尾不碰滑块 M/N/T′/critic */
+    if (mode === 'react') {
+      var rc = STEPS[1][0];
+      slotsEl.className = 'slots';
+      slotsEl.innerHTML = '<div class="slot hit">' +
+        '<div class="slot-name">策略的第 1 个采样</div>' +
+        '<div class="slot-val">' + rc.intent + '</div>' +
+        '<div class="slot-val" style="font-weight:400;color:var(--text-muted);margin-top:6px">不评分，直接执行</div>' +
+        '<div class="bar"><i class="b1" style="width:100%"></i></div></div>' +
+        '<div class="slot"><div class="slot-name">候选 2 ～ M</div>' +
+        '<div class="slot-val" style="color:var(--text-soft);font-weight:400">从未被提出</div>' +
+        '<div class="slot-val" style="font-weight:400;color:var(--text-soft);margin-top:6px">无世界模型、无 critic</div></div>';
+      readoutEl.innerHTML =
+        '<strong>反应式：只执行策略的第一个采样</strong><br>' +
+        '选中「' + rc.intent + '」 → 真实剧情：' + rc.next + '<br>' +
+        '真实贴合度：' + rc.value.toFixed(2) +
+        ' · <span class="warn">这一步偏离目标</span>';
+      traceEl.innerHTML =
+        '<span class="t-ok">Reactive：不调用世界模型，不调用 critic</span>\n' +
+        '  [1] a′ = 「' + rc.intent + '」（策略第一个采样）\n' +
+        '  → 直接执行\n' +
+        '<span class="t-act">任意拖动 M / N / T′ / critic，这里都不会变——反应式没有这些环节</span>';
+      return;
+    }
+
+    var used = STEPS[1].slice(0, Math.min(M, STEPS[1].length));
+    var results = [];
+    var lines = [];
+    for (var j = 0; j < used.length; j++) {
+      var res = simCandidate(j, M, N, T, pc);
+      results.push(res);
+      var chain = res.track.path.map(function (p, idx) { return (idx === 0 ? '' : '    → ') + '「' + p.intent + '」 f: ' + p.next; }).join('\n');
+      lines.push(
+        '[' + (j + 1) + '] ' + chain + '\n' +
+        '    ' + M + ' 条 rollout（T′=' + T + '）× critic ' + N + ' 次 → 候选均分 ' + res.score.toFixed(2)
+      );
+    }
+
+    var bestIdx = 0;
+    for (var k = 1; k < results.length; k++) if (results[k].score > results[bestIdx].score) bestIdx = k;
+
+    var html = '';
+    for (var m = 0; m < used.length; m++) {
+      html += '<div class="slot' + (m === bestIdx ? ' hit' : '') + '">' +
+        '<div class="slot-name">候选 ' + (m + 1) + '</div>' +
+        '<div class="slot-val">' + used[m].intent + '</div>' +
+        '<div class="slot-val" style="font-weight:400;color:var(--text-muted);margin-top:6px">v = ' + results[m].score.toFixed(2) + '</div>' +
+        '<div class="bar"><i class="b1" style="width:' + Math.round(results[m].score * 100) + '%"></i></div>' +
+      '</div>';
+    }
+    slotsEl.className = 'slots';
+    slotsEl.innerHTML = html;
+
+    var best = used[bestIdx];
+    var good = best.value >= TARGET;
+    readoutEl.innerHTML =
+      '<strong>模拟规划：DFS 选分最高的候选</strong><br>' +
+      '选中「' + best.intent + '」 → 世界模型预测：' + best.next + '<br>' +
+      '该第一步的真实贴合度：' + best.value.toFixed(2) +
+      ' · v 打分 ' + results[bestIdx].score.toFixed(2) +
+      (good ? ' · <span style="color:var(--c3);font-weight:600">这一步方向正确</span>'
+            : ' · <span class="warn">这一步偏离目标</span>');
+
+    traceEl.innerHTML =
+      '<span class="t-ok">Simulative：候选 ' + used.length + ' 个，每个 T′=' + T + ' 推演 M=' + M + ' 次，每次 critic 采样 N=' + N + ' 次</span>\n' +
+      lines.join('\n') +
+      '\n<span class="t-act">→ α：把「' + best.intent + '」落地为页面上的具体点击</span>';
+  }
+
+  var rb = modeBtns.querySelectorAll('.rule-btn');
+  for (var b = 0; b < rb.length; b++) {
+    rb[b].addEventListener('click', function () {
+      for (var q = 0; q < rb.length; q++) rb[q].classList.remove('active');
+      this.classList.add('active');
+      mode = this.getAttribute('data-mode');
+      render();
+    });
+  }
+
+  [mSlider, nSlider, tSlider, cSlider].forEach(function (el) {
+    el.addEventListener('input', render);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

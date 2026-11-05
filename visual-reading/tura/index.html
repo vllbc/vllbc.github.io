@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TURA · 把 RAG 查不动的实时问题，交给工具 DAG 去办</title>
+<meta name="description" content="TURA 把 AI 搜索里的静态网页检索与动态 API 调用统一成 MCP Server 上的规划—执行问题：意图分解 + 索引增强召回工具，DAG 规划并行调用，蒸馏小模型执行。离线人工评测答案准确率 87.5%、忠实度 96.2%（Table 1，MCP-Bench）。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.tagline-en{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-soft);letter-spacing:.02em}
+.quote{border-left:3px solid var(--border-strong);padding:2px 0 2px 14px;margin:14px 0 16px;color:var(--text-muted);font-size:14px}
+.quote .en{display:block;color:var(--text);font-size:13.5px;margin-bottom:3px}
+.quote .where{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft)}
+.conflict{display:grid;grid-template-columns:1fr;gap:10px;margin:16px 0}
+.conflict .side{background:var(--bg-surface);border:1px solid var(--border);border-left:4px solid var(--border-strong);border-radius:var(--radius);padding:12px 16px;font-size:14px;line-height:1.75}
+.conflict .side b{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-soft)}
+.conflict .side p{margin:4px 0 0;color:var(--text-muted)}
+.dataset-bar{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}
+.dataset-bar .d{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
+.dataset-bar .d .dv{font-family:"JetBrains Mono",monospace;font-size:15px;font-weight:600;color:var(--text)}
+.dataset-bar .d .dk{font-size:12px;color:var(--text-soft);margin-top:3px;line-height:1.5}
+.sim .slider-row{margin:6px 0 4px}
+.sim .slider-ends{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);margin-top:2px}
+.scenario-note{font-size:13px;color:var(--text-soft);margin:-4px 0 12px;line-height:1.65}
+.mini{font-size:12.5px;color:var(--text-soft)}
+@media (max-width:880px){
+  .dataset-bar{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">TURA</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#dag">核心方法</a>
+      <a href="#cost">工程账</a>
+      <a href="#pipeline">全流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>AI Search · 工具调用 · arXiv 2508.04604v2</span>
+  <h1>TURA：把「查不到的实时信息」接到工具上，再用 DAG 把它们并行办掉</h1>
+  <p class="hero-sub">
+    RAG 只能读静态网页快照：机票余票、酒店库存这类<strong>必须现场调用才会产生</strong>的信息，它从结构上就拿不到。
+    TURA 把网页检索也包装成一种 MCP Server，和各类 API 放在同一个池子里——先用意图分解 + 索引增强选出该用哪个，再用 DAG 把互不依赖的调用并行发出去，最后交给一个<strong>蒸馏过的 4B 小模型</strong>逐步执行工具。
+    代价是：整个离线评估建立在一个从生产日志构建的内部基准 MCP-Bench 上，而网页检索被放进了同一个检索池里。
+  </p>
+  <div class="meta">
+    <span>Zhejun Zhao, Yuchen Li, Alley Liu 等（前三位贡献相同）· 百度</span>
+    <a href="https://arxiv.org/abs/2508.04604v2" target="_blank" rel="noopener">arXiv 2508.04604v2 ↗</a>
+    <a href="https://github.com/weixiaolong94-hub/TURA" target="_blank" rel="noopener">MCP-Bench 仓库 ↗</a>
+  </div>
+  <p class="mini" style="margin-top:10px">arXiv v2 于 2026-03-12 提交，晚于笔记日期 2025-08-15；表号与结论以 v2 为准。</p>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文把 AI 搜索定义成一个<strong>带延迟上限的组合优化</strong>：选一组 MCP Server 调用策略 <code>π</code>，在 <code>L(π) ≤ τmax</code> 下最大化答案质量 <code>Q(A)</code>（Eq.1）。网页搜索本身也被当成一个 MCP Server，于是静态检索和动态 API 走同一套规划与执行。
+  </p>
+  <p>
+    三段各解决一个卡点：<strong>意图分解 + 为每个 Server 合成查询来扩充索引</strong>，把「用户口语 → 开发者文档」的词汇鸿沟垫平（Table 4/5）；<strong>DAG 规划器</strong>只在判定为复杂查询时被调用，简单查询走单任务方案（§4.3）；<strong>蒸馏执行器</strong>训练时学完整的 thought + action，上线时连 thought 一起生成以减少 token 与延迟（§4.4.2）。
+  </p>
+  <p>
+    最强的信号来自蒸馏：<em>Qwen3-4B Distilled 工具调用准确率 88.3%，比它的基座 70.1% 高 18.2 个百分点，比教师 Deepseek-V3（671B-A37B）的 82.4% 高 5.9 个百分点；P80 延迟 750ms，是基座 2200ms 的 65.9% 降幅</em>（Table 7）。但端到端 Table 1 的对比对象只是 LLM + RAG / Dynamic RAG / Tool-Agent，没有 "TURA 去掉蒸馏" 这一行，所以 Table 1 的差距里，蒸馏占多少、规划与检索占多少，论文没有拆分。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 7">88.3<small>%</small></div>
+      <div class="k">Qwen3-4B Distilled 工具调用准确率<br>基座 70.1% / 教师 82.4% / GPT-4o 81.7%（MCP-Bench）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 7">750<small>ms</small></div>
+      <div class="k">每步平均 P80 延迟（Qwen3-4B Distilled）<br>基座 2200ms；教师 8700ms，是它的 11.6 倍</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">0.8289</div>
+      <div class="k">Full TURA 的 Recall@5<br>无索引增强 0.7500 / 无查询分解 0.4530（NQ = 20）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>RAG 的盲区不是「召回不好」，而是答案根本不在索引里</h2></div>
+  <p class="sec-sub">读完这节应能说清：为什么更强的检索模型救不了实时查询，以及论文把这类查询形式化成了什么。</p>
+
+  <p>网页检索读的是<strong>预先建好的静态快照</strong>。但有一类信息的产生方式就是「现场问一次系统」：某个日期的机票余票、电商数据库里的实时库存、铁路车次在指定日期的时刻表。这些内容在索引时还不存在，召回率再高也召不回来。</p>
+
+  <div class="quote">
+    <span class="en">"they cannot query a flight booking system for ticket availability on a specific future date or check real-time inventory from an e-commerce database, as this information is only accessible through interactive queries to APIs or databases."</span>
+    <span class="where">§1 Introduction</span>
+  </div>
+
+  <p>论文的做法不是给 RAG 打补丁，而是<strong>换一个形式化</strong>：把所有能力——包括网页搜索本身——都表示成 MCP Server <code>M = {M₁, …, M_N}</code>；一次具体的调用组合与顺序记作执行策略 <code>π</code>；目标是</p>
+
+  <div class="eq">
+    π* = arg max<sub>π</sub> <span class="hl-c">Q(A(π))</span> &nbsp;&nbsp; subject to &nbsp;&nbsp; <span class="hl-a">L(π) ≤ τ<sub>max</sub></span>
+  </div>
+  <div class="eq-cap">Eq.1 · <span class="hl-a">L(π)</span> 是端到端延迟，<span class="hl-c">Q(A)</span> 是答案质量；单次工具调用不是问题，多步、有依赖、还要压延迟才是问题</div>
+
+  <p>这个改写把三类难点一次摆到台面：<strong>选哪些 Server</strong>（工具选择的语义鸿沟）、<strong>按什么顺序与并行度调用</strong>（多跳依赖）、<strong>用什么模型执行</strong>（生产环境的延迟）。后面三节依次对应。</p>
+
+  <p class="mini">评估基准 MCP-Bench 的规模（§5.1.1）：</p>
+  <div class="dataset-bar">
+    <div class="d"><div class="dv">10,683</div><div class="dk">查询（95.02% 单意图）</div></div>
+    <div class="d"><div class="dv">61</div><div class="dk">MCP Server，10 类</div></div>
+    <div class="d"><div class="dv">1.533</div><div class="dk">平均工具调用数（P50=1，P90=3）</div></div>
+    <div class="d"><div class="dv">1.147</div><div class="dk">平均 DAG 宽度</div></div>
+  </div>
+  <p class="mini">多意图查询只占 4.98%（§5.1.1）。<span class="infer">推断</span>（依据：数据来自生产日志的自然分布，而 §5.3.2 又单独划出「复杂、多跳」子集才测 DAG——说明这部分是少数派，DAG 的收益只作用在少数查询上）。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三路前人方案各有各的天花板，线上指标给出三段台阶</h2></div>
+  <p class="sec-sub">读完这节应能说清：LLM+RAG、Dynamic RAG、Tool-Agent 各自卡在哪，以及它们在人工评测里分别落在什么水平。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">LLM + RAG</span></div>
+      <p>Deepseek-V3 配百度的检索 API（跳过 rerank 只取原始文档），合成答案，不调用工具。</p>
+      <p><strong>卡点：</strong>索引里没有实时数据，再强的 LLM 也只能复述旧网页。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Dynamic RAG</span></div>
+      <p>生成过程中动态决定何时、检索什么，但<strong>仍然局限在静态索引</strong>。</p>
+      <p><strong>卡点：</strong>检索时机变聪明了，仍然碰不到事务型 API。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Tool-Agent</span></div>
+      <p>ReAct 式与 DAG 式 agent，用同一批 MCP Server，但<strong>没有</strong> TURA 的统一检索模块与蒸馏执行器。</p>
+      <p><strong>卡点：</strong>能调工具了，但工具选择与执行延迟没做优化。</p>
+    </div>
+  </div>
+
+  <p>Table 1 的人工评测呈现出三级台阶（同一基准 MCP-Bench，指标为准确率 / 忠实度）：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Method</th><th style="text-align:right">Accuracy (Human)</th><th style="text-align:right">Faithfulness (Human)</th></tr></thead>
+      <tbody>
+        <tr><td>LLM + RAG</td><td class="num">65.3%</td><td class="num">72.4%</td></tr>
+        <tr><td>Dynamic RAG</td><td class="num">67.2%</td><td class="num">77.6%</td></tr>
+        <tr><td>Tool-Agent</td><td class="num">76.8%</td><td class="num">81.7%</td></tr>
+        <tr class="best"><td>TURA</td><td class="num">87.5%</td><td class="num">96.2%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="mini">数据取自 Table 1 的 Human 列。同表的 LLM-as-judge 列：Accuracy 68.1% / 69.5% / 80.4% / 88.3%，Faithfulness 75.0% / 79.4% / 83.9% / 97.1%，顺序同表。</p>
+
+  <ul>
+    <li><strong>「会不会调工具」是最大一跳</strong>：从 Dynamic RAG 到 Tool-Agent，人工准确率 +9.6 个百分点（76.8 − 67.2），忠实度 +4.1 个百分点（81.7 − 77.6）。</li>
+    <li><strong>「怎么选工具、用谁执行」是第二跳</strong>：Tool-Agent 到 TURA，准确率 +10.7 个百分点（87.5 − 76.8），忠实度 +14.5 个百分点（96.2 − 81.7）。相对 Tool-Agent，准确率相对提升 13.9%（10.7 / 76.8）。</li>
+    <li>相对 LLM + RAG，TURA 人工准确率高 22.2 个百分点（87.5 − 65.3，相对提升 34.0%），忠实度高 23.8 个百分点（96.2 − 72.4，相对提升 32.9%）。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">读表提示</span><h4>这三条基线都不是单独某一个模块的对照</h4></div>
+    <p>Tool-Agent 同时缺「统一 MCP 检索模块」和「蒸馏低延迟执行器」（§5.1.2 原话："do not incorporate our unified MCP server retrieval module or our distilled low-latency executor"）。所以 Table 1 中 Tool-Agent → TURA 的 +10.7 个百分点，是<strong>两个模块合起来的差</strong>，不能单独记在 DAG 或蒸馏任一头上。</p>
+  </div>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="dag">
+  <div class="sec-head"><span class="sec-num">03</span><h2>DAG 的价值不是「更好」，而是「同样的成功率先把时间砍掉 44%」</h2></div>
+  <p class="sec-sub">读完这节应能动手算出：一个依赖图里有 k 条并行分支时会省下多少等待时间，以及论文里这条 DAG 具体长什么样。</p>
+
+  <h3>「北京三日游」被拆成一张有向无环图</h3>
+  <p>论文 §4.3 完整走了一遍 Figure 2 的例子：查询 "Beijing trip June 10-15. Need hotel, 2-3 attractions and things to do."。规划器把子任务定义为 <code>st<sub>k</sub> = (sq′<sub>k</sub>, M<sub>k</sub>)</code>——一个上下文相关的细化子查询，外加一个在 <code>M<sub>final</sub></code> 中选定的 MCP Server；当子任务 b 需要子任务 a 的输出作为输入时，连一条边 <code>(v<sub>a</sub>, v<sub>b</sub>)</code>。</p>
+
+  <div class="quote">
+    <span class="en">"the planner identifies that Sub-task4 (Path planner) depends on the outputs of Sub-task2 (Top Attractions) and Sub-task3 (Hotel Booking). … Meanwhile, Sub-task1 (Search Beijing weather) can be executed in parallel as it has no dependencies."</span>
+    <span class="where">§4.3 · 图中的子任务编号即论文 Figure 2 的 Sub-task1–4</span>
+  </div>
+
+  <p>路由模型先判断复杂度：<strong>简单查询不走 DAG 规划器</strong>，直接构造单任务执行计划；只有被判为复杂的查询才调用由 Deepseek-V3 实现的 DAG 规划器（§4.3、§5.1.4）。执行时 orchestrator 沿图遍历，子任务一旦可执行就派给执行器。</p>
+
+  <h3>Table 6：复杂多跳子集上，并行让延迟从 1650ms 降到 920ms</h3>
+  <p>Table 6 只在 MCP-Bench 中「复杂、多跳、存在并行可能」的子集上比较两种规划方式（成功率 88.9% → 89.1%，+0.2 个百分点）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Planning Method</th><th style="text-align:right">Success Rate (%)</th><th style="text-align:right">Avg. Latency (ms) ↓</th></tr></thead>
+      <tbody>
+        <tr><td>Sequential Plan</td><td class="num">88.9</td><td class="num">1,650</td></tr>
+        <tr class="best"><td>DAG Plan</td><td class="num">89.1</td><td class="num">920</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>平均延迟降 730ms，相对 Sequential 降低 44.2%（730 / 1650 = 0.4424，与论文 §5.3.2 的 "reduces average latency by 44.2%" 一致）。论文原句是 "This substantial efficiency gain is achieved with no degradation in the execution success rate"——成功率的实际变化是 +0.2 个百分点（88.9 → 89.1）。</p>
+
+  <h3>交互：并行窗口决定 DAG 能省多少，但省不掉关键路径</h3>
+  <p>并行省的只是「等最慢那条分支」的时间：关键路径不变，其余分支重叠执行，总延迟由最长的那条路径决定。下图把 Figure 2 那张 DAG 搬到一个极简的耗时模型上（四个子任务等长、各为 t），切换规划模式、拖动子任务耗时，观察总延迟与节省比例。</p>
+  <p class="scenario-note">在本模型里，降幅恒等于 <code>1 − 步数 / 4</code>：Figure 2 的 DAG 恒为 <code>1 − 2/4 = 50.0%</code>，全部无依赖恒为 <code>1 − 1/4 = 75.0%</code>，与 t 的取值无关。滑块只改绝对延迟（毫秒），比例的读数不随 t 变。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="dag-mode">
+      <button class="rule-btn active" data-mode="seq">Sequential Plan<span class="r-sub">单通道，逐个执行</span></button>
+      <button class="rule-btn" data-mode="two">DAG Plan<span class="r-sub">Figure 2 的依赖图</span></button>
+      <button class="rule-btn" data-mode="none">DAG · 假设全部无依赖<span class="r-sub">对照用，非论文方案</span></button>
+    </div>
+    <p class="scenario-note">前两种对应 Figure 2：天气（Sub-task1）单独一条；景点（Sub-task2）、酒店（Sub-task3）各自先跑，然后共同汇入路径规划（Sub-task4）。第三种把 Sub-task4 的依赖<strong>人为拆掉</strong>，论文没有这个方案，只用来展示上界。</p>
+
+    <svg id="dag-chart" viewBox="0 0 760 196" role="img" aria-label="四种排布的耗时时间轴" style="width:100%;height:auto;display:block"></svg>
+
+    <div class="ctrl slider-row">
+      <label>每个子任务耗时 t <span class="v" id="dag-t-v">450 ms</span></label>
+      <input type="range" id="dag-t" min="100" max="2000" step="50" value="450">
+      <div class="slider-ends"><span>100 ms</span><span>2000 ms</span></div>
+      <p class="mini" style="margin-top:6px">t 只改绝对毫秒；降低比例不随 t 变（DAG 恒 50.0%，全部无依赖恒 75.0%）。</p>
+    </div>
+
+    <div class="readout" id="dag-readout" data-src="Table 6">
+      <div class="r-head">总延迟 · 自上而下</div>
+      <div id="dag-msg"></div>
+      <p class="mini" style="margin-top:6px">读数中比例与 t 无关，t 只改绝对延迟。</p>
+    </div>
+  </div>
+
+  <p>把 <code>t = 450ms</code> 代入：顺序 = 4 × 450 = 1800ms；Figure 2 的 DAG = 2 × 450 = 900ms，相对顺序执行降低 50.0%（少 900ms）；全部无依赖 = 450ms，相对顺序执行降低 75.0%。</p>
+
+  <details>
+    <summary>手算两组：给定 t 与规划模式，总延迟怎么算<span class="sum-sub">JS 与此处同一组整数公式（JS 由 rows 现算最长行长度，手算即 max 行长度），逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>规则（本页自定的示意模型，不是论文的算法）：</strong></p>
+      <ul>
+        <li>Sequential：4 个任务逐个跑，总延迟 = <code>4t</code>。</li>
+        <li>DAG（Figure 2）：三组互不相等的行是 <code>[天气]</code>、<code>[景点 → 路径]</code>、<code>[酒店 → 路径]</code>，各占 <code>t</code>、<code>2t</code>、<code>2t</code>，总延迟 = <code>max(t, 2t, 2t) = 2t</code>——不是 3t；本模型假定 Sub-task4 在两条分支上共用一个执行结果、只跑一次（论文 §4.3 未讨论 S4 被调用多次的情形，这是页面自定的假设）。</li>
+        <li>全部无依赖：<code>max(t, t, t, t) = t</code>。</li>
+        <li>「降低比例」= <code>1 − total(模式) / total(Sequential)</code>，百分比保留 1 位小数。</li>
+      </ul>
+      <p><strong>第 1 组：t = 450ms，DAG（Figure 2）</strong><br>
+        顺序：<code>4 × 450 = 1800 ms</code><br>
+        Figure 2：<code>max(450, 450 + 450, 450 + 450) = max(450, 900, 900) = 900 ms</code><br>
+        降低比例：<code>1 − 900 / 1800 = 0.5 → 50.0%</code>，少 900ms。</p>
+      <p><strong>第 2 组：t = 700ms，全部无依赖</strong><br>
+        顺序：<code>4 × 700 = 2800 ms</code><br>
+        无依赖：<code>max(700, 700, 700, 700) = 700 ms</code><br>
+        降低比例：<code>1 − 700 / 2800 = 0.75 → 75.0%</code>，少 2100ms。</p>
+      <p><strong>为什么只有 2×、以及和 Table 6 的关系：</strong>关键路径是「景点 → 路径」两步，并行再彻底也要至少 2t，所以 4 个等长子任务的图最多降到顺序的一半。Table 6 的实际比值是 <code>920 / 1650 ≈ 0.5576</code>，高于本模型的 0.5。<span class="infer">推断</span>（依据：本模型假设四个子任务等长、除子任务外无其它开销；实际子任务长短不一，且规划、检索等环节有不能并行的固定开销，这两点都可能让实际比值高于关键路径下界）。</p>
+    </div>
+  </details>
+
+</section>
+
+<!-- ================= 04 怎么训 / 怎么算 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>执行器为什么要变小：大模型每步 8.7 秒，实时搜索等不起</h2></div>
+  <p class="sec-sub">读完这节应能说清：教师轨迹怎么被筛成数据、学生为什么能超过教师，以及线上为什么最后选 4B 而不是最准的 30B。</p>
+
+  <p>用 Deepseek-V3 直接做细粒度执行在生产上不可行：每一步决策的上下文包括对话历史、Server 描述，以及论文所说的（未明确是每个 Server 之内还是整个上下文的）"dozens of tool APIs"（§4.4）。Table 7 的数字给出了量级：教师模型每步平均 P80 延迟 <code>8,700ms</code>。</p>
+
+  <h3>数据是筛出来的，不是攒出来的</h3>
+  <p>教师模型按 ReAct 式三元组 <code>⟨o<sub>t</sub>, th<sub>t</sub>, a<sub>t</sub>⟩</code> 生成轨迹（观察、思维、动作），然后过两道自动质检（§4.4.1）：</p>
+  <ul>
+    <li><strong>Correctness Filtering</strong>：裁判模型 <code>J<sub>correct</sub></code> 检查是否遵守 API schema、参数值是否合法、思维是否逻辑成立，失败的整条丢弃。</li>
+    <li><strong>Efficiency Filtering</strong>：<code>J<sub>efficient</sub></code> 检查动作冗余、路径次优，这类轨迹 "either pruned or programmatically corrected"。</li>
+  </ul>
+  <div class="eq">D<sub>distill</sub> = <span class="hl-a">J<sub>efficient</sub></span>( <span class="hl-b">J<sub>correct</sub></span>( D<sub>expert</sub> ) )</div>
+  <div class="eq-cap">Eq.7 · 外层效率过滤作用在「已正确」的轨迹上</div>
+
+  <p>训练用 <code>Qwen3</code> 系列，标准交叉熵损失覆盖 <strong>thought + action 的完整 token 序列</strong>（Eq.8）；上线时 prompt 明确要求直接产出 action、跳过 thought——这就是 "train-with-thought, infer-without-thought"。</p>
+  <p>学生超过教师，论文的解释是：数据管线 "effectively filters noise and crystallizes optimal reasoning paths into a targeted training dataset"（§5.3.3）。</p>
+
+  <h3>Table 7：8 个执行器的准确率与延迟</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Agent Model</th><th>Model Size</th><th style="text-align:right">Tool Calling Acc. (%) ↑</th><th style="text-align:right">Avg. Latency/Step P80 (ms) ↓</th></tr></thead>
+      <tbody>
+        <tr><td>GPT-4o</td><td>N/A</td><td class="num">81.7</td><td class="num">6,800</td></tr>
+        <tr><td>Teacher (Deepseek-V3)</td><td>671B-A37B</td><td class="num">82.4</td><td class="num">8,700</td></tr>
+        <tr><td>Qwen3-1.7B</td><td>1.7B</td><td class="num">43.5</td><td class="num">1,500</td></tr>
+        <tr><td>Qwen3-4B</td><td>4B</td><td class="num">70.1</td><td class="num">2,200</td></tr>
+        <tr><td>Qwen3-30B-A3B</td><td>30B-A3B</td><td class="num">76.3</td><td class="num">2,600</td></tr>
+        <tr><td>Qwen3-1.7B Distilled</td><td>1.7B</td><td class="num">77.6</td><td class="num">620</td></tr>
+        <tr class="best"><td>Qwen3-4B Distilled</td><td>4B</td><td class="num">88.3</td><td class="num">750</td></tr>
+        <tr><td>Qwen3-30B-A3B Distilled</td><td>30B-A3B</td><td class="num">88.7</td><td class="num">760</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ul>
+    <li><strong>蒸馏的增益随基座变弱而变大</strong>：1.7B 从 43.5 → 77.6（+34.1 个百分点），4B 从 70.1 → 88.3（+18.2 个百分点），30B-A3B 从 76.3 → 88.7（+12.4 个百分点）。</li>
+    <li><strong>延迟与「去 thought」的关系</strong>：4B 蒸馏后 P80 从 2200ms 到 750ms，相对降低 65.9%（1450 / 2200）；30B-A3B 蒸馏后 2600 → 760，相对降低 70.8%（1840 / 2600）。两个蒸馏模型的准确率分别比教师高 5.9 与 6.3 个百分点、比 GPT-4o 高 6.6 与 7.0 个百分点。论文在 §5.3.3 把「准确率与延迟同时提升」称为 "a direct consequence of our train-with-thought, infer-without-thought paradigm"，并说学生直接生成简洁的最终动作、minimizing token output；论文未给出 thought 部分占总 token 的比例。</li>
+    <li><strong>上线选的不是最准的</strong>：30B-A3B Distilled 准确率 88.7% 略高于 4B 的 88.3%（+0.4 个百分点），延迟仅差 10ms，但论文说它的总参数太大，需要双卡 L20 部署，而 4B 单卡即可（§5.3.3）。</li>
+    <li><strong>延迟口径</strong>：P80，「每个工具执行步骤」的平均延迟；Qwen3 系列在两张与生产同配置的 NVIDIA L20 上测，Deepseek-V3 用百度千帆在线服务测（§5.1.4）——两者的硬件/服务环境不同。</li>
+  </ul>
+
+  <div class="conflict">
+    <div class="side"><b>原文写法 A · §5.3.3 正文</b><p>"…while concurrently achieving a <b>66% reduction</b> in P80 latency (from 2,200ms to 750ms)."</p></div>
+    <div class="side"><b>原文写法 B · 用正文给的原始值算</b><p><code>(2200 − 750) / 2200 = 1450 / 2200 = 65.91% → 65.9%</code>，与 66% 相差 0.1 个百分点。页面统一按原表数值计算。</p></div>
+  </div>
+</section>
+
+<!-- ================= 05 架构 / 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>检索、规划、执行三段接力，每一段都有可量化的口径</h2></div>
+  <p class="sec-sub">读完这节应能说清：一个查询从进入系统到出答案，各段分别做了什么、在表上对应哪一列。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 300" role="img" aria-label="TURA 三阶段流程：意图感知检索、DAG 规划、蒸馏执行">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+      <g font-family="Inter,'Noto Sans SC',sans-serif">
+        <!-- 输入 -->
+        <rect x="8" y="120" width="110" height="58" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+        <text x="63" y="145" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--text)">query q</text>
+        <text x="63" y="164" text-anchor="middle" font-size="11" fill="var(--text-muted)">用户自然语言</text>
+        <line x1="118" y1="149" x2="146" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ah)"></line>
+
+        <!-- 阶段 1 -->
+        <rect x="148" y="70" width="200" height="158" rx="12" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="248" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="var(--c1)">① Intent-Aware Retrieval</text>
+        <text x="164" y="118" font-size="11" fill="var(--text)">分解 → SQ = f(q)</text>
+        <text x="164" y="136" font-size="11" fill="var(--text)">Server 索引 = 文档 ∪ 合成查询</text>
+        <text x="164" y="154" font-size="11" fill="var(--text)">多向量 MaxSim（Eq.4）</text>
+        <text x="164" y="172" font-size="11" fill="var(--text)">跨子查询取 max 聚合（Eq.6）</text>
+        <text x="164" y="196" font-size="10.5" font-family="'JetBrains Mono',monospace" fill="var(--c1)">→ Table 4 / 5 口径</text>
+        <line x1="348" y1="149" x2="376" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ah)"></line>
+
+        <!-- 阶段 2 -->
+        <rect x="378" y="70" width="200" height="158" rx="12" fill="var(--bg-surface)" stroke="var(--accent)"></rect>
+        <text x="478" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="var(--accent-deep)">② DAG Task Planner</text>
+        <text x="394" y="118" font-size="11" fill="var(--text)">router 判复杂度</text>
+        <text x="394" y="136" font-size="11" fill="var(--text)">简单 → 单任务方案</text>
+        <text x="394" y="154" font-size="11" fill="var(--text)">复杂 → G = (V, E)</text>
+        <text x="394" y="172" font-size="11" fill="var(--text)">边表示数据依赖</text>
+        <text x="394" y="196" font-size="10.5" font-family="'JetBrains Mono',monospace" fill="var(--accent)">→ Table 6 口径</text>
+        <line x1="578" y1="149" x2="606" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ah)"></line>
+
+        <!-- 阶段 3 -->
+        <rect x="608" y="70" width="200" height="158" rx="12" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="708" y="94" text-anchor="middle" font-size="12" font-weight="700" fill="var(--accent-deep)">③ Distilled Executor</text>
+        <text x="624" y="118" font-size="11" fill="var(--text)">orchestrator 遍历 DAG</text>
+        <text x="624" y="136" font-size="11" fill="var(--text)">A_θ 只在 M_k 内调工具</text>
+        <text x="624" y="154" font-size="11" fill="var(--text)">train thought / infer action</text>
+        <text x="624" y="172" font-size="11" fill="var(--text)">Qwen3-4B Distilled</text>
+        <text x="624" y="196" font-size="10.5" font-family="'JetBrains Mono',monospace" fill="var(--accent)">→ Table 7 口径</text>
+      </g>
+      <g font-family="Inter,'Noto Sans SC',sans-serif" font-size="11.5" fill="var(--text-muted)">
+        <text x="248" y="256" text-anchor="middle">M = N 个 MCP Server（含网页搜索）</text>
+        <text x="478" y="256" text-anchor="middle">无依赖子任务并行</text>
+        <text x="708" y="256" text-anchor="middle">答案 A → Q(A) 与 L(π)</text>
+        <text x="430" y="284" text-anchor="middle" font-size="11">三个模块分别对应 RQ2 / RQ3 / RQ4 的消融</text>
+      </g>
+    </svg>
+    <figcaption>流程按 §4.1–§4.4 的文字整理，非论文 Figure 2 的原图重绘；Figure 2 的完整结构见原文。三段的评估口径分别落在 Table 4/5、Table 6、Table 7。</figcaption>
+  </figure>
+
+  <h3>① 意图感知检索：词汇鸿沟靠「给每个 Server 造问题」来垫平</h3>
+  <p>用户说的话和开发者写的工具文档用词不同。论文在<strong>离线阶段</strong>用生成模型 <code>g<sub>LLM-gen</sub></code> 以高温 <code>T<sub>high</sub> &gt; 1.0</code> 为每个 Server 合成一批可能的用户查询 <code>Q<sub>i</sub><sup>syn</sup></code>，与原始文档拼成 <code>D′<sub>i</sub> = {D<sub>i</sub>} ∪ Q<sub>i</sub><sup>syn</sup></code>，再逐段嵌入（ERNIE）。上线时把每个子查询与 Server 的全部向量做 <code>max cos</code>（Eq.4），跨子查询取最高分聚合（Eq.6），取 top-K。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Retrieval Method</th><th style="text-align:right">Recall@5 ↑</th><th style="text-align:right">Precision@5 ↑</th></tr></thead>
+      <tbody>
+        <tr><td>Dense Retrieval (ERNIE)</td><td class="num">0.4187</td><td class="num">0.5505</td></tr>
+        <tr><td>TURA (w/o Augment.)</td><td class="num">0.7500</td><td class="num">0.8555</td></tr>
+        <tr><td>TURA (w/o Decomp.)</td><td class="num">0.4530</td><td class="num">0.5631</td></tr>
+        <tr class="best"><td>TURA (Full)</td><td class="num">0.8289</td><td class="num">0.9190</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>两个模块都撤掉哪个更致命，从 Table 4 能直接读出来：</p>
+  <ul>
+    <li><strong>去掉查询分解</strong>：Recall@5 从 0.8289 掉到 0.4530（−0.3759，相对下降 45.3%）。</li>
+    <li><strong>去掉索引增强</strong>：Recall@5 从 0.8289 掉到 0.7500（−0.0789，相对下降 9.5%）。</li>
+    <li>两个模块对「单条基线」的贡献：相对 Dense Retrieval (ERNIE)，Full TURA 的 Recall@5 从 0.4187 到 0.8289（+0.4102）。</li>
+  </ul>
+
+  <p>合成查询放多少条也有拐点：Figure 3 显示 Recall@5 在 <code>N<sub>Q</sub> = 20</code> 时达到峰值，之后进入平台期，论文据此固定 <code>N<sub>Q</sub> = 20</code>。索引组织方式上，Table 5 比较了三种方案（NQ = 20）：Single-Vector 0.7721，Multi-Vector（Queries + Doc）0.8289，Multi-Vector（Queries Only）0.8299。Queries Only 略高 0.0010，论文仍选 Queries + Doc，给出的理由是保留原始文档作为 "safety net"。</p>
+  <p class="mini">Figure 3 的曲线未转录（只有峰值位置这条结论 + 表 5 的 NQ=20 截面）；Table 5 的 @5 指标列名在原文写作 P@5。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>线上 SSR 从 55.1% 到 64.0%，但线上只采样了 103 条查询</h2></div>
+  <p class="sec-sub">读完这节应能说清：线上 A/B 的三个指标各是什么口径、以及论文自身跨表引用时有一处对不上的地方。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Online System</th><th style="text-align:right">SSR</th><th>GSB</th></tr></thead>
+      <tbody>
+        <tr><td>LLM + RAG (Legacy)</td><td class="num">55.1%</td><td>—</td></tr>
+        <tr class="best"><td>TURA (Ours)</td><td class="num">64.0% (+8.9%)</td><td>13% / 86% / 4%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>数据取自 Table 2。SSR（Session Success Rate）的口径是「提供满意答案的会话占比」（§5.1.3，引 [7]）；GSB 是 TURA 相对线上 LLM + RAG 的人工对比评分，13% Good / 86% Same / 4% Bad，正文称 Same 为 "Satisfactory"。</p>
+
+  <div class="conflict">
+    <div class="side"><b>原文写法 A · Table 2</b><p>TURA 的 SSR 单元格是 <code>64.0% (+8.9%)</code>，与 §5.2.2 正文 "It increased the Session Success Rate by 8.9%" 并列出现。</p></div>
+    <div class="side"><b>原文写法 B · 用两列原始值算</b><p>由 55.1% 与 64.0% 计算：绝对差 <code>8.9</code> 个百分点，相对提升 <code>(64.0 − 55.1) / 55.1 = 8.9 / 55.1 = 16.15% → 16.2%</code>。页面不替原文选口径。</p></div>
+  </div>
+
+  <h3>Table 3：问题数减少，但表题数字与表内数字对不上</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Online System</th><th style="text-align:right">Total Issues</th><th style="text-align:right">Advantage Rate</th><th style="text-align:right">SSR</th></tr></thead>
+      <tbody>
+        <tr><td>LLM + RAG (Legacy)</td><td class="num">66</td><td class="num">—</td><td class="num">55.1%</td></tr>
+        <tr class="best"><td>TURA (Ours)</td><td class="num">55 (−16.7%)</td><td class="num">8.7%</td><td class="num">64.0% (+8.9%)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="conflict">
+    <div class="side"><b>原文写法 A · Table 3 表题</b><p>"Detailed performance analysis showing TURA's <b>8.7%</b> performance advantage with significantly reduced error rates across all issue categories."（原文未给出 Advantage Rate 的计算口径，8.7% 无法与其他列互相核对。）</p></div>
+    <div class="side"><b>原文写法 B · 用两列原始值算</b><p>原文未给出 Advantage Rate 的计算口径（§5.1.3、§5.2.2 均未说明）。可查的邻近数字只有：Advantage Rate <code>8.7%</code> vs SSR 差 <code>64.0 − 55.1 = 8.9</code> 个百分点；TURA 行的 <code>(−16.7%)</code> 与 <code>(+8.9%)</code> 分别对应问题数相对降幅 <code>(66 − 55) / 66 = 16.67%</code> 与 SSR 的绝对差。</p></div>
+  </div>
+  <p>正文还给出分类降幅：accuracy −7.1%、content richness −28.6%、content value −17.6%，以及关键失败从 9 降到 4（§5.2.2）。</p>
+
+  <h3>线上测试的样本与一个跨表引用问题</h3>
+  <ul>
+    <li><strong>样本量</strong>：§5.2.2 "We sampled 103 queries to balance coverage and cost"，每条由三名标注员独立评、分歧投票。Table 2/3 的数字就建立在这 103 条上。</li>
+    <li><strong>跨表引用</strong>：§5.3.2 开头写 "While Table 1 shows the latency impact of the DAG planner on the entire dataset…"，但 Table 1 的四列只有 Accuracy 与 Faithfulness 的人工/LLM 两个口径，<strong>没有延迟列</strong>。DAG 规划器的延迟对比出现在 Table 6（复杂多跳子集）。</li>
+    <li><strong>结论强度</strong>：正文称在线结果 "statistically significant"（§5.2.2），但论文未给出该检验的统计量、置信区间或样本构成明细。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>这套账在什么条件下才成立</h2></div>
+  <p class="sec-sub">读完这节应能判断：什么场景直接借鉴没问题，什么场景需要重新验证。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>离线评估全部在一个内部构建的基准上进行</h4></div>
+    <p>MCP-Bench 来自百度搜索的匿名化生产日志，人工标注（Cohens kappa 0.87），Server 与工具标识被匿名化后公开发布（§5.1.1 原句只承诺 "anonymizing server and tool identifiers"，页面不据此推断 service 侧域名或属性也已匿名化）。Table 1/4/5/6/7 的所有对比都在这个基准上，论文没有报告它与公开 benchmark 的交叉结果。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界二</span><h4>「网页检索也进检索池」带来的静态查询风险</h4></div>
+    <p>传统网页检索本身被当作一个 MCP Server（§3："traditional web retrieval is itself treated as an MCP server"）。<span class="infer">推断</span>（依据：§4.2 的召回在 top-K 处截断，"selecting the top-K servers"，且 Table 4 的 Recall@5 不满 1）：搜索引擎若没挤进 top-K，原本纯静态的查询也会失效——论文未单独报告纯静态查询子集上的效果，这个风险有多大无法从表中判断。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>DAG 只对少数复杂查询有意义，且省的是等待不是计算</h4></div>
+    <p>只有被判为复杂的查询才进 DAG 规划器，简单查询走单任务方案（§4.3）；MCP-Bench 中 95.02% 是单意图、平均 DAG 宽度 1.147，Table 6 的 44.2% 延迟降幅只在「复杂多跳、存在并行」的子集上测得，不能外推到全量。并行只压缩关键路径之外的等待，不减少总工具调用本地计算。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>成功的上限被教师与数据管线锁住</h4></div>
+    <p>训练数据来自教师在「一组具有代表性的子任务」上生成的轨迹（§4.4.1："For a large set of representative sub-tasks"），再由两道裁判模型筛选。教师无法正确解决的子任务类型，学生也没有对应的正例。<span class="infer">推断</span>（依据：Eq.7 的 D<sub>distill</sub> 全部来源于 D<sub>expert</sub>；§5.3.3 把学生超教师解释为数据管线 "filters noise and crystallizes optimal reasoning paths"，未讨论管线之外的类型）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界五</span><h4>执行失败、重规划与权限没有在文中给出评估</h4></div>
+    <p>论文的指标围绕答案质量、忠实度、SSR 与延迟；对 API 失败/超时后的重规划、工具调用的权限与安全，文中没有对应的实验或指标。<span class="infer">推断</span>（依据：§5.1.3 列出的评估指标全集不含失败恢复类指标）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>可迁移的是「统一 Server 池 + 先分解再检索 + 按依赖图并行 + 用生产数据蒸馏小执行器」</h4></div>
+    <p>其中每一步的可复用性、以及在非百度搜索场景下能拿回多少收益，都要用自己的流量日志重新测——尤其第二块，它依赖教师模型和服务端 API 的具体分布。</p>
+  </div>
+</section>
+
+<footer>
+  <div>TURA: Tool-Augmented Unified Retrieval Agent for AI Search · 本页依据 arXiv:2508.04604v2 整理，同一页面只引用该版本。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.04604v2" target="_blank" rel="noopener">https://arxiv.org/abs/2508.04604v2</a><br>
+    基准：<a href="https://github.com/weixiaolong94-hub/TURA" target="_blank" rel="noopener">MCP-Bench 仓库</a><br>
+    笔记：<a href="/turatool-augmented-unified-retrieval-agent-for-ai-search/">TURA：Tool-Augmented Unified Retrieval Agent for AI Search</a><br>
+    <span class="mini">笔记勘误（原笔记未改动）：原笔记 Table 7 简化版把 Qwen3-4B Distilled 的 P80 延迟写作 760ms，原文 Table 7 为 750ms（760ms 是 Qwen3-30B-A3B Distilled 的值）；原笔记「延迟仅为教师模型的不到十分之一」，按原表 8,700 / 750 ≈ 11.6，方向正确，但「十分之一」应对应 870ms。</span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   TURA 精读页 · 交互：DAG 并行的时间轴示意
+   ------------------------------------------------
+   出处：§4.3（Figure 2 的依赖）+ Table 6（Sequential vs DAG 延迟）
+   本模型由页面自定，不是论文算法：
+     Sequential     总延迟 = 4t
+     DAG(Figure 2)  行 [天气] / [景点 → 路径] / [酒店 → 路径]
+                    总延迟 = max(t, 2t, 2t) = 2t
+     全部无依赖      总延迟 = max(t, t, t, t) = t   （论文没有此方案）
+   覆盖：依赖关系与关键路径对总延迟的影响。
+   自定假设（原文未说明）：
+     - S4 只跑一次（论文 §4.3 未讨论 S4 被调用多次的情形）
+     - 四个子任务等长、各为 t
+     - 所有行同时起跑
+     - 本地工具延迟、布桩开销（stub）、失败重试、规划器与检索的耗时均设为 0
+   未覆盖：论文 Figure 2 之外的系统开销本模型不含。
+   ============================================================ */
+(function () {
+  var MODES = {
+    seq:  { name: 'Sequential', rows: [['w', 'a', 'h', 'p']] },
+    two:  { name: 'DAG（Figure 2）', rows: [['w'], ['a', 'p'], ['h', 'p']] },
+    none: { name: 'DAG（全部无依赖）', rows: [['w'], ['a'], ['h'], ['p']] }
+  };
+  var LABEL = { w: 'S1 天气', a: 'S2 景点', h: 'S3 酒店', p: 'S4 路径' };
+  var state = { mode: 'seq', t: 450 };
+
+  var chart = document.getElementById('dag-chart');
+  var slider = document.getElementById('dag-t');
+  var sliderV = document.getElementById('dag-t-v');
+  var msg = document.getElementById('dag-msg');
+  var btnBox = document.getElementById('dag-mode');
+
+  function totalSteps(mode) {
+    var rows = MODES[mode].rows, best = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].length > best) best = rows[i].length;
+    }
+    return best;   /* 每一步固定 t：最长一行决定总延迟，与手算 max(行长度) 同一公式 */
+  }
+
+  function esc(x) { return String(x); }
+
+  function draw() {
+    if (!chart) return;
+    var t = state.t;
+    var rows = MODES[state.mode].rows;
+    var end = totalSteps(state.mode) * t;          /* 该模式的结束时刻 */
+    var scale = 4 * t;                             /* 横轴统一按顺序执行的 4t 铺满 */
+    var x0 = 96, plotW = 640, top = 14, rowH = 40, barH = 26;
+    var svg = '';
+    /* 顺序执行的 4 个刻度 */
+    for (var k = 0; k <= 4; k++) {
+      var x = x0 + plotW * k / 4;
+      svg += '<line x1="' + x + '" y1="' + (top - 2) + '" x2="' + x + '" y2="' + (top + rows.length * rowH + 2) + '" stroke="var(--border)" stroke-width="1"' + (k === 4 ? '' : ' stroke-dasharray="3 3"') + '/>';
+    }
+    svg += '<text x="' + (x0 + plotW) + '" y="' + (top + rows.length * rowH + 18) + '" text-anchor="end" font-size="10.5" font-family="JetBrains Mono,monospace" fill="var(--text-soft)">4t = ' + scale + ' ms</text>';
+    rows.forEach(function (row, ri) {
+      var y = top + ri * rowH;
+      svg += '<text x="' + (x0 - 8) + '" y="' + (y + barH / 2 + 4) + '" text-anchor="end" font-size="11" fill="var(--text-muted)">行 ' + (ri + 1) + '</text>';
+      row.forEach(function (k, ci) {
+        var bx = x0 + plotW * ci / 4;
+        var bw = plotW / 4 - 4;
+        var critical = (state.mode === 'two' && k === 'p');
+        var fill = critical ? 'var(--accent)' : 'var(--accent-soft)';
+        var stroke = 'var(--accent)';
+        svg += '<rect x="' + (bx + 2) + '" y="' + y + '" width="' + bw + '" height="' + barH + '" rx="5" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1.3"/>';
+        svg += '<text x="' + (bx + 2 + bw / 2) + '" y="' + (y + barH / 2 + 4) + '" text-anchor="middle" font-size="10.5" font-family="JetBrains Mono,monospace" fill="' + (critical ? '#FBF6EA' : 'var(--text)') + '">' + esc(LABEL[k]) + '</text>';
+      });
+      var ex = x0 + plotW * end / scale;
+      svg += '<line x1="' + ex + '" y1="' + (y - 3) + '" x2="' + ex + '" y2="' + (y + barH + 3) + '" stroke="var(--accent-deep)" stroke-width="1.5"/>';
+      svg += '<text x="' + (ex + 4) + '" y="' + (y + 10) + '" font-size="9.5" font-family="JetBrains Mono,monospace" fill="var(--accent-deep)">' + end + '</text>';
+    });
+    chart.innerHTML = svg;
+  }
+
+  function report() {
+    if (!msg) return;
+    var t = state.t, steps = totalSteps(state.mode);
+    var total = steps * t, seq = 4 * t;
+    if (state.mode === 'seq') {
+      msg.innerHTML = '总延迟 = <strong>4 × ' + t + ' = ' + total + ' ms</strong>。四个子任务完全首尾相接，没有任何重叠。';
+    } else {
+      var cut = seq - total;
+      var pct = (1 - total / seq) * 100;
+      msg.innerHTML = '总延迟 = <strong>' + steps + ' × ' + t + ' = ' + total + ' ms</strong>（最长一行决定）；' +
+        '相对顺序执行 ' + seq + ' ms 少 ' + cut + ' ms，相对降低 <strong>' + pct.toFixed(1) + '%</strong>。' +
+        (state.mode === 'two'
+          ? ' 行 2、行 3 汇入同一个 S4，本模型按 S4 只跑一次计算，所以是 2t 而不是 3t（页面假设，原文未说明）。'
+          : ' 这是拆掉 S4 依赖后的假想上界，论文的方案是 Figure 2 那张图。');
+    }
+  }
+
+  function render() { draw(); report(); }
+
+  if (btnBox) {
+    btnBox.querySelectorAll('.rule-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        btnBox.querySelectorAll('.rule-btn').forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        state.mode = btn.getAttribute('data-mode');
+        if (MODES[state.mode]) render();
+      });
+    });
+  }
+  if (slider) {
+    slider.addEventListener('input', function (e) {
+      var v = parseInt(e.target.value, 10);
+      if (isNaN(v)) return;
+      state.t = v;
+      if (sliderV) sliderV.textContent = v + ' ms';
+      render();
+    });
+  }
+  if (chart && slider) render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Agents with World Models · 点下去之前，先预演一遍</title>
+<meta name="description" content="论文用一个小型世界模型预演网页操作的后果，让 LLM agent 在真实点击前比较候选动作。WebArena 上 GPT-4o 的成功率从 13.1% 升到 16.6%，成本仅为树搜索的 1/6.8。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+section.block{scroll-margin-top:64px}
+.wm-figure{max-width:560px;margin-left:auto;margin-right:auto}
+.wm-figure svg{max-width:560px;margin:0 auto}
+.wm-svg .box{stroke-width:1.2}
+.wm-svg .b1{fill:var(--c1-soft);stroke:var(--c1)}
+.wm-svg .b2{fill:var(--c2-soft);stroke:var(--c2)}
+.wm-svg .ba{fill:var(--accent-soft);stroke:var(--accent)}
+.wm-svg .t{font-size:12px;font-weight:600;fill:var(--text);text-anchor:middle}
+.wm-svg .s{font-size:10px;fill:var(--text-muted);text-anchor:middle}
+.wm-svg .arrow{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.hchart{display:flex;flex-direction:column;gap:2px;margin:16px 0;padding:0 10px 0 4px}
+.hgroup{display:grid;grid-template-columns:104px 1fr;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+.hgroup:last-child{border-bottom:none}
+.hname{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;color:var(--text-muted);line-height:1.35}
+.hlines{display:flex;flex-direction:column;gap:5px}
+.hline{display:grid;grid-template-columns:1fr 40px;gap:8px;align-items:center}
+.htrack{height:15px;border-radius:100px;background:var(--bg-soft);overflow:hidden}
+.htrack i{display:block;height:100%;border-radius:100px;background:var(--c1);transition:width .35s ease}
+.htrack i.acc{background:var(--accent)}
+.htrack i.human{background:var(--c2)}
+.hnum{font-family:"JetBrains Mono",monospace;font-size:12px;text-align:right;color:var(--text-muted)}
+.prelim-readout{margin-top:0;margin-bottom:14px}
+.chart-note{font-size:12.5px;color:var(--text-soft);margin-top:8px;line-height:1.7}
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:16px 0}
+.flow-box{
+  flex:1 1 120px;min-width:108px;background:var(--bg);border:1px solid var(--border);
+  border-radius:var(--radius);padding:11px 10px;text-align:center;
+}
+.flow-box .k{
+  display:block;font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:600;
+  color:var(--text-soft);letter-spacing:.04em;margin-bottom:4px;
+}
+.flow-box strong{display:block;font-size:13px;line-height:1.45}
+.flow-box em{display:block;font-style:normal;font-size:11px;color:var(--text-muted);margin-top:3px;line-height:1.5}
+.flow-box.hot{border-color:var(--accent);background:var(--accent-soft)}
+.flow-box.cool{border-color:var(--c1);background:var(--c1-soft)}
+.flow-box.violet{border-color:var(--c2);background:var(--c2-soft)}
+.flow-arrow{display:flex;align-items:center;justify-content:center;color:var(--text-soft);font-size:18px;flex:0 0 18px}
+@media (max-width:700px){
+  .flow{flex-direction:column}
+  .flow-arrow{transform:rotate(90deg);flex-basis:16px;height:16px}
+}
+.steps{list-style:none;counter-reset:step;padding:0;margin:18px 0}
+.steps li{
+  position:relative;padding:0 0 18px 42px;counter-increment:step;margin:0;
+}
+.steps li::before{
+  content:counter(step);position:absolute;left:0;top:0;width:26px;height:26px;border-radius:50%;
+  background:var(--accent);color:var(--bg-surface);font-family:"JetBrains Mono",monospace;font-size:12px;
+  font-weight:600;display:flex;align-items:center;justify-content:center;
+}
+.steps li::after{
+  content:"";position:absolute;left:12.5px;top:30px;bottom:2px;width:1px;background:var(--border);
+}
+.steps li:last-child::after{display:none}
+.steps li strong{display:block;margin-bottom:3px}
+.steps li .s-sub{font-size:13px;color:var(--text-muted);line-height:1.75}
+.sim-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+@media (max-width:700px){.sim-grid{grid-template-columns:1fr}}
+.io-box{
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 15px;min-height:118px;transition:border-color .18s ease,background .18s ease;
+}
+.io-box.pred{border-color:var(--accent);background:var(--accent-soft)}
+.io-box.good{border-color:var(--c3);background:var(--c3-soft)}
+.io-box.bad{border-color:var(--accent);background:var(--accent-soft)}
+.io-k{
+  font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--text-soft);margin-bottom:7px;
+}
+.io-v{font-size:13.5px;line-height:1.75;color:var(--text)}
+.score-head{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.08em;color:var(--text-soft);margin:16px 0 8px}
+.score-row{
+  display:grid;grid-template-columns:112px 1fr 48px;gap:10px;align-items:center;
+  padding:7px 9px;border-radius:8px;margin-bottom:5px;border:1px solid transparent;
+}
+.score-row.pick{background:var(--accent-soft);border-color:var(--accent)}
+.score-row.sel{outline:2px solid var(--text);outline-offset:-2px}
+.score-name{font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:600;color:var(--text-muted);line-height:1.35}
+.score-track{height:9px;border-radius:100px;background:var(--border);overflow:hidden}
+.score-fill{display:block;height:100%;border-radius:100px;background:var(--c1);transition:width .3s ease}
+.score-row.pick .score-fill{background:var(--accent)}
+.score-num{font-family:"JetBrains Mono",monospace;font-size:11.5px;text-align:right;color:var(--text)}
+.score-note{font-size:12px;color:var(--text-soft);line-height:1.7;margin-top:6px}
+.act[disabled]{opacity:.45;cursor:not-allowed}
+.errbar{display:flex;height:20px;border-radius:100px;overflow:hidden;margin:14px 0 10px;background:var(--border)}
+.errbar span{display:block;height:100%}
+.errbar .e1{background:var(--accent)}
+.errbar .e2{background:var(--c1)}
+.errbar .e3{background:var(--c2)}
+.errbar .e4{background:var(--border-strong)}
+.legend i.e1{background:var(--accent)}
+.legend i.e2{background:var(--c1)}
+.legend i.e3{background:var(--c2)}
+.legend i.e4{background:var(--border-strong)}
+.tbl-note{font-size:12px;color:var(--text-soft);line-height:1.7;margin:-6px 0 20px}
+.note-fix{
+  margin-top:18px;padding:13px 15px;border-radius:var(--radius);
+  background:var(--bg-soft);border-left:3px solid var(--accent);line-height:1.8;
+}
+.note-fix strong{color:var(--accent-deep)}
+.small{font-size:12.5px;color:var(--text-soft);line-height:1.7}
+@media (max-width:880px){
+  .hgroup{grid-template-columns:92px 1fr;gap:8px}
+  .hname{font-size:11px}
+  .score-row{grid-template-columns:96px 1fr 44px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Web Agents with World Models</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">两条路</a>
+      <a href="#method">方法</a>
+      <a href="#train">训练</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>ICLR 2025 · arXiv 2410.13232</span>
+  <h1>Web Agents with World Models：在点下去之前，先预演一遍</h1>
+  <p class="hero-sub">
+    LLM 网页代理靠「走一步看一步」推进任务，一次不可逆点击就可能把局面毁掉。论文先证明模型几乎不会预测动作后果：四个前沿 LLM 平均只有 <strong>54.75%</strong>，人类是 <strong>83%</strong>。
+    然后它训练一个 8B 的世界模型，把「点下去会发生什么」写成一句状态差异，让 agent 在真实执行前先比较三个候选动作的未来。
+  </p>
+  <div class="meta">
+    <span>Hyungjoo Chae 等 · 延世大学</span>
+    <a href="https://arxiv.org/abs/2410.13232" target="_blank" rel="noopener">arXiv 2410.13232 ↗</a>
+    <a href="https://github.com/kyle8581/WMA-Agents" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    网页代理的瓶颈不只是「不会规划」，而是<strong>看不见动作的后果</strong>。论文让模型从「真实下一状态」和「相似但错误的下一状态」中二选一，四个前沿 LLM 只有 52–58%，人类 83%——基本等于抛硬币。
+  </p>
+  <p>
+    可一旦把每个候选动作的下一状态直接告诉模型，GPT-4o 选对动作的准确率就从 <strong>53% 跳到 73%</strong>。信息是有用的，模型只是自己生成不出来。
+  </p>
+  <p>
+    WMA（World-model-augmented web agent）因此把决策拆成三步：<em>冻结的策略模型提议候选动作，小型世界模型预演每个动作的后果，价值函数给预演结果打分并选最高分</em>。世界模型不预测整页 HTML，只预测「哪些元素被新增、删除、更新」，再用一句话写出来。
+  </p>
+  <p>
+    代价是绝对性能仍低于用 oracle 下一状态的树搜索；世界模型的错误里有 <strong>42%</strong> 是凭空编造不存在的页面元素。它更像一个更强的「选择器」，而不是更强的「策略」。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">54.75<small>%</small></div>
+      <div class="k">LLM 预测下一状态的平均准确率<br>人类 83%，随机基线 50%</div>
+    </div>
+    <div class="metric">
+      <div class="v">16.6<small>%</small></div>
+      <div class="k">WebArena 成功率（GPT-4o + WMA）<br>Vanilla CoT 13.1%</div>
+    </div>
+    <div class="metric">
+      <div class="v">6.8<small>×</small></div>
+      <div class="k">API 成本低于树搜索<br>推理时间快 5.3×</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>代理不是不会点，是不知道点下去会发生什么</h2></div>
+  <p class="sec-sub">先把「世界模型缺失」量化：模型预测动作后果的能力，几乎和抛硬币一样。</p>
+
+  <p>网页导航被论文建模成 <strong>POMDP</strong>（部分可观测马尔可夫决策过程）：真正决定页面状态的是隐藏状态 <code>s</code>，代理只能看到视口里的 <strong>accessibility tree</strong>（简化 DOM）<code>o</code>。动作空间是 <code>CLICK</code>、<code>TYPE</code>、<code>HOVER</code> 这类语言描述的操作，状态转移由环境里的真实函数 <code>T</code> 决定。</p>
+
+  <div class="eq">
+    s<sub>t+1</sub> ~ T(· | s<sub>t</sub>, a<sub>t</sub>)&nbsp;&nbsp;&nbsp;&nbsp;
+    o<sub>t</sub> ∈ O = accessibility tree
+  </div>
+  <div class="eq-cap">代理看不到 s，只能根据 o 猜；它缺的正是「a 会把 s 推到哪」这层知识</div>
+
+  <p>这件事在长任务里会要命。WebArena 的 812 个任务上，GPT-4 的成功率是 <strong>14.41%</strong>，人类是 <strong>78.24%</strong>。差距不只是「步数不够」：代理会重复购买不可退款的机票、在购物车里反复加购、把已经填好的表单清空——这些错误在真实网站上都不可撤销。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">预实验 I</span><h4>预测下一状态：接近随机</h4></div>
+      <p>给当前页面和黄金动作，让模型从真实下一状态与「相似但错误」的下一状态中二选一。GPT-4o-mini <strong>54%</strong>、GPT-4o <strong>55%</strong>、GPT-4-Turbo <strong>58%</strong>、Claude-3.5-Sonnet <strong>52%</strong>，平均 <strong>54.75%</strong>；人类 <strong>83%</strong>，随机是 50%。</p>
+      <p>Claude-3.5-Sonnet 的表现几乎和随机猜测一样差。论文的结论很直接：<strong>世界模型在现有 LLM 里是缺失的</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">预实验 II</span><h4>知道后果，选择立刻变好</h4></div>
+      <p>给 10 个候选动作（1 个黄金 + 9 个负例），只给当前状态时平均只有 <strong>49%</strong>；把每个动作的下一状态一起给出后，四个模型提升 <strong>19–20 个百分点</strong>，最高提升 <strong>38%</strong>。</p>
+      <p>GPT-4o 从 <strong>53%</strong> 升到 <strong>73%</strong>。这说明「后果」这条信息对决策非常有用——模型只是自己生成不出来。</p>
+    </div>
+  </div>
+
+  <p>所以问题被重新定义：不是「让策略模型更会规划」，而是<strong>给它一个便宜、够准的外部预演器</strong>。这正是后面 WMA 的出发点。</p>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成路线：一条盲走，一条把真实环境跑成搜索树</h2></div>
+  <p class="sec-sub">两条路都能走，但一条看不见未来，另一条把未来真的执行一遍。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>反应式 CoT / 试错</h4></div>
+      <p>策略模型看当前页面，直接生成下一步动作，最多允许 30 步。每步只做候选采样和多数投票，不额外调用世界模型或价值函数，便宜、快。</p>
+      <p><strong>卡点：</strong>它没有「如果点了会怎样」的内部模型，只能靠真实环境反馈纠错。遇到不可逆操作时，纠错机会已经没了；在 WebArena 上 GPT-4o 的成功率只有 <strong>13.1%</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>Tree search + oracle 下一状态</h4></div>
+      <p>把候选动作真的执行一遍，拿到环境返回的下一状态，再回溯搜索。它用的是 <strong>oracle</strong> 下一状态（环境真实返回的下一状态），信息条件最好。</p>
+      <p><strong>卡点：</strong>回溯要把之前的动作序列重新执行一遍。论文测到每个实例平均 <strong>748.3 秒</strong>、<strong>$2.7</strong> API 成本；性能上限 <strong>19.2%</strong>，但代价让它很难规模化。</p>
+    </div>
+  </div>
+
+  <p>两条路之间留下一个明显的空档：<strong>oracle 下一状态很有用，但太贵；能不能用一个学出来的模型，便宜地近似它？</strong>论文的预实验正好说明这个近似值得做——模型自己预测不准，但「看到后果」对选择帮助很大。</p>
+
+  <div class="tabs" id="prelim-tabs">
+    <button class="tab active" data-bench="1" aria-pressed="true">预实验 I · 预测下一状态</button>
+    <button class="tab" data-bench="2" aria-pressed="false">预实验 II · 选择动作</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div id="prelim-note" class="readout prelim-readout"></div>
+    <div class="hchart" id="prelim-chart"></div>
+    <div class="legend" id="prelim-legend"></div>
+    <div class="chart-note" id="prelim-caption"></div>
+  </div>
+
+  <p>注意两张图的差别：<strong>预测下一状态</strong>是「生成能力」，四个模型都很差；<strong>在给定下一状态后选动作</strong>是「判别能力」，四个模型都明显更好。WMA 的设计就是把难的那一半交给专门训练的小模型，把容易的那一半留给大模型。</p>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把「预演」拆成三个模块：提议、模拟、打分</h2></div>
+  <p class="sec-sub">策略模型只负责提出可能，世界模型负责写出后果，价值函数负责挑一个未来。</p>
+
+  <p>WMA 不在推理时更新策略模型。它把决策拆成三个角色：策略模型 <code>θ</code> 采样候选动作；世界模型 <code>φ</code> 对每个候选预测下一观测；价值函数 <code>V</code> 给每个「预测出来的未来」打分，选分数最高的动作。</p>
+
+  <div class="eq">
+    {õ<sub>t+1</sub><sup>i</sup>}<sub>i=1</sub><sup>k</sup> =
+    { φ(o<sub>t</sub>, a<sub>t</sub><sup>i</sup>, I) }<sub>i=1</sub><sup>k</sup>
+    <br><br>
+    â<sub>t</sub> = argmax<sub>a<sub>t</sub> ∈ {a<sub>t</sub><sup>1</sup>, …, a<sub>t</sub><sup>k</sup>}</sub>
+    V(I, o<sub>t</sub>, a<sub>t</sub>, õ<sub>t+1</sub><sup>i</sup>)
+  </div>
+  <div class="eq-cap">Eq. 2–3：先让世界模型把每个候选动作「演」一遍，再让价值函数在这些预演结果上取 argmax</div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">策略 θ</span><h4>提议候选</h4></div>
+      <p>用 top-p 采样 20 个动作，保留出现频率最高的 3 个。θ 保持<strong>冻结</strong>，不训练，也不更新参数。</p>
+      <p class="small">所以 WMA 可以套在现成策略模型上；代价是候选集的质量决定了上限。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">世界模型 φ</span><h4>预演后果</h4></div>
+      <p>输入用户指令 <code>I</code>、当前观测 <code>o<sub>t</sub></code>、候选动作 <code>a<sub>t</sub><sup>i</sup></code>，输出一句自然语言描述的下一观测 <code>õ<sub>t+1</sub></code>。</p>
+      <p class="small">主干是 Llama-3.1-8B-Instruct，用下一 token 预测训练。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">价值 V</span><h4>给未来打分</h4></div>
+      <p>看 <code>(I, o<sub>t</sub>, a<sub>t</sub>, õ<sub>t+1</sub>)</code>，估计这个动作离目标有多近，取分数最高的动作。</p>
+      <p class="small">价值函数也是 Llama-3.1-8B，用 Mind2Web 的进度奖励 <code>t / len(τ)</code> 微调。</p>
+    </div>
+  </div>
+
+  <h3>关键工程：不预测整页，只预测「变了什么」</h3>
+  <p>直接把完整 accessibility tree 当训练目标有两个问题。第一，网页一次操作通常只改一小块，<strong>大部分内容原样重复</strong>，信息增益很低；第二，整棵树平均约 <strong>4K tokens</strong>，训练和推理都很贵。</p>
+
+  <p>论文的做法叫 <strong>Transition-focused Observation Abstraction（TaO）</strong>：先用匈牙利算法把 <code>o<sub>t</sub></code> 和 <code>o<sub>t+1</sub></code> 的元素匹配起来。每个元素有 name、role、location 三个属性，三者拼成匹配代价矩阵；匹配不上的元素就是新增或删除，匹配上但内容变了就是更新。于是得到一份机械的差异列表 <code>Δ(o<sub>t</sub>, o<sub>t+1</sub>)</code>，再让一个 LLM 把它写成一句自然语言 <code>õ<sub>t+1</sub></code>。</p>
+
+  <figure class="wm-figure">
+    <svg class="wm-svg" viewBox="0 0 360 250" role="img" aria-label="世界模型把指令、当前观测和候选动作映射为下一状态的抽象描述">
+      <defs>
+        <marker id="wmArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+      <rect class="box b1" x="8" y="14" width="104" height="52" rx="9"></rect>
+      <text class="t" x="60" y="36">指令 I</text>
+      <text class="s" x="60" y="53">用户目标</text>
+
+      <rect class="box b1" x="128" y="14" width="104" height="52" rx="9"></rect>
+      <text class="t" x="180" y="36">观测 o&#8348;</text>
+      <text class="s" x="180" y="53">accessibility tree</text>
+
+      <rect class="box b1" x="248" y="14" width="104" height="52" rx="9"></rect>
+      <text class="t" x="300" y="36">动作 a&#8348;</text>
+      <text class="s" x="300" y="53">候选之一</text>
+
+      <path class="arrow" d="M60 66 L120 104" marker-end="url(#wmArrow)"></path>
+      <path class="arrow" d="M180 66 L180 104" marker-end="url(#wmArrow)"></path>
+      <path class="arrow" d="M300 66 L240 104" marker-end="url(#wmArrow)"></path>
+
+      <rect class="box ba" x="104" y="108" width="152" height="62" rx="10"></rect>
+      <text class="t" x="180" y="132">世界模型 φ</text>
+      <text class="s" x="180" y="150">Llama-3.1-8B</text>
+
+      <path class="arrow" d="M180 170 L180 196" marker-end="url(#wmArrow)"></path>
+
+      <rect class="box b2" x="86" y="200" width="188" height="42" rx="9"></rect>
+      <text class="t" x="180" y="218">õ&#8348;&#8330;&#8321; · 下一状态描述</text>
+      <text class="s" x="180" y="233">只写「变了什么」</text>
+    </svg>
+    <figcaption>示意图：世界模型的一次前向。输入是三元组，输出不是整页 HTML，而是一句描述状态变化的自然语言。</figcaption>
+  </figure>
+
+  <p>训练目标就是标准的下一 token 预测：</p>
+  <div class="eq">
+    L<sub>φ</sub> = − log p( õ<sub>t+1</sub> | o<sub>t</sub>, a<sub>t</sub>, I )
+  </div>
+  <div class="eq-cap">Eq. 1：模型学的是「在这个页面、点这个动作、为了这个目标，接下来会看到什么」</div>
+
+  <h3>自己动手：三个候选动作，先预演再执行</h3>
+  <p>下面是一个<strong>示意场景</strong>：目标是在购物网站买一双 42 码、预算 $80 的跑鞋。策略模型给出三个候选动作，世界模型分别预演后果，价值函数给三个「未来」打分。先选一个动作看预演，再执行看真实结果。</p>
+
+  <div class="sim" id="wma-sim">
+    <div class="sim-top" id="sim-actions">
+      <button class="rule-btn" data-action="a">A · 加入购物车<span class="r-sub">跑鞋 A · $59 · 42 码</span></button>
+      <button class="rule-btn" data-action="b">B · 立即购买<span class="r-sub">跑鞋 B · $120 · 超预算</span></button>
+      <button class="rule-btn" data-action="c">C · 直接搜索<span class="r-sub">搜索框仍有旧文本</span></button>
+    </div>
+
+    <div class="sim-grid">
+      <div class="io-box" id="pred-box">
+        <div class="io-k">世界模型预演 · õ<sub>t+1</sub></div>
+        <div class="io-v">选中一个动作，世界模型会在这里写出它预测的下一状态。</div>
+      </div>
+      <div class="io-box" id="actual-box">
+        <div class="io-k">真实执行 · o<sub>t+1</sub></div>
+        <div class="io-v">执行后，这里显示环境真正返回的观测。</div>
+      </div>
+    </div>
+
+    <div id="sim-scores">
+      <div class="score-note">V 会在三个预演结果上打分；分数最高的是 argmax。</div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="sim-exec" disabled>执行真实动作 →</button>
+      <button class="act ghost" id="sim-reset">重置</button>
+    </div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前推演</div>
+      <div>先选一个动作。注意：V 只看预演描述，不核对现实。</div>
+    </div>
+  </div>
+
+  <p class="small">这个模拟里的页面状态、0–1 分值和错误类型是为讲解机制构造的，<strong>不是论文实验数据</strong>。论文的真实数字在 06 节；错误类型分类来自论文 6.2 节。</p>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练一个 8B 世界模型，只要 3 个 GPU 小时</h2></div>
+  <p class="sec-sub">难点不在算力，而在把「整页预测」改写成「状态差异预测」。</p>
+
+  <ol class="steps">
+    <li>
+      <strong>收集轨迹</strong>
+      <span class="s-sub">让 LLM 代理在环境里跑任务，记录 <code>{I, o<sub>t</sub>, a<sub>t</sub>, o<sub>t+1</sub>}</code>。WebArena 没有公开训练集，论文用 LLM 合成了 <strong>870 条指令</strong>，每条采样 <code>l=5</code> 条轨迹，共 <strong>14,200</strong> 个实例；Mind2Web 直接用离线训练轨迹。</span>
+    </li>
+    <li>
+      <strong>抽取状态差异</strong>
+      <span class="s-sub">用匈牙利算法匹配前后两页的元素，代价由 name、role、location 三项组成，得到 <code>ADDED / DELETED / UPDATED</code> 三类变化。</span>
+    </li>
+    <li>
+      <strong>改写成自然语言</strong>
+      <span class="s-sub">把结构化差异交给 LLM，写成一句简洁描述 <code>õ<sub>t+1</sub></code>，替换掉原始整页观测，得到训练集 <code>D̃</code>。</span>
+    </li>
+    <li>
+      <strong>下一 token 预测</strong>
+      <span class="s-sub">在 <code>(I, o<sub>t</sub>, a<sub>t</sub>)</code> 上微调 Llama-3.1-8B-Instruct，让它生成 <code>õ<sub>t+1</sub></code>。学习率 <code>1e-5</code>、2 个 epoch、8 张 RTX 4090，世界模型和价值函数合计约 <strong>3 GPU 小时</strong>。</span>
+    </li>
+  </ol>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">训练账本</span><h4>数据是瓶颈，不是算力</h4></div>
+      <p>WebArena 侧只有 870 条合成指令、14,200 个实例；Mind2Web 侧用现成离线轨迹。世界模型的全部训练成本约 3 GPU 小时——这比大多数人预期的「训练一个环境模拟器」便宜得多。</p>
+      <p>真正的成本在<strong>数据覆盖</strong>：合成指令是否覆盖真实用户目标，直接决定世界模型见过多少种页面转移。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">推理账本</span><h4>3 次预演，1 次真实执行</h4></div>
+      <p>每步从策略模型采样 20 个动作，保留 3 个；世界模型对这 3 个动作各做一次前向，价值函数再各打一次分，最后只把 <strong>1 个动作</strong>真正执行到环境里。</p>
+      <p>对比树搜索：每实例 <strong>140.3 秒 / $0.4</strong>，树搜索是 <strong>748.3 秒 / $2.7</strong>。省下来的就是「不真的执行、也不回溯」。</p>
+    </div>
+  </div>
+
+  <div class="eq">
+    每步成本 ≈ k × (世界模型前向 + 价值函数打分) + 1 次真实执行
+    <br>
+    k = 3（从 20 个采样动作里保留）
+  </div>
+  <div class="eq-cap">k 越大，探索越充分，但世界模型和价值函数的调用次数线性增长</div>
+
+  <details>
+    <summary>为什么不能直接用 prompting 的世界模型？<span class="sum-sub">消融里的 17.5% vs 22.0%</span></summary>
+    <div class="details-body">
+      <p>论文对比了一个变体：不训练世界模型，直接用 GPT-4o-mini + 2-shot 示例让它预测下一状态。结果整体 SR 只有 <strong>17.5%</strong>，低于完整 WMA 的 <strong>22.0%</strong>。这与预实验 I 的结论一致——现成 LLM 对网页环境动态的知识不够。</p>
+      <p>另一个变体是「不做观测抽象」：让世界模型直接生成完整的 accessibility tree。它的整体 SR 只有 <strong>14.5%</strong>，是所有消融里最差的。说明「只预测变化」不是省 token 的小技巧，而是决定世界模型能不能学到关键动态的核心设计。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条训练流水线，一条推理流水线</h2></div>
+  <p class="sec-sub">训练时把轨迹压成「状态差异」；推理时把候选动作展开成「三个未来」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">训练</span><h4>从轨迹到世界模型</h4></div>
+    <div class="flow">
+      <div class="flow-box cool"><span class="k">STEP 1</span><strong>轨迹数据</strong><em>{I, o&#8348;, a&#8348;, o&#8348;&#8330;&#8321;}</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><span class="k">STEP 2</span><strong>匈牙利匹配</strong><em>name / role / location</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><span class="k">STEP 3</span><strong>Δ 差异列表</strong><em>ADDED / DELETED / UPDATED</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box violet"><span class="k">STEP 4</span><strong>LLM 改写</strong><em>õ&#8348;&#8330;&#8321; 自然语言</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box hot"><span class="k">STEP 5</span><strong>微调 φ</strong><em>Llama-3.1-8B</em></div>
+    </div>
+    <p class="small">训练目标不是「重建整页」，而是「写出这一步变了什么」。这让 4K token 的整树预测变成一句短描述。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">推理</span><h4>从当前页到一次真实点击</h4></div>
+    <div class="flow">
+      <div class="flow-box cool"><span class="k">输入</span><strong>o&#8348; + I</strong><em>当前页 + 用户目标</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box"><span class="k">策略 θ</span><strong>采样 20 个动作</strong><em>保留 3 个高频候选</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box hot"><span class="k">世界模型 φ</span><strong>预演 3 个未来</strong><em>õ&#8348;&#8330;&#8321;&#185; … õ&#8348;&#8330;&#8321;&#179;</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box violet"><span class="k">价值 V</span><strong>给 3 个未来打分</strong><em>argmax 选动作</em></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box cool"><span class="k">环境</span><strong>只执行 1 次</strong><em>拿到真实 o&#8348;&#8330;&#8321;</em></div>
+    </div>
+    <p class="small">真实环境只在最后被调用一次。世界模型负责「想」，环境负责「验收」；下一步再把真实 <code>o<sub>t+1</sub></code> 喂回策略模型。</p>
+  </div>
+
+  <p>这套流程的关键取舍是：<strong>把探索成本从「真实网页交互」搬到「一次 LLM 前向」</strong>。树搜索之所以贵，是因为它要在真实环境里展开分支并回溯；WMA 只在文本空间里展开三个分支，所以成本低了一个量级。</p>
+
+  <details>
+    <summary>为什么只保留 3 个候选？<span class="sum-sub">k 的权衡</span></summary>
+    <div class="details-body">
+      <p>论文在附录里说明：先用 top-p = 1.0 采样 20 个动作，再取出现频率最高的 3 个。这样做的原因是控制世界模型和价值函数的调用次数——每多一个候选，就要多一次世界模型前向和一次价值打分。</p>
+      <p>Figure 6 显示，采样动作数 <code>k</code> 增大时 SR 呈上升趋势，但论文没有给出逐点的具体数值表。也就是说，<strong>3 是一个成本约束下的工程选择，不是理论最优</strong>；预算允许时，扩大候选集还有收益。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>收益主要来自「选择」，不是「更会做」</h2></div>
+  <p class="sec-sub">最反直觉的一张表：WMA 不启用 action selection 时，反而比 Vanilla CoT 还低。</p>
+
+  <p>先看 WebArena 主表。所有数字都来自论文 Table 1，策略模型为 GPT-4o 或 GPT-4o-mini。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>策略 LLM</th><th>方法</th><th class="num">Max actions</th><th class="num">SR 无选择</th><th class="num">SR 有选择</th><th class="num">Δ</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-4o</td><td>Vanilla CoT</td><td class="num">30</td><td class="num">13.1%</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>GPT-4o</td><td>Tree search</td><td class="num">5</td><td class="num">15.0%</td><td class="num">19.2%</td><td class="num">+28.0%</td></tr>
+        <tr class="best"><td>GPT-4o</td><td>WMA</td><td class="num">5</td><td class="num">12.8%</td><td class="num">16.6%</td><td class="num">+29.7%</td></tr>
+        <tr><td>GPT-4o-mini</td><td>WMA</td><td class="num">5</td><td class="num">9.4%</td><td class="num">13.5%</td><td class="num">+43.6%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">Table 1。WMA 的 12.8% 是「不启用 action selection」的成绩，低于 Vanilla CoT 的 13.1%；16.6% 才是启用后的结果。注意两者的 max actions 也不同：CoT 为 30，WMA 为 5。Tree search 的 19.2% 用的是 oracle 下一状态，WMA 用的是世界模型模拟。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>12.8 &lt; 13.1：世界模型本身不提升基础策略</h4></div>
+    <p>WMA 的「无选择」列只有 12.8%，比 Vanilla CoT 的 13.1% 还低。一个关键原因是它先采样 20 个动作、只保留 3 个高频候选，再直接取其中一个——没有价值函数的重排，这个候选集反而比 CoT 的贪心解码更差；另一个差异是两者的 max actions 不同（CoT 30、WMA 5），所以这组对比不是完全受控的。</p>
+    <p>真正带来提升的是<strong>「预演 + 重排」</strong>：16.6% 相对 12.8% 的 +29.7%，来自在世界模型给出的未来上做选择。所以 WMA 的定位不是「更强的策略模型」，而是<strong>给现有策略加一层基于模拟的选择器</strong>。</p>
+  </div>
+
+  <h3>分领域：Gitlab 和 Map 提升最大，Shopping 几乎没动</h3>
+  <p>用 GPT-4o-mini 做策略模型时，各领域相对 CoT 的提升差异很大。下图是论文 Table 2 的原始数字。</p>
+
+  <div class="hchart">
+    <div class="hgroup"><span class="hname">Shopping</span><div class="hlines">
+      <div class="hline"><div class="htrack"><i style="width:75.2%"></i></div><span class="hnum">18.8</span></div>
+      <div class="hline"><div class="htrack"><i class="acc" style="width:77.2%"></i></div><span class="hnum">19.3</span></div>
+    </div></div>
+    <div class="hgroup"><span class="hname">CMS</span><div class="hlines">
+      <div class="hline"><div class="htrack"><i style="width:32.8%"></i></div><span class="hnum">8.2</span></div>
+      <div class="hline"><div class="htrack"><i class="acc" style="width:46%"></i></div><span class="hnum">11.5</span></div>
+    </div></div>
+    <div class="hgroup"><span class="hname">Reddit</span><div class="hlines">
+      <div class="hline"><div class="htrack"><i style="width:21.2%"></i></div><span class="hnum">5.3</span></div>
+      <div class="hline"><div class="htrack"><i class="acc" style="width:31.6%"></i></div><span class="hnum">7.9</span></div>
+    </div></div>
+    <div class="hgroup"><span class="hname">Gitlab</span><div class="hlines">
+      <div class="hline"><div class="htrack"><i style="width:12.4%"></i></div><span class="hnum">3.1</span></div>
+      <div class="hline"><div class="htrack"><i class="acc" style="width:34.8%"></i></div><span class="hnum">8.7</span></div>
+    </div></div>
+    <div class="hgroup"><span class="hname">Map</span><div class="hlines">
+      <div class="hline"><div class="htrack"><i style="width:46.4%"></i></div><span class="hnum">11.6</span></div>
+      <div class="hline"><div class="htrack"><i class="acc" style="width:89.2%"></i></div><span class="hnum">22.3</span></div>
+    </div></div>
+    <div class="hgroup"><span class="hname">Overall</span><div class="hlines">
+      <div class="hline"><div class="htrack"><i style="width:37.6%"></i></div><span class="hnum">9.4</span></div>
+      <div class="hline"><div class="htrack"><i class="acc" style="width:54%"></i></div><span class="hnum">13.5</span></div>
+    </div></div>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--c1)"></i>Vanilla CoT</span>
+    <span><i style="background:var(--accent)"></i>WMA（GPT-4o-mini）</span>
+  </div>
+  <p class="chart-note">Table 2：Gitlab +181%、Map +92%、Reddit +49%、CMS +40%、Shopping 仅 +3%。论文把 Shopping 的小幅提升归因于它的状态空间大——商品列表随查询变化，世界模型更难学准。</p>
+
+  <h3>Mind2Web：跨任务涨得多，跨网站和跨领域只涨一点</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>设定</th><th class="num">AWM</th><th class="num">AWM + WMA</th><th class="num">Δ</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>Cross-Task</td><td class="num">15.3%</td><td class="num">25.4%</td><td class="num">+10.1</td></tr>
+        <tr><td>Cross-Website</td><td class="num">6.2%</td><td class="num">8.5%</td><td class="num">+2.3</td></tr>
+        <tr><td>Cross-Domain</td><td class="num">9.5%</td><td class="num">10.1%</td><td class="num">+0.6</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">Table 3，策略模型为 GPT-3.5-Turbo。Cross-Task 的 EA / AF1 / Step SR 分别为 79.9% / 75.8% / 67.0%（EA = element accuracy，AF1 = action F1）。AWM 默认的 element filtering 会把 Cross-Task SR 压到 4.8%，所以这里的 AWM 是 w/o EF 版本。</p>
+
+  <p>这组数字比 WebArena 更能说明边界：同一个世界模型，在<strong>同分布的新任务</strong>上能把 SR 从 15.3% 拉到 25.4%，但换到新网站只多 2.3 个点、换到新领域只多 0.6 个点。世界模型学到的动态，仍然贴着训练时的网站结构。</p>
+
+  <details>
+    <summary>补充：把截图也交给世界模型<span class="sum-sub">Appendix A · Table 8</span></summary>
+    <div class="details-body">
+      <p>论文附录 A 做了一个多模态扩展：用 Qwen2-VL-2B 做世界模型，在 Mind2Web Cross-Task 上比较纯文本和「文本 + 截图」。纯文本 SR 为 <strong>23.7%</strong>，加入截图后升到 <strong>36.7%</strong>；EA / AF1 / Step SR 也从 79.2 / 75.1 / 65.0 升到 83.0 / 78.9 / 72.8。</p>
+      <p>注意这是<strong>同一主干（Qwen2-VL-2B）内部</strong>的对比，不能直接把 36.7% 和主表的 25.4%（Llama-3.1-8B 纯文本）横比——两者换了模型。论文的结论是：视觉模态本身带来了明显增益，且用更精细的图像提示（如 Set-of-Marks）还有空间。</p>
+    </div>
+  </details>
+
+  <h3>效率：便宜 6.8 倍、快 5.3 倍，但不是每个领域都赢</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>指标 / 领域</th><th class="num">Tree search</th><th class="num">WMA</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>API 成本 / 实例</td><td class="num">$2.7</td><td class="num">$0.4</td></tr>
+        <tr><td>推理时间 / 实例</td><td class="num">748.3 s</td><td class="num">140.3 s</td></tr>
+        <tr><td>Shopping SR</td><td class="num">28.1%</td><td class="num">20.8%</td></tr>
+        <tr><td>CMS SR</td><td class="num">16.5%</td><td class="num">14.3%</td></tr>
+        <tr><td>Reddit SR</td><td class="num">10.5%</td><td class="num">10.5%</td></tr>
+        <tr><td>Gitlab SR</td><td class="num">13.3%</td><td class="num">13.3%</td></tr>
+        <tr><td>Map SR</td><td class="num">25.8%</td><td class="num">26.8%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">Table 4，GPT-4o 策略。成本和时间在 10% 的 WebArena 实例上测；Tree search 的数字来自 Koh et al. 2024。Reddit、Gitlab 打平，Map 略高，Shopping 明显低。</p>
+
+  <p>论文的措辞是「comparable performance」：在 CMS、Reddit、Gitlab、Map 四个领域与树搜索接近，但没有全面超过。真正的优势是<strong>把 748 秒和 $2.7 压到 140 秒和 $0.4</strong>——如果任务量很大，这个差距比几个点的 SR 更影响可用性。</p>
+
+  <h3>消融：抽象比训练更关键</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>设置</th><th class="num">Overall SR</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>奖励估计不看模拟下一状态（只用 o<sub>t</sub>, a<sub>t</sub>）</td><td class="num">18.0%</td></tr>
+        <tr><td>世界模型不训练（GPT-4o-mini + 2-shot）</td><td class="num">17.5%</td></tr>
+        <tr><td>不做观测抽象（预测完整 accessibility tree）</td><td class="num">14.5%</td></tr>
+        <tr class="best"><td>完整 WMA</td><td class="num">22.0%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">Table 5，200 个 WebArena 任务（Shopping 50 / Gitlab 50 / Map 100），GPT-4o-mini 策略。完整 WMA 的分领域 SR：Shopping 32.0%、Gitlab 14.0%、Map 21.0%。</p>
+
+  <p>三个消融分别拿掉「下一状态」「训练」「抽象」：去掉下一状态，价值函数退化成 Q 函数（18.0%）；不训练世界模型，换成 prompting（17.5%）；不做抽象，直接预测整棵树（14.5%）。<strong>抽象的影响最大</strong>，说明「预测什么」比「用多大的模型」更决定成败。</p>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是「选得更好」，不是「看得更远」</h2></div>
+  <p class="sec-sub">论文自己的数据里，能读出四条硬边界和两条工程边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>世界模型会编造不存在的未来</h4></div>
+    <p>论文从 WebArena 里抽了 50 个错误预演，人工分类：<strong>反事实想象 42%</strong>、不熟悉网页组件 26%、描述正确但过于笼统 24%、其他 8%。反事实想象是最主要的一类——模型会「脑补」出商店里根本没卖的商品，或者一个并不存在的页面元素。</p>
+    <div class="errbar" aria-label="错误类型占比：反事实想象 42%，低组件能力 26%，过于笼统 24%，其他 8%">
+      <span class="e1" style="width:42%"></span>
+      <span class="e2" style="width:26%"></span>
+      <span class="e3" style="width:24%"></span>
+      <span class="e4" style="width:8%"></span>
+    </div>
+    <div class="legend">
+      <span><i class="e1"></i>反事实想象 42%</span>
+      <span><i class="e2"></i>低组件能力 26%</span>
+      <span><i class="e3"></i>过于笼统 24%</span>
+      <span><i class="e4"></i>其他 8%</span>
+    </div>
+    <p style="margin-top:14px">覆盖率（预测描述覆盖真实观测句子的比例）也说明它还远不够准：用 GPT-4o 当 judge，GPT-4o-mini 的世界模型覆盖真实观测的 <strong>33.50%</strong>，GPT-4o 是 <strong>33.85%</strong>，论文训练的世界模型是 <strong>42.99%</strong>（Table 10，100 个样本）。提升明显，但离「可靠模拟器」还有距离。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>绝对性能仍低于 oracle 树搜索</h4></div>
+    <p>GPT-4o 策略下，WMA 有选择时是 <strong>16.6%</strong>，树搜索是 <strong>19.2%</strong>。论文的辩护是「相对提升更大」（+29.7% vs +28.0%），但绝对差距是实打实的：树搜索用 oracle 下一状态，WMA 用模拟，模拟误差会直接变成错误选择。</p>
+    <p>如果环境查询很便宜、或者任务对正确率的要求高于成本，树搜索仍然是更强的上限。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>单步有效，多步会漂</h4></div>
+    <p>WMA 的主实验是单步预演。把世界模型接进多步搜索后，误差会随深度累积。论文 Table 9 的结果：<code>(w=1,d=1)</code> 7.1%、<code>(w=2,d=1)</code> 10.1%、<code>(w=3,d=1)</code> 17.1%、<code>(w=3,d=3)</code> 19.6%、<code>(w=9,d=1)</code> 20.5%。</p>
+    <p>同样的探索预算下，<strong>加宽（更多候选）比加深（更多步模拟）更划算</strong>。论文还指出一个很工程的问题：页面重新加载后，后端算出的 element ID 可能变化，搜索时选中的元素在执行时可能对不上。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界四</span><h4>换网站、换领域，增益迅速衰减</h4></div>
+    <p>Mind2Web 的 Cross-Task 涨 10.1 个点，但 Cross-Website 只涨 2.3 个点，Cross-Domain 只涨 0.6 个点。世界模型学到的页面动态和训练网站强相关；到了新网站，预演质量下降，选择器也跟着失效。</p>
+    <p>论文没有给出在线更新世界模型的实验。真实网站还会变版、改库存、换文案，这些都是离线训练的盲区。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界五</span><h4>价值函数是另一个瓶颈</h4></div>
+    <p>价值函数用 Mind2Web 的进度奖励 <code>t / len(τ)</code> 微调，学的是「离目标走了多远」，不是「任务最终是否成功」。论文对比过：prompted GPT-4o-mini 做价值函数是 12.7%，微调 Llama-3.1-8B 是 13.5%——只差 0.8 个点。</p>
+    <p>如果价值函数有偏，世界模型预演得再准也会选错。WMA 把「模拟」和「评估」拆成两个模型，但也把误差来源变成了两个。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界六</span><h4>候选集是天花板</h4></div>
+    <p>策略模型是冻结的，每步只保留 3 个候选。如果正确动作根本没被采样出来，世界模型和价值函数都无能为力。论文 Figure 6 显示 <code>k</code> 增大时 SR 有上升趋势，但每多一个候选就多一次世界模型前向和一次价值打分，成本和收益要一起算。</p>
+    <p>换句话说：<strong>WMA 只能重排策略模型已经想到的动作，不能替它想出没想到的动作。</strong></p>
+  </div>
+
+  <h3>什么时候别用</h3>
+  <ul>
+    <li><strong>高风险、不可逆的操作</strong>：买票、转账、删除数据。42% 的反事实想象意味着预演可能把失败写成成功，必须有人工确认或外部校验。</li>
+    <li><strong>真实环境查询很便宜</strong>：如果目标环境可以低成本地真实执行，oracle 树搜索的 19.2% 比 WMA 的 16.6% 更可靠。</li>
+    <li><strong>延迟极度敏感</strong>：每步多出 3 次世界模型前向和 3 次价值打分；WMA 省的是真实交互，不是所有开销。</li>
+    <li><strong>策略模型本身提不出正确候选</strong>：候选集里没有正确动作，后面的模拟和打分都是空转。</li>
+    <li><strong>目标网站与训练分布差很远</strong>：跨网站只涨 2.3 个点、跨领域只涨 0.6 个点，先补数据或做在线校准更实际。</li>
+  </ul>
+
+  <p>一句话总结：<strong>WMA 把「试错」换成了「预演」，但预演的质量就是它的上限。</strong>它适合作为现有 web agent 的一层可插拔选择器，而不是替代策略模型或环境交互的万能方案。</p>
+</section>
+
+<footer>
+  <div>Web Agents with World Models: Learning and Leveraging Environment Dynamics in Web Navigation · ICLR 2025 · 延世大学</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2410.13232" target="_blank" rel="noopener">arXiv 2410.13232</a><br>
+    代码：<a href="https://github.com/kyle8581/WMA-Agents" target="_blank" rel="noopener">kyle8581/WMA-Agents</a><br>
+    笔记：<a href="/web-agents-with-world-models-learning-and-leveraging-environment-dynamics-in-web-navigation/">WEB AGENTS WITH WORLD MODELS：LEARNING AND LEVERAGING ENVIRONMENT DYNAMICS IN WEB NAVIGATION</a>
+  </div>
+  <div class="note-fix">
+    <strong>与笔记的差异：</strong>
+    笔记写「计划在 ICLR 2025 会议上发表」，论文首页已标注 <em>Published as a conference paper at ICLR 2025</em>；
+    笔记正文用 12.8% → 16.6% 描述 WMA 的提升，但没有点明 12.8% 是「不启用 action selection」的成绩、且低于 Vanilla CoT 的 13.1%，读者容易把它误读成相对 CoT 的基线；这个差别决定了「收益来自选择而不是策略」；
+    笔记说「性能略低于树搜索」是对的，但树搜索用的是 oracle 下一状态，WMA 用的是世界模型模拟，两者信息条件不同，不能只看 SR 差距。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ============================================================
+     1) 预实验图表：切换 Figure 1 / Figure 2
+     ============================================================ */
+  var PRELIM = {
+    1: {
+      title: '预实验 I · 预测下一状态',
+      desc: '给当前页面和黄金动作，让模型从「真实下一状态」和「相似但错误的下一状态」中二选一。四个模型都在 52–58%，人类 83%，随机基线 50%。',
+      labels: ['GPT-4o-mini', 'GPT-4o', 'GPT-4-Turbo', 'Claude-3.5'],
+      values: [54, 55, 58, 52],
+      human: 83,
+      legend: [['var(--c1)', 'LLM'], ['var(--c2)', '人类']],
+      caption: 'Figure 1：条长表示二分类准确率。人类 83% 远高于四个 LLM；Claude-3.5-Sonnet 的 52% 几乎贴着随机线。'
+    },
+    2: {
+      title: '预实验 II · 选择动作',
+      desc: '给 10 个候选动作（1 个黄金 + 9 个负例），让模型选出正确动作。只给当前状态时平均 49%；给出每个动作的下一状态后，四个模型提升 19–20 个百分点。',
+      labels: ['GPT-4o-mini', 'GPT-4o', 'GPT-4-Turbo', 'Claude-3.5'],
+      before: [41, 53, 51, 53],
+      after: [60, 73, 70, 73],
+      legend: [['var(--c1)', 'w/o 下一状态'], ['var(--accent)', 'w/ 下一状态']],
+      caption: 'Figure 2：同一批候选动作，只是把「下一状态」一起给模型。GPT-4o 从 53% 升到 73%，四个模型的提升都在 19–20 个百分点。'
+    }
+  };
+
+  var prelimChart = document.getElementById('prelim-chart');
+  var prelimNote = document.getElementById('prelim-note');
+  var prelimLegend = document.getElementById('prelim-legend');
+  var prelimCaption = document.getElementById('prelim-caption');
+  var prelimTabs = document.querySelectorAll('#prelim-tabs .tab');
+
+  function makeHLine(value, variant) {
+    var line = document.createElement('div');
+    line.className = 'hline';
+    var track = document.createElement('div');
+    track.className = 'htrack';
+    var fill = document.createElement('i');
+    if (variant === 'acc') fill.className = 'acc';
+    if (variant === 'human') fill.className = 'human';
+    fill.style.width = Math.max(2, value) + '%';
+    track.appendChild(fill);
+    var num = document.createElement('span');
+    num.className = 'hnum';
+    num.textContent = value;
+    line.appendChild(track);
+    line.appendChild(num);
+    return line;
+  }
+
+  function makeHGroup(label, items) {
+    var group = document.createElement('div');
+    group.className = 'hgroup';
+    var name = document.createElement('span');
+    name.className = 'hname';
+    name.textContent = label;
+    var lines = document.createElement('div');
+    lines.className = 'hlines';
+    items.forEach(function (item) {
+      lines.appendChild(makeHLine(item.value, item.variant));
+    });
+    group.appendChild(name);
+    group.appendChild(lines);
+    return group;
+  }
+
+  function renderPrelim(key) {
+    if (!prelimChart || !prelimNote || !prelimLegend || !prelimCaption) return;
+    var cfg = PRELIM[key];
+    if (!cfg) return;
+
+    prelimNote.innerHTML = '<div class="r-head">' + cfg.title + '</div>' + cfg.desc;
+    prelimChart.innerHTML = '';
+    prelimLegend.innerHTML = '';
+    prelimCaption.textContent = cfg.caption;
+
+    if (key === '1') {
+      cfg.labels.forEach(function (label, i) {
+        prelimChart.appendChild(makeHGroup(label, [{ value: cfg.values[i] }]));
+      });
+      prelimChart.appendChild(makeHGroup('Human', [{ value: cfg.human, variant: 'human' }]));
+    } else {
+      cfg.labels.forEach(function (label, i) {
+        prelimChart.appendChild(makeHGroup(label, [
+          { value: cfg.before[i] },
+          { value: cfg.after[i], variant: 'acc' }
+        ]));
+      });
+    }
+
+    cfg.legend.forEach(function (item) {
+      var span = document.createElement('span');
+      var icon = document.createElement('i');
+      icon.style.background = item[0];
+      span.appendChild(icon);
+      span.appendChild(document.createTextNode(item[1]));
+      prelimLegend.appendChild(span);
+    });
+  }
+
+  if (prelimTabs && prelimTabs.length) {
+    prelimTabs.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        prelimTabs.forEach(function (b) {
+          b.classList.remove('active');
+          b.setAttribute('aria-pressed', 'false');
+        });
+        btn.classList.add('active');
+        btn.setAttribute('aria-pressed', 'true');
+        renderPrelim(btn.getAttribute('data-bench'));
+      });
+    });
+    renderPrelim('1');
+  }
+
+  /* ============================================================
+     2) WMA 单步预演器：选动作 → 看预演 → 执行 → 对比
+     ============================================================ */
+  var ACTIONS = {
+    a: {
+      label: 'A',
+      name: '加入购物车',
+      pred: '页面进入「跑鞋 A」详情：尺码 42 显示有货，价格 $59，出现「加入购物车」按钮。',
+      actual: '页面进入「跑鞋 A」详情：尺码 42 显示有货，价格 $59，出现「加入购物车」按钮。',
+      score: 0.90,
+      ok: true,
+      verdict: '<strong>预测命中。</strong>世界模型抓对了「进入详情页、尺码有货、价格不变」这三个关键变化；V 给出 0.90，执行后任务向前推进。'
+    },
+    b: {
+      label: 'B',
+      name: '立即购买',
+      pred: '订单已创建，页面显示「支付成功」，总价 $120。',
+      actual: '页面跳转到「配送信息」表单，尚未支付；总价 $120 超过预算。',
+      score: 0.96,
+      ok: false,
+      verdict: '<span class="warn">预测失败：counterfactual imagination（反事实想象）。</span> 世界模型编造了一个不存在的「支付成功」页。V 只能评估它看到的未来，于是把 B 选成 argmax；真实执行后任务卡在配送表单。'
+    },
+    c: {
+      label: 'C',
+      name: '直接搜索',
+      pred: '搜索结果更新为「42 码跑鞋」列表。',
+      actual: '搜索框仍保留旧查询，结果列表没有变化。',
+      score: 0.41,
+      ok: false,
+      verdict: '<span class="warn">预测失败：low competence（不熟悉网页组件）。</span> 世界模型不知道搜索前要先清空旧文本，直接假设结果会刷新。V 给了 0.41，但这个低分只是「描述里没出现尺码和价格」，并不是它预见到了失败。'
+    }
+  };
+
+  var simActions = document.getElementById('sim-actions');
+  var predBox = document.getElementById('pred-box');
+  var actualBox = document.getElementById('actual-box');
+  var simScores = document.getElementById('sim-scores');
+  var simExec = document.getElementById('sim-exec');
+  var simReset = document.getElementById('sim-reset');
+  var simReadout = document.getElementById('sim-readout');
+  var selectedAction = null;
+  var executed = false;
+
+  function setIO(host, kicker, value, cls) {
+    if (!host) return;
+    host.className = 'io-box' + (cls ? ' ' + cls : '');
+    host.innerHTML = '';
+    var k = document.createElement('div');
+    k.className = 'io-k';
+    k.innerHTML = kicker;
+    var v = document.createElement('div');
+    v.className = 'io-v';
+    v.textContent = value;
+    host.appendChild(k);
+    host.appendChild(v);
+  }
+
+  function setReadout(html) {
+    if (!simReadout) return;
+    simReadout.innerHTML = '<div class="r-head">当前推演</div><div>' + html + '</div>';
+  }
+
+  function renderScores(selected) {
+    if (!simScores) return;
+    simScores.innerHTML = '';
+    var head = document.createElement('div');
+    head.className = 'score-head';
+    head.textContent = 'V 的预演打分（示意）';
+    simScores.appendChild(head);
+
+    ['a', 'b', 'c'].forEach(function (key) {
+      var d = ACTIONS[key];
+      var row = document.createElement('div');
+      row.className = 'score-row' + (key === 'b' ? ' pick' : '') + (key === selected ? ' sel' : '');
+
+      var name = document.createElement('span');
+      name.className = 'score-name';
+      name.textContent = d.label + ' · ' + d.name;
+
+      var track = document.createElement('div');
+      track.className = 'score-track';
+      var fill = document.createElement('i');
+      fill.className = 'score-fill';
+      fill.style.width = (d.score * 100).toFixed(0) + '%';
+      track.appendChild(fill);
+
+      var num = document.createElement('span');
+      num.className = 'score-num';
+      num.textContent = d.score.toFixed(2);
+
+      row.appendChild(name);
+      row.appendChild(track);
+      row.appendChild(num);
+      simScores.appendChild(row);
+    });
+
+    var note = document.createElement('div');
+    note.className = 'score-note';
+    note.textContent = 'argmax = B（0.96）。V 只在这些预演描述上打分，不核对现实。';
+    simScores.appendChild(note);
+  }
+
+  function selectAction(key) {
+    var d = ACTIONS[key];
+    if (!d) return;
+    selectedAction = key;
+    executed = false;
+    setIO(predBox, '世界模型预演 · õ<sub>t+1</sub>', d.pred, 'pred');
+    setIO(actualBox, '真实执行 · o<sub>t+1</sub>', '尚未执行。点下面的按钮，把动作真正发到环境里。', '');
+    renderScores(key);
+    if (simExec) simExec.disabled = false;
+
+    if (key === 'b') {
+      setReadout('你选了 V 会选的 B。预演说「支付成功」，但它可能是在编故事——执行看看。');
+    } else {
+      setReadout('你选了 ' + d.label + '。V 的 argmax 其实是 B（0.96）；可以执行当前动作，也可以换成 B 看它怎么失败。');
+    }
+
+    if (simActions) {
+      Array.prototype.forEach.call(simActions.querySelectorAll('.rule-btn'), function (btn) {
+        btn.classList.toggle('active', btn.getAttribute('data-action') === key);
+      });
+    }
+  }
+
+  function executeAction() {
+    if (!selectedAction || executed) return;
+    var d = ACTIONS[selectedAction];
+    executed = true;
+    setIO(actualBox, '真实执行 · o<sub>t+1</sub>', d.actual, d.ok ? 'good' : 'bad');
+    setReadout(d.verdict + (d.ok
+      ? ' 这次预演和现实一致，WMA 的选择是安全的。'
+      : ' 这正是论文把世界模型质量视为瓶颈的原因：预演越像成功，错误越难被 V 发现。'));
+  }
+
+  function resetSim() {
+    selectedAction = null;
+    executed = false;
+    setIO(predBox, '世界模型预演 · õ<sub>t+1</sub>', '选中一个动作，世界模型会在这里写出它预测的下一状态。', '');
+    setIO(actualBox, '真实执行 · o<sub>t+1</sub>', '执行后，这里显示环境真正返回的观测。', '');
+    if (simScores) {
+      simScores.innerHTML = '<div class="score-note">V 会在三个预演结果上打分；分数最高的是 argmax。</div>';
+    }
+    if (simExec) simExec.disabled = true;
+    setReadout('先选一个动作。注意：V 只看预演描述，不核对现实。');
+    if (simActions) {
+      Array.prototype.forEach.call(simActions.querySelectorAll('.rule-btn'), function (btn) {
+        btn.classList.remove('active');
+      });
+    }
+  }
+
+  if (simActions) {
+    simActions.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('.rule-btn') : null;
+      if (!btn || !simActions.contains(btn)) return;
+      selectAction(btn.getAttribute('data-action'));
+    });
+  }
+  if (simExec) simExec.addEventListener('click', executeAction);
+  if (simReset) simReset.addEventListener('click', resetSim);
+})();
+</script>
+</body>
+</html>

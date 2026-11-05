@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EMPG · 用每一步的熵，重新校准信用分配</title>
+<meta name="description" content="论文指出策略梯度的范数与策略熵天然耦合：自信且正确的步骤更新太小、高熵探索步骤更新又大又吵。EMPG 用步级熵做自校准缩放，再加未来清晰度奖励，在 WebShop、ALFWorld、Deep Search 上全面超过 GRPO / DAPO。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：让 .slot-val 的等宽数字小一点，长数值不换行 */
+.slot-val.tight{font-size:12px;white-space:nowrap}
+.axis-note{font-size:12px;color:var(--text-soft);font-family:"JetBrains Mono",monospace;margin-top:-4px}
+.eq.small{font-size:13.5px;line-height:1.9}
+/* 窄屏：base.css 仅在 880px 以下把 .s5 切成 3 列，420–560px 仍会溢出卡片，此处再切为 2 列 */
+@media(max-width:560px){#g-slots{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">EMPG</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent RL · arXiv 2509.09265 · 2025</span>
+  <h1>EMPG：用每一步的「不确定性」，把稀疏奖励的信用分配重新校准一遍</h1>
+  <p class="hero-sub">
+    长时序 Agent 只有最终成败一个信号，中间哪一步关键，策略梯度并不知道。论文先证明了一个常被忽略的耦合：<strong>策略梯度的期望范数随熵单调变化</strong>——自信步骤梯度小、不确定步骤梯度大而噪声也大。
+    EMPG 把每一步的平均 token 熵做成乘在优势上的缩放系数，再给「让下一步更清晰」的动作加一项奖励，以即插即用的方式叠在 GRPO / DAPO 之上。
+  </p>
+  <div class="meta">
+    <span>Jiawei Wang, Jiacai Liu, Yuqian Fu 等 · ByteDance</span>
+    <a href="https://arxiv.org/abs/2509.09265" target="_blank" rel="noopener">arXiv 2509.09265 ↗</a>
+    <a href="https://empgseed-seed.github.io/" target="_blank" rel="noopener">项目页 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    问题不是「没有奖励」，而是<strong>奖励的落点错了</strong>。论文把信用分配视为信号失真：所有步骤共享轨迹级优势 A，而每步的梯度范数由自身的熵决定——置信度天然地在调节更新幅度，却没被任何人利用。
+  </p>
+  <p>
+    <strong>自校准梯度缩放</strong>：把步级熵做批次 min-max 归一化，用 <code>g(H)=exp(−k·H_norm)/mean</code> 乘在 A 上，批次均值恰好为 1——它只做重分配、不整体放大。高置信步骤得到放大，高熵探索步骤被压低。
+  </p>
+  <p>
+    <strong>未来清晰度奖励</strong>：再加一项 <code>ζ·exp(−k′·H_norm(t+1))</code>，奖励「让下一步更确定」的动作，给探索指了方向，而不是盲目乱走。
+  </p>
+  <p>
+    作为纯 advantage 调制模块，它叠在 GRPO 与 DAPO 之上，三种任务、三档模型规模全部涨点，且 OOD 涨幅大于 ID 涨幅——说明学到的是应对不确定性的能力，而非拟合训练分布。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">65.3 <small>vs 62.0</small></div>
+      <div class="k">Deep Search 总平均分（Qwen2.5-32B，DAPO + EMPG vs DAPO），Table 2</div>
+    </div>
+    <div class="metric">
+      <div class="v">+8.1</div>
+      <div class="k">ALFWorld 平均成功率提升（1.5B，GRPO 65.6 → 73.7），Table 1</div>
+    </div>
+    <div class="metric">
+      <div class="v">+3.9 <small>vs +3.1</small></div>
+      <div class="k">Deep Search OOD 涨幅大于 ID 涨幅（DAPO 之上），Table 2</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>梯度的大小，其实早就被熵偷偷决定了</h2></div>
+  <p class="sec-sub">读完这节你应该明白：为什么「把所有步骤一视同仁地乘同一个优势」会同时导致学得慢和训得抖。</p>
+
+  <p>论文把长时序任务建模成标准 RL：一条轨迹 <code>τ=(s₀,a₀,r₀,…,s_T,a_T,r_T)</code>，非终止步奖励全为 0，无折扣（γ=1），所以回报完全由最终成败决定：<code>R(τ)=r_T∈{0,1}</code>。一个 step 对应一次完整的「先思考、再行动」（ReAct 式）。</p>
+
+  <p>在这种设置下，难的不只是奖励稀疏，还有 <strong>credit assignment（信用分配）</strong>。策略梯度写成：</p>
+
+  <div class="eq">
+    ∇<sub>θ</sub>J(π<sub>θ</sub>) = 𝔼<sub>τ~π<sub>θ</sub></sub>[ Σ<sub>t=0</sub><sup>T</sup> A(s<sub>t</sub>,a<sub>t</sub>) ∇<sub>θ</sub> log π<sub>θ</sub>(a<sub>t</sub>|s<sub>t</sub>) ]
+  </div>
+  <div class="eq-cap">Eq. 2 · 所有步骤都乘同一个 A —— 论文称之为 coarse, trajectory-level 的信用分配</div>
+
+  <p>但即使 A 完全相同，每一步对参数的实际推动力也不同。论文的 <strong>Proposition 1</strong> 给出原因：对 logits 做 softmax 的策略，score function 的期望平方范数直接由策略的 Rényi-2 熵 H₂(π) 决定：</p>
+
+  <div class="eq">
+    𝔼<sub>a~π<sub>θ</sub></sub>[ ‖∇<sub>z<sub>θ</sub></sub> log π<sub>θ</sub>(a|s)‖<sup>2</sup> ] = <span class="hl-c">1 − exp(−H<sub>2</sub>(π))</span>
+  </div>
+  <div class="eq-cap">Eq. 5 · 附录 A 的证明转化为 1 − Σ<sub>j</sub> π<sub>j</sub><sup>2</sup>（碰撞概率），而 Σπ<sub>j</sub><sup>2</sup> = exp(−H₂)</div>
+
+  <p>熵越低，右边的值越小。直觉是：策略越自信，正确动作就脱离了其它候选，log-softmax 的梯度就越小。于是出现两难：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">第一难</span><h4>自信且正确，反而学得慢</h4></div>
+      <p>这类步骤最该被强化，但它的梯度天然就小——同样的 A，推动参数的力度不够，收敛被拖慢。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">第二难</span><h4>不确定的探索，反而很吵</h4></div>
+      <p>高熵步骤梯度大，一旦轨迹失败，大幅负更新会把有益的探索一起打掉，训练剧烈波动。论文称之为 entropy-gradient coupling。</p>
+    </div>
+  </div>
+
+  <p>所以目标不是「把熵压小」——那会诱发 <strong>hallucinated confidence</strong>（自信地错）。目标是<strong>按每一步的不确定性，重新校准学习信号</strong>。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路都在「从外部造奖励」，都没看模型内部</h2></div>
+  <p class="sec-sub">论文把相关工作对照成两路：造稠密奖励 vs 组内相对优势——各自都把整条轨迹当成一个整体。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>造稠密奖励</h4></div>
+      <p><strong>做法：</strong>reward shaping、基于新颖性的内在动机、逆向强化学习，或 Process Reward Model（PRM）逐步打分。</p>
+      <p><strong>卡在哪：</strong>计算代价大、不适配庞大的状态-动作空间；PRM 要大量人工标注、合成数据训练易带噪、在 OOD 上泛化差。交互式任务里「哪一步正确」本身就依上下文而定，步骤标签难以定义。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>组内相对优势（GRPO / DAPO）</h4></div>
+      <p><strong>做法：</strong>GRPO 对同一 query 采样 M 条响应，用 Z-score 形式的组内相对优势 <code>A=(r−mean)/(std+ε)</code>；DAPO 再加动态采样与解耦裁剪。</p>
+      <p><strong>卡在哪：</strong>它们为单轮生成设计，把整条动作序列当成一个整体块（monolithic block），只给出轨迹级信用分配，定位不到长序列里真正关键的那一步；同时忽略了每一步可用的内在信号。</p>
+    </div>
+  </div>
+
+  <p>还有第三种更近的做法：用熵来调制优势。SEED-GRPO 用语义熵给高熵响应降权，Cheng 等人用 token 级熵塑造优势，EDGE-GRPO 在单轮数学推理上放大自信正确、衰减错误与不确定的更新。但它们都停留在<strong>token 级或响应级的单轮生成</strong>；论文认为，如何把 Agent 的内在不确定性用于多步长时序的信用分配，仍然欠探索。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">抓手</span><h4>一个关键观察：token 级的规律在 step 级不成立</h4></div>
+    <p>近期有工作发现「RL 主要更新高熵 token」。论文在 ALFWorld 上分析超过 <strong>9,000 个步骤</strong>，按初始熵的分位区间统计 RL 后的平均熵变化（Figure 3）：即便初始熵很低的步骤（例如 15%–20% 分位）也发生了可观的熵变化。说明<strong>一个自信的步骤同样可能需要大幅更新</strong>，调制必须在整个置信度谱上生效，而不能只盯高熵区域。</p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两个反方向的修正：一个管幅度，一个管方向</h2></div>
+  <p class="sec-sub">整篇方法就四行公式：步级熵、归一化、自校准缩放 g(H)、未来清晰度奖励 f(H)。</p>
+
+  <h3>第一步：把一步的不确定性量化成一个数</h3>
+  <p>一个 step 由 token <code>{w₁,…,w_m}</code> 组成，取其中每个 token 的熵的平均：</p>
+  <div class="eq">
+    H<sub>t</sub> = − (1/m) Σ<sub>j=1</sub><sup>m</sup> Σ<sub>v∈V</sub> p(v|w<sub>&lt;j</sub>) log p(v|w<sub>&lt;j</sub>)
+  </div>
+  <div class="eq-cap">Eq. 7 · H 越低 = 这一步越自信；论文选它是因为它与 Proposition 1 的梯度动力学直接挂钩，且计算便宜</div>
+
+  <h3>第二步：自校准的梯度缩放 g(H)</h3>
+  <p>先做批内 min-max 归一化，再取指数并按批内均值归一：</p>
+  <div class="eq small">
+    H<sub>norm,t</sub> = (H<sub>t</sub> − min(H)) / (max(H) − min(H) + ε)
+    <br>
+    g(H<sub>t</sub>) = <span class="hl-c">exp(−k · H<sub>norm,t</sub>)</span> / mean<sub>batch</sub>[ exp(−k · H<sub>norm</sub>) ]
+  </div>
+  <div class="eq-cap">Eq. 12 + Eq. 10 · 分母保证批内 Σg = 1 的约束（Eq. 9），即只「重分配」学习信号，不整体放大</div>
+
+  <p>H_norm 落在 [0,1]，exp(−k·H_norm) 是递减正数，再除以均值，于是：低于批次平均熵的步骤得 g&gt;1（放大），高于平均的得 g&lt;1（衰减）。论文给的定性规则：</p>
+  <ul>
+    <li><strong>自信 + 正确（A&gt;0, 低熵）</strong>：g 大，正向更新被放大，加快收敛。</li>
+    <li><strong>自信 + 错误（A&lt;0, 低熵）</strong>：g 大，负向更新被放大——强纠正「幻觉式自信」。</li>
+    <li><strong>不确定（A 任意, 高熵）</strong>：g 小，噪声更新被压低，保护探索、稳定训练。</li>
+  </ul>
+
+  <h3>第三步：未来清晰度奖励 f(H)</h3>
+  <div class="eq">
+    f(H<sub>t+1</sub>) = exp(−k′ · H<sub>norm,t+1</sub>)
+  </div>
+  <div class="eq-cap">Eq. 11 · 下一步越清晰（H 越小），奖励越大；它只加正项，是内在动机</div>
+
+  <p>把它理解成奖励「通向更可预测未来」的动作，对应一个逐步目标 <code>min<sub>a_t</sub> H(π<sub>θ</sub>(s<sub>t+1</sub>))</code>（Eq. 6），论文用 information gain / empowerment 的观点解释它。两部分合起来就是调制后的优势：</p>
+
+  <div class="eq">
+    A<sub>mod</sub>(i,t) = <span class="hl-c">A(i) · g(H<sub>t</sub>)</span> + <span class="hl-b">ζ · f(H<sub>t+1</sub>)</span>
+  </div>
+  <div class="eq-cap">Eq. 8 · 乘性项（自校准缩放，管幅度）+ 加性项（未来清晰度，管方向）</div>
+
+  <p>论文附录 B 进一步把整个更新写成复合目标的梯度：<code>J<sub>EMPG</sub> = J<sub>extrinsic</sub> + J<sub>intrinsic</sub></code>（Eq. 16）。外推项是把原目标换成「状态相关的加权测度」，内推项正是 clarity reward 的累积期望——所以 <code>G<sub>EMPG</sub> = Σ [A·g(H_t) + ζ·f(H_{t+1})] ∇log π</code>（Eq. 24）不是拼凑，而是某个目标的真实梯度。</p>
+
+  <h3>自己动手：看 g(H) 如何重分配一个批次</h3>
+  <p>下面 5 个步骤代表同一批里的 5 个 step，每条柱子是它乘法项之后的优势 <code>A·g</code>。拖动 k 或直接改某个步骤的熵，观察分配比例的变化。默认预设（k=1，H=[0.2,1,1,1,1.6]，A=[+1,+1,−1,+1,−1]）与下方「手算核对」逐位一致。</p>
+
+  <div class="sim" id="gsim">
+    <div class="sim-top" id="g-presets">
+      <button class="rule-btn active" data-preset="mixed">混合批次<span class="r-sub">A = +1 / −1 交错</span></button>
+      <button class="rule-btn" data-preset="confident">全是自信步骤<span class="r-sub">熵彼此接近</span></button>
+      <button class="rule-btn" data-preset="allfail">整条失败轨迹<span class="r-sub">A 全为 −1</span></button>
+    </div>
+
+    <div class="slots s5" id="g-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>k 缩放锐度 <span class="v" id="gk-v">1.00</span></label>
+        <input type="range" id="gk" min="0.25" max="4" step="0.25" value="1">
+      </div>
+      <div class="ctrl">
+        <label>步骤 C 的熵 H <span class="v" id="gh-v">1.00</span></label>
+        <input type="range" id="gh" min="0.1" max="1.8" step="0.05" value="1">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act" data-gact="toggle">切换步骤 C 的成败（A 正 / 负）</button>
+      <button class="act ghost" data-gact="reset">重置</button>
+    </div>
+
+    <div class="readout" id="g-readout">
+      <div class="r-head">当前批次</div>
+      <div id="g-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算核对（k=1，H = [0.2, 1.0, 1.0, 1.0, 1.6]，A = [+1, +1, −1, +1, −1]）<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p>① 归一化：min=0.2，max=1.6，区间 1.4。<code>H_norm = [0, 0.5714, 0.5714, 0.5714, 1]</code>。</p>
+      <p>② 指数：<code>exp(−H_norm) = [1, 0.5647, 0.5647, 0.5647, 0.3679]</code>，求和 <code>= 1 + 3×0.5647 + 0.3679 = 3.0620</code>，批内均值 <code>= 3.0620/5 = 0.6124</code>。</p>
+      <p>③ 缩放：<code>g = [1.6329, 0.9221, 0.9221, 0.9221, 0.6007]</code>，均值 = 1。步骤 A 的 g 是步骤 E 的 2.72 倍。</p>
+      <p>④ 乘法项 <code>A·g = [+1.633, +0.922, −0.922, +0.922, −0.601]</code>。同样是失败（A=−1），低熵的步骤 C 被罚得比高熵的步骤 E 更重——这正是对「自信地错」的强纠正。</p>
+      <p>最后还有一层 Eq. 13 的批内零均值归一化（<code>A_final = A_mod − mean(A_mod)</code>），模拟器画的是乘法项本身，不含这一层。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>它的代价几乎为零：不改采样，只改优势</h2></div>
+  <p class="sec-sub">不需要 value model、不需要额外 rollout、不需要外部标注——只在优势上多算两次 exp。</p>
+
+  <p>EMPG 被实现成一个 <strong>advantage modulation module</strong>，直接叠在 GRPO 或 DAPO 之上：采样、裁剪、KL 惩罚统统不动，只把 <code>A(i)</code> 换成 <code>A_final(i,t)</code>。Algorithm 1 把它拆成 6 步，每轮训练内完成：</p>
+
+  <ul>
+    <li><strong>采样</strong>一批轨迹，算出每条轨迹的结果优势 <code>A(i)</code>。</li>
+    <li><strong>收集</strong>批次内所有 step 的 token 熵均值 <code>{H_t}</code>（熵在 rollout 时本来就有，取均值即可）。</li>
+    <li><strong>归一化</strong>：批内 min-max 得 <code>H_norm</code>，按 Eq. 10 得 <code>g(H_t)</code>。作者特意用了无状态的 min-max，而不是用历史统计——这样它会自动跟随策略自信度的变化。</li>
+    <li><strong>调制</strong>：对每个 step 算 <code>f(H_{t+1})</code>，组装 <code>A_mod</code>。</li>
+    <li><strong>零均值归一</strong>：把整批 <code>A_mod</code> 去均值得到 <code>A_final</code>（方差缩减，标准做法）。</li>
+    <li><strong>更新</strong>：用 <code>A_final</code> 做策略梯度。</li>
+  </ul>
+
+  <p>超参数只有三个：<code>k</code>（缩放锐度）、<code>k′</code>（奖励锐度）、<code>ζ</code>（奖励权重）。论文两组实验都固定 <code>k=k′=1.0</code>，ζ 在 WebShop / ALFWorld 取 0.05、Deep Search 取 0.1。由于 g 的批内均值为 1，缩放本身不会整体改变学习率，理论上与原有优势归一化的配合更稳。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">无 value model</span><h4>延续 value-free 路线</h4></div>
+      <p>与 GRPO / DAPO 一样直接由组内采样估计优势，省去与策略同规模的 critic 及其内存开销。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">便宜</span><h4>熵是现成的副产品</h4></div>
+      <p>rollout 时每个 token 的熵已算出，步级 H 只是对 action 段取均值，调制只是两次 exp 与一次批内均值。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">通用</span><h4>换底座即插即用</h4></div>
+      <p>与具体算法解耦：论文在 GRPO 与 DAPO 两种底座、三种任务上验证，收益不依赖某个特定 backbone。</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>实验设置速览<span class="sum-sub">WebShop / ALFWorld 与 Deep Search 是两套配置</span></summary>
+    <div class="details-body">
+      <p>WebShop、ALFWorld 在 Verl-Agent（veRL 上的 Agent 扩展）中训练。原实验在 H200 上跑，作者因资源限制改用 A100：1.5B 用 4×A100，7B 用 8×A100，所有 baseline 在相同硬件、种子、设置下重训。学习率 1e-6、批大小 16、训练 150 步、rollout 组大小 8、温度 1.0；ALFWorld 最多 50 个动作，WebShop 最多 15 个。WebShop / ALFWorld 的实现基于 GiGPO 公开代码库。</p>
+      <p>Deep Search 在 ByteDance 内部的 RL 框架上训练，模型为 Qwen2.5-32B-Instruct，配 Bing Search 与网页阅读工具；训练集是从 WebWalker、HotpotQA、2WikiMultiHopQA、NaturalQuestions、TriviaQA 中过滤出的 17k 条。批大小 64、训练 220 步、rollout 组大小 16、32×A100，KL 系数 0.001、熵系数 0。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次训练迭代里，信号被改写了两遍</h2></div>
+  <p class="sec-sub">论文 Figure 1 左侧的机制示意，重绘成数据流：每个 step 从「共享 A」变成「A·g + ζ·f」。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 470" role="img" aria-label="EMPG 数据流示意：轨迹采样、步级熵、两次归一化、调制优势、策略更新">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <!-- Stage 1 -->
+      <rect x="20" y="30" width="200" height="64" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <foreignObject x="20" y="38" width="200" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#1A1816">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">① 采样轨迹 + 组内优势</span>
+          <span style="display:block;font-size:11.5px;color:#6B6660;line-height:1.05;white-space:nowrap">GRPO / DAPO 原有流程</span>
+        </div>
+      </foreignObject>
+
+      <!-- Stage 2 -->
+      <rect x="260" y="30" width="200" height="64" rx="10" fill="var(--bg)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <foreignObject x="260" y="38" width="200" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#1A1816">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">② 每步平均 token 熵 H_t</span>
+          <span style="display:block;font-size:11.5px;color:#6B6660;line-height:1.05;white-space:nowrap">Eq. 7 · 取 action 段均值</span>
+        </div>
+      </foreignObject>
+
+      <!-- Stage 3 -->
+      <rect x="500" y="30" width="170" height="64" rx="10" fill="var(--bg)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <foreignObject x="500" y="38" width="170" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#1A1816">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">③ 批内 min-max</span>
+          <span style="display:block;font-size:11.5px;color:#6B6660;line-height:1.05;white-space:nowrap">Eq. 12 → H_norm</span>
+        </div>
+      </foreignObject>
+
+      <!-- branch A: g -->
+      <rect x="440" y="150" width="200" height="64" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"></rect>
+      <foreignObject x="440" y="158" width="200" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#1A1816">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">④ 自校准缩放 g(H_t)</span>
+          <span style="display:block;font-size:11.5px;color:#6B6660;line-height:1.05;white-space:nowrap">Eq. 10 · 批内均值 = 1</span>
+        </div>
+      </foreignObject>
+
+      <!-- branch B: f -->
+      <rect x="680" y="150" width="180" height="64" rx="10" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.2"></rect>
+      <foreignObject x="680" y="158" width="180" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#1A1816">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">⑤ 未来清晰度 f(H_t+1)</span>
+          <span style="display:block;font-size:11.5px;color:#6B6660;line-height:1.05;white-space:nowrap">Eq. 11 · 加性奖励</span>
+        </div>
+      </foreignObject>
+
+      <!-- combine -->
+      <rect x="440" y="270" width="420" height="64" rx="10" fill="var(--text)" stroke="var(--text)" stroke-width="1.2"></rect>
+      <foreignObject x="440" y="278" width="420" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#FBF6EA">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">⑥ A_mod = A(i)·g(H_t) + ζ·f(H_t+1)</span>
+          <span style="display:block;font-size:11.5px;color:#C9BFAF;line-height:1.05;white-space:nowrap">Eq. 8 · 每个 step 各自一格</span>
+        </div>
+      </foreignObject>
+
+      <!-- final -->
+      <rect x="440" y="380" width="420" height="64" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <foreignObject x="440" y="388" width="420" height="52">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;text-align:center;color:#1A1816">
+          <span style="display:block;font-weight:600;font-size:13.5px;line-height:1.05;white-space:nowrap">⑦ 批内零均值 → A_final → 策略梯度</span>
+          <span style="display:block;font-size:11.5px;color:#6B6660;line-height:1.05;white-space:nowrap">Eq. 13 · 其余训练细节不变</span>
+        </div>
+      </foreignObject>
+
+      <!-- arrows -->
+      <path d="M 220 62 L 258 62" stroke="var(--text-soft)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+      <path d="M 460 62 L 498 62" stroke="var(--text-soft)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+      <path d="M 585 94 L 585 118 L 540 118 L 540 148" stroke="var(--accent)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+      <path d="M 650 94 L 650 130 L 770 130 L 770 148" stroke="var(--c2)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+      <path d="M 540 214 L 540 268" stroke="var(--text-soft)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+      <path d="M 770 214 L 770 268" stroke="var(--text-soft)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+      <path d="M 650 334 L 650 378" stroke="var(--text-soft)" stroke-width="1.3" fill="none" marker-end="url(#arw)"></path>
+
+      <!-- left label column for stages -->
+      <foreignObject x="20" y="122" width="380" height="120">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;color:#6B6660;font-size:12.5px;line-height:1.6">
+          <span style="display:block;white-space:nowrap;font-weight:600;color:#1A1816">同一批数据只被改了两处：</span>
+          <span style="display:block;white-space:nowrap">幅度（mag）由 g 决定，方向（dir）由 f 补。</span>
+          <span style="display:block;white-space:nowrap">采样、裁剪、KL 全部保持原样。</span>
+        </div>
+      </foreignObject>
+
+      <foreignObject x="20" y="270" width="390" height="110">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;color:#6B6660;font-size:12.5px;line-height:1.6">
+          <span style="display:block;white-space:nowrap;font-weight:600;color:#1A1816">论文 Figure 1 的对照</span>
+          <span style="display:block;white-space:nowrap">基线：成功 / 失败轨迹中所有步骤更新一致。</span>
+          <span style="display:block;white-space:nowrap">EMPG：低熵步骤放大，高熵步骤衰减；</span>
+          <span style="display:block;white-space:nowrap">失败轨迹里「自信地错」被罚得最重。</span>
+        </div>
+      </foreignObject>
+    </svg>
+    <figcaption>
+      图 1（重绘）：EMPG 的数据流。①②③ 在每次迭代开头完成，④⑤ 分两路，⑥⑦ 合成最终优势。
+    </figcaption>
+  </figure>
+
+  <p>这套流程不增加 rollout 次数，也不需要额外的模型。它在计算上唯一的额外成本是批内再跑一遍熵的归一化与两次指数运算——相较于 32B 模型的采样与反传，可以忽略。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>三种任务、两种底座、三档规模，全部涨；OOD 涨得比 ID 更多</h2></div>
+  <p class="sec-sub">Table 1 与 Table 2 的关键数字。标 * 的是作者在相同硬件下复现的结果，其余取自 GiGPO。</p>
+
+  <h3>ALFWorld 与 WebShop</h3>
+  <p>Table 1 报告 3 个随机种子的平均。ALFWorld 给出 6 个子任务的成功率与总平均；WebShop 给出得分与成功率。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型 / 方法</th><th class="num">ALFWorld 平均</th><th class="num">WebShop 得分</th><th class="num">WebShop 成功率</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-1.5B · GRPO*</td><td class="num">65.6</td><td class="num">78.0</td><td class="num">58.2</td></tr>
+        <tr class="best"><td>Qwen2.5-1.5B · GRPO + EMPG*</td><td class="num">73.7 (+8.1)</td><td class="num">80.4</td><td class="num">60.8 (+2.6)</td></tr>
+        <tr><td>Qwen2.5-1.5B · DAPO*</td><td class="num">80.8</td><td class="num">85.9</td><td class="num">73.2</td></tr>
+        <tr class="best"><td>Qwen2.5-1.5B · DAPO + EMPG*</td><td class="num">88.1 (+7.3)</td><td class="num">86.8</td><td class="num">73.8 (+0.6)</td></tr>
+        <tr><td>Qwen2.5-7B · GRPO*</td><td class="num">74.8</td><td class="num">77.8</td><td class="num">65.6</td></tr>
+        <tr class="best"><td>Qwen2.5-7B · GRPO + EMPG*</td><td class="num">78.5 (+3.7)</td><td class="num">81.0</td><td class="num">69.3 (+3.7)</td></tr>
+        <tr><td>Qwen2.5-7B · DAPO*</td><td class="num">90.0</td><td class="num">90.6</td><td class="num">79.6</td></tr>
+        <tr class="best"><td>Qwen2.5-7B · DAPO + EMPG*</td><td class="num">91.6 (+1.6)</td><td class="num">92.0</td><td class="num">82.7 (+3.1)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>注意几个反直觉的点：EMPG 给 <strong>弱底座带来的提升更大</strong>。1.5B 的 GRPO 在 ALFWorld 上 +8.1，而已经很强的 7B DAPO 只 +1.6。这符合方法逻辑——底座越差，轨迹里「自信但错」或「完全迷茫」的步骤越多，校准的空间就越大。</p>
+
+  <h3>Deep Search（Qwen2.5-32B-Instruct）</h3>
+  <p>Table 2 按域拆分：ID 包含 WebWalker、HotpotQA、2wiki，OOD 包含 Musique、Bamboogle。每格是一个方法的分数，下面一行是与 DAPO 基线的差。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th class="num">WebWalker</th><th class="num">HotpotQA</th><th class="num">2wiki</th><th class="num">ID 平均</th><th class="num">Musique</th><th class="num">Bamboogle</th><th class="num">OOD 平均</th><th class="num">总平均</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DAPO（基线）</td><td class="num">55.1</td><td class="num">66.4</td><td class="num">68.9</td><td class="num">63.5</td><td class="num">38.8</td><td class="num">80.8</td><td class="num">59.8</td><td class="num">62.0</td></tr>
+        <tr><td>+ Gradient Scaling（仅缩放）</td><td class="num">54.9</td><td class="num">68.8</td><td class="num">67.4</td><td class="num">63.7</td><td class="num">41.0</td><td class="num">86.4</td><td class="num">63.7</td><td class="num">63.7</td></tr>
+        <tr><td>+ Future Bonus（仅奖励）</td><td class="num">60.6</td><td class="num">69.7</td><td class="num">67.9</td><td class="num">66.1</td><td class="num">40.4</td><td class="num">82.4</td><td class="num">61.4</td><td class="num">64.2</td></tr>
+        <tr class="best"><td>+ EMPG（完整）</td><td class="num">57.5</td><td class="num">71.2</td><td class="num">71.0</td><td class="num">66.6</td><td class="num">41.8</td><td class="num">84.8</td><td class="num">63.7</td><td class="num">65.3</td></tr>
+        <tr><td>相对基线增益</td><td class="num">+2.4</td><td class="num">+4.8</td><td class="num">+2.1</td><td class="num">+3.1</td><td class="num">+3.0</td><td class="num">+4.0</td><td class="num">+3.9</td><td class="num">+3.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>完整 EMPG 的总分比 DAPO 高 3.3 分，但更要看消融的<strong>分工</strong>：</p>
+  <ul>
+    <li><strong>Future Bonus 主攻 ID</strong>：单独使用把 ID 从 63.5 拉到 66.1（+2.6），OOD 只 +1.6。论文的解释是它是个<em>利用（exploitation）信号</em>，强化训练数据里已知的高质量决策序列。</li>
+    <li><strong>Gradient Scaling 主攻 OOD</strong>：单独使用 ID 只 +0.2，但 OOD 从 59.8 拉到 63.7（+3.9）。论文的解释是它是个<em>正则化信号</em>——削弱高熵步骤的更新，让策略在遇到新颖输入（高不确定性）时不至于过度反应。</li>
+    <li><strong>合起来</strong>：ID 66.6（+3.1）、OOD 63.7（+3.9），两边都拿到。这正是「既用好已知模式、又对未知稳健」的组合。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">训练稳定性</span><h4>KL Loss 不再后期失控（Figure 2）</h4></div>
+    <p>在线 RL 微调常见 policy collapse：后期策略发散、性能断崖。论文追踪训练中的 KL Loss：DAPO 基线在约 <strong>240 步</strong>后 KL 开始剧烈抖动，而 EMPG 加持的版本全程保持低而平稳。为公平比较，基线与 EMPG 都在 <strong>220 步</strong>取 checkpoint 评估——作者特别指出，EMPG 若继续训练还能再涨。</p>
+  </div>
+
+  <p>学习曲线方面（Figure D.1，7B 模型在 WebShop / ALFWorld 验证集上），基线普遍早早进入平台期、成功率停滞；EMPG 版本则持续突破这一平台，最终收敛到明显更高的成功率。论文据此认为，它不只是加速收敛，而是让策略跳出基线陷入的局部最优。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它是「加权器」，不是新的不确定性理论</h2></div>
+  <p class="sec-sub">以下几条里，边界一、边界三由论文自己的数据或设置可以直接读出，其余几条是本页的推论。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>强底座上增益变小</h4></div>
+    <p>7B DAPO 在 ALFWorld 上已经 90.0，EMPG 只能加到 91.6（+1.6）；1.5B GRPO 上则是 +8.1。当底座的信用分配本身已足够好、轨迹中的失配步骤很少时，可校准的空间也小。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二（推论）</span><h4>熵只是不确定性的代理</h4></div>
+    <p>作者未讨论熵代理的局限，仅将 MC dropout/集成方差列为 future work（§4.1）。§4.1 中作者把平均 token 熵设为默认选择，理由是它与 Proposition 1 的理论联系最直接。至于「模型可能以极低熵自信地生成错误内容」，这是 §1 引用文献 [45] 时的背景陈述，不是作者对本身工作的自评。由此引出的是本页推论：EMPG 会放大对低熵错误步骤的惩罚，但无法消除熵与语义真实性之间的鸿沟。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>只在文本 Agent 上验证</h4></div>
+    <p>实验覆盖 WebShop、ALFWorld、Deep Search 三种文本交互环境，最大到 32B。具身 AI、多智能体协作被列为未来工作，连续动作、多模态输入下的表现尚无数据。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界四（推论）</span><h4>「往清晰走」可能压掉长期探索</h4></div>
+    <p>Future Clarity Bonus 奖励进入更确定的状态。短期看它把探索导向有意义的路径；但一个暂时高熵、长期更优的路径也可能被系统性低估。论文没有对这一点做专门实验，只有 Deep Search 上 Bamboogle 一栏 OOD 分数（EMPG 84.8，仅 Gradient Scaling 时 86.4）暗示加性奖励并非每个子集都最优。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界五（推论）</span><h4>调制的方向取决于原始优势符号</h4></div>
+    <p>g 只放大或缩小 A 的绝对值：当 A&gt;0 时放大利于快速学习；当 A&lt;0 时放大意味着更重的惩罚。若底层算法给出的优势本身有偏（例如组内全成功或全失败时 std 为 0，GRPO 的 Z-score 退化），EMPG 会把这个偏差同样放大。论文用 DAPO 的过滤采样应对此类批次，但 EMPG 自身不处理。</p>
+  </div>
+
+  <p style="margin-top:22px"><strong>一句话：EMPG 的贡献是把「熵-梯度耦合」这条已有事实变成一个可插拔的加权器，而不是提供更精确的不确定性度量。</strong>它的收益大小，取决于底座留下多少可校准的失配。</p>
+</section>
+
+<footer>
+  <div>Harnessing Uncertainty: Entropy-Modulated Policy Gradients for Long-Horizon LLM Agents · Jiawei Wang, Jiacai Liu, Yuqian Fu, Yingru Li, Xintao Wang, Yuan Lin, Yu Yue, Lin Zhang, Yang Wang, Ke Wang · ByteDance</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.09265" target="_blank" rel="noopener">arXiv 2509.09265</a><br>
+    笔记：<a href="/harnessing-uncertaintyentropy-modulated-policy-gradients-for-long-horizon-llm-agents/">Harnessing Uncertainty：Entropy-Modulated Policy Gradients for Long-Horizon LLM Agents</a>
+    <p style="margin-top:12px;font-size:12.5px;color:var(--text-soft)">
+      勘误（未改动笔记原文）：笔记正文给出的「DAPO 90.0 → 91.6（+1.6）」「7B 下 WebShop 79.6 → 82.7（+3.1）」与原文 Table 1 完全一致；但笔记「引言」段把 DAPO 的 ALFWorld 说成 74.8%→78.5，实际这两组数字是 <strong>7B 模型上 GRPO 的基线值与 GRPO+EMPG 的值</strong>；另外 7B DAPO 的 ALFWorld 基线应为 90.0%（论文另列 PPO 在 7B 上为 80.4，易混淆）。本页展示的表以论文 Table 1 / Table 2 为准。
+    </p>
+    <p style="margin-top:4px;font-size:12px;color:var(--text-soft)">图 1 为依据论文 Figure 1 重绘的示意，非原图。</p>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   g(H) 批次重分配模拟器
+   公式来源：Eq. 10 / Eq. 12；手算核对见页面 details
+   ============================================================ */
+(function () {
+  var stepsEl = document.getElementById('g-slots');
+  var msgEl = document.getElementById('g-msg');
+  var kEl = document.getElementById('gk');
+  var kValEl = document.getElementById('gk-v');
+  var hEl = document.getElementById('gh');
+  var hValEl = document.getElementById('gh-v');
+  if (!stepsEl || !msgEl || !kEl || !hEl) return;
+
+  var NAMES = ['A', 'B', 'C', 'D', 'E'];
+  var BASE_H = [0.2, 1.0, 1.0, 1.0, 1.6];
+  var BASE_A = [1, 1, -1, 1, -1];
+  var state = { H: BASE_H.slice(), A: BASE_A.slice(), preset: 'mixed' };
+
+  function fmt(x, d) { return x.toFixed(d == null ? 2 : d); }
+
+  function compute() {
+    var H = state.H;
+    var mn = Math.min.apply(null, H);
+    var mx = Math.max.apply(null, H);
+    var span = mx - mn;
+    var norm = H.map(function (h) {
+      return span < 1e-9 ? 0.5 : (h - mn) / span;
+    });
+    var k = parseFloat(kEl.value);
+    var ex = norm.map(function (n) { return Math.exp(-k * n); });
+    var mean = ex.reduce(function (a, b) { return a + b; }, 0) / ex.length;
+    var g = ex.map(function (e) { return e / mean; });
+    var scaled = g.map(function (gi, i) { return state.A[i] * gi; });
+    return { norm: norm, g: g, scaled: scaled, mean: mean };
+  }
+
+  function render() {
+    var r = compute();
+    var maxAbs = 0;
+    r.scaled.forEach(function (v) { maxAbs = Math.max(maxAbs, Math.abs(v)); });
+    if (maxAbs < 0.05) maxAbs = 1;
+
+    stepsEl.innerHTML = '';
+    for (var i = 0; i < 5; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot';
+      if (i === 2) slot.classList.add('hit');
+
+      var nm = document.createElement('div');
+      nm.className = 'slot-name';
+      nm.textContent = 'Step ' + NAMES[i];
+
+      var v1 = document.createElement('div');
+      v1.className = 'slot-val';
+      v1.textContent = 'H=' + fmt(state.H[i]) + '  A=' + (state.A[i] > 0 ? '+1' : '−1');
+
+      var v2 = document.createElement('div');
+      v2.className = 'slot-val tight';
+      v2.style.marginTop = '4px';
+      v2.textContent = 'g=' + fmt(r.g[i]) + ' → ' + (r.scaled[i] >= 0 ? '+' : '−') + fmt(Math.abs(r.scaled[i]));
+
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var b1 = document.createElement('i');
+      b1.className = r.scaled[i] >= 0 ? 'b1' : 'b3';
+      b1.style.width = Math.round(Math.abs(r.scaled[i]) / maxAbs * 100) + '%';
+      bar.appendChild(b1);
+
+      slot.appendChild(nm);
+      slot.appendChild(v1);
+      slot.appendChild(v2);
+      slot.appendChild(bar);
+      stepsEl.appendChild(slot);
+    }
+
+    var worst = 0;
+    for (var j = 1; j < 5; j++) {
+      if (Math.abs(r.scaled[j]) > Math.abs(r.scaled[worst])) worst = j;
+    }
+    var gMean = r.g.reduce(function (a, b) { return a + b; }, 0) / 5;
+    var html = '批内归一化后 ' +
+      '<strong>Σg/5 = ' + fmt(gMean) + '</strong>（恒为 1，只重分配不放大）。' +
+      '当前绝对值最大的项是 <strong>Step ' + NAMES[worst] + '（' +
+      (r.scaled[worst] >= 0 ? '+' : '−') + fmt(Math.abs(r.scaled[worst])) + '）</strong>。';
+    if (state.preset === 'allfail') {
+      html += ' 整条轨迹失败时所有 A 为负，低熵步骤被罚得最重——这正是「自信地错」被强纠正的地方。';
+    } else if (state.preset === 'confident') {
+      html += ' 当各步骤熵接近时 min-max 的区间变小，g 趋于 1，调制几乎失效：EMPG 需要批次内存在熵差异才有信号。';
+    }
+    msgEl.innerHTML = html;
+  }
+
+  function applyPreset(name) {
+    state.preset = name;
+    if (name === 'mixed') {
+      state.H = BASE_H.slice(); state.A = BASE_A.slice();
+    } else if (name === 'confident') {
+      state.H = [0.95, 1.0, 1.0, 1.02, 1.05]; state.A = [1, 1, -1, 1, -1];
+    } else if (name === 'allfail') {
+      state.H = BASE_H.slice(); state.A = [-1, -1, -1, -1, -1];
+    }
+    hEl.value = state.H[2];
+    hValEl.textContent = fmt(state.H[2]);
+    render();
+  }
+
+  document.querySelectorAll('#g-presets .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#g-presets .rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      applyPreset(btn.dataset.preset);
+    });
+  });
+
+  document.querySelectorAll('#gsim .act').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var act = btn.dataset.gact;
+      if (act === 'reset') { applyPreset('mixed'); return; }
+      if (act === 'toggle') {
+        state.A[2] = -state.A[2];
+        if (state.preset !== 'allfail') state.preset = 'mixed';
+        render();
+      }
+    });
+  });
+
+  kEl.addEventListener('input', function () {
+    kValEl.textContent = fmt(parseFloat(kEl.value));
+    render();
+  });
+
+  hEl.addEventListener('input', function () {
+    var v = parseFloat(hEl.value);
+    hValEl.textContent = fmt(v);
+    state.H[2] = v;
+    if (state.preset !== 'allfail' && state.preset !== 'confident') state.preset = 'mixed';
+    render();
+  });
+
+  applyPreset('mixed');
+})();
+</script>
+</body>
+</html>

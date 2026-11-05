@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1" style="color-scheme:only light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSRL · 不打一次外部搜索，也能把搜索智能体训出来</title>
+<meta name="description" content="SSRL（arXiv 2508.10874v1）把策略模型同时当作搜索引擎：先用 pass@k 量化 LLM 自身知识的上限，再用格式奖励与规则奖励做全模拟的搜索 RL。Llama-3.1-8B 主表 43.1 EM，比零外部搜索的 ZeroSearch 高 1.6 个百分点，训练时间少到 1/5.53；但同一套方法在 Qwen2.5-7B 上低于 ZeroSearch 7.3 个百分点。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.metric .src{font-family:"JetBrains Mono",monospace;font-size:10px;color:#8C857B;margin-top:4px}
+.infer{font-size:11px;font-weight:600;padding:1px 6px;border-radius:100px;background:var(--accent-soft);color:var(--accent-deep);font-family:"JetBrains Mono",monospace;white-space:nowrap}
+.infer::before{content:"推断 · "}
+.sim .k-sub{font-size:12.5px;color:var(--text-soft);margin:-6px 0 14px}
+.slots.s4{grid-template-columns:repeat(4,1fr)}
+.tbl-cap{font-size:12.5px;color:var(--text-soft);text-align:center;margin:-10px 0 20px}
+.side{font-size:12.5px;color:var(--text-soft);margin-top:-6px}
+@media (max-width:880px){
+  .sim-top .rule-btn{flex:1 1 100%}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SSRL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Search Agent · arXiv 2025 · 2508.10874v1</span>
+  <h1>SSRL：不接一次外部搜索，把搜索智能体训出来</h1>
+  <p class="hero-sub">
+    搜索 RL 要靠外部引擎产生轨迹，而 Search-R1 的 <code>&lt;search&gt;</code> 结果每一步都产生 API 费用；ZeroSearch 换成另一个微调过的 LLM 当引擎，又多一份模型开销。
+    这篇论文先测出一件事：<strong>答案常常就在参数里</strong>——Llama-3.1-8B-Instruct 在 Bamboogle 上 pass@1024 达到 <code>87.2%</code>，比 pass@1 高约 2.5 倍。于是它让<strong>策略模型自己扮演搜索引擎</strong>，用一份格式奖励 + 规则奖励把这种内隐搜索训成稳定的单次能力。
+    代价写在论文自己的表里：主表领先只对 Llama 成立，换成 Qwen2.5-7B 就落后于 ZeroSearch。
+  </p>
+  <div class="meta">
+    <span>Yuchen Fan, Kaiyan Zhang, Heng Zhou 等 · 清华 / 上海 AI Lab / UCL / SJTU / CSCEC / 微信 AI 等</span>
+    <a href="https://arxiv.org/abs/2508.10874v1" target="_blank" rel="noopener">arXiv 2508.10874v1 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    作者先不看训练，而是只做推理：让模型在一次生成里自己写 <code>&lt;search&gt;</code> 和自我作答 <code>&lt;information&gt;</code>，重复采样 K 次算 pass@k。
+    <strong>K 越大越准，曲线遵循 log c ≈ a·K<sup>b</sup> 的拟合</strong>——说明知识在参数里，缺的是「把它稳定取出来」的方法。
+  </p>
+  <p>
+    取不出来就训练。RL 目标 (Eq. 4) 里本来要边训边查外部引擎；当检索器就是策略模型自己时 R 的分布与 π<sub>θ</sub> 相同，目标退化成 Eq. 5——<em>「全模拟」（Full-Sim）搜索 RL</em>。
+    奖励是结果对错（Eq. 6：+1 / −1）与格式布尔量 f<sub>format</sub> ∈ {True, False} 按 λ<sub>f</sub> = 0.1 组合成 Eq. 7 的四个常数（1 / 0.9 / 0.1 / 0）；训练时把 <code>&lt;information&gt;</code> 的 token 从损失里屏蔽。
+  </p>
+  <p>
+    <strong>结果分两半。</strong>Llama-3.1-8B-Instruct 六个 QA 基准 EM 平均 43.1，高于训练时用 Google 的 Search-R1（37.1）和半模拟的 ZeroSearch（41.5），训练时间约为 ZeroSearch 的 1/5.53。
+    但把它训出来的技能直接接到真实 Google 上，Llama 反而<em>掉</em>了（K=3 时 35.5），只有 Qwen2.5-7B 涨到 47.9；而且 Qwen2.5-7B 上 SSRL 本身就低于 ZeroSearch。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 3">43.1<small> avg EM</small></div>
+      <div class="k">SSRL Llama-3.1-8B-Instruct，六个基准 EM 平均；Search-R1-Instruct 37.1，ZeroSearch-Instruct 41.5</div>
+      <div class="src">Table 3</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 8">1/5.53</div>
+      <div class="k">训练时间相对 ZeroSearch 的倍率（作者写「5.53× reduction in training time」，图 8 左轴是训练步数随小时数）</div>
+      <div class="src">§3.4.1 · Figure 8</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">47.9<small> avg EM</small></div>
+      <div class="k">Qwen2.5-7B-Instruct 纯 SSRL 30.2；Sim2Real K=3（最多三次真实 Google 替换自编信息）47.9</div>
+      <div class="src">Table 4</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>搜索 RL 的瓶颈不在算法，在「每个 rollout 都要问一次外部引擎」</h2></div>
+  <p class="sec-sub">读完这节，你要知道为什么作者先测 pass@k、再谈训练。</p>
+
+  <p>把 LLM 训成搜索智能体的标准做法是：模型写 <code>&lt;think&gt;</code>、发出 <code>&lt;search&gt;</code> 查询、拿回 <code>&lt;information&gt;</code>、再思考，直到给出 <code>&lt;answer&gt;</code>。Search-R1 在本地维基语料上跑这套流程，在线版本则直接打 Google / Bing。RL 训练需要大量 rollout，而每条轨迹里可能有多次搜索调用——§1 原句是「interacting with real web search engines remains costly …, especially given the large number of rollouts and multi-turn tool calls required during RL training」，即成本来自实时网页搜索交互，训练期 rollout 数量与多轮工具调用会把它放大 <span class="mono">(§1)</span>。</p>
+
+  <p>但在换环境之前，作者先问了一个更基础的问题：<strong>如果完全不搜索，模型自己知道多少？</strong> 这正是 pass@k 能回答的问题：给定一个问题采样 K 个答案，其中至少一个正确就算命中。它衡量的是「知识库覆盖率」，而不是「一次答对的稳定性」。两者之间的差距，就是训练要补的空间。</p>
+
+  <div class="eq" data-src="§2.2">
+    pass@k = (1/N) · Σ<sub>i</sub> [ 1 − C(K−C<sub>i</sub>, k) / C(K, k) ]
+  </div>
+  <div class="eq-cap">Eq. 1（§2.2 Task Formulation）· 每道题采样 K 条、其中 C<sub>i</sub> 条正确，N 为题目数；k 是抽取数。论文在 §2.4 / Figure 3 用 K = 1024 采样</div>
+
+  <p>实验覆盖 Llama-3.x、Qwen2.5、Qwen3 三个家族和 0.6B–72B，共七个基准（Table 2）：TriviaQA、NQ、HotpotQA、2Wiki、Musique、Bamboogle 属于事实/多跳问答，BrowseComp 是开放网页浏览题。采样温度 0.7、top-p 0.95、max tokens 8192 <span class="mono">(§2.3)</span>。</p>
+
+  <p>两个结果值得记住，它们分别说明「有上限」和「上限高」：</p>
+  <ul>
+    <li><strong>高</strong>：Bamboogle 上 Llama-3.1-8B-Instruct 的 pass@1024 达到 <code>87.2%</code>，论文原话是「a 150% improvement over pass@1 performance」。按字面反推 pass@1 ≈ 87.2 / 2.5 = <code>34.88</code> <span class="infer">推断</span>（依据 §2.4 原文与 Table 15：Table 15 的 caption 原文为「Comparison of actual vs. fitted values, residuals, and relative errors for three Llama models across different K values」，只给 Llama-3.2-3B / 3.1-8B / 3.1-70B 三个模型在 K = 2<sup>0</sup>…2<sup>10</sup> 下的实际值与拟合值对比；其中 Llama-3.1-8B-Instruct 的 actual 在 K=2<sup>0</sup> 为 25.53、K=2<sup>10</sup> 为 67.83，表里没有单列 Bamboogle，故 34.88 只是按「150%」字面反推）。</li>
+    <li><strong>也高得很离谱</strong>：BrowseComp 上 GPT-4o with search 只有 1.9%、o1 为 10%，而 Qwen2.5-14B-Instruct 与 Llama-3.1-8B-Instruct 在足够采样下越过 o1 <span class="mono">(§2.4, Figure 3)</span>。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">所以真正的问题</span><h4>知识在上限里，但「挑出对的答案」比「答得出来」难得多</h4></div>
+    <p>论文在 §2.5.2 试了 maj@k（多数投票）：即使把样本数加到 1024，提升依然很小，因为错误答案会成批地重复出现（Figure 6）。这就是 SSRL 的切入点——不靠事后投票，而是<strong>训练模型自己把内隐知识用对</strong>。</p>
+  </div>
+  <p class="side">顺带一个与直觉相反的观察：数学 RL 里常被当作好底座的 Qwen，在自搜索场景的 pass@k 上限反而低于 Llama <span class="mono">(§2.4)</span>，作者据此认为「搜索先验」与「推理先验」不是同一件事。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人给了两条替代路：真引擎太贵，假引擎要两份模型</h2></div>
+  <p class="sec-sub">论文自己的术语表（Table 11，§3.5.3 末）把「训练/推理时用谁做搜索引擎」分成四档，这里是其中三档。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Full-Real</span><h4>Search-R1：真引擎 / 语料</h4></div>
+      <p>训练时用 e5 + 维基语料检索，上线接 Google。知识新鲜、噪声真实，但 RL 要海量 rollout，<strong>每步搜索都是成本</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Semi-Real</span><h4>ZeroSearch：另一个 LLM 当引擎</h4></div>
+      <p>用一个微调过的 LLM（论文称「Simulation LLM」）模拟搜索返回。便宜，但多养一份模拟器，而且引擎和被训模型是<strong>两份参数</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Full-Sim</span><h4>SSRL：策略模型即引擎</h4></div>
+      <p>只训一份模型，它生成的 <code>&lt;information&gt;</code> 就是检索结果。零外部调用，但知识冻结在预训练数据里。</p>
+    </div>
+  </div>
+
+  <p>单看训练集配置也能看出差距：论文在附录 B.2.1 里写明 search baselines 与 ZeroSearch 都沿用 R1 的设置——batch 256、lr 1e-6，并且 <strong>ZeroSearch 的 max turn 是 2</strong>；Search-R1 在测试阶段换成 Google。SSRL 自己则是每条 prompt 采 5 条 rollout、训练 5 个 epoch、max response length 4096，训练全在 8×A800 单节点上 <span class="mono">(§3.3)</span>。</p>
+
+  <p><strong>代价对照是这篇的核心卖点</strong>，但对照只在一个模型家族上全面成立——见 §06。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>信息源就是自己：目标函数里的 R 消失了，奖励变成「格式 × 对错」</h2></div>
+  <p class="sec-sub">看懂这两个式子，再加上 §3.2 的信息屏蔽与复合奖励，，基本就拿到了这篇的全部机制。</p>
+
+  <div class="eq">
+    max<sub>π<sub>θ</sub></sub> E<sub>x∼D, y∼π<sub>θ</sub>(·|x; R)</sub> [ r<sub>φ</sub>(x, y) ] − β · D<sub>KL</sub>[ π<sub>θ</sub>(y|x; R) ‖ π<sub>ref</sub>(y|x; R) ]
+  </div>
+  <div class="eq-cap">Eq. 4 · 带外部检索 R 的搜索智能体 RL 目标（Search-R1 / ZeroSearch 一类）</div>
+
+  <div class="eq">
+    max<sub>π<sub>θ</sub></sub> E<sub>x∼D, y∼π<sub>θ</sub>(·|x)</sub> [ r<sub>φ</sub>(x, y) ] − β · D<sub>KL</sub>[ <span class="hl-c">π<sub>θ</sub>(y|x)</span> ‖ π<sub>ref</sub>(y|x) ]
+  </div>
+  <div class="eq-cap">Eq. 5 · SSRL：R 由 π<sub>θ</sub> 自回归生成，分布与策略相同，于是从目标里消掉</div>
+
+  <p>rewards 用的不是 reward model，而是两个<strong>可验证信号</strong>（§3.2）。附录 C 的 Listing 1 给了格式奖励的判定函数，它返回 0~1 的连续分数 s（正文 Eq. 7 的 f<sub>format</sub> 却是 True/False，两者如何对应论文未说明，见下）；结果奖励是个符号函数：</p>
+
+  <div class="eq">
+    R(ŷ, y) = <span class="hl-a">+1</span> if is_equivalent(ŷ, y) else <span class="hl-b">−1</span>
+  </div>
+  <div class="eq-cap">Eq. 6 · 结果奖励（EM 口径，§3.2 · 评测温度 0.0 见 §3.3）</div>
+
+  <div class="eq" data-src="§3.2">
+    r<sub>φ</sub>(y<sub>i</sub>, y) =
+      1 &nbsp;if is_equivalent(ŷ, y) ∧ f<sub>format</sub>(y) = <strong>True</strong><br>
+      1 − λ<sub>f</sub> &nbsp;if is_equivalent(ŷ, y) ∧ f<sub>format</sub>(y) = <strong>False</strong><br>
+      λ<sub>f</sub> &nbsp;if !is_equivalent(ŷ, y) ∧ f<sub>format</sub>(y) = <strong>True</strong><br>
+      0 &nbsp;if !is_equivalent(ŷ, y) ∧ f<sub>format</sub>(y) = <strong>False</strong> &nbsp;&nbsp;&nbsp;<span style="color:var(--text-soft)">（λ<sub>f</sub> = 0.1 → 1 / 0.9 / 0.1 / 0）</span>
+  </div>
+  <div class="eq-cap">Eq. 7（§3.2 Reward Modeling）· 论文里 f<sub>format</sub>(y) 取 <strong>True / False 两值</strong>，奖励因此只有四个常数：对 ∧ True → 1；对 ∧ False → 0.9；错 ∧ True → 0.1；错 ∧ False → 0。<code>λ<sub>f</sub> = 0.1</code> 原文：「to prioritize correctness while maintaining structured reasoning」</div>
+
+  <p class="side" style="margin-top:14px">注意 <strong>Eq. 7 的布尔 f<sub>format</sub> 与附录 C Listing 1 的连续分数是两套东西</strong>：Listing 1 的 <code>format_reward</code> 最后一行返回 <code>min(score, 1.0) * ratio</code>（think ≤ 8 时），可以取 0~1 之间的任何连续值（如 A 用例的 0.5）。<strong>论文正文没有说明这个连续分数 s 如何映射到 Eq. 7 的 Boolean f<sub>format</sub></strong>；下面分别称它们为「Listing 格式分 s」与「Eq. 7 的 f」。这是原文自身未接上的两处（Listing 1 是代码实现，Eq. 7 是正文公式），页面并列呈现，不做消解。</p>
+
+  <h3>自己动手：Listing 格式分 s 与 Eq. 7 奖励怎么算</h3>
+  <p class="side">模拟器先按 <strong>附录 C Listing 1 原样算连续分数 s</strong>，再按 <strong>Eq. 7 的布尔口径</strong>给最终奖励；两者之间的映射见下方「页面约定」。<strong>覆盖</strong> Listing 1 的这些检查：标签白名单（6 个用例都假设通过，分支保留）、<code>search_num = information_num</code>、<code>score = (1/max_turn)·think_num</code>（max_turn = 2）、ratio、<code>think &gt; 8</code> 返回 0。<strong>未覆盖</strong>（用例均假设通过）：空内容、<code class="mono">search</code> 内容必须单行、占位词（your query / your thoughts / your answer / your information）、<code>len(tags) &lt; 4</code>、起始必须是 <code>&lt;think&gt;</code> 后接 <code>&lt;/think&gt;</code>、结尾必须是 <code>&lt;answer&gt;&lt;/answer&gt;</code>、以及中间每个 <code>search</code> 后必须紧跟 <code>/search · information · /information</code> 的配对与顺序。此外 Listing 1 本身没有「think / search / info 至少 1 个」这一步——那只是页面按用例结构直接给的<b>简化假设</b>。<strong>页面约定</strong>：<code>f = (s &gt; 0)</code>，即 Listing 返回正分记为 True、返回 0 记为 False。下面的 f 与 r 都按这条约定 + Eq. 7 计算（λ<sub>f</sub> = 0.1）。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="mt-btns">
+      <button class="rule-btn active" data-act="a">A · 标准三段<span class="r-sub">&lt;think&gt;×2 &lt;search&gt;×1</span></button>
+      <button class="rule-btn" data-act="b">B · search 多于 information<span class="r-sub">&lt;search&gt;×3 information×1</span></button>
+      <button class="rule-btn" data-act="c">C · 4 次 think 带 3 次搜索<span class="r-sub">2 对 search/info</span></button>
+      <button class="rule-btn" data-act="d">D · 9 次 think 超上限<span class="r-sub">think &gt; 8</span></button>
+      <button class="rule-btn" data-act="e">E · 模板不严格<span class="r-sub">4 个标签齐全但漏换行</span></button>
+      <button class="rule-btn" data-act="f">F · think 少于 search<span class="r-sub">&lt;think&gt;×2 &lt;search&gt;×2</span></button>
+    </div>
+    <div class="actions">
+      <button class="act primary" data-tog="ok" id="tog-ok">对错：✓ 答案对</button>
+      <button class="act" data-tog="fmt" id="tog-fmt">Tag 取：✓（s &gt; 0 → f = True）</button>
+    </div>
+    <div class="slots s5" id="mt-slots"></div>
+    <div class="readout" id="mt-out" data-src="Eq. 7 · Appendix C">
+      <div class="r-head">当前组合</div>
+      <div id="mt-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账<span class="sum-sub">两组参数 → 结果，与上面按钮逐位一致（默认按钮状态）</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：用例 A（2 think、1 search、1 information），答案正确，Tag 取 ✓。</strong></p>
+      <ul>
+        <li>合法性：标签序列 <code>think /think search /search information /information answer /answer</code> 全在白名单里，<code>search_num = information_num = 1</code>，结构通过。</li>
+        <li>Listing 格式分：<code>score = (1/max_turn)·think_num = (1/2)·2 = 1</code>；<code>think_num = search_num + 1</code>，<code>ratio = 1</code>；<code>think_num ≤ 8</code> → <code>s = min(1,1)·1 = 1</code>。</li>
+        <li>页面约定：<code>s = 1 &gt; 0 → f = True</code>。</li>
+        <li>Eq. 7：<code>对 ∧ f=True → 1</code>。同一 Tag 取法若把 f 判为 False，Eq. 7 给 <code>1 − λ<sub>f</sub> = 0.9</code>（而不是 1）。</li>
+      </ul>
+      <p><strong>组 2：用例 C（4 think、3 search、3 information），答案错误，Tag 取 ✓。</strong></p>
+      <ul>
+        <li>合法性：三数相等，<code>score = (1/2)·4 = 2</code>；<code>think_num = search_num + 1 = 4</code> → <code>ratio = 1</code>；<code>min(2,1)·1 = 1</code>，<code>think_num ≤ 8</code> → <code>s = 1</code>。</li>
+        <li>页面约定：<code>f = (s &gt; 0) = True</code>。</li>
+        <li>Eq. 7：<code>错 ∧ f=True → λ<sub>f</sub> = 0.1</code>。</li>
+        <li>Tag 取 ✗（约定 f = False）时：<code>错 ∧ f=False → 0</code>。</li>
+      </ul>
+      <p>另附边界与口径：用例 B（3 ≠ 1）与用例 F（2 ≠ 1）在 Listing 1 的 <code>search_num != information_num</code> 处返回 0，故 <code>s = 0 → f = False</code>：答案对时 0.9、错时 0。用例 D 的 <code>think_num = 9 &gt; 8</code> 直接返回 0，同上。<strong>Eq. 7 不区分 s 的大小</strong>：f 只有 True/False 两档，Listing 的连续 s 只决定 f 的取值（页面约定 f = (s &gt; 0)），这是 Eq. 7 原文口径。以上均为确定值，无标准差。</p>
+    </div>
+  </details>
+
+  <h3>另一个不显眼但关键的开关：<code>&lt;information&gt;</code> 不做 loss</h3>
+  <p>Search-R1 那类工作中，外部检索到的文本天然不计入策略损失。在 SSRL 里 <code>&lt;information&gt;</code> 是模型自己编的——很自然会想「那就一起训吧」。论文的做法相反：仍把它们从损失里屏蔽。原因在 §3.5.1 给了：屏蔽（preventing the model from simply copying retrieved information）迫使模型更深入地走推理过程，屏蔽后不再能「拷贝」，训练动态显示 search 次数显著增加（附录 B.3.3 · Figure 14 左），轨迹更完整、推理更深。</p>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>能不能训、训得动，取决于同步与异步的取舍</h2></div>
+  <p class="sec-sub">这节讲清楚训练配置与「为什么离线反而更快」。</p>
+
+  <table>
+    <thead><tr><th>项</th><th>设置</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td>算法</td><td>GRPO（默认），另测 PPO / REINFORCE++ / DAPO / KL-Cov</td><td>§3.3, Table 10</td></tr>
+      <tr><td>训练数据</td><td>NQ + HotpotQA 混合</td><td>§3.3</td></tr>
+      <tr><td>batch / lr / warmup</td><td>256 / 1e-6 / 62 步</td><td>§3.3</td></tr>
+      <tr><td>rollout</td><td>每条 prompt 5 条；temperature 1.0</td><td>§3.3</td></tr>
+      <tr><td>KL 系数 β</td><td>0.001</td><td>§3.3</td></tr>
+      <tr><td>max response length</td><td>4096</td><td>§3.3</td></tr>
+      <tr><td>epoch 选点</td><td>5 epoch，取验证集平均最高的 checkpoint</td><td>§3.3</td></tr>
+      <tr><td>硬件</td><td>单节点 8× A800</td><td>§3.3</td></tr>
+    </tbody>
+  </table>
+  <p class="tbl-cap">训练配置（§3.3 · Table 10 给出算法对比）。附录 B.3.4 的 Table 25 另测 group size = 10：Llama-3.2-3B 的 avg 从 35.2 到 35.5、Qwen2.5-3B 反而从 26.0 掉到 24.5。</p>
+
+  <p>为什么 Fully-Sim 能省时间？关键在于<strong>信息源不是外部服务</strong>：一条 rollout 只需一次前向，<code>&lt;information&gt;</code> 由同一个策略一并生成；turns 由模型决定，而不是等 API 返回。§3.4.1 的 Figure 7 显示 Llama 训练初期 response length 和 search 次数都在下降——模型先被格式奖励逼回结构，后期才发展出拆题与自我反思。</p>
+
+  <p>Figure 8 是作者对效率的量化：同模型同硬件，SSRL 完成训练所需时间只有 ZeroSearch 的 <code>1/5.53</code>。注意作者给的是「reduction」，而 Figure 8 左图纵轴是 <strong>training steps</strong> 对 <strong>hours</strong>，即「达到相同步数所需的墙钟时间」<span class="infer">推断</span>（依据 Figure 8 左图轴标注：ZeroSearch 约 25 小时、SSRL 约 5 小时），不是吞吐率。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一条反直觉的推论</span><h4>离线训练让「多采样」变成纯收益</h4></div>
+    <p>在线引擎下，多 rollout 就是多 API 调用；论文在 §3.5.4 指出，正因为训练完全离线，更多 rollout 不会带来额外成本——这解释了为什么它能放心每条 prompt 采 5 条、做 5 个 epoch。</p>
+  </div>
+</section>
+
+<!-- ================= 05 架构或流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹里，谁的 token 进 loss、谁被屏蔽</h2></div>
+  <p class="sec-sub">对照 Figure 1 左与 §2.2 的 Prompt 模板（Table 1）、§3.2 的信息屏蔽与 Eq. 6–7，把「训练一条 rollout」拆成五个动作。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 380" role="img" aria-label="SSRL 单条轨迹的生成与损失屏蔽示意">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+      <g font-family="Inter, Noto Sans SC, sans-serif">
+        <rect x="20" y="30" width="200" height="58" rx="10" fill="#F4DCD0" stroke="#C04E2D"></rect>
+        <text x="120" y="56" text-anchor="middle" font-size="14" font-weight="600" fill="#7A2E16">Prompt · 问题 x</text>
+        <text x="120" y="76" text-anchor="middle" font-size="11" fill="#7A2E16" font-family="JetBrains Mono">&lt;think&gt; 开始推理</text>
+
+        <rect x="250" y="30" width="180" height="58" rx="10" fill="#FFFFFF" stroke="#D4C4A6"></rect>
+        <text x="340" y="56" text-anchor="middle" font-size="14" font-weight="600" fill="#1A1816">&lt;search&gt; query</text>
+        <text x="340" y="76" text-anchor="middle" font-size="11" fill="#6B6660" font-family="JetBrains Mono">策略自己生成</text>
+
+        <rect x="460" y="30" width="220" height="58" rx="10" fill="#DDE9EE" stroke="#2E5A6B"></rect>
+        <text x="570" y="56" text-anchor="middle" font-size="14" font-weight="600" fill="#2E5A6B">&lt;information&gt; 自编</text>
+        <text x="570" y="76" text-anchor="middle" font-size="11" fill="#2E5A6B" font-family="JetBrains Mono">token 屏蔽 loss</text>
+
+        <rect x="710" y="30" width="170" height="58" rx="10" fill="#F4DCD0" stroke="#C04E2D"></rect>
+        <text x="795" y="56" text-anchor="middle" font-size="14" font-weight="600" fill="#7A2E16">&lt;answer&gt; ŷ</text>
+        <text x="795" y="76" text-anchor="middle" font-size="11" fill="#7A2E16" font-family="JetBrains Mono">与 y 比对</text>
+
+        <path d="M220 59 L250 59" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arw)"></path>
+        <path d="M430 59 L460 59" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arw)"></path>
+        <path d="M680 59 L710 59" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arw)"></path>
+        <path d="M570 88 C570 120, 330 120, 330 88" fill="none" stroke="#C04E2D" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arw)"></path>
+        <text x="450" y="118" text-anchor="middle" font-size="11" fill="#7A2E16">多轮：再写 &lt;think&gt; 与下一组 &lt;search&gt;</text>
+
+        <!-- reward -->
+        <rect x="250" y="160" width="180" height="56" rx="10" fill="#FFFFFF" stroke="#D4C4A6"></rect>
+        <text x="340" y="184" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816">结果奖励 R ∈ {+1, −1}</text>
+        <text x="340" y="202" text-anchor="middle" font-size="11" fill="#6B6660" font-family="JetBrains Mono">Eq. 6 · EM</text>
+        <rect x="460" y="160" width="220" height="56" rx="10" fill="#FFFFFF" stroke="#D4C4A6"></rect>
+        <text x="570" y="184" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816">Listing s ∈ [0, 1] → Eq. 7 f ∈ {True, False}</text>
+        <text x="570" y="202" text-anchor="middle" font-size="11" fill="#6B6660" font-family="JetBrains Mono">s→f 映射正文未说明</text>
+        <path d="M795 88 L795 188 L680 188" fill="none" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arw)"></path>
+        <path d="M340 88 L340 160" stroke="#8C857B" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arw)"></path>
+
+        <rect x="250" y="252" width="430" height="56" rx="10" fill="#1A1816"></rect>
+        <text x="465" y="276" text-anchor="middle" font-size="13" font-weight="600" fill="#F5F1E8">r = Eq. 7 (R, f ∈ {T, F}, λf = 0.1)</text>
+        <text x="465" y="294" text-anchor="middle" font-size="11" fill="#D9A98F" font-family="JetBrains Mono">GRPO 组内归一化 → 更新 πθ</text>
+        <path d="M340 216 L340 252" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arw)"></path>
+        <path d="M570 216 L570 252" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arw)"></path>
+
+        <rect x="710" y="252" width="170" height="56" rx="10" fill="#DDE9EE" stroke="#2E5A6B" stroke-dasharray="4 3"></rect>
+        <text x="795" y="276" text-anchor="middle" font-size="12" font-weight="600" fill="#2E5A6B">外部引擎（可选）</text>
+        <text x="795" y="294" text-anchor="middle" font-size="11" fill="#2E5A6B" font-family="JetBrains Mono">仅 Sim2Real 推理时</text>
+        <path d="M795 308 L795 330 L570 330 L570 88" fill="none" stroke="#2E5A6B" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arw)"></path>
+
+        <text x="40" y="350" font-size="11" fill="#8C857B" font-family="JetBrains Mono">粉 = 推理 token 进 loss · 蓝 = information 屏蔽 · 虚线 = 仅推理时生效</text>
+      </g>
+    </svg>
+    <figcaption>流程重绘，依据 Figure 1（左：Full/Semi-Real 与 Full-Sim 对比）、§2.2 标签模板、§3.2 信息屏蔽与 Eq. 6–7</figcaption>
+  </figure>
+
+  <p>把「训练最后一步选点」也算进去：每个 epoch 结束看验证集平均 EM，保留最高的 checkpoint。这条和 Table 25（附录 B.3.4）的 group-size 结果放在一起看，说明论文对训练稳定性并不完全不在乎——它花了篇幅说明「有信息屏蔽时 search 次数更高」（附录 B.3.3, Figure 14 左）。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>主表赢在 Llama，换 Qwen2.5-7B 就输给 ZeroSearch</h2></div>
+  <p class="sec-sub">两处结论：同一方法在论文自己的附录表里就出现了反例；Sim2Real 是分模型成立的。</p>
+
+  <h3>主表（Table 3）：六个 QA 基准，指标为 EM</h3>
+  <p>训练数据 NQ + HotpotQA，评测同一批六基准，BrowseComp 因难度和训练数据缺失被排除（§3.3）。下表只挑与 SSRL 最直接可比的一列 Avg。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th>类型</th><th class="num">Search-R1-B</th><th class="num">Search-R1-I</th><th class="num">ZeroSearch-B</th><th class="num">ZeroSearch-I</th><th class="num">SSRL-B</th><th class="num">SSRL-I</th></tr></thead>
+      <tbody>
+        <tr><td>Llama-3.2-3B</td><td><span class="pill p1">对照</span></td><td class="num">32.6</td><td class="num">28.2</td><td class="num">34.0</td><td class="num">28.5</td><td class="num">30.5</td><td class="num">35.2</td></tr>
+        <tr class="best"><td>Llama-3.1-8B</td><td><span class="pill pa">SSRL 领先</span></td><td class="num">40.4</td><td class="num">37.1</td><td class="num">27.9</td><td class="num">41.5</td><td class="num">34.4</td><td class="num">43.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-cap">Table 3（节选）· Avg = NQ、TQ、HotpotQA、Musique、2Wiki、Bamboogle 六基准 EM 平均 · <span class="mono">B</span> = Base 起点，<span class="mono">I</span> = Instruct 起点 · 本表每个模型节选 6 行，完整 12 行见原文</p>
+
+  <p><strong>细拆一下这组数</strong>（Python 复算）：</p>
+  <ul>
+    <li>Llama-3.1-8B：SSRL-I 43.1 对 ZeroSearch-I 41.5，<strong>+1.6 个百分点（43.1 − 41.5），相对 ZeroSearch 高 3.9%</strong>；对 Search-R1-B 40.4 高 2.7 个百分点。</li>
+    <li>Llama-3.2-3B：SSRL-I 35.2 对 ZeroSearch-I 28.5，<strong>+6.7 个百分点，相对高 23.5%</strong>；但 SSRL-B 30.5 反而比 Search-R1-B 32.6 <strong>低 2.1 个百分点</strong>。</li>
+    <li>同一张表的 Base 行里，SSRL-B（8B 34.4）比 Search-R1-B（40.4）低 6.0 个百分点——「SSRL 一律更好」不成立，作者自己也在 §3.4.1 说 instruct 模型才更擅长榨取内部知识。同模型不带搜索的 RAG 在表里是 39.2，也高于 SSRL-B 的 34.4。</li>
+  </ul>
+
+  <h3>反例：Qwen2.5-7B 在附录表（Table 23）里输给 ZeroSearch</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型（Qwen2.5-7B-Instruct）</th><th class="num">NQ</th><th class="num">TQ</th><th class="num">HotpotQA</th><th class="num">Musique</th><th class="num">2Wiki</th><th class="num">Bamboogle</th><th class="num">Avg</th></tr></thead>
+      <tbody>
+        <tr><td>Search-R1-Instruct</td><td class="num">42.4</td><td class="num">63.4</td><td class="num">32.8</td><td class="num">17.4</td><td class="num">33.2</td><td class="num">26.4</td><td class="num">35.9</td></tr>
+        <tr><td>ZeroSearch-Instruct</td><td class="num">43.6</td><td class="num">65.2</td><td class="num">34.6</td><td class="num">18.4</td><td class="num">35.2</td><td class="num">27.8</td><td class="num">37.5</td></tr>
+        <tr><td>Self-Search-Instruct</td><td class="num">31.4</td><td class="num">44.4</td><td class="num">26.0</td><td class="num">11.8</td><td class="num">31.0</td><td class="num">36.8</td><td class="num">30.2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-cap">Table 23（节选，附录 B.3.1，Qwen2.5-7B-Instruct 六基准 EM）· 同一模型上 SSRL 30.2 比 ZeroSearch-Instruct 37.5 <strong>低 7.3 个百分点，相对低 19.5%（7.3 / 37.5）</strong></p>
+
+  <h3>Sim2Real：四个模型里只有 Qwen2.5-7B 随搜索次数单调上涨</h3>
+  <div class="sim">
+    <div class="sim-top" id="s2r-btns">
+      <button class="rule-btn active" data-model="0">Llama-3.2-3B<span class="r-sub">Instruct</span></button>
+      <button class="rule-btn" data-model="1">Llama-3.1-8B<span class="r-sub">Instruct</span></button>
+      <button class="rule-btn" data-model="2">Qwen2.5-3B<span class="r-sub">Instruct</span></button>
+      <button class="rule-btn" data-model="3">Qwen2.5-7B<span class="r-sub">Instruct</span></button>
+    </div>
+    <div class="chart" id="s2r-chart"></div>
+    <div class="cx" id="s2r-x"><span>Zero-shot CoT</span><span>SSRL</span><span>Sim2Real K=1</span><span>Sim2Real K=3</span><span>Sim2Real All</span></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>无真实搜索（CoT / 纯 SSRL）</span>
+      <span><i style="background:var(--accent)"></i>接入真实搜索</span>
+    </div>
+    <p class="k-sub" style="margin-top:14px">横轴是五次设置，纵轴为该模型的六基准 Avg EM。K 指「用真实 Google 替换模型自编信息的最多轮数」，见 §3.4.2。</p>
+    <div class="readout" id="s2r-out" data-src="Table 4"></div>
+  </div>
+
+  <p><strong>读法</strong>：Qwen2.5-7B 从纯 SSRL 30.2 一路涨到 K=3 的 47.9（<strong>+17.7 个百分点，相对 +58.6%</strong>），是全表最漂亮的一段；Llama-3.2-3B 在 K=3 小幅涨到 41.9；但 Llama-3.1-8B 从 43.1 掉到 K=3 的 35.5（<strong>−7.6 个百分点</strong>，尽管 K=1 时还有 41.6），Qwen2.5-3B 在 K=1 时仅比纯 SSRL 高 3.8 个百分点。</p>
+
+  <p>还有一组同样值得看的数据：<strong>只训 TTRL、完全不用标准答案（Table 6）</strong>，比同数据的 GRPO 高得多。Llama-3.2-3B 从 35.2 到 56.1（<strong>+20.9 个百分点，相对 +59.4%</strong>）；但 Llama-3.1-8B 只有 48.7（+5.6 个百分点，相对 +13.0%）。作者在 §3.4.3 也承认 TTRL 模型「over-relying on internal knowledge」，Sim2Real 时几乎只搜一次。注意 Table 8 只列了 Llama-3.2-3B 与 Qwen2.5-3B：3B 的 TTRL→Sim2Real 从 56.1 到 54.5，Qwen2.5-3B 从 43.5 到 42.9。</p>
+
+  <p>规律：<strong>SSRL 抬高的是内隐知识利用率，不是「接过 Google 就会用」</strong>。这一点与 §2.5.1 的发现一致：Self-Search 设定下，加长思考、多轮自搜索、加反思都「同 token 预算下不如朴素重复采样」（Figure 4、5）。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>三类场景别用 SSRL；五件事它没有解决</h2></div>
+  <p class="sec-sub">一条是「方法本身的前提失败」，两条是「换环境后反而变差的已知形态」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>知识有截止日期</h4></div>
+    <p>论文在 §3.4.2 明说「inherent knowledge within these models remains fixed」。对时效性问题、内部文档、私有库，Full-Sim 根本无从检索。附录 B.3.5 的 Table 27 也给了旁证：SimpleQA 上纯 SSRL 只有 2.7–7.0，接真实搜索 / Entropy-guided 后跳到 30–51——靠的是外部知识。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>Sim2Real 不是自动接上</h4></div>
+    <p>Llama-3.1-8B 在 K=1 时 41.6、K=3 时 35.5，作者把原因归到「self-search generated information 与外部信息之间的 gap」。如果目标就是「训完立刻能用真引擎」，那 Qwen2.5-7B 的经历（30.2 → 47.9）才是正面例子；同一个方法换模型就能反转。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>「同 token 预算下更长的思考没有帮助」</h4></div>
+    <p>§2.5.1 报告的 Qwen3 结果显示，更多 thinking token 并不换来更高准确率；同预算下 Multi-turn 与 Reflection 通常还比朴素重复采样差。作者的解释是这时的瓶颈是「知识使用」而非「推理」（§2.5.1 末：「knowledge utilization may be more advantageous than reasoning in these scenarios」）。</p>
+  </div>
+
+  <h3>还没解决的</h3>
+  <ul>
+    <li><strong>训练集外的难度</strong>：BrowseComp 被排除在 RL 训练之外，因为「exceptional difficulty and limited availability of training data」（§3.3）。Table 7（§3.4.3，caption「Performance on BrowseComp.」）报的正是 BrowseComp 上的结果：WebSailor-3B 2.0；Qwen2.5-3B-Instruct 经 TTRL 得 3.9，其 Sim2Real 版本得 1.4；Llama-3.2-3B-Instruct 经 TTRL 得 6.2，其 Sim2Real 版本得 4.1。每个 Sim2Real 数都是与同模型 TTRL 行配对的，两处配对均下降（3.9 → 1.4，6.2 → 4.1）。</li>
+    <li><strong>Base 模型不擅长</strong>：Table 3 的 Base 行均低于对应 Instruct 行（8B 34.4 vs 43.1，3B 30.5 vs 35.2）；作者据此指出 instruct 模型更擅长利用内部知识，内部与外部知识需要不同的优化策略（§3.4.1）。</li>
+    <li><strong>格式奖励的硬边</strong>：附录 C 的 Listing 1 最后一行返回 <code>min(score, 1.0) * ratio if think_num &lt;= 8 else 0.0</code>，search 与 information 数量不等则在更早处返回 0；但正文 Eq. 7 只按布尔 f<sub>format</sub> 给四个常数，「s → f」的映射论文未说明。页面模拟器按 Listing 1 算连续 s、再按页面约定 <code>f = (s &gt; 0)</code> 套 Eq. 7（详情见 §03 格式分说明）；这意味着需要长链自我反思的任务可能被格式约束卡住<span class="infer">推断</span>。</li>
+    <li><strong>组大小 / 算法的敏感性</strong>：Table 25（附录 B.3.4）显示 group size 从 5 变 10 时，Qwen2.5-3B 掉 1.5 个百分点（26.0 → 24.5）；Table 10 里 PPO 在 Llama-3.1-8B 只有 36.2，约为 GRPO（43.1）的 84%，在五种算法中最低（DAPO 43.3 最高，KL-Cov 42.3、REINFORCE++ 40.3）。</li>
+  </ul>
+
+  <p style="margin-top:14px">一句话：<strong>SSRL 是「在知识已经够用的问题上，把答案更稳定地取出来」的一种廉价训练方案</strong>；知识本身不够、或部署时依赖实时外部信息时，它不能替代 Full-Real 检索。</p>
+</section>
+
+<footer>
+  <div>SSRL: Self-Search Reinforcement Learning · Yuchen Fan, Kaiyan Zhang, Heng Zhou, Yuxin Zuo 等（清华大学、上海 AI Lab、UCL、上海交大、中建三局、微信 AI 等）。本页所有数字均取自 arXiv 2508.10874v1，以该版为准。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.10874v1" target="_blank" rel="noopener">https://arxiv.org/abs/2508.10874v1</a><br>
+    笔记：<a href="/ssrlself-search-reinforcement-learning/">SSRL：SELF-SEARCH REINFORCEMENT LEARNING</a><br>
+    <span style="color:var(--accent-deep)">笔记勘误（未改动原文）：</span>① 笔记称「Llama-3.1-8B 上 SSRL 显著优于 Search-R1（37.1）和 ZeroSearch（41.5）」，其中 37.1 / 41.5 是 <strong>Instruct</strong> 行，SSRL 的 43.1 也是 Instruct 行，但同表的 Base 行 SSRL 34.4 低于 Search-R1-B 40.4，并非全面领先；② 笔记写「全局准确率 47.9%」，实际是 Qwen2.5-7B-Instruct 在 Sim2Real（K=3）下的六基准 Avg EM，并非全题集；③ 笔记说「Table 11 中 Full-Real 优势泛化性好」——Table 11 的 caption 是「We display key concepts discussed in this paper. The terminology we mentioned above is the approach of search used during training and inference.」，表内三列是 Terminology / Explanation / Example，逐行只给 Full-Real / Semi-Real / Full-Sim / Sim2Real 的定义与例子（Search-R1、ZeroSearch、Self-Search），「泛化性好」不是该表的内容，其依据在原文别处，笔记的表格出处标错了。另：本页格式分模拟按 Listing 1 算连续 s，并按页面约定 f = (s &gt; 0) 套 Eq. 7；Listing 1 中空内容/占位词/标签顺序/search–information 配对等检查未覆盖（见 §03）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 格式分模拟器（附录 C + Eq. 7）
+   ============================================================ */
+(function () {
+  var fEl = document.getElementById('mt-slots');
+  if (!fEl) return;
+
+  var CASES = {
+    a: { name: 'A', think: 2, search: 1, info: 1, tmpl: true,  tagsOk: true,  note: '标准三段' },
+    b: { name: 'B', think: 2, search: 3, info: 1, tmpl: true,  tagsOk: true,  note: 'search 多于 information' },
+    c: { name: 'C', think: 4, search: 3, info: 3, tmpl: true,  tagsOk: true,  note: '4 think / 3 search / 3 info' },
+    d: { name: 'D', think: 9, search: 8, info: 8, tmpl: true,  tagsOk: true,  note: 'think > 8' },
+    e: { name: 'E', think: 2, search: 1, info: 1, tmpl: false, tagsOk: true,  note: '模板不严格' },
+    f: { name: 'F', think: 2, search: 2, info: 1, tmpl: true,  tagsOk: true,  note: 'think 少于 search' }
+  };
+
+  var cur = 'a';
+  var answerOk = true;
+  var useFmt = true;
+
+  function formatScore(c) {
+    if (!c.tagsOk) return 0;
+    if (c.think < 1 || c.search < 1 || c.info < 1) return 0;
+    if (c.search !== c.info) return 0;
+    var maxTurn = 2;
+    var score = 1 / maxTurn * c.think;
+    var ratio = 1;
+    var upper = 8;
+    if (c.think !== c.search + 1) {
+      ratio = Math.min(c.think, c.search + 1) / Math.max(c.think, c.search + 1);
+    }
+    if (c.think > upper) return 0;
+    return Math.min(score, 1) * ratio;
+  }
+
+  function finalReward(ok, f) {
+    if (ok) return f ? 1 : 0.9;
+    return f ? 0.1 : 0;
+  }
+
+  function fmtNum(x) {
+    return x.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function render() {
+    var c = CASES[cur];
+    var s = formatScore(c);
+    var f = useFmt && s > 0;
+    var r = finalReward(answerOk, f);
+
+    fEl.innerHTML = '';
+    var cells = [
+      ['think ×', String(c.think)],
+      ['search ×', String(c.search)],
+      ['info ×', String(c.info)],
+      ['Listing s', fmtNum(s)],
+      ['f_format', f ? 'True' : 'False'],
+      ['最终 r', fmtNum(r)]
+    ];
+    cells.forEach(function (p, i) {
+      var slot = document.createElement('div');
+      slot.className = 'slot' + (i >= 3 ? ' hit' : '');
+      var n = document.createElement('div');
+      n.className = 'slot-name';
+      n.textContent = p[0];
+      var v = document.createElement('div');
+      v.className = 'slot-val';
+      v.textContent = p[1];
+      slot.appendChild(n);
+      slot.appendChild(v);
+      fEl.appendChild(slot);
+    });
+
+    var msg = document.getElementById('mt-msg');
+    if (msg) {
+      var why = c.search !== c.info
+        ? 'search 与 information 数量不等 —— 模拟与 Listing 1 相同，直接返回 s = 0。'
+        : (c.think > 8
+          ? 'think 次数超过上限 8 —— 返回 0（Listing 1 末尾有 upper_bound = 8 的截断）。'
+          : 'score = (1/2)·' + c.think + ' = ' + fmtNum(1 / 2 * c.think) +
+            (c.think !== c.search + 1 ? '，ratio = ' + fmtNum(Math.min(c.think, c.search + 1) / Math.max(c.think, c.search + 1)) : '，ratio = 1') +
+            ' → s = ' + fmtNum(s) + '。');
+      msg.innerHTML = '<strong>' + c.name + '</strong>（' + c.note + '）：' + why +
+        '<br>答案' + (answerOk ? '对' : '错') + '，f_format = ' + (f ? 'True' : 'False') +
+        (useFmt ? '（f = (s > 0)）' : '（Tag 取 x，页面约定 f = False）') +
+        ' → Eq. 7 奖励 <strong>' + fmtNum(r) + '</strong>' +
+        (!f ? '（Eq. 7 取 False 行，不看 s 的大小）' : '') + '。';
+    }
+  }
+
+  document.querySelectorAll('#mt-btns .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#mt-btns .rule-btn').forEach(function (x) { x.classList.remove('active'); });
+      btn.classList.add('active');
+      cur = btn.dataset.act;
+      render();
+    });
+  });
+
+  var togOk = document.getElementById('tog-ok');
+  if (togOk) togOk.addEventListener('click', function () {
+    answerOk = !answerOk;
+    togOk.textContent = answerOk ? '对错：✓ 答案对' : '对错：✗ 答案错';
+    render();
+  });
+  var togFmt = document.getElementById('tog-fmt');
+  if (togFmt) togFmt.addEventListener('click', function () {
+    useFmt = !useFmt;
+    togFmt.textContent = useFmt ? 'Tag 取：✓（s > 0 → f = True）' : 'Tag 取：✗（约定 f = False）';
+    render();
+  });
+
+  render();
+})();
+
+/* ============================================================
+   2) Sim2Real 对比图（Table 4）
+   ============================================================ */
+(function () {
+  var host = document.getElementById('s2r-chart');
+  if (!host) return;
+
+  var DATA = [
+    { label: 'Llama-3.2-3B-Instruct', vals: [20.7, 35.2, 40.0, 41.9, 41.8] },
+    { label: 'Llama-3.1-8B-Instruct', vals: [25.0, 43.1, 41.6, 35.5, 40.2] },
+    { label: 'Qwen2.5-3B-Instruct',   vals: [14.7, 26.0, 29.8, 32.8, 33.0] },
+    { label: 'Qwen2.5-7B-Instruct',   vals: [17.4, 30.2, 38.0, 47.9, 46.8] }
+  ];
+  var NAMES = ['CoT', 'SSRL', 'K=1', 'K=3', 'All'];
+  var MAXV = 55;
+
+  function draw(idx) {
+    var d = DATA[idx];
+    host.innerHTML = '';
+    var row = document.createElement('div');
+    row.className = 'crow';
+    var nm = document.createElement('div');
+    nm.className = 'cname';
+    nm.textContent = NAMES.join(' · ');
+    var bars = document.createElement('div');
+    bars.className = 'cbars';
+    d.vals.forEach(function (v, i) {
+      var cb = document.createElement('div');
+      cb.className = 'cbar';
+      var tr = document.createElement('div');
+      tr.className = 'track';
+      var fl = document.createElement('div');
+      fl.className = 'fill';
+      fl.style.background = i < 2 ? 'var(--c1)' : 'var(--accent)';
+      fl.style.height = (v / MAXV * 100) + '%';
+      tr.appendChild(fl);
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = v.toFixed(1);
+      cb.appendChild(tr);
+      cb.appendChild(num);
+      bars.appendChild(cb);
+    });
+    row.appendChild(nm);
+    row.appendChild(bars);
+    host.appendChild(row);
+
+    var out = document.getElementById('s2r-out');
+    if (!out) return;
+    var diff = Math.round((d.vals[3] - d.vals[1]) * 10) / 10;
+    var rel = Math.round(diff / d.vals[1] * 1000) / 10;
+    var relTxt = (rel >= 0 ? '相对 +' : '相对 −') + Math.abs(rel).toFixed(1) + '%';
+    var pctTxt = (diff >= 0 ? '+' : '−') + Math.abs(diff).toFixed(1) + ' 个百分点';
+    var verdict = diff > 0
+      ? '接入 K=3 的真实搜索后平均分' + (diff >= 5 ? '明显上升' : '小幅上升')
+      : '接入 K=3 的真实搜索后平均分反而下降';
+    out.innerHTML = '<div class="r-head">' + d.label + ' · Table 4</div>' +
+      'SSRL 纯自搜索 <strong>' + d.vals[1].toFixed(1) + '</strong> → Sim2Real K=3 <strong>' +
+      d.vals[3].toFixed(1) + '</strong>：' + verdict + '（<strong>' + pctTxt + '</strong>，' +
+      relTxt + '）。K=1 为 ' + d.vals[2].toFixed(1) + '，K=3 为 ' + d.vals[3].toFixed(1) +
+      '，全部接入为 ' + d.vals[4].toFixed(1) + '。';
+  }
+
+  document.querySelectorAll('#s2r-btns .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#s2r-btns .rule-btn').forEach(function (x) { x.classList.remove('active'); });
+      btn.classList.add('active');
+      draw(parseInt(btn.dataset.model, 10));
+    });
+  });
+  draw(0);
+})();
+</script>
+</body>
+</html>

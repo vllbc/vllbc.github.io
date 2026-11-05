@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From Trial-and-Error to Improvement · RLVR 探索机制的三个层次</title>
+<meta name="description" content="人大 STILL 团队对 RLVR 探索机制的系统分析：SFT 拓宽 Pass@k 边界、RL 只锐化 Pass@1；上升期靠负样本削熵，平台期学习集中在低 PPL、后段、高熵少数 token 上；据此提出 PPL-based 与 Position-based 两种优势塑造。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：SVG 轴标签与图例 */
+figure svg .ax{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-soft)}
+figure svg .ax-y{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-muted)}
+figure svg .vn{font-family:"JetBrains Mono",monospace;font-weight:600}
+figure svg .lb{font-family:"Inter","Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.ctrl .hint{display:block;font-size:11px;color:var(--text-soft);margin-top:6px;font-family:"JetBrains Mono",monospace}
+.note-inline{font-size:13px;color:var(--text-soft);margin-top:-6px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Trial-and-Error → Improvement</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#two-roads">两路</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RLVR · 技术报告 · arXiv 2508.07534</span>
+  <h1>从试错到进步：RLVR 里「探索」究竟在哪里起作用</h1>
+  <p class="hero-sub">
+    RLVR 用「答案对错」驱动推理模型自我改进，但探索空间为什么会收缩、学习信号到底落在哪些 token 上，一直缺少细粒度答案。
+    中国人民大学高瓴人工智能学院的这篇技术报告把 RLVR 训练拆成<strong>空间边界、熵–性能交换、性能转换</strong>三个层次，
+    逐层给出度量、实验和落点方法，并在 GRPO 上提出两种几行代码就能实现的优势塑造。
+  </p>
+  <div class="meta">
+    <span>Jia Deng, Jie Chen, … Wayne Xin Zhao, Ji-Rong Wen · 中国人民大学 Gaoling School of AI</span>
+    <a href="https://arxiv.org/abs/2508.07534" target="_blank" rel="noopener">arXiv 2508.07534 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    报告的第一判断：<strong>SFT 与 RL 是两种完全不同的探索操作</strong>。SFT 利用外部数据显著抬高 Pass@k 上限，RL 几乎不动 Pass@k，只把 Pass@1 往前推；两者都无法「单向扩张」能力边界，训练更多是<em>重塑</em>可解集合。
+  </p>
+  <p>
+    第二判断：<strong>熵的下降由负样本驱动，而学习发生在低 PPL、靠后位置的少数高熵 token 上</strong>。上升期模型主要靠惩罚错误路径削掉无关词元、固化格式；平台期超过 <em>99%</em> 的 token 概率几乎不动，更新集中在形式推理类 token（数字、运算符）上。
+  </p>
+  <p>
+    第三判断：既然学习集中在这两类「特殊 token」上，就<em>直接给它们加权</em>——按对数 PPL 标准化值压低高 PPL 样本的优势（α=0.01），按相对位置加偏置（γ=0.1，仅在平台期第 200–300 步施加）。
+    论文报告平均相对提升 1.51%（Qwen2.5-7B）与 2.31%（Qwen2.5-Math-7B），但绝对值提升很小，且两个百分比与自家表 4 对不上。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">k=640</div>
+      <div class="k">AIME24/25 共 60 题的采样次数<br>用于 Pass@k 与「不可解集合」对比</div>
+    </div>
+    <div class="metric">
+      <div class="v">99%+</div>
+      <div class="k">平台期概率变化 &lt; 0.06 的 token 占比<br>学习集中到极少数 token</div>
+    </div>
+    <div class="metric">
+      <div class="v">51.64 → 54.21</div>
+      <div class="k">Math-7B 的 avg@8 平均分<br>GRPO → GRPO+PPL（表 4）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>RLVR 的进步，本质是把「不确定性」换成「正确率」</h2></div>
+  <p class="sec-sub">先建立共同认知：探索是什么、它受什么约束、为什么只看最终分数不够。</p>
+
+  <p>RLVR 的循环很朴素：模型对题目采样多个回答，验证器只给 0/1 奖励，算法强化正确路径、压制错误路径，然后重复。和 RLHF 的区别在于奖励来自规则而非偏好模型；和 SFT 的区别在于<strong>训练数据全部由模型自己生成</strong>。这带来一个结构性约束：模型只能在自己已经踩过的轨迹上自我强化，新技能要靠探索去发现。</p>
+
+  <p>探索受<strong>能力边界</strong>约束——边界之外的问题，无论 RL 怎么优化都解不出来。论文引用的经典观点是把策略熵视作不确定性的度量：起始时探索空间大，随着正确轨迹被强化，置信度上升、熵下降，最终停在「不确定性 vs 性能」的某个折中点上。于是问题变成三个：</p>
+
+  <ul>
+    <li><strong>边界在哪、谁在动它</strong>：SFT 和 RL 分别把边界推到哪、往哪个方向？</li>
+    <li><strong>熵换来了多少性能</strong>：熵的下降在训练不同阶段、不同样本、不同位置上的含义是否一样？</li>
+    <li><strong>怎么把探索变成分数</strong>：边界够宽之后，怎样让每次更新都落在「值得学」的地方？</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>Pass@1 上升不代表能力变强</h4></div>
+    <p>RL 强化的是模型已经采到过的正确路径，于是首答更准；但新的正确路径并不会凭空出现。Pass@k 才是「同一个问题最多试 k 次能否解出」的度量，更接近能力上限。论文用 <code>k=640</code> 次采样比较三种模型：基座 Qwen2.5-Math-7B、SFT 版 DeepSeek-R1-Distill-Qwen-7B、再经 RL 的 Skywork-OR1-Math-7B。</p>
+  </div>
+
+  <p>这个视角下，「探索空间收缩」不是坏事——它是 RL 用宽度换深度的必然结果；问题只在于<strong>深度是否值得，以及能不能把换来的深度再高效地转化成宽度</strong>。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="two-roads">
+  <div class="sec-head"><span class="sec-num">02</span><h2>SFT 拓宽边界，RL 只锐化首答</h2></div>
+  <p class="sec-sub">论文用三个指标把「谁拓宽、谁收缩」量化出来：Pass@k 曲线、答案多样性、不可解问题集合。</p>
+
+  <figure>
+    <svg viewBox="0 0 680 250" role="img" aria-label="SFT 与 RL 在 Pass@k 曲线上的示意对比">
+      <line x1="60" y1="200" x2="640" y2="200" stroke="var(--border-strong)" stroke-width="1"/>
+      <line x1="60" y1="200" x2="60" y2="26" stroke="var(--border-strong)" stroke-width="1"/>
+      <text class="ax" x="640" y="216" text-anchor="end">k</text>
+      <text class="ax" x="60" y="18" text-anchor="middle">Pass@k</text>
+      <text class="ax" x="52" y="196" text-anchor="end">0.2</text>
+      <text class="ax" x="52" y="160" text-anchor="end">0.4</text>
+      <text class="ax" x="52" y="123" text-anchor="end">0.6</text>
+      <text class="ax" x="52" y="86" text-anchor="end">0.8</text>
+      <text class="ax" x="76" y="216">0</text>
+      <text class="ax" x="620" y="216" text-anchor="end">640</text>
+      <path d="M 66 120 C 110 78, 180 60, 260 48 C 380 36, 500 31, 630 28" fill="none" stroke="var(--c1)" stroke-width="2.4"/>
+      <path d="M 66 196 C 110 150, 180 114, 260 94 C 380 76, 500 68, 630 64" fill="none" stroke="var(--c2)" stroke-width="2.4"/>
+      <path d="M 66 197 C 110 172, 180 152, 260 140 C 380 126, 500 116, 630 104" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-dasharray="6 4"/>
+      <circle cx="66" cy="120" r="3" fill="var(--c1)"/><circle cx="66" cy="196" r="3" fill="var(--c2)"/><circle cx="66" cy="197" r="3" fill="var(--accent)"/>
+      <g>
+        <rect x="330" y="34" width="12" height="3" fill="var(--c1)"/>
+        <text class="lb" x="348" y="40">SFT：DeepSeek-R1-Distill-Qwen-7B</text>
+        <rect x="330" y="70" width="12" height="3" fill="var(--c2)"/>
+        <text class="lb" x="348" y="76">基座：Qwen2.5-Math-7B</text>
+        <rect x="330" y="106" width="12" height="3" fill="var(--accent)"/>
+        <text class="lb" x="348" y="112" fill="var(--accent-deep)">RL：Skywork-OR1-Math-7B（≈ 或低于 SFT）</text>
+      </g>
+    </svg>
+    <figcaption>图 1(a) 示意：SFT 把整条 Pass@k 曲线抬到基座之上；RL 版与 SFT 版几乎重合、在某些区间甚至更低。曲线形状据原文描述重绘，非逐点数值。</figcaption>
+  </figure>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">SFT</span><h4>靠外部数据拓宽</h4></div>
+      <p><strong>强项：</strong>Pass@k 显著高于基座；Rollout Branching Factor（每步 top-95% 概率质量内的候选 token 数）整体上移，单域 SFT-Math 和多域 SFT-All 都比基座高。</p>
+      <p><strong>代价：</strong>答案多样性同样下降，只不过降幅比 RL 小。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">RL</span><h4>靠自采样锐化</h4></div>
+      <p><strong>强项：</strong>Pass@1 提升明显，策略更确定。</p>
+      <p><strong>代价：</strong>Pass@k 不升反降，答案多样性下降<strong>更剧烈</strong>，分支因子没有提高——强化的是已经是高概率的那条路。</p>
+    </div>
+  </div>
+
+  <h3>不可解集合不是「缩小」，而是「平移」</h3>
+  <p>论文把在 k 次采样后仍无一道正确解的题目集合画成维恩图（AIME24+25 共 60 题）。三个集合<strong>没有任何一个被完全包含</strong>：基座能解的题 SFT 后可能解不出，反之亦然。这是「训练重塑边界」的直接证据，而不是「训练扩大边界」。</p>
+
+  <p class="note-inline">图中三个集合的两两交集与独有部分分别为 11/3/2/1/1/1，但三者的并集计数没有标出，图上也看不出左右两个小圆各自只被第三方「部分覆盖」（1 与 0 同处外圈），因此仅凭图无法推出「RL 的不可解集合更大」这句正文结论。引用时请以正文表述为准。</p>
+
+  <p>外部工具是另一条路：用代码解释器辅助推理（TIR）能显著提高 Pass@k，但把 k 拉大之后，经 RL 训练的模型最终会被<strong>未做 RL</strong> 的对应模型追上甚至反超——RL 在「拓宽边界」这件事上的作用依然有限。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>学习集中在两类少数 token 上：低 PPL 的样本、靠后的位置</h2></div>
+  <p class="sec-sub">三个层次的实验结论最终收敛成两条可直接作用在 advantage 上的规则，这也是全篇最可复用的部分。</p>
+
+  <h3>层次一：阶段——负样本削熵，正样本固化格式</h3>
+  <p>GRPO 训练呈「上升期 → 平台期」两段。上升期里，负样本的平均熵<strong>始终高于</strong>正样本，且下降更快；只在负样本中出现的 token 熵降得最快。也就是说，初期学习信号主要来自<em>排除错误路径</em>。熵降幅度最大的 token 大多与任务目标无关，而推理关键 token 的频率反而上升；同时三类低质量输出——未包框/多次包框、无关内容、中英混杂——随训练下降。</p>
+
+  <h3>层次二：实例——低 PPL 样本学得最多、最稳</h3>
+  <p>平台期的高幅度概率更新集中在<strong>低 PPL 区</strong>；对低 PPL 样本做 token 替换干预，最终答案准确率的变化更小，说明其推理路径更稳健。把优势权重倒向高 PPL 一边，策略熵更高、质量问题回答占比升到约 <code>7%</code>，低 PPL 策略约 <code>3%</code>。</p>
+
+  <h3>层次三：位置——熵是 U 形，但只有后段值得优化</h3>
+  <p>token 熵在序列开头和结尾都高。开头的高熵反映「选哪条路」的广度，替换开头 token 对结果影响巨大；结尾的高熵更多反映最终决策的不确定性，替换影响小，但优化器把奖励偏移到后段效果更好：偏向早期位置的模型平均回答 904 token，偏向后期位置的 1146 token——后段优化让推理过程<strong>变长</strong>。</p>
+
+  <div class="eq">
+    w<sub>ppl</sub>(o<sub>i</sub>) = ( ln PPL(o<sub>i</sub>) − μ ) / σ
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    Ã<sub>t</sub><sup>i</sup> = A<sub>t</sub><sup>i</sup> · (1 − α · w<sub>ppl</sub>(o<sub>i</sub>))
+  </div>
+  <div class="eq-cap">式 (7) + (11) · <span style="color:var(--c2);font-weight:600">紫色</span>是同一 prompt 组内的对数 PPL 标准化，<span style="color:var(--accent);font-weight:600">陶土红</span>是本文方法：低 PPL 样本 w&lt;0，优势被放大；高 PPL 样本 w&gt;0，优势被压低</div>
+
+  <div class="eq">
+    b<sub>t</sub><sup>i</sup> = γ · σ( d · r<sub>t</sub><sup>i</sup> )
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    Ã<sub>t</sub><sup>i</sup> = A<sub>t</sub><sup>i</sup> + sign(A<sub>t</sub><sup>i</sup>) · b<sub>t</sub><sup>i</sup>
+  </div>
+  <div class="eq-cap">式 (8) + (12) · r<sub>t</sub> = m · (l<sub>t</sub> − n)，l<sub>t</sub> ∈ [0,1] 为相对位置；正文取 γ = 0.1、d = 1、m = 15、n = −0.5</div>
+
+  <p>位置偏置的精妙处在于乘 <code>sign(A)</code>：正样本额外加奖励，负样本额外加惩罚，方向始终与原始优势一致，只放大「靠后部分」的学习力度。</p>
+
+  <h3>自己动手：看权重落在哪个样本、哪个位置</h3>
+  <p>下面用论文的默认超参模拟。两个滑块各自作用在一条独立的示意序列上：PPL 滑块只改变「谁被加权」，位置滑块只改变「序列哪一段被加权」。数值严格按式 (7)(8)(11)(12) 计算，组内 {μ, σ} 用 <code>[1.2, 1.5, 1.8, 2.1, 2.4]</code> 五个样本的对数 PPL 固定为 <code>ln 1.2 … ln 2.4</code>。</p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <button class="rule-btn active" data-mode="ppl">PPL-based<span class="r-sub">改样本权重</span></button>
+      <button class="rule-btn" data-mode="pos">Position-based<span class="r-sub">改位置权重</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>α · PPL 强度 <span class="v" id="alpha-v">0.01</span></label>
+        <input type="range" id="alpha" min="0" max="1" step="0.01" value="0.01">
+        <span class="hint">论文默认 α = 0.01；拉到 1 看极端加权（1 − w 可能为负）</span>
+      </div>
+      <div class="ctrl">
+        <label>γ · 位置强度 <span class="v" id="gamma-v">0.1</span></label>
+        <input type="range" id="gamma" min="0" max="0.1" step="0.01" value="0.1">
+        <span class="hint">论文默认 γ = 0.1；只在平台期 200–300 步施加</span>
+      </div>
+    </div>
+
+    <div id="panel-ppl">
+      <div class="slots s5" id="ppl-slots"></div>
+    </div>
+    <div id="panel-pos" hidden>
+      <div class="slots s5" id="pos-slots"></div>
+    </div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前状态</div>
+      <div id="sim-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算核对：这两组数字是怎么来的？<span class="sum-sub">点开看逐步代入</span></summary>
+    <div class="details-body">
+      <p><strong>PPL 侧（α = 0.01）。</strong>五个样本 ln PPL 依次为 ln1.2 = 0.1823、ln1.5 = 0.4055、ln1.8 = 0.5878、ln2.1 = 0.7419、ln2.4 = 0.8755，均值 μ = 0.5586，总体标准差 σ = 0.2525。于是 PPL=1.2 的样本 w = (0.1823 − 0.5586)/0.2525 = <code>−1.490</code>，权重 1 − 0.01 × (−1.490) = <code>1.015</code>；PPL=2.4 的样本 w = (0.8755 − 0.5586)/0.2525 = <code>+1.255</code>，权重 <code>0.987</code>。也就是说默认强度下权重只在 0.99–1.02 之间摆动——它是一次<em>偏置</em>而非开关。把 α 拉到 1，两端变成 2.49 与 −0.26，后者意味着优势被翻号，这正是把探索压到极端的后果。</p>
+      <p><strong>位置侧（γ = 0.1, m = 15, n = −0.5）。</strong>取序列位置 10%、30%、50%、70%、90%：r = 15 × (l + 0.5) 得 9、12、15、18、21，代入 σ(d·r)，d = 1，得到 <code>0.9999、0.999994、1.000、1.000、1.000</code>——全部饱和到 1，偏置 b 等于 γ = 0.1。可见在论文参数下，<em>偏置形状由 m 和 n 决定</em>：m 很大、n 为正位移，使 sigmoid 在 [0,1] 区间内全程饱和，因此 b 基本是常数 γ，只是对换符号后整体塞给后段。模拟如实展示这一点，不做美化。</p>
+      <p><strong>为什么两组分开做？</strong>两种方法作用在不同维度（样本 vs 位置），论文也没有报告二者叠加的效果；页面把它们并列展示，而不是假设可加。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>方法只有几行，成本几乎为零；但保持探索要先换掉 RL</h2></div>
+  <p class="sec-sub">工程上要知道两件事：优势塑造的额外开销，与论文提出的「保 Pass@k」路线其实用的是 RFT。</p>
+
+  <p>两项优势塑造都在计算完了 GRPO 的组内优势之后进行：</p>
+  <ul>
+    <li>PPL-based 需要对每个采样响应算一次序列 PPL 与同组 μ、σ，再对每个 token 乘一个常数因子；<strong>全程施加</strong>，α = 0.01。</li>
+    <li>Position-based 只需 token 的相对位置，套 sigmoid 得常数偏置。<strong>只在平台期</strong>（第 200 步起 100 步）施加，γ = 0.1；论文给出的理由是位置偏置会使策略熵快速上升，若全程使用会抵消训练本身带来的熵下降。</li>
+  </ul>
+  <p>两者都不改变 rollout 次数、不增加采样开销，属于「改一行奖励计算」级别的介入——这也是报告反复强调的：<em>对学习机制的正确理解，可以换来极廉价的改进</em>。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>「保住 Pass@k」的实验，没有用 RL 做</h4></div>
+    <p>论文考虑到 RL 算力昂贵，用 <strong>Rejection-sampling Fine-Tuning（RFT）</strong> 来验证保探索策略：Qwen2.5-32B、STILL-3 数据集，每轮选 1.1k 条样本微调，先过规则过滤（必须含 <code>\boxed</code> 答案、至少一个数字、截断答案后内容、3-gram 冗余率不超过 0.31），再叠加三种选择策略之一：掺 5% 负样本、按平均 token 熵选、按平均分支因子（RBF）选。最终方案是「5% 噪声 + 高 RBF」，在 AIME24/AMC23/MINERVA 上 Pass@k 全面超过 Qwen2.5-32B-SimpleRL-Zoo，Pass@1 保持有竞争力。</p>
+  </div>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>全景：探索空间 → 熵–性能交换 → 优势塑造</h2></div>
+  <p class="sec-sub">报告的三个层次首尾相接：先测边界，再找学习落在哪里，最后把结论变成训练时的加权。</p>
+
+  <figure>
+    <svg viewBox="0 0 680 300" role="img" aria-label="报告三层结构与两组方法的关系图">
+      <rect x="14" y="20" width="196" height="240" rx="16" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <rect x="242" y="20" width="196" height="240" rx="16" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <rect x="470" y="20" width="196" height="240" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text class="lb" x="112" y="50" text-anchor="middle" font-weight="700" style="font-size:11px">§2 探索空间</text>
+      <text class="lb" x="340" y="50" text-anchor="middle" font-weight="700" style="font-size:11px">§3 熵–性能交换</text>
+      <text class="lb" x="568" y="50" text-anchor="middle" font-weight="700" style="font-size:11px;fill:var(--accent-deep)">§4 性能转换</text>
+
+      <rect x="30" y="70" width="164" height="58" rx="9" fill="#FFF" stroke="var(--c1)"/>
+      <text class="lb" x="112" y="94" text-anchor="middle">k=640 采样 →</text>
+      <text class="lb" x="112" y="112" text-anchor="middle">不可解集合对比</text>
+
+      <rect x="30" y="144" width="164" height="58" rx="9" fill="#FFF" stroke="var(--c1)"/>
+      <text class="lb" x="112" y="168" text-anchor="middle">Rollout Branching</text>
+      <text class="lb" x="112" y="186" text-anchor="middle">Factor（top-95%）</text>
+
+      <rect x="30" y="212" width="164" height="34" rx="9" fill="#FFF" stroke="var(--c1)"/>
+      <text class="lb" x="112" y="234" text-anchor="middle">答案多样性</text>
+
+      <rect x="258" y="70" width="164" height="52" rx="9" fill="#FFF" stroke="var(--c2)"/>
+      <text class="lb" x="340" y="92" text-anchor="middle">阶段：负样本削熵</text>
+      <text class="lb" x="340" y="110" text-anchor="middle">平台期少数 token</text>
+
+      <rect x="258" y="138" width="164" height="52" rx="9" fill="#FFF" stroke="var(--c2)"/>
+      <text class="lb" x="340" y="160" text-anchor="middle">实例：低 PPL</text>
+      <text class="lb" x="340" y="178" text-anchor="middle">更集中、更稳健</text>
+
+      <rect x="258" y="206" width="164" height="40" rx="9" fill="#FFF" stroke="var(--c2)"/>
+      <text class="lb" x="340" y="231" text-anchor="middle">位置：后段更值</text>
+
+      <rect x="486" y="70" width="164" height="58" rx="9" fill="#FFF" stroke="var(--accent)"/>
+      <text class="lb" x="568" y="93" text-anchor="middle" style="fill:var(--accent-deep)">PPL 优势塑造</text>
+      <text class="lb" x="568" y="111" text-anchor="middle">A·(1−α·w), α=0.01</text>
+
+      <rect x="486" y="144" width="164" height="58" rx="9" fill="#FFF" stroke="var(--accent)"/>
+      <text class="lb" x="568" y="167" text-anchor="middle" style="fill:var(--accent-deep)">位置优势塑造</text>
+      <text class="lb" x="568" y="185" text-anchor="middle">γ=0.1, 200–300 步</text>
+
+      <rect x="486" y="212" width="164" height="34" rx="9" fill="#FFF" stroke="var(--accent)"/>
+      <text class="lb" x="568" y="234" text-anchor="middle" style="fill:var(--accent-deep)">RFT：保 Pass@k</text>
+
+      <line x1="212" y1="140" x2="238" y2="140" stroke="var(--text-soft)" stroke-width="1.4"/>
+      <path d="M 238 140 l -7 -4 l 0 8 z" fill="var(--text-soft)"/>
+      <line x1="440" y1="140" x2="466" y2="140" stroke="var(--text-soft)" stroke-width="1.4"/>
+      <path d="M 466 140 l -7 -4 l 0 8 z" fill="var(--text-soft)"/>
+
+      <path d="M 340 206 L 340 196" stroke="var(--text-soft)" stroke-width="1.2" stroke-dasharray="3 3"/>
+      <path d="M 340 107 L 320 136" stroke="var(--border-strong)" stroke-width="1" stroke-dasharray="3 3"/>
+      <text class="ax" x="300" y="126" style="font-size:9px">PPL</text>
+      <text class="ax" x="330" y="203" style="font-size:9px">位置 → 低 PPL 常伴随后段</text>
+    </svg>
+    <figcaption>图 5 结构总览（依报告章节重绘）。左列是「测什么」，中列是「学在哪里」，右列是「怎么加权」。实例层与位置层在经验上相互印证（低 PPL 响应同样集中在后段），但二者是并列证据，不是同一指标的两次测量。</figcaption>
+  </figure>
+
+  <p>读图要点：报告不是「提出一个新算法」，而是<strong>一条从度量到干预的因果链</strong>。左侧指标负责发现「边界在平移」，中列实验负责定位「学习信号在哪」，右列把定位结果直接变成训练时的权重。RFT 路线属于「保探索」，与两条优势塑造的「提高转换效率」正交。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>两种加权都有收益，但幅度远小于「相对提升」的字面</h2></div>
+  <p class="sec-sub">表 4 是唯一给出完整数字的主结果；下表已逐行重算平均，原表两位小数的舍入误差不超过 0.005。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型 / 方法</th><th style="text-align:right">AIME24 avg@8</th><th style="text-align:right">AIME25 avg@8</th><th style="text-align:right">AMC23 avg@8</th><th style="text-align:right">MATH500 avg@8</th><th style="text-align:right">Avg. avg@8</th><th style="text-align:right">Avg. maj@8</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-7B BASE</td><td class="num">7.50</td><td class="num">1.67</td><td class="num">38.44</td><td class="num">58.63</td><td class="num">26.56</td><td class="num">34.84</td></tr>
+        <tr><td>Qwen2.5-7B GRPO</td><td class="num">21.30</td><td class="num">15.40</td><td class="num">59.38</td><td class="num">80.83</td><td class="num">44.23</td><td class="num">47.38</td></tr>
+        <tr class="best"><td>Qwen2.5-7B GRPO+PPL</td><td class="num">22.08</td><td class="num">18.75</td><td class="num">60.31</td><td class="num">82.90</td><td class="num">46.01</td><td class="num">49.69</td></tr>
+        <tr><td>Qwen2.5-7B GRPO+POSITION</td><td class="num">20.00</td><td class="num">17.08</td><td class="num">63.44</td><td class="num">81.33</td><td class="num">45.46</td><td class="num">49.82</td></tr>
+        <tr><td>Qwen2.5-Math-7B BASE</td><td class="num">15.42</td><td class="num">7.50</td><td class="num">42.77</td><td class="num">57.60</td><td class="num">30.82</td><td class="num">38.51</td></tr>
+        <tr><td>Qwen2.5-Math-7B GRPO</td><td class="num">27.08</td><td class="num">25.00</td><td class="num">67.81</td><td class="num">86.65</td><td class="num">51.64</td><td class="num">54.65</td></tr>
+        <tr class="best"><td>Qwen2.5-Math-7B GRPO+PPL</td><td class="num">31.25</td><td class="num">25.42</td><td class="num">73.44</td><td class="num">86.73</td><td class="num">54.21</td><td class="num">58.74</td></tr>
+        <tr><td>Qwen2.5-Math-7B GRPO+POSITION</td><td class="num">33.75</td><td class="num">22.92</td><td class="num">71.56</td><td class="num">86.52</td><td class="num">53.69</td><td class="num">56.68</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note-inline">来源：原文 Table 4。Avg. 列为四组 avg@8 / maj@8 的等权平均，由本页手算，与原文一致。高亮行为两个模型上 avg@8 均值最高的一项。</p>
+
+  <h3>把「1.51% / 2.31%」拆开看</h3>
+  <p>论文正文写：相对 GRPO 基线，平均提升 1.51%（Qwen2.5-7B）与 2.31%（Qwen2.5-Math-7B）。用表 4 的四组 avg@8 重算，若按「相对提升」计算：</p>
+  <div class="eq">
+    7B：PPL <span class="hl-c">+17.15%</span> · POSITION <span class="hl-c">+7.61%</span>
+    &nbsp;|&nbsp;
+    Math：PPL <span class="hl-c">+15.07%</span> · POSITION <span class="hl-c">+10.90%</span>
+  </div>
+  <div class="eq-cap">以 Avg. avg@8 为基准，逐题 (新 − 基线)/基线 再对四题取平均；均明显大于正文声称的 1.51% / 2.31%</div>
+  <p>若按「绝对提升」，两边对不上的方式是相反的：7B 上 PPL 的 Avg. avg@8 比 GRPO 高 <code>46.01 − 44.23 = 1.78</code>，Math 上 POSITION 只高 <code>53.69 − 51.64 = 2.05</code>；而正文的 1.51% 恰好小于 7B 的最大绝对差 1.78，2.31 恰好介于 Math 的最大绝对差 <code>3.75 − 1.00 = 2.75</code> 与 PPL 的绝对差 2.57 之外。换句话说，<strong>正文这两个百分比无法由表 4 的 avg@8 列以任何一致的统计口径复原</strong>；本页只把它们当「有提升」的方向性陈述，量级以表为准。</p>
+  <p>上一版笔记给出的 mid（maj）列也有问题：它把 GRPO 的 AIME24 maj@8 记成了「AIME24 的 avg@8」，同时漏掉了 AIME25 两列，导致「AIME24 从 27.08 到 33.75」这一说法实际上跨越了两个不同列。</p>
+
+  <h3>值得记住的三个细节</h3>
+  <ul>
+    <li><strong>PPL 更稳，Position 更尖</strong>：Math-7B 上 Position 把 AIME24 推到 33.75，但 AMC23 和 MATH500 都低于 GRPO；PPL 则在四个题集上全部不降。</li>
+    <li><strong>提升伴随更长的推理</strong>：Qwen2.5-7B 的 GRPO 平均回答 969 token，加 PPL 后 1841 token，加 Position 后 1121 token；形式推理 token 从 501 增至 1007 / 608。</li>
+    <li><strong>域外没有变强</strong>：附录 pass@k 显示三个方法在 GPQA、HumanEval 上普遍低于基座——只用数学 RL 会削弱其他领域能力。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它能解释「为什么」，但不能保证「大到哪」</h2></div>
+  <p class="sec-sub">报告自己给出的三处软肋，加上读表时能看出的两点，共同决定了什么时候别照搬。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>Pass@k 可能是「答案对、推理错」</h4></div>
+    <p>论文承认 Pass@k 可能在没有有效推理链的情况下给出正确答案；作者只做了人工抽查，结论是 k 越大这个现象越不明显，但没有系统方法去消除。所有关于「探索边界」的结论都继承这个不确定性。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>证据几乎全部来自数学、7B/32B</h4></div>
+    <p>主实验是 Qwen2.5-Math-7B / Qwen2.5-7B 训练、AIME/AMC/MATH500 评测，保探索实验用 Qwen2.5-32B。形式推理 token 占主导、答案可验证这两个前提在代码、开放式问答中是否成立，报告没有验证；更大模型上的熵–性能交换形状也可能不同。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>报告是「整合 + 增量实验」，不是单点突破</h4></div>
+    <p>报告本身声明是此前工作「Decomposing the Entropy-Performance Exchange」的扩展，并整合了另一篇关于代码解释器推理的技术报告；部分结论来自对已有文献的综述（表 2 的四类增强方法），本页引用时应把它们与报告原创实验区分开。PPL 与 Position 两种加权是原创实验，但增益幅度有限，且没有报告二者组合。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>这份报告的贡献是「定位学习信号在哪里」，而不是「把 Pass@1 推高多少」。</strong> 想用它指导训练，先确认你的任务和数学推理同构（可验证、长链、形式符号多），再考虑把 PPL 加权当作默认 item，把位置加权当作平台期催化剂。</p>
+</section>
+
+<footer>
+  <div>From Trial-and-Error to Improvement: A Systematic Analysis of LLM Exploration Mechanisms in RLVR — Jia Deng, Jie Chen, Zhipeng Chen, Daixuan Cheng, Fei Bai, Beichen Zhang, Yinqian Min, Yanzipeng Gao, Wayne Xin Zhao, Ji-Rong Wen（中国人民大学高瓴人工智能学院）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.07534" target="_blank" rel="noopener">arXiv 2508.07534</a>（v2, 2025-08-16）<br>
+    笔记：<a href="/from-trial-and-error-to-improvementa-systematic-analysis-of-llm-exploration-mechanisms-in-rlvr/">From Trial-and-Error to Improvement：A Systematic Analysis of LLM Exploration Mechanisms in RLVR</a><br>
+    笔记勘误（原文件未改动）：①「平均提升 1.5%–2.3%」应为正文所称「相对 GRPO，7B 1.51%、Math-7B 2.31%」，且这两个数字与表 4 无法对账；② 表 4 引用时把 GRPO 的 AIME24 maj@8（31.25）误当成 avg@8（27.08），并漏掉 AIME25 两列，导致「AIME24 27.08 → 33.75」跨列比较；③ 图 1(d) 的「2.0–2.2 / 1.4 / 1.3」是读图估计，原图未标数值，可确认的只是「SFT 组显著高于基座和 RL」；④ 笔记称实验用「Qwen2.5-7B 和 Qwen2.5-Math-7B」，报告另外还用 Qwen2.5-32B 做保探索实验；⑤ 报告对表 6 的引用称为「GPQA/HumanEval 泛化提升」，实际是 pass@k，且三项方法在域外普遍低于基座。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ---------------- PPL 加权模拟 ---------------- */
+  var PPLS = [1.2, 1.5, 1.8, 2.1, 2.4];
+  var LNS = PPLS.map(function (p) { return Math.log(p); });
+  var MU = LNS.reduce(function (a, b) { return a + b; }, 0) / LNS.length;
+  var SD = Math.sqrt(LNS.reduce(function (a, b) { return a + (b - MU) * (b - MU); }, 0) / LNS.length);
+
+  var alphaEl = document.getElementById('alpha');
+  var gammaEl = document.getElementById('gamma');
+  var alphaV = document.getElementById('alpha-v');
+  var gammaV = document.getElementById('gamma-v');
+  var pplSlots = document.getElementById('ppl-slots');
+  var posSlots = document.getElementById('pos-slots');
+  var msg = document.getElementById('sim-msg');
+  var mode = 'ppl';
+  var POS_LS = [0.1, 0.3, 0.5, 0.7, 0.9];
+
+  function sig(x) { return 1 / (1 + Math.exp(-x)); }
+  function f3(x) { return (Math.abs(x) < 0.0005 ? 0 : x).toFixed(3); }
+
+  function makeSlot(label, valText, barPct, hit) {
+    var d = document.createElement('div');
+    d.className = 'slot' + (hit ? ' hit' : '');
+    var n = document.createElement('div');
+    n.className = 'slot-name';
+    n.textContent = label;
+    var v = document.createElement('div');
+    v.className = 'slot-val';
+    v.textContent = valText;
+    var b = document.createElement('div');
+    b.className = 'bar';
+    var i = document.createElement('i');
+    i.className = 'b1';
+    i.style.width = Math.max(0, Math.min(100, barPct)) + '%';
+    b.appendChild(i);
+    d.appendChild(n); d.appendChild(v); d.appendChild(b);
+    return d;
+  }
+
+  function renderPPL() {
+    if (!pplSlots || !alphaEl) return;
+    var a = parseFloat(alphaEl.value);
+    var minW = 9, maxW = -9;
+    var rows = LNS.map(function (l) {
+      var w = (l - MU) / SD;
+      var factor = 1 - a * w;
+      if (factor < minW) minW = factor;
+      if (factor > maxW) maxW = factor;
+      return { w: w, f: factor };
+    });
+    var span = maxW - minW || 1;
+
+    pplSlots.innerHTML = '';
+    rows.forEach(function (r, idx) {
+      var pct = 12 + 88 * (r.f - minW) / span;
+      var hit = idx === 0 || idx === rows.length - 1;
+      pplSlots.appendChild(makeSlot('PPL ' + PPLS[idx], f3(r.f), pct, hit));
+    });
+
+    var lowW = rows[0].f, highW = rows[rows.length - 1].f;
+    var html = 'α = ' + a.toFixed(2) + '：最低 PPL 样本 w = <strong>' + f3(rows[0].w) + '</strong>，优势 ×<strong>' + f3(lowW) +
+      '</strong>；最高 PPL 样本 w = <strong>' + f3(rows[rows.length - 1].w) + '</strong>，优势 ×<strong>' + f3(highW) + '</strong>。';
+    if (highW < 0) {
+      html += ' <span class="warn">权重已为负——高 PPL 样本的优势被整体翻号，不是「少学」而是「反向学」。</span>';
+    } else {
+      html += ' 低 PPL 样本被放大、高 PPL 样本被压低，但幅度都在个位数百分比以内。';
+    }
+    msg.innerHTML = html;
+  }
+
+  function renderPOS() {
+    if (!posSlots || !gammaEl) return;
+    var g = parseFloat(gammaEl.value);
+    var m = 15, n = -0.5, d = 1;
+    posSlots.innerHTML = '';
+    var raw = [];
+    POS_LS.forEach(function (l) {
+      var r = m * (l - n);
+      var b = g * sig(d * r);
+      raw.push({ r: r, b: b });
+    });
+    var maxB = Math.max.apply(null, raw.map(function (x) { return x.b; })) || 1;
+    raw.forEach(function (x, idx) {
+      var pct = 100 * x.b / maxB;
+      posSlots.appendChild(makeSlot('pos ' + Math.round(POS_LS[idx] * 100) + '%', 'b = ' + f3(x.b), pct, idx >= 2));
+    });
+    var first = raw[0].b, last = raw[raw.length - 1].b;
+    msg.innerHTML = 'γ = ' + g.toFixed(2) + '：位置 10% 的 token 偏置 b = <strong>' + f3(first) + '</strong>，位置 90% 的 b = <strong>' + f3(last) +
+      '</strong>。m = 15、n = −0.5 使 sigmoid 在整条序列上几乎饱和到 1，<span class="warn">b 近似恒等于 γ</span>——位置差异主要体现在 sign(A) 决定的「加还是减」上，而不是 b 的大小随位置连续增长。';
+  }
+
+  function render() {
+    if (mode === 'ppl') { renderPPL(); } else { renderPOS(); }
+  }
+
+  document.querySelectorAll('.sim-top .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.sim-top .rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      mode = btn.dataset.mode;
+      var pp = document.getElementById('panel-ppl');
+      var po = document.getElementById('panel-pos');
+      if (pp) pp.hidden = mode !== 'ppl';
+      if (po) po.hidden = mode !== 'pos';
+      render();
+    });
+  });
+
+  if (alphaEl) {
+    alphaEl.addEventListener('input', function () {
+      if (alphaV) alphaV.textContent = parseFloat(alphaEl.value).toFixed(2);
+      renderPPL();
+    });
+  }
+  if (gammaEl) {
+    gammaEl.addEventListener('input', function () {
+      if (gammaV) gammaV.textContent = parseFloat(gammaEl.value).toFixed(2);
+      renderPOS();
+    });
+  }
+
+  render();
+
+  /* ---------------- 图注展开 ---------------- */
+  window.toggleFig = function (el) {
+    var fig = el.closest('figure');
+    if (!fig) return;
+    var detail = fig.querySelector('.figure-detail');
+    if (!detail) return;
+    var open = detail.classList.toggle('active');
+    el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+  };
+})();
+</script>
+</body>
+</html>

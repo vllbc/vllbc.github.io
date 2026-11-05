@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan-and-Act · 把规划从执行里拆出来，再给规划器造数据</title>
+<meta name="description" content="Plan-and-Act 把网页智能体拆成 Planner 与 Executor，用 LLM 从成功轨迹反向标注出接地计划，再做 1 万条合成计划扩展和 5 千条失败定向增强，加上每一步重规划与 CoT，在 WebArena-Lite 上从 9.85% 做到 57.58%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pa-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pa-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pa-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pa-acc{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pa-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pa-dash{stroke:var(--accent);stroke-width:1.4;fill:none;stroke-dasharray:5 4}
+.pa-arrow{fill:var(--border-strong)}
+.pa-arrow-a{fill:var(--accent)}
+.pa-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:12.5px;fill:var(--text)}
+.pa-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.pa-m{font-family:"JetBrains Mono",monospace}
+.pa-stage-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:12px;font-weight:600;fill:var(--text-muted);letter-spacing:.02em}
+.pa-chip{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-muted)}
+
+/* ---- 消融阶梯 ---- */
+.el{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px 22px;margin:22px 0;box-shadow:var(--shadow-sm)}
+.el-top{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.el-top .tab{font-family:"JetBrains Mono",monospace;font-size:12px;padding:6px 13px}
+.el-row{display:grid;grid-template-columns:150px 1fr 64px;gap:12px;align-items:center;margin-bottom:6px}
+.el-row.grp{margin-top:16px}
+.el-row.last{margin-top:16px;padding-top:16px;border-top:1px dashed var(--border-strong)}
+.el-name{font-size:13px;color:var(--text);line-height:1.4}
+.el-name span{display:block;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft)}
+.el-track{height:26px;background:var(--bg-soft);border-radius:6px;overflow:hidden}
+.el-fill{height:100%;border-radius:6px;transition:width .45s ease}
+.el-num{font-family:"JetBrains Mono",monospace;font-size:13.5px;font-weight:600;text-align:right;color:var(--text)}
+.el-num .d{display:block;font-size:10.5px;font-weight:400;color:var(--text-soft)}
+.el-note{font-size:12.5px;color:var(--text-soft);margin:14px 0 0;line-height:1.65}
+
+@media (max-width:520px){
+  .el-row{grid-template-columns:104px 1fr 56px;gap:8px}
+  .el-name{font-size:11.5px}
+  .el-num{font-size:12px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Plan-and-Act</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#data">怎么造数据</a>
+      <a href="#flow">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2503.09572 · 2025-03</span>
+  <h1>Plan-and-Act：把规划从执行里拆出来，瓶颈就变成了给规划器造数据</h1>
+  <p class="hero-sub">
+    网页智能体既要定战略又要管细节，单模型扛不住，这是公认的结构性难题。Plan-and-Act 把职责拆成 Planner 与 Executor 两个 LLM，
+    再用「从成功轨迹反向标注计划 → 合成扩展 → 按失败定向补数据」三段流水线把规划能力练出来。
+    <strong>只做监督微调</strong>，不做 RL；最终 57.58% 来自每一步都重规划、再加 CoT 的 70B 模型。
+  </p>
+  <div class="meta">
+    <span>Lutfi Eren Erdogan, Nicholas Lee, Sehoon Kim, Suhong Moon, Hiroki Furuta, Gopala Anumanchipalli, Kurt Keutzer, Amir Gholami · UC Berkeley</span>
+    <a href="https://arxiv.org/abs/2503.09572" target="_blank" rel="noopener">arXiv 2503.09572 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    主方法很朴素：Planner 读用户请求和 HTML，输出带「## Step N / Reasoning / Step」格式的高层计划；Executor 把当前那一步翻译成 <code>do(action="Click", element="13")</code> 这样的动作，并顺手清理冗余 HTML。动作执行后，Planner <em>每一步都重新规划</em>，把新观察吸收进后面的计划——论文说这样就不需要显式记忆模块。
+  </p>
+  <p>
+    真正的贡献在数据侧。直接让教师模型凭用户请求「猜」计划，计划会偏离网站实际；作者改成给它看<strong>成功的行动轨迹</strong>，让它反向标注出计划，并要求把每个计划步骤映射到轨迹里的具体动作，计划因此「接地」。再以这些计划为种子，用 GPT-4o <em>一小时内生成 10,000 条新的查询-计划对</em>；最后按验证集暴露的失败模式，再定向生成 5,000 条。
+  </p>
+  <p>
+    Executor 的收益很快见顶：把执行器训练从 1,113 条加到 2,036 条轨迹，ReAct 式执行器只从 36.36 涨到 36.97；<strong>真正拉开差距的是规划质量</strong>。但规划器只在 1,113 条数据上朴素微调反而回退，说明这个任务对数据量和多样性极其敏感。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">57.58<small>%</small></div>
+      <div class="k">WebArena-Lite 成功率（Llama-3.3-70B + CoT）<br>原 SOTA WebRL-3.1-70B 为 49.1%</div>
+    </div>
+    <div class="metric">
+      <div class="v">53.94<small>%</small></div>
+      <div class="k">仅加动态重规划时的成功率（Table 1 第 12 行）<br>静态规划器最好成绩 43.63%</div>
+    </div>
+    <div class="metric">
+      <div class="v">81.36<small>%</small></div>
+      <div class="k">WebVoyager text-only SOTA（QWQ-32B）<br>GPT-4-Turbo 的 Wilbur 为 52.6%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一个模型同时管战略和细节，遇长任务必然顾此失彼</h2></div>
+  <p class="sec-sub">先分清两种失败：模型根本没被训练过做网页规划，和把规划与执行压进同一个模型。</p>
+
+  <p>
+    论文把规划难拆成三件事：把「帮我订一张去纽约的机票」拆成可执行步骤；任务一长就忘了做到哪、还剩什么；环境会变，计划得跟着改。三者之外还有一条最硬的约束——<strong>没有训练数据</strong>。LLM 预训练时没见过「给一个网站、给一个请求、输出一份计划和一串网页动作」这种格式的任务。
+  </p>
+
+  <p>论文开篇用一组消融数字把这两种失败分开摆出来（Table 1，指标是 WebArena-Lite 成功率）：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">失败一</span><h4>没训练过，拆也拆不动</h4></div>
+      <p>完全零样本的 LLaMA-3.3-70B-Instruct 加 ReAct 提示，只有 <code>9.85%</code>。提示和 in-context 示例对简单任务有帮助，对 WebArena-Lite 这种非平凡查询基本无解。</p>
+      <p>同一个模型在 1,113 条 WebArena-Lite 训练数据上做完 ReAct 微调，能到 <code>36.36%</code>——说明能力不是学不会，只是没被教。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">失败二</span><h4>挤在一个模型里，认知负载过重</h4></div>
+      <p>引用的先前工作（Sridhar et al. 2023；Yang et al. 2024a）认为，单模型同时做长程规划与逐步执行，容易丢失最终目标、行为不一致。</p>
+      <p>这一点论文用「零样本规划器 + 零样本执行器」的消融来间接说明：加上一个未训练、不接地的规划器，基础执行器能从 9.85% 升到 14.21%，但对已训练的执行器反而是负担。</p>
+    </div>
+  </div>
+
+  <div class="eq">
+    <span class="hl-a">Planner</span> : (user&nbsp;query, state) → plan &nbsp;&nbsp;|&nbsp;&nbsp;
+    <span class="hl-b">Executor</span> : (plan, HTML) → action
+  </div>
+  <div class="eq-cap">职责拆分后的形式：规划器不接触「element 13 是哪个按钮」，执行器不操心「下一步该不该换网站」</div>
+
+  <p>
+    还有一个反直觉的数字：<strong>执行器的数据加倍几乎没用</strong>。在没有 Planner 的 ReAct 设置下，执行器从 1,113 条轨迹扩到 2,036 条（再加 923 条合成轨迹），成功率只从 36.36% 到 36.97%，涨 0.61 个百分点。执行器越训越顺，天花板却卡在「它不知道整体该往哪走」。
+  </p>
+
+  <p>
+    所以问题的形状变了：不是「再做点提示工程」，而是「怎么在没有人工标注、也不需要沙箱的前提下，造出足够多的高质量计划数据」。这就引出后面两条已有的数据路线，以及论文的三段式流水线。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>显式规划早有人做，缺的是能训开源模型的计划数据</h2></div>
+  <p class="sec-sub">已有工作分两族：一族的规划靠闭源大模型逐层提示，一族的数据只有轨迹、没有计划。</p>
+
+  <h3>路线 A：分层规划，但都是在提示闭源模型</h3>
+  <p>
+    AgentOccam 用「planning via generation」把计划塞进行动空间、树式规划；WebPilot 是比较重的多智能体系统；AdaPlanner 带 In-Plan / Out-of-Plan 两套 refiner 做重规划；ADaPT 在执行失败时递归分解任务。论文对它们的评价很直接：<strong>都是 prompting 方法，底座是 GPT-4o 这类闭源模型</strong>，靠提示叠出来的性能，没有让开源模型真正学会规划。
+  </p>
+
+  <h3>路线 B：有数据，但只有轨迹、没有计划</h3>
+  <p>
+    WebRL、DigiRL、AutoWebGLM、NNetNav 都能采到多样的轨迹。论文承认这些采集技术与自己互补、可以直接替换，但指出它们<strong>只产出轨迹、不产出计划</strong>；而且都依赖外部模拟器，每个步骤都要真的在环境里跑一遍网页动作。WebRL 还要 on-policy 自演化课程。路线 B 里 NNetNav 的思路最接近——它从交互里反向标注，但标出来的是用户指令，不是高层计划。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方案</th><th>规划</th><th>训练数据来源</th><th>底座</th><th>卡在哪</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ReAct 单模型</td><td>隐式</td><td>1,113 条训练轨迹</td><td>LLaMA-3.3-70B</td><td>数据加倍只 +0.61；36.97% 到顶</td></tr>
+        <tr><td>AgentOccam / ADaPT / WebPilot</td><td>显式，提示驱动</td><td>无（零样本）</td><td>GPT-4o / GPT-4-Turbo</td><td>闭源提示；开源模型学不到</td></tr>
+        <tr><td>WebRL</td><td>隐式 + 自演化课程</td><td>on-policy 轨迹 + ORM</td><td>Llama-3.1-70B</td><td>依赖模拟器；只有轨迹没有计划</td></tr>
+        <tr class="best"><td>Plan-and-Act</td><td>显式，Planner 微调</td><td>轨迹反向标注 + 合成扩展 + 定向增强</td><td>LLaMA-3.3-70B</td><td>执行器仍是 WebArena-Lite 风格；见 07</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    还有一个不同的切面：WebRL 靠 RL 提升，论文引用 Rafailov et al. 2024、Furuta et al. 2024 指出这类方法对超参和奖励设计高度敏感、容易不稳定。Plan-and-Act 的姿态是反过来的——<strong>把难题全部搬进数据里</strong>，训练只剩监督微调。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Planner 写计划，Executor 接地；行动之后每一步都重新规划</h2></div>
+  <p class="sec-sub">运行时的机制只有这三件，真正的工程都在第四节的数据流水线。</p>
+
+  <p>
+    以论文 Figure 2 的 GitHub 例子：用户输入 <em>Follow the top contributor of this GitHub project</em>。Planner 读初始 HTML，产出 <code>## Step 1</code> 导航到 Contributors 页面、<code>## Step 2</code> identify the top contributor and follow them。Executor 只做第一步：在 HTML 里找到 Contributors 链接，输出 <code>do(action="Click", element="13")</code>。执行完它做一次「垃圾回收」，丢掉冗余 HTML，再接下一步。
+  </p>
+
+  <h3>计划长什么样：硬格式，且 reasoning 与 step 分离</h3>
+  <div class="eq">
+    ## Step N<br>
+    Reasoning: [为什么把这几个动作归成一组]<br>
+    Step: [这一步要达到的结果]
+  </div>
+  <div class="eq-cap">Appendix A.3 的 Planner 系统提示规定了逐字格式；Guidelines 要求「说 what 不说 how」，例如写「Input 'New York' as the arrival city」，而不是「Input the arrival city」</div>
+
+  <p>
+    格式本身是约束而不是装饰：Reasoning 解释分组逻辑、给执行器战略上下文，Step 只给结果；提示明确要求<strong>把逻辑相关的动作聚成一步</strong>（把点击搜索框、输入、点搜索合成「Search for X」），并按「每个计划步骤可能对应多个底层动作」来设计。计划步骤数因此远少于动作数——论文说一条成功轨迹平均有 8 个步骤，而为执行器提供 8 个训练点、为规划器只提供一个计划。
+  </p>
+
+  <h3>动态重规划：计划是活的，而且顺便当了记忆</h3>
+  <p>
+    静态计划的死角在 Figure 2 的后半段：初始计划不可能知道 top contributor 是谁，只能写「identify the top contributor」。点击 Contributors 后，HTML 里出现了 <em>John Doe</em>；Planner 读完这个状态和已有计划，把剩余计划改写成 <code>## Step 1</code> Follow "John Doe"。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">机制要点</span><h4>重规划 = 把关键发现写进计划文本</h4></div>
+    <p>
+      计划在每一步被重写，所以「搜到了谁」「当前在第几页」这类信息自然沉淀在计划里。<strong>论文据此声称：不需要显式的记忆模块</strong>，也能应对长程任务里的记忆问题——因为记忆就寄存在 Planner 每步产出的计划中。
+    </p>
+    <p>代价是每一步都要多调用一次 Planner，论文在 Limitations 里承认这可能慢、可能低效；改进方向是让 Executor 自己判断何时需要重规划，或让 Planner 把任务委派给子智能体。</p>
+  </div>
+
+  <h3>CoT：Planner 与 Executor 都先写推理，再出结果</h3>
+  <p>
+    Section 3.4 在 Planner 和 Executor 的输出前各加一段链式推理。附录 A.1 的 Planner 示例显示，正式微调后的输出里每个 Step 都带一句 Reasoning（例如先观察「当前在 OpenStreetMap，页面有搜索框和 directions 图标」）。CoT 的数据同样是合成出来的（4.2.2），而不是简单的提示词开关。效果见第六节：叠加 CoT 后 53.94% → 57.58%。
+  </p>
+
+  <h3>自己动手：同一任务，静态计划与每步重规划</h3>
+  <p>
+    下面是 Appendix A.2.1 的真实任务与计划：用户要问「从 Carnegie Museum of Art 走到 CMU 的某个图书馆要走多久」。静态计划里第二步是<em>看搜索结果、挑一个图书馆</em>；可执行器按计划搜索 "Library at CMU"，页面返回 <code>No results found</code>。点下方按钮切换执行方式，看计划如何演化。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" id="replan-modes">
+      <button class="rule-btn active" data-mode="static" type="button">静态计划<span class="r-sub">只在开头规划一次</span></button>
+      <button class="rule-btn" data-mode="dynamic" type="button">动态重规划<span class="r-sub">每个动作后重写计划</span></button>
+    </div>
+
+    <div class="eq" style="margin-top:0">
+      P<sub>t+1</sub> = <span class="hl-c">Planner</span>( query, s<sub>t+1</sub>, P<sub>t</sub>, H<sub>≤t</sub> )
+    </div>
+    <div class="eq-cap">s<sub>t+1</sub> 是动作之后的 HTML 状态，P<sub>t</sub> 是上一步的计划，H<sub>≤t</sub> 是已执行的动作历史</div>
+
+    <div id="rp-steps" style="margin:18px 0"></div>
+
+    <div class="readout" id="rp-readout">
+      <div class="r-head">第 0 步 · 执行前</div>
+      <div id="rp-msg"></div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="rp-next" type="button">执行下一个动作 ▸</button>
+      <button class="act ghost" id="rp-reset" type="button">重置</button>
+    </div>
+    <p class="fine" style="font-size:12.5px;color:var(--text-soft);margin:8px 0 0;line-height:1.7">
+      计划的步骤与重规划后的新计划取自论文 Appendix A.2.1 的原始输出；执行器动作与 HTML 反馈取自同一附录。静态模式里的「执行器不知所措」是对论文描述的模拟，不是逐字原文。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 4. 怎么造数据 ================= -->
+<section class="block" id="data">
+  <div class="sec-head"><span class="sec-num">04</span><h2>造计划数据：反向标注 → 合成扩展 → 按失败补数据</h2></div>
+  <p class="sec-sub">Section 4 全部是数据工程：每一段都回答「为什么不能更简单一点」。</p>
+
+  <h3>第一段：先造轨迹，用 ORM 筛成功</h3>
+  <p>
+    沿用 Alpaca / Self-Instruct 的做法：从训练数据随机抽查询当种子，让 LLM 生成相似的新查询，再让 LLM 先筛掉网页智能体不可能完成的；然后交给演示智能体（actor）在环境里跑，得到轨迹；最后用 ORM 打分，只留成功轨迹。这条轨迹就是后面所有计划数据的原料。
+  </p>
+
+  <h3>第二段：为什么不能直接让教师模型「写计划」</h3>
+  <p>
+    最直接的做法——教师模型拿着用户请求直接生成分步计划——会失败。原因很具体：<strong>教师模型看不到网站，也没在这种任务上预训练过</strong>，生成的计划往往和网站的实际情况对不上。作者改用它擅长的 in-context 能力：把成功轨迹交给它，让它从动作序列「反向工程」出一份计划；并额外要求<strong>每个高层步骤都要说明对应轨迹里哪些底层动作</strong>，这就把计划和真实可执行序列绑在了一起。
+  </p>
+
+  <div class="eq">
+    τ = [ a<sub>1</sub>, …, a<sub>T</sub> ] &nbsp;⟶<br>
+    Plan = [ Step<sub>1</sub>→{a<sub>i…j</sub>}, &nbsp;Step<sub>2</sub>→{a<sub>k…l</sub>}, … ]
+  </div>
+  <div class="eq-cap">接地（grounding）的定义：每个 Step 都指回轨迹里的动作区间；论文 §4.2，Figure 3 第二行</div>
+
+  <p>
+    同一套标注思路还用于两份派生数据：重规划数据（额外给出原计划和走到这一步的轨迹，§4.2.1）和 CoT 追溯数据（§4.2.2）。
+  </p>
+
+  <h3>第三段：数据不平衡是主要矛盾</h3>
+  <p>
+    成功轨迹来之不易——ORM 会筛掉大量不可接受的轨迹。更糟的是比例：一条成功轨迹平均约 8 个动作，对执行器是 8 个样本，对规划器<strong>只有 1 份计划</strong>。所以第三段做合成计划扩展：从已有查询-计划对随机抽种子，让教师模型生成结构一致、内容多样的新对。
+  </p>
+
+  <p>论文给出的规模数字，前后口径略有差别，按原文照列：</p>
+  <ul>
+    <li>§5.1 超参说明：生成时 <code>5 个种子 → 10 个新数据点</code>。</li>
+    <li>§4.3：用 GPT-4o 生成 <code>10,000</code> 条额外的查询-计划对，<strong>不到一小时</strong>完成。</li>
+    <li>§6 结论：总共 <code>15,000</code> 条合成训练样本，一小时内生成。</li>
+    <li>Targeted Plan Augmentation：<code>5,000</code> 条。Appendix A.8 的说明是「每个种子数据点再多生成一条」，而 A.7 的分类是为了找出与失败相关的训练点。</li>
+  </ul>
+
+  <h3>定向增强：有了数据生成的控制权，就能对着失败补</h3>
+  <p>
+    大规模扩展提升了多样性，但它是盲目的。作者把模型跑在一个留出的验证集上，归纳出各网站上的失败模式，再用 LLM 对训练点分类（Appendix A.7 为每个网站准备了失败类别，例如 CMS 后台的失败类），把相关训练点当种子，定向再生成 5,000 条。这一步在 Table 1 里换来 4–5 个百分点。
+  </p>
+
+  <h3>合成计划到底合成了什么：没有模拟器，也能扩</h3>
+  <p>
+    Section 2 说论文的流水线可以在<em>没有模拟器</em>的情况下生成规划数据。Appendix A.6 的合成计划生成器提示显示了做法：每一条合成样本都由三部分组成——新的用户查询、<strong>从种子示例里选一个初始 HTML 状态（写示例编号）</strong>、对应的高层计划。也就是说，合成不凭空发明网页，而是围绕已有网站的 HTML 状态，重新组合「能在这些页面上做的事」。提示还要求：不要照抄示例，也不能生成网站上不可能完成的请求。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">对照</span><h4>同一条流水线，在 WebVoyager 上为什么换了老师</h4></div>
+    <p>
+      WebVoyager 没有训练数据，拿不到「种子轨迹」的现成来源。论文的做法是：用 text-only WebVoyager + GPT-4o 先采 1,500 条合成轨迹，再让 <strong>QWQ-32B</strong> 标注计划、CoT 推理，并生成 10k 条合成计划。这说明整条流水线可拆可换，也说明它依赖一个「能先把任务做成的底座」。这一点在 07 节作为边界展开。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 5. 架构 / 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三条流水线合起来，才是一套完整的数据源</h2></div>
+  <p class="sec-sub">Figure 3 的三行对应三段数据；训练时 Planner 和 Executor 各拿一份。</p>
+
+  <figure>
+    <svg viewBox="0 0 740 440" role="img" aria-label="Plan-and-Act 合成数据生成流水线：行动轨迹生成、接地计划生成、合成计划扩展三个阶段，分别产出执行器轨迹、规划器计划、扩展与定向计划">
+      <defs>
+        <marker id="pa-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pa-arrow"></path>
+        </marker>
+      </defs>
+
+      <!-- stage 1 -->
+      <rect x="4" y="6" width="732" height="132" rx="14" class="pa-box"></rect>
+      <text x="20" y="28" class="pa-stage-t">§4.1 Action Trajectory Generation</text>
+      <text x="20" y="46" class="pa-s" style="font-family:'JetBrains Mono',monospace">每个成功轨迹 ≈ 8 个动作</text>
+
+      <rect x="18" y="62" width="116" height="52" rx="9" class="pa-c1"></rect>
+      <text x="76" y="84" text-anchor="middle" class="pa-t">种子查询</text>
+      <text x="76" y="101" text-anchor="middle" class="pa-s pa-m">training data</text>
+      <path d="M134 88 L164 88" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="168" y="62" width="136" height="52" rx="9" class="pa-c1"></rect>
+      <text x="236" y="84" text-anchor="middle" class="pa-t">查询生成 LLM</text>
+      <text x="236" y="101" text-anchor="middle" class="pa-s pa-m">GPT-4o</text>
+      <path d="M304 88 L334 88" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="338" y="62" width="150" height="52" rx="9" class="pa-c1"></rect>
+      <text x="413" y="84" text-anchor="middle" class="pa-t">演示智能体</text>
+      <text x="413" y="101" text-anchor="middle" class="pa-s pa-m">WebRL-Llama-3.1-70B</text>
+      <path d="M488 88 L518 88" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="522" y="62" width="110" height="52" rx="9" class="pa-c2"></rect>
+      <text x="577" y="84" text-anchor="middle" class="pa-t">ORM 过滤</text>
+      <text x="577" y="101" text-anchor="middle" class="pa-s pa-m">Llama-3.1-8B</text>
+      <path d="M632 88 L662 88" class="pa-line" marker-end="url(#pa-arrow)"></path>
+      <text x="676" y="83" class="pa-t" font-weight="600">成功</text>
+      <text x="676" y="99" class="pa-t" font-weight="600">轨迹 τ</text>
+
+      <!-- stage 2 -->
+      <rect x="4" y="148" width="732" height="132" rx="14" class="pa-box"></rect>
+      <text x="20" y="170" class="pa-stage-t">§4.2 Grounded Plan Generation（反向标注）</text>
+      <text x="20" y="188" class="pa-s" style="font-family:'JetBrains Mono',monospace">Step → 轨迹里的动作区间</text>
+
+      <rect x="18" y="204" width="116" height="52" rx="9" class="pa-c2"></rect>
+      <text x="76" y="226" text-anchor="middle" class="pa-t">成功轨迹 τ</text>
+      <text x="76" y="243" text-anchor="middle" class="pa-s pa-m">a₁ … a_T</text>
+      <path d="M134 230 L164 230" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="168" y="204" width="150" height="52" rx="9" class="pa-c1"></rect>
+      <text x="243" y="226" text-anchor="middle" class="pa-t">计划标注 LLM</text>
+      <text x="243" y="243" text-anchor="middle" class="pa-s pa-m">GPT-4o</text>
+      <path d="M318 230 L348 230" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="352" y="204" width="176" height="52" rx="9" class="pa-acc"></rect>
+      <text x="440" y="224" text-anchor="middle" class="pa-t" font-weight="600">接地计划</text>
+      <text x="440" y="242" text-anchor="middle" class="pa-s pa-m">Step 1 → {a₁…a₃} · Step 2 → {a₄…}</text>
+      <path d="M528 230 L558 230" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="562" y="196" width="160" height="68" rx="9" class="pa-box" style="stroke-dasharray:4 3"></rect>
+      <text x="642" y="216" text-anchor="middle" class="pa-t">派生数据</text>
+      <text x="642" y="234" text-anchor="middle" class="pa-s">重规划（§4.2.1）</text>
+      <text x="642" y="250" text-anchor="middle" class="pa-s">CoT 追溯（§4.2.2）</text>
+
+      <!-- stage 3 -->
+      <rect x="4" y="290" width="732" height="132" rx="14" class="pa-box"></rect>
+      <text x="20" y="312" class="pa-stage-t">§4.3 Synthetic Plan Expansion</text>
+      <text x="20" y="330" class="pa-s" style="font-family:'JetBrains Mono',monospace">1 条轨迹 : 8 个动作样本 : 1 份计划</text>
+
+      <rect x="18" y="346" width="98" height="52" rx="9" class="pa-acc"></rect>
+      <text x="67" y="368" text-anchor="middle" class="pa-t">接地计划</text>
+      <text x="67" y="385" text-anchor="middle" class="pa-s">种子示例</text>
+      <path d="M116 372 L146 372" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="150" y="346" width="150" height="52" rx="9" class="pa-c1"></rect>
+      <text x="225" y="368" text-anchor="middle" class="pa-t">合成计划生成 LLM</text>
+      <text x="225" y="385" text-anchor="middle" class="pa-s pa-m">GPT-4o · &lt;1h</text>
+      <path d="M300 372 L330 372" class="pa-line" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="334" y="346" width="160" height="52" rx="9" class="pa-acc"></rect>
+      <text x="414" y="368" text-anchor="middle" class="pa-t" font-weight="600">计划扩展 +10,000</text>
+      <text x="414" y="385" text-anchor="middle" class="pa-s">重选初始 HTML 状态，不凭空造网页</text>
+
+      <path d="M494 372 L516 372" class="pa-dash" marker-end="url(#pa-arrow)"></path>
+
+      <rect x="520" y="338" width="204" height="68" rx="9" class="pa-c2"></rect>
+      <text x="622" y="358" text-anchor="middle" class="pa-t">验证集失败分析</text>
+      <text x="622" y="375" text-anchor="middle" class="pa-s">LLM 分类训练点（A.7）</text>
+      <text x="622" y="392" text-anchor="middle" class="pa-s">定向 +5,000（A.8）</text>
+
+      <!-- merge to training -->
+      <path d="M440 256 L440 292" class="pa-line" marker-end="url(#pa-arrow)"></path>
+      <path d="M414 338 L414 292" class="pa-line" style="stroke:var(--border);stroke-width:1" opacity="0"></path>
+
+      <text x="370" y="436" text-anchor="start" class="pa-s pa-m">τ → Executor 训练样本（每动作一条） · Plan → Planner 训练样本（每条请求一份）</text>
+    </svg>
+    <figcaption>
+      图 1：按论文 Figure 3 与第 4 节重绘的数据流水线。虚线箭头表示定向增强依赖一次「训练后验证、再回头补数据」的循环。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>三个阶段的输入输出不对称</strong>：第一阶段产出的轨迹对执行器是 8 个左右的动作样本，对规划器只有 1 份计划。第三阶段就是专门补这个缺口。</li>
+          <li><strong>「接地」是第二阶段的全部目的</strong>：计划标注器同时输出步骤到动作的映射，计划因此可以被执行器落地，而不是一段漂亮的空话。</li>
+          <li><strong>定向增强不是新模型</strong>：它先训练一版、在留出验证集上看失败，把失败归到网站与任务类型，再挑相关训练点当种子重新生成。它是有反馈的数据闭环，不是盲目扩量。</li>
+          <li><strong>训练侧没有 RL</strong>：两个模型都是监督微调，Appendix A.12 给出统一超参（LR 2e-5、AdamW、cosine、batch 32、1 epoch、8×A100、torchtune）；推理用 vLLM、temperature 0。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    训练数据的三种来源在 Table 1 里被分开计：<code>+ Finetuning</code>（1,113 条 WebArena-Lite）、<code>+ Synthetic Trajectories</code>（再加 923 条 §4.1 轨迹）、<code>+ Plan Expansion</code>（再加 10,000 份计划）、<code>+ Targeted Augmentation</code>（再加 5,000 份）。第六节按这四级看涨幅。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>路径是「先补规划、再补重规划、最后补推理」，每一步都有大台阶</h2></div>
+  <p class="sec-sub">数字全部来自 Table 1–4 与 Figure 4；切换执行器，看同一套规划数据对三类执行器的效果。</p>
+
+  <div class="el">
+    <div class="el-top" id="el-tabs">
+      <button class="tab active" data-exec="s0" type="button">Base Executor</button>
+      <button class="tab" data-exec="s1" type="button">+ Finetuning</button>
+      <button class="tab" data-exec="s2" type="button">+ Synthetic Traj.</button>
+    </div>
+    <div id="el-chart"></div>
+    <p class="el-note" id="el-note"></p>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>无 Planner 或基座规划器</span>
+      <span><i style="background:var(--c2)"></i>规划器已微调</span>
+      <span><i style="background:var(--accent)"></i>重规划 / CoT（本文结论）</span>
+    </div>
+  </div>
+
+  <p>
+    按 Table 1 第三列（<code>+ Synthetic Traj.</code> 执行器）读，台阶是这样的：
+  </p>
+  <ul>
+    <li><strong>零样本规划器不如没有</strong>：14.21% → Base Planner 时 23.63%，但对比无 Planner 的 36.97% 仍然更差。论文的解释是：未训练、不接地的计划会<em>混淆</em>执行器。</li>
+    <li><strong>只在 1,113 条上微调也回退</strong>：20.60%，低于无 Planner 的 36.97%。规划器过拟合，不会泛化到新任务。规划数据两连败之后，才是数据的胜利。</li>
+    <li><strong>+10k 计划是最大单步</strong>：30.30% → 39.40%，约 10 个百分点；+5k 定向再给 4–5 个百分点到 43.63%。</li>
+    <li><strong>动态重规划是第二大台阶</strong>：43.63% → 53.94%，+10.31 个百分点，首次超过当时的 SOTA WebRL-3.1-70B（49.1%）。</li>
+    <li><strong>CoT 收尾</strong>：+4.36 个百分点到 57.58%。</li>
+  </ul>
+
+  <p>
+    Base Executor 那一列最能说明规划本身的价值：执行器完全没微调，光靠更好的计划，就从 9.85% 到 29.63%（静态规划器）再到 44.24%（动态重规划），论文称后者相对最基础设置提升了 34.39%。
+  </p>
+
+  <h3>CoT 的价值：8B 打平 70B 的不带 CoT 版本</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>底座模型</th><th>CoT</th><th style="text-align:right">WebArena-Lite 成功率</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>Llama-3.3-70B</td><td>✗</td><td class="num">53.94</td><td>Table 1 第 12 行</td></tr>
+        <tr><td>Llama-3.1-8B</td><td>✓</td><td class="num">53.33</td><td>同一份数据，参数少近一个数量级</td></tr>
+        <tr><td>QWQ-32B</td><td>✓</td><td class="num">54.88</td><td></td></tr>
+        <tr class="best"><td>Llama-3.3-70B</td><td>✓</td><td class="num">57.58</td><td>Final Plan-and-Act</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Table 2。论文的解读是「8B + CoT 与 70B 不带 CoT 打平，说明 CoT 有多重要」——对长程规划，推理过程带来的收益可以与 9 倍参数相当。</p>
+
+  <h3>两个泛化基准：模拟器之外与全量 WebArena</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Table 4</span><h4>WebVoyager（真实网站，text-only）</h4></div>
+      <p>Plan-and-Act 8B：<code>58.08</code>，超过所有开源模型；QWQ-32B：<code>81.36</code>，刷新 text-only SOTA。</p>
+      <p>同表里 GPT-4-Turbo 的 Wilbur 为 52.6，Agent-E 为 73.1。论文在结论里说「超过所有先前工作」——严格地说，Agent-E 是用截图等多模态输入的，text-only SOTA 的限定才成立。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Table 3</span><h4>全量 WebArena</h4></div>
+      <p>Llama-70B 版本 <code>45.7</code>，与 GPT-4-Turbo 的 AgentOccam-Judge 持平；QWQ-32B 版本 <code>48.15</code>，超过所有列出的方法。</p>
+      <p>这是论文「performs better or on-par」的出处：在全量 WebArena 上，优势并不像 WebArena-Lite 那样悬殊。</p>
+    </div>
+  </div>
+
+  <h3>按网站拆开：Multi-site 与 Map 是短板</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>网站</th><th style="text-align:right">任务数</th><th style="text-align:right">平均步数（成功）</th><th style="text-align:right">平均步数（失败）</th><th style="text-align:right">成功率</th></tr></thead>
+      <tbody>
+        <tr><td>Overall</td><td class="num">165</td><td class="num">7.52</td><td class="num">13.43</td><td class="num">53.9</td></tr>
+        <tr><td>GitLab</td><td class="num">30</td><td class="num">5.98</td><td class="num">20.35</td><td class="num">53.3</td></tr>
+        <tr><td>Map（OpenStreetMap）</td><td class="num">26</td><td class="num">10.37</td><td class="num">9.10</td><td class="num">46.2</td></tr>
+        <tr><td>Shopping Admin（CMS）</td><td class="num">35</td><td class="num">8.65</td><td class="num">14.41</td><td class="num">48.6</td></tr>
+        <tr><td>Shopping（OSS）</td><td class="num">45</td><td class="num">7.11</td><td class="num">10.66</td><td class="num">55.6</td></tr>
+        <tr><td>Reddit</td><td class="num">19</td><td class="num">8.31</td><td class="num">9.92</td><td class="num">84.2</td></tr>
+        <tr><td>Multiple Websites</td><td class="num">10</td><td class="num">6.00</td><td class="num">17.83</td><td class="num">30.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Figure 4。失败轨迹明显更长（13.43 vs 7.52 步），唯一例外是 Map：失败的平均步数（9.10）比成功的（10.37）<em>更短</em>——在 OpenStreetMap 上，模型是过早放弃或过早给出错误答案，而不是绕远路。GitLab 则相反，失败轨迹平均 20.35 步，像是一直在页面里乱转。Reddit 最简单（84.2%），Multi-site（30.0%）和 Map（46.2%）是短板。注意 Figure 4 的 Overall 53.9 是四舍五入后的展示值，Table 1 对应设置是 53.94。
+  </p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它的收益来自「数据工程 + 每一步重规划」，也受制于这两件事</h2></div>
+  <p class="sec-sub">论文自己承认两条边界，另外三条可以从数据与消融里读出来。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>流水线需要底座能先把任务做成</h4></div>
+    <p>§4.1 采轨迹依赖演示智能体；§4.2 反向标注依赖成功轨迹。在没有任何训练数据的领域（WebVoyager），只得先借 GPT-4o 的 text-only 版本采 1,500 条轨迹。论文在 Limitations 里明说：这限制了方法进入全新领域的能力。这一点也写在结论的规模数字里——WebVoyager 的合成计划只有 10k，而在 WebArena-Lite 上是 10k + 5k。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>每一步重规划，慢且贵</h4></div>
+    <p>每个动作后 Planner 都要重读 HTML、生成新计划，推理调用翻倍。论文承认可能低效，建议未来让 Executor 自己决定何时重规划，或让 Planner 委派子任务——但都只是方向，没有实验。用户白皮书里 57.58% 的轨迹平均也就 11.12 步（Figure 4），成本仍可接受；真实场景里更长的任务，代价会线性增长。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>执行器没有实质升级</h4></div>
+    <p>论文刻意保持「标准 WebArena-Lite 风格」的执行器，只提升规划。执行器基线 36.97% 的瓶颈里，有一部分是执行能力本身——例如失败轨迹里在 GitLab 绕了 20 步，不一定是计划的问题。结论里提到的改进方向之一就是给执行器加 CoT。也就是说，57.58% 不是「这套框架的上限」，而只是「规划部分修好时」的成绩。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>规划器对数据量和多样性非常敏感</h4></div>
+    <p>同样 1,113 条规划数据，朴素微调让执行器从 36.97% 掉到 20.60%。要拿到收益，得配上 10k + 5k 的合成计划。这对中小团队意味着：方法可以复现，但成本主要在数据生成与筛选，不在训练算法。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界五</span><h4>成绩只覆盖网络导航</h4></div>
+    <p>全部实验都在 WebArena / WebArena-Lite / WebVoyager 上。框架本身面向「各种结构化决策环境」，但没有跨域实验——代码编辑、桌面软件、具身任务都未验证。论文的 future work 把多模态输入、基于 RL 的计划优化、记忆增强推理列为方向，说明三者都还没做。</p>
+  </div>
+
+  <p style="margin-top:22px">
+    一句话：<strong>Plan-and-Act 把「长程任务」这个抽象难题，拆成了「规划器数据要多、要好、要贴失败」这个具体的工程问题。</strong>它赢在数据，而不是在算法复杂度——整套训练只是 SFT。
+  </p>
+</section>
+
+<footer>
+  <div>Plan-and-Act: Improving Planning of Agents for Long-Horizon Tasks · Lutfi Eren Erdogan, Nicholas Lee, Sehoon Kim, Suhong Moon, Hiroki Furuta, Gopal Anumanchipalli, Kurt Keutzer, Amir Gholami · UC Berkeley · arXiv 2503.09572v3（2025-04-22）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2503.09572" target="_blank" rel="noopener">arXiv:2503.09572</a><br>
+    笔记：<a href="/plan-and-actimproving-planning-of-agents-for-long-horizon-tasks/">LAN-AND-ACT：Improving Planning of Agents for Long-Horizon Tasks</a><br>
+    本页 §3 的交互示例取自 Appendix A.2.1；流程图按 Figure 3 重绘。
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong style="color:var(--text)">与笔记的差异</strong>（未改动笔记文件）：<br>
+    1. 笔记把 57.58% 称为「全面超过 WebRL 的 49.1%」；按 Table 1，WebRL 这一格带 ∗ 号，是原文引用的他人结果，而 49.1 本身对应「有 Planner、执行器用合成轨迹」的格子，Plan-and-Act 没有直接复用它的执行器。<br>
+    2. 笔记称流水线第二段由 DeepSeek-R1-Distill-Llama-70B 反向推导计划；原文 §5.1 的 DeepSeek-R1-Distill 只用于生成 CoT，反向标注计划由 GPT-4o 完成。<br>
+    3. 笔记说在 WebArena-Lite 与 WebVoyager 上都 SOTA；WebArena-Lite 的 57.58% 是 SOTA，WebVoyager 的 81.36% 是 <strong>text-only</strong> SOTA——同表 Agent-E（GPT-4-Turbo，多模态）为 73.1。<br>
+    4. 笔记称 WebVoyager 的泛化「超越包括 Wilbur 52.6 在内的所有模型」；WebVoyager 没有训练数据，模型仍然要靠 1,500 条合成轨迹 + 10k 合成计划做微调，且用的是 QWQ-32B 生成数据。<br>
+    5. 笔记称「WebRL-Llama-3.1-70B 在执行阶段」；原文里 WebRL 本身也是无 Planner 的隐式规划，它是 Table 1 第 6 行的引用结果，不是执行器。<br>
+    6. 笔记把 9.85% → 57.58% 写成「逐步应用其提出的各项技术」；其中 9.85% 是零样本 + ReAct，57.58% 是 70B + 动态重规划 + CoT，四个格子都是不同 Executor，不是同一条曲线的首尾。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 动态重规划：静态计划 vs 每步重规划
+   ============================================================ */
+(function () {
+  var SCI = 'var(--c1)', DYN = 'var(--accent)', WARN = 'var(--accent-deep)';
+
+  function list(items, color, extra) {
+    var h = '';
+    for (var i = 0; i < items.length; i++) {
+      var flag = items[i].stale ? ' style="color:' + WARN + ';text-decoration:line-through"' : '';
+      h += '<div style="display:flex;gap:8px;margin:4px 0;line-height:1.5">' +
+        '<span class="mono" style="color:' + color + ';font-weight:600;min-width:52px">Step ' + (i + 1) + '</span>' +
+        '<span' + flag + '>' + items[i].t + '</span>' +
+        (items[i].badge ? ' <span class="pill pa" style="font-size:10px;padding:1px 7px;margin-left:6px">' + items[i].badge + '</span>' : '') +
+        '</div>';
+    }
+    if (extra) h += extra;
+    return h;
+  }
+
+  var S = {
+    'static': {
+      name: '静态计划',
+      color: SCI,
+      initial: [
+        { t: 'Search for libraries at CMU.' },
+        { t: 'Review the search results and select a library at CMU.' },
+        { t: 'Initiate the process of finding directions.' },
+        { t: 'Input ‘Carnegie Museum of Art’ as the starting location.' },
+        { t: 'Input the selected CMU library as the destination.' },
+        { t: 'Select the option for walking directions.' },
+        { t: 'Analyze the results to determine the walking time.' }
+      ],
+      events: [
+        {
+          act: 'do(action="Search", argument="Library at CMU", element="13")',
+          obs: 'No results found',
+          msg: '执行器照计划搜了 <code>Library at CMU</code>，网页返回空结果。静态计划没有对这个意外的处理，执行器只能盲从下一步「看搜索结果」——没有结果可选。'
+        },
+        {
+          act: 'do(action="Click", element="13")',
+          obs: '同一搜索页，仍无结果',
+          msg: '计划继续往前走，执行器失去依据。论文 §3.3 正是用这种「搜索无结果」作为静态计划失效的典型例子。'
+        },
+        {
+          act: '（卡住）',
+          obs: '计划未改变',
+          msg: '剩余第 3–7 步全部建立在「已选到一个 CMU 图书馆」这一前提上，前提不成立，整条计划失效。'
+        }
+      ],
+      finalPlan: [
+        { t: 'Search for libraries at CMU.', stale: true },
+        { t: 'Review the search results and select a library at CMU.', stale: true },
+        { t: 'Initiate the process of finding directions.', stale: true },
+        { t: 'Input ‘Carnegie Museum of Art’ as the starting location.', stale: true },
+        { t: 'Input the selected CMU library as the destination.', stale: true },
+        { t: 'Select the option for walking directions.', stale: true },
+        { t: 'Analyze the results to determine the walking time.', stale: true }
+      ],
+      finalMsg: '执行到这里，7 个计划步骤全部失效，任务失败。'
+    },
+    'dynamic': {
+      name: '动态重规划',
+      color: DYN,
+      initial: [
+        { t: 'Search for libraries at CMU.' },
+        { t: 'Review the search results and select a library at CMU.' },
+        { t: 'Initiate the process of finding directions.' },
+        { t: 'Input ‘Carnegie Museum of Art’ as the starting location.' },
+        { t: 'Input the selected CMU library as the destination.' },
+        { t: 'Select the option for walking directions.' },
+        { t: 'Analyze the results to determine the walking time.' }
+      ],
+      events: [
+        {
+          act: 'do(action="Search", argument="Library at CMU", element="13")',
+          obs: 'No results found',
+          msg: '同样搜索失败，但 Planner 拿到了新的 HTML 状态（页面显示 “No results found”，搜索框 id=12，Go 按钮 id=13）。',
+          replan: [
+            { t: 'Refine the search query by focusing on libraries near CMU.', badge: '新计划' },
+            { t: 'Analyze the search results to identify potential libraries near CMU.' },
+            { t: 'Get walking directions to each identified library from Carnegie Museum of Art.' },
+            { t: 'Identify the closest library based on the recorded distances.' }
+          ]
+        },
+        {
+          act: 'do(action="Search", argument="Library near CMU", element="12")',
+          obs: '出现附近的图书馆列表',
+          msg: '执行器按新计划把查询改宽为 <code>Library near CMU</code>，页面第一次出现候选结果。任务从这里重新有了前进方向。'
+        },
+        {
+          act: '（继续逐步规划）',
+          obs: 'HTML 随动作更新',
+          msg: '新计划共 4 步：放宽查询 → 分析结果 → 逐个取步行路线 → 比距离取最近。关键发现不靠记忆，而是直接写进了计划文本。'
+        }
+      ],
+      finalPlan: [
+        { t: 'Refine the search query by focusing on libraries near CMU.' },
+        { t: 'Analyze the search results to identify potential libraries near CMU.' },
+        { t: 'Get walking directions to each identified library from Carnegie Museum of Art.' },
+        { t: 'Identify the closest library based on the recorded distances.' }
+      ],
+      finalMsg: '计划的「身份」被保留——原计划想回答的问题没变，但执行路径被重新规划。'
+    }
+  };
+
+  var mode = 'static';
+  var step = 0;
+
+  function render() {
+    var cfg = S[mode];
+    var listEl = document.getElementById('steps-host');
+    var msgEl = document.getElementById('rp-msg');
+    var headEl = document.getElementById('rp-head');
+    var nextBtn = document.getElementById('rp-next');
+    if (!listEl || !msgEl || !headEl || !nextBtn) return;
+
+    var plan, title, extra = '';
+    if (step === 0) {
+      plan = cfg.initial;
+      title = '第 0 步 · 初始计划';
+      extra = '<div class="eq-cap" style="margin:8px 0 0;text-align:left">Planner 根据用户请求和初始 HTML 生成，共 ' + plan.length + ' 步。</div>';
+    } else if (step <= cfg.events.length) {
+      var ev = cfg.events[step - 1];
+      title = '第 ' + step + ' 步 · 执行后';
+      var obsHtml =
+        '<div style="margin:10px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg)">' +
+        '<div class="mono" style="font-size:12px;color:var(--text-muted)">Action</div>' +
+        '<code>' + ev.act + '</code>' +
+        '<div class="mono" style="font-size:12px;color:var(--text-muted);margin-top:8px">Observation</div>' +
+        '<span style="color:' + (ev.obs.indexOf('No results') === 0 ? WARN : 'var(--text)') + '">' + ev.obs + '</span></div>';
+      if (ev.replan) {
+        var staleAll = cfg.initial.map(function (it, i) {
+          return i === 0 ? { t: it.t, stale: true } : { t: it.t, stale: true };
+        });
+        plan = staleAll;
+        extra = obsHtml +
+          '<div class="mono" style="font-size:12px;color:var(--text-muted);margin:12px 0 4px">Planner 重写后的计划</div>' +
+          list(ev.replan, DYN);
+      } else {
+        plan = (mode === 'static') ? cfg.events[step - 1].planWhen : cfg.initial;
+        if (mode === 'static') {
+          plan = cfg.initial.map(function (it, i) {
+            return (i < step) ? { t: it.t, stale: true } : it;
+          });
+        } else {
+          plan = cfg.events[step - 1].planWhen;
+        }
+        extra = obsHtml;
+      }
+    } else {
+      plan = cfg.finalPlan;
+      title = '结束';
+      extra = '';
+    }
+
+    listEl.innerHTML = '<div class="mono" style="font-size:12px;color:' + cfg.color + ';font-weight:600;margin-bottom:6px">' + cfg.name + ' · 当前计划</div>' +
+      list(plan, cfg.color, extra);
+
+    var msg;
+    if (step === 0) {
+      msg = mode === 'static'
+        ? '初始计划 7 步，第 2 步要求「看结果并选一个图书馆」。先想一下：如果第二步的搜索什么都没搜到，后面 5 步还能走吗？'
+        : '初始计划与静态模式完全一样。区别在于：每执行一个动作，Planner 都会拿到更新后的 HTML 并重写计划。';
+    } else if (step <= cfg.events.length) {
+      msg = cfg.events[step - 1].msg;
+    } else {
+      msg = cfg.finalMsg;
+    }
+    headEl.textContent = title;
+    msgEl.innerHTML = msg;
+    nextBtn.disabled = step >= cfg.events.length;
+    nextBtn.style.opacity = nextBtn.disabled ? '.5' : '1';
+    nextBtn.textContent = step >= cfg.events.length ? '已到末尾' : '执行下一个动作 ▸';
+  }
+
+  // 补上静态模式每步的计划快照（计划不变）
+  S['static'].events.forEach(function (ev, i) {
+    ev.planWhen = S['static'].initial.map(function (it, k) {
+      return (k < i + 1) ? { t: it.t, stale: true } : it;
+    });
+  });
+  // 动态模式在第 3 个事件之后，计划仍是重规划后的 4 步
+  S['dynamic'].events[1].planWhen = S['dynamic'].events[0].replan.map(function (it, k) {
+    return (k === 0) ? { t: it.t, stale: true, badge: it.badge } : it;
+  });
+  S['dynamic'].events[2].planWhen = S['dynamic'].events[0].replan.map(function (it, k) {
+    return (k === 1) ? { t: it.t, stale: true } : it;
+  });
+
+  var host = document.getElementById('rp-steps');
+  if (!host) return;
+  host.innerHTML = '<div id="rp-head"></div><div id="steps-host" style="margin-top:8px"></div>';
+  // 把标题渲染进 readout 之外的位置需要静态容器，统一放在 readout 上方
+  var headSlot = document.getElementById('rp-head');
+  if (headSlot) {
+    // 将标题也放进 readout，保持布局简单：复制一个 r-head
+    var rb = document.getElementById('rp-readout');
+    if (rb) {
+      var clone = document.createElement('div');
+      clone.className = 'r-head';
+      clone.id = 'rp-readout-head';
+      rb.insertBefore(clone, rb.firstChild);
+      rb.querySelector('#rp-readout .r-head:not(#rp-readout-head)');
+    }
+    headSlot.outerHTML = '';
+  }
+
+  // 简化：标题统一用 readout 内的 r-head
+  var ro = document.getElementById('rp-readout');
+  if (ro && !document.getElementById('rp-readout-head')) {
+    var h0 = document.createElement('div');
+    h0.className = 'r-head';
+    h0.id = 'rp-readout-head';
+    var firstChild = ro.firstChild;
+    ro.insertBefore(h0, firstChild);
+  }
+  // 原 r-head「第 0 步 · 执行前」冗余，替换其内容
+  var headInReadout = document.getElementById('rp-readout-head');
+  var oldHead = ro ? ro.querySelector('.r-head:not(#rp-readout-head)') : null;
+  if (oldHead) oldHead.parentNode.removeChild(oldHead);
+
+  // render() 里写的是旧的 rp-head，改为写 rp-readout-head
+  render = (function (orig) {
+    return function () {
+      var msgEl = document.getElementById('rp-msg');
+      var nextBtn = document.getElementById('rp-next');
+      var headEl = document.getElementById('rp-readout-head');
+      void (orig && orig);
+      if (!msgEl || !nextBtn || !headEl) return;
+      _render(headEl, msgEl, nextBtn);
+    };
+  })(render);
+
+  function _render(headEl, msgEl, nextBtn) {
+    var cfg = S[mode];
+    var listEl = document.getElementById('steps-host');
+    if (!listEl) return;
+    var plan, title, extra = '';
+    if (step === 0) {
+      plan = cfg.initial;
+      title = '第 0 步 · 初始计划（' + pointCount(plan) + ' 步）';
+      extra = '';
+    } else if (step <= cfg.events.length) {
+      var ev = cfg.events[step - 1];
+      title = '第 ' + step + ' 步 · 执行后';
+      var obsHtml =
+        '<div style="margin:10px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg)">' +
+        '<div class="mono" style="font-size:12px;color:var(--text-muted)">Action</div>' +
+        '<code>' + ev.act + '</code>' +
+        '<div class="mono" style="font-size:12px;color:var(--text-muted);margin-top:8px">Observation</div>' +
+        '<span style="color:' + (ev.obs.indexOf('No results') === 0 ? WARN : 'var(--text)') + '">' + ev.obs + '</span></div>';
+      if (ev.replan) {
+        plan = cfg.initial.map(function (it) { return { t: it.t, stale: true }; });
+        extra = obsHtml +
+          '<div class="mono" style="font-size:12px;color:var(--text-muted);margin:12px 0 4px">Planner 重写后的计划</div>' +
+          list(ev.replan, DYN);
+      } else {
+        plan = ev.planWhen;
+        extra = obsHtml;
+      }
+    } else {
+      plan = cfg.finalPlan;
+      title = '结束';
+    }
+
+    listEl.innerHTML = '<div class="mono" style="font-size:12px;color:' + cfg.color + ';font-weight:600;margin-bottom:6px">当前计划' +
+      (plan.length ? '（' + pointCount(plan) + ' 步）' : '') + '</div>' + list(plan, cfg.color, extra);
+
+    var msg;
+    if (step === 0) {
+      msg = mode === 'static'
+        ? '初始计划 7 步，第 2 步要求「看结果并选一个图书馆」。先想一下：如果第二步的搜索什么都没搜到，后面 5 步还能走吗？'
+        : '初始计划与静态模式完全一样。区别在于：每执行一个动作，Planner 都会拿到更新后的 HTML 并重写计划。';
+    } else if (step <= cfg.events.length) {
+      msg = cfg.events[step - 1].msg;
+    } else {
+      msg = cfg.finalMsg;
+    }
+    headEl.textContent = title;
+    msgEl.innerHTML = msg;
+    nextBtn.disabled = step >= cfg.events.length;
+    nextBtn.style.opacity = nextBtn.disabled ? '.5' : '1';
+    nextBtn.textContent = step >= cfg.events.length ? '已到末尾' : '执行下一个动作 ▸';
+  }
+
+  function pointCount(p) {
+    return p.length;
+  }
+
+  var modeBtns = document.querySelectorAll('#replan-modes .rule-btn');
+  modeBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      modeBtns.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      mode = b.getAttribute('data-mode');
+      step = 0;
+      render();
+    });
+  });
+
+  var next = document.getElementById('rp-next');
+  if (next) {
+    next.addEventListener('click', function () {
+      if (step < S[mode].events.length) {
+        step += 1;
+        render();
+      }
+    });
+  }
+  var reset = document.getElementById('rp-reset');
+  if (reset) {
+    reset.addEventListener('click', function () {
+      step = 0;
+      render();
+    });
+  }
+
+  if (document.getElementById('rp-readout-head')) render();
+})();
+
+/* ============================================================
+   2) Table 1 消融阶梯
+   ============================================================ */
+(function () {
+  var DATA = {
+    s0: { name: 'Base Executor', vals: [14.21, 22.42, 24.24, 27.10, 29.63, 44.24, null], base: 9.85 },
+    s1: { name: '+ Finetuning', vals: [17.16, 16.36, 27.28, 38.18, 42.42, 48.48, null], base: 36.36 },
+    s2: { name: '+ Synthetic Traj.', vals: [23.63, 20.60, 30.30, 39.40, 43.63, 53.94, 57.58], base: 36.97 }
+  };
+  var ROWS = [
+    { n: 'Base Planner', s: 'zero-shot planner' },
+    { n: '+ Finetuning', s: '1,113 plans' },
+    { n: '+ Synthetic Traj.', s: 'add 923 trajectories' },
+    { n: '+ Plan Expansion', s: 'add 10,000 plans' },
+    { n: '+ Targeted Aug.', s: 'add 5,000 plans' },
+    { n: '+ Dynamic Replanning', s: 'replan every step', grp: true },
+    { n: '+ CoT', s: 'final Plan-and-Act', grp: true, last: true }
+  ];
+  var NOTES = {
+    s0: 'Base Executor + 零样本规划器：14.21%，虽比无 Planner 的 9.85% 高，但仍不是好计划。静态规划 + 5k 定向数据能到 29.63%（论文写作「9.85% → 29.63%」）；每一步重规划后到 44.24%，相对最基础设置的提升是论文所称的 34.39 个百分点。',
+    s1: '+ Finetuning Executor：规划器只在 1,113 条上微调时只有 16.36%，反而低于无 Planner 的 36.36%——过拟合，不泛化。加 10k 计划后跳到 38.18，+5k 定向后 42.42，重规划后 48.48。',
+    s2: '+ Synthetic Traj. Executor：第一条主曲线。零样本 Base Planner 23.63 不如无 Planner 的 36.97；朴素微调 20.60 也回退；10k 计划带来 +9.1 pp（30.30→39.40），5k 定向 +4.2 pp，重规划 +10.3 pp，CoT +3.6 pp。'
+  };
+
+  function render(key) {
+    var d = DATA[key];
+    var host = document.getElementById('el-chart');
+    var note = document.getElementById('el-note');
+    if (!host) return;
+    var html = '';
+    for (var i = 0; i < ROWS.length; i++) {
+      var r = ROWS[i];
+      var v = d.vals[i];
+      var cls = 'el-row' + (r.grp ? ' grp' : '') + (r.last ? ' last' : '');
+      var color = i <= 1 ? 'var(--c1)' : (i <= 4 ? 'var(--c2)' : 'var(--accent)');
+      var width = v == null ? 0 : Math.max(1, v);
+      var numHtml = v == null ? '<span style="color:var(--text-soft)">—</span>' : v.toFixed(2);
+      if (v != null && i > 0 && d.vals[i - 1] != null) {
+        var delta = v - d.vals[i - 1];
+        numHtml += '<span class="d">' + (delta >= 0 ? '+' : '') + delta.toFixed(2) + '</span>';
+      }
+      html += '<div class="' + cls + '">' +
+        '<div class="el-name">' + r.n + '<span>' + r.s + '</span></div>' +
+        '<div class="el-track"><div class="el-fill" style="width:' + width + '%;background:' + color + (v == null ? ';opacity:0' : '') + '"></div></div>' +
+        '<div class="el-num">' + numHtml + '</div>' +
+        '</div>';
+    }
+    html += '<div class="el-row grp"><div class="el-name">No Planner（ReAct）<span>baseline</span></div>' +
+      '<div class="el-track"><div class="el-fill" style="width:' + d.base + '%;background:var(--border-strong)"></div></div>' +
+      '<div class="el-num" style="color:var(--text-muted)">' + d.base.toFixed(2) + '</div></div>';
+    host.innerHTML = html;
+    if (note) note.innerHTML = NOTES[key];
+  }
+
+  var tabs = document.querySelectorAll('#el-tabs .tab');
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      tabs.forEach(function (x) { x.classList.remove('active'); });
+      t.classList.add('active');
+      render(t.getAttribute('data-exec'));
+    });
+  });
+  if (document.getElementById('el-chart')) render('s2');
+})();
+
+/* ============================================================
+   3) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest ? el.closest('figure') : null;
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

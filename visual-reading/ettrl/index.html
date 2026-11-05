@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ETTRL · 让测试时 RL 的探索和利用都由熵来定</title>
+<meta name="description" content="ETTRL 在 TTRL 基础上做两件事：用熵分叉的树状 rollout（ETMR）复用低熵 token，用相对熵给优势函数做缩放（EAR）。Llama-3.1-8B 在 AIME 2024 上 Pass@1 相对提升 68%，token 预算只需 60%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.crow.narrow{grid-template-columns:64px 1fr}
+.slot-in{width:100%;background:var(--bg-surface);border:1px solid var(--border-strong);border-radius:6px;padding:5px 6px;font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--text);text-align:center}
+.slot-in:focus{outline:2px solid var(--accent);outline-offset:1px}
+.sym-box{display:inline-flex;align-items:center;gap:6px;font-family:"JetBrains Mono",monospace;font-size:13px;padding:2px 9px;border-radius:6px;margin:0 2px}
+.sym-hi{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+.sym-lo{background:var(--c1-soft);color:var(--c1)}
+.sym-list{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 18px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">ETTRL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Test-Time RL · arXiv 2508.11356</span>
+  <h1>ETTRL：rollout 在哪分叉、优势该放大多少，都交给「熵」来定</h1>
+  <p class="hero-sub">
+    TTRL 靠多数投票造伪标签，但需要几十到上百条并行 rollout，而且早期共识往往错、模型还对它过度自信。
+    这篇论文用两个熵机制对症下药：<strong>ETMR</strong> 只在高熵 token 处分叉、复用低熵前缀省 token；<strong>EAR</strong> 按回复级相对熵缩放优势，压住早期的高熵「蒙对」样本。
+  </p>
+  <div class="meta">
+    <span>Jia Liu, ChangYi He, YingQiao Lin, MingMin Yang, FeiYang Shen, ShaoGuo Liu · 快手 / 北航 / 西工大</span>
+    <a href="https://arxiv.org/abs/2508.11356" target="_blank" rel="noopener">原文 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    TTRL 的两个痛点其实是同一个东西的两面：<strong>可靠性来自更多 rollout，但 rollout 越多越贵；伪标签越早越不靠谱，可 GRPO 的组内归一化恰恰把早期少数「幸运样本」的优势放大到最大</strong>。
+  </p>
+  <p>
+    <em>ETMR</em> 把并行采样换成一棵熵分叉树：高熵 token 处放 B 个分支，低熵前缀所有分支共享。按均匀分布假设，token 消耗比简化为 <code>(1 + 0.5·B·N) / (1 + B·N)</code>，N=2、B=2 时正好是 60%，叶子数 M(1+B·N)=12×5=60 条。
+  </p>
+  <p>
+    <em>EAR</em> 进一步区分「蒙对的」和「真会的」：回复平均熵高于组内平均的，优势乘 γ&lt;1；低于平均的略微放大。γ 对称裁剪在 [0.8, 1.2]，比直接裁剪优势的 Adv-Clip 更稳。
+  </p>
+  <div class="metrics">
+    <div class="metric"><div class="v">68<small>%</small></div><div class="k">Llama-3.1-8B 在 AIME 2024 上 Pass@1 相对提升（摘要与 Table 1 均为 69.0% 一格）</div></div>
+    <div class="metric"><div class="v">60<small>%</small></div><div class="k">ETMR 达到同等 rollout 条数所需的 token 预算占比（Eq. 11，N=2, B=2）</div></div>
+    <div class="metric"><div class="v">13.1</div><div class="k">Qwen2.5-Base-3B 在 AIME 2024 的 Pass@1，TTRL 为 7.9（Table 2）</div></div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>TTRL 的贵，和它的脆，是同一个循环</h2></div>
+  <p class="sec-sub">先看懂 TTRL 的训练回路，才能明白为什么省 token 和防过自信必须一起解决。</p>
+
+  <p>测试时强化学习（TTRL）面对一个无标签的问题 <code>q</code>：让策略采样 N 条回复，抽取答案，取众数当作伪标签 <code>y*</code>，答案等于 <code>y*</code> 的回复给奖励 1，其余给 0，然后就地跑一轮 GRPO。</p>
+
+  <div class="eq">
+    R<sub>TTRL</sub>(o<sub>i</sub>) = <span class="hl-a">𝟙[ extract_answer(o<sub>i</sub>) = y<sup>⋆</sup> ]</span>
+  </div>
+  <div class="eq-cap">Eq. 7 · 奖励只有一个比特，而 <code>y*</code> 本身是模型自己投票投出来的</div>
+
+  <p>问题从这个回路里长出来，论文把它们并列为两条：</p>
+  <ul>
+    <li><strong>推理预算高。</strong>要拿到可靠的伪标签，「必须做几十到上百次 rollout」，难题更甚——论文明说「复杂任务往往需要超过 64 条 rollout」。</li>
+    <li><strong>早期估计偏差。</strong>前几个迭代里伪标签经常是错的，而模型会「带着更大的优势快速过拟合上去」，被锁进局部最优。</li>
+  </ul>
+
+  <p>这两条为什么纠缠在一起？因为它们共用同一个「票数少」的起点。票数少 → 伪标签不准 → 早期只有极少数回复拿到正奖励 → GRPO 组内归一化把这几条「幸运样本」的优势推得特别大。论文 Figure 3 在 AIME 上记录了这个进程：多数比例从约 10% 爬到 70%，而正的组内相对优势随之下降。换句话说，<strong>模型最不靠谱的时候，恰好被推得最狠</strong>。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>现有做法各管一头：要么堆样本省钱，要么硬压优势</h2></div>
+  <p class="sec-sub">论文的 related work 把无监督奖励估计分成「软」「硬」两派，并对加熵正则的传统办法保持保留。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">软估计</span><h4>熵最小化即奖励</h4></div>
+      <p>RENT、EM-RL 直接拿负的回复熵当稠密奖励（Eq. 6）。</p>
+      <p><strong>卡点：</strong>把「信心」当「正确」；奖励还受基础模型归纳偏置和校准程度影响，熵低的错答案同样被鼓励。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">硬估计</span><h4>一致性 / 多数投票</h4></div>
+      <p>TTRL 用并行采样 + 众数投票造伪标签，对标签噪声有一定容忍度。</p>
+      <p><strong>卡点：</strong>可靠性靠 rollout 数量堆出来，token 直接线性增长；且不处理早期优势被放大的问题。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">熵做正则</span><h4>熵奖励 / 熵调制优势</h4></div>
+      <p>PPO、SAC 式的熵项，以及 Cheng 等人的熵增优势项。</p>
+      <p><strong>卡点：</strong>论文引用 Cui 等人的结论：系数难调，加到 LLM 上可能无效甚至熵爆炸；加在优势里也有量纲不一致的问题。</p>
+    </div>
+  </div>
+
+  <p>论文自己的 takeaways 把这个格局总结为一句话：软、硬两派「从机制上都没有在利用和探索之间取得有效平衡」。还有一个现成的对照——<strong>Adv-Clip</strong>：直接把 GRPO 的优势裁到 [−β, β]（论文实验取 β=2）。它能压住极端更新，但「不利用每个回复可靠性的细粒度信息」，这正是 EAR 要补的空。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两个熵机制：一个管采样在哪花 token，一个管优势怎么缩放</h2></div>
+  <p class="sec-sub">两段都可以手算。先看 ETMR 为什么 60% 的 token 能换回同样多的 rollout 叶子。</p>
+
+  <h3>ETMR：只在最犹豫的 token 处分叉</h3>
+  <p>观察是：推理轨迹里有大量逐字重复，真正影响结果的是少数高熵 token——通常是连词、转折词（论文举例 “but”“however”）。低熵 token 换个分支也几乎一样，复用它不损失多样性。ETMR 沿用 TreeRL 的 token 级决策步：先生在一条树上生成整条回复，再用 <code>H(y<sub>t</sub>) = −log π(y<sub>t</sub>)</code> 挑出熵最高的 N 个 token 作为分叉点，每个分叉点再采样 B 条分支，所有分支走到叶子，最后把叶子答案拿去投票。</p>
+
+  <div class="eq">
+    R<sub>tree</sub> = M (1 + B · N)&nbsp;&nbsp;&nbsp;&nbsp;
+    <span class="hl-a">T<sub>tree</sub> = Len · (1 + B · Σ<sub>k=1..N</sub> k/(N+1))</span>
+    &nbsp;&nbsp;
+    <span class="hl-c">TR<sub>tree</sub> = (1 + 0.5·B·N) / (1 + B·N)</span>
+  </div>
+  <div class="eq-cap">Eq. 8–11 · 叶子数只由 M、N、B 决定；token 消耗靠一个假设简化：N 个分叉点在整条回复里均匀分布，于是 Σ k/(N+1) = N/2</div>
+
+  <p>按论文的均匀假设，N 个分叉点落在 x<sub>k</sub> = k/(N+1)（k=1…N），第 k 叉之后还剩 1 − k/(N+1) 的回复。求和 <code>Σ (1 − k/(N+1)) = N/2</code>，于是相对并行采样的 token 比从 1 压到 <code>(1 + 0.5·B·N) / (1 + B·N)</code>：每多一个分叉点，只多付「分支数 × 剩余长度」的一半左右。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的算例</span><h4>N=3、B=2 给出 60%，但实验用的是 N=2</h4></div>
+    <p>Eq. 11 下面写的是「N = 3, B = 2 时只需 60% 的 token」；(1+3)/(1+6) = 4/7 ≈ 57.1%，接近但不等。而第 4 节的实测配置是 <strong>M=12、N=2、B=2</strong>，叶子 12×(1+4)=60 条，对照 TTRL 的 64 条，(1+2)/(1+4) = <strong>正好 60%</strong>，这个数对得上。两处说法不一致，以实验配置为准。</p>
+  </div>
+
+  <div class="sim">
+    <div class="sim-top" id="etmr-preset">
+      <button class="rule-btn active" data-n="2" data-b="2">实验配置<span class="r-sub">N=2 · B=2</span></button>
+      <button class="rule-btn" data-n="3" data-b="2">论文文字算例<span class="r-sub">N=3 · B=2</span></button>
+      <button class="rule-btn" data-n="3" data-b="1">对照组<span class="r-sub">N=3 · B=1</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>分叉点 N <span class="v" id="n-v">2</span></label>
+        <input type="range" id="n-range" min="1" max="5" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label>每叉分支 B <span class="v" id="b-v">2</span></label>
+        <input type="range" id="b-range" min="1" max="3" step="1" value="2">
+      </div>
+    </div>
+    <div class="slots s5" id="tree-slots"></div>
+    <div class="readout" id="tree-readout">
+      <div class="r-head">叶节点 vs token 消耗</div>
+      <div id="tree-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>那个 60% 具体怎么手算？<span class="sum-sub">N=2、B=2 的逐项拆解</span></summary>
+    <div class="details-body">
+      <p>N=2、B=2。分子 1 + 0.5·2·2 = 3，分母 1 + 2·2 = 5，比例 3/5 = <strong>60%</strong>。对应到分叉位置：第 1 叉在 1/3 处，每个分支还剩 2/3；第 2 叉在 2/3 处，每个分支还剩 1/3；两项剩余长度之和为 1，即 N/2。</p>
+      <p>Eq. 11 相对 Eq. 10 少掉的是「第二叉长在第一叉分支上、自身又分出 B 条」这层结构，所以它是一个近似值。论文没有报告树上前缀的真实复用率，60% 是公式值而不是测量值；第 07 节提到的「墙上时间达不到理论值」也说明理论节省不等于实测节省。</p>
+    </div>
+  </details>
+
+  <h3>EAR：用回复级相对熵给优势打折</h3>
+  <p>第二个机制作用在奖励侧。把每条回复的平均 token 熵（Eq. 5）和组内平均比一比，得到缩放系数 γ，再乘到 GRPO 优势上。它用的不是绝对熵，而是相对熵：论文 5.2 节说先用绝对熵，发现有量纲不一致、超参难调，才换成相对值。</p>
+
+  <div class="eq">
+    <span class="hl-c">γ<sub>i</sub> = 1 + ( avg(H<sub>resp</sub>) − H<sub>resp</sub>(o<sub>i</sub>) ) / avg(H<sub>resp</sub>)</span><br>
+    Â<sup>res</sup><sub>i,t</sub> = <span class="hl-a">Clip(γ<sub>i</sub>, 1−α, 1+α)</span> · Â<sub>i,t</sub>
+    &nbsp;&nbsp;&nbsp;&nbsp; Â<sup>clip</sup><sub>i,t</sub> = Clip(Â<sub>i,t</sub>, −β, +β)
+  </div>
+  <div class="eq-cap">Eq. 14–15、13，以及 Adv-Clip 的 Eq. 12 · 论文中 α 对称取 0.2，β 取 2</div>
+
+  <p>注意它的方向和「熵越低越好」的直觉正好相反一半：<strong>高熵样本被压</strong>（它们更可能是蒙对的），<strong>低熵样本被放</strong>（模型真的会），但只放一点点，靠 α 截断。下面可以拖动熵分布，看每一档的 γ 和最终乘数。</p>
+
+  <div class="sim">
+    <div class="slots" id="ear-slots"></div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>裁剪幅度 α <span class="v" id="ar-a-v">0.20</span></label>
+        <input type="range" id="ar-a" min="0.05" max="0.5" step="0.05" value="0.2">
+      </div>
+      <div class="ctrl">
+        <label>Adv-Clip 上界 β <span class="v" id="ar-b-v">2.0</span></label>
+        <input type="range" id="ar-b" min="0.5" max="3" step="0.5" value="2">
+      </div>
+    </div>
+    <div class="actions">
+      <button class="act primary" id="ear-reset">恢复到论文算例</button>
+    </div>
+    <div class="readout" id="ear-readout">
+      <div class="r-head">高熵 vs 低熵</div>
+      <div id="ear-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算验证：H = [0.4, 0.6, 0.7, 0.5]，α = 0.2<span class="sum-sub">四个样本的 γ 与最终乘数</span></summary>
+    <div class="details-body">
+      <p>组内平均熵 = (0.4+0.6+0.7+0.5)/4 = 0.55。γ = 1 + (0.55 − H)/0.55：</p>
+      <ul>
+        <li>H=0.4（最自信）：γ = 1.273 → 裁到 <code>1.20</code>，优势放大 20%</li>
+        <li>H=0.6：γ = 0.909 → 0.91，略打折</li>
+        <li>H=0.7（最犹豫）：γ = 0.727 → 裁到 <code>0.80</code>，优势只剩 80%</li>
+        <li>H=0.5：γ = 1.091 → 1.09</li>
+      </ul>
+      <p>四个熵全相等时，所有人的 γ 都是 1，EAR 退化为空操作——它只区分组内的相对高低，不改变整体尺度。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练几乎照搬 TTRL：先投 64 票，只取 32 条算梯度</h2></div>
+  <p class="sec-sub">ETTRL 不改算法骨架，改的是「rollout 怎么长」和「优势怎么算」这两处。</p>
+
+  <ul>
+    <li><strong>预算。</strong>每个 prompt 先采 64 条回复（温度 0.6）用于投票估标签，再下采样到 32 条做训练；最大生成长度 3072 token。ETMR 实验里换成 M=12、N=2、B=2，叶子 60 条，仍然下采样到 32 条算梯度。</li>
+    <li><strong>优化器。</strong>AdamW，余弦学习率，峰值 5e-7。训练轮数按数据集规模缩放：MATH-500 取 10、AMC 取 30、AIME 2024 取 80。</li>
+    <li><strong>评估。</strong>Pass@1，贪心解码，协议和超参严格对齐 TTRL。</li>
+    <li><strong>硬件。</strong>8 张 A800 80GB。论文没有报告实际训练时长或 token 总量。</li>
+    <li><strong>EAR 超参。</strong>Adv-Res 的 γ 对称裁剪在 ±0.2，Adv-Clip 取 ±2，两者跨所有模型、数据集保持不变。</li>
+  </ul>
+
+  <p>ETMR 的工程代价藏在结构里：并行采样能吃满 GPU 批处理，树状 rollout 却是流水线式的分支——一部分分支在等另一部分先吐 token。论文 6 节承认，现有 RL 框架（Verl）没有原生支持这种混合执行模式，<strong>理论省下的 token 没有等比例变成墙上时间</strong>，扩展 Verl 的调度原语留作未来工作。</p>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条提示词的完整走法</h2></div>
+  <p class="sec-sub">对应论文 Figure 1：采样 → 投票 → 优势 → 重塑 → 策略更新，两个熵机制分别插在首尾。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 360" role="img" aria-label="ETTRL 流程：提示词经 ETMR 树状采样得到多条回复，多数投票估出伪标签，计算组内优势，再经 EAR 相对熵缩放，最后做策略优化">
+      <defs>
+        <marker id="arw" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+          <path d="M0 0 L10 4 L0 8 z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="arw-a" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+          <path d="M0 0 L10 4 L0 8 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <!-- 1. 提示词 -->
+      <rect x="14" y="150" width="76" height="56" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="52" y="175" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">提示 q</text>
+      <text x="52" y="193" text-anchor="middle" font-size="11" fill="var(--text-soft)">无标签</text>
+      <line x1="90" y1="178" x2="128" y2="178" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"></line>
+
+      <!-- 2. ETMR 树 -->
+      <rect x="130" y="18" width="230" height="324" rx="14" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+      <text x="245" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-deep)">ETMR · 熵分叉树</text>
+      <!-- 主干 -->
+      <line x1="150" y1="178" x2="248" y2="178" stroke="var(--text)" stroke-width="2"></line>
+      <!-- 低熵 token 小圆 -->
+      <circle cx="170" cy="178" r="4" fill="var(--c1)"></circle>
+      <circle cx="188" cy="178" r="4" fill="var(--c1)"></circle>
+      <circle cx="214" cy="178" r="4" fill="var(--c1)"></circle>
+      <circle cx="232" cy="178" r="4" fill="var(--c1)"></circle>
+      <!-- 叉 1 -->
+      <circle cx="200" cy="178" r="6" fill="var(--accent)"></circle>
+      <path d="M200 178 L248 128" stroke="var(--accent)" stroke-width="1.5" fill="none"></path>
+      <path d="M200 178 L248 228" stroke="var(--accent)" stroke-width="1.5" fill="none"></path>
+      <!-- 叉 2 在下面分支上 -->
+      <circle cx="224" cy="203" r="5" fill="var(--accent)"></circle>
+      <path d="M224 203 L248 190" stroke="var(--accent)" stroke-width="1.5" fill="none"></path>
+      <path d="M224 203 L248 216" stroke="var(--accent)" stroke-width="1.5" fill="none"></path>
+      <!-- 叶子 -->
+      <circle cx="252" cy="128" r="4.5" fill="var(--c3)"></circle>
+      <circle cx="252" cy="178" r="4.5" fill="var(--c3)"></circle>
+      <circle cx="252" cy="190" r="4.5" fill="var(--c3)"></circle>
+      <circle cx="252" cy="203" r="4.5" fill="var(--c3)"></circle>
+      <circle cx="252" cy="216" r="4.5" fill="var(--c3)"></circle>
+      <circle cx="252" cy="228" r="4.5" fill="var(--c3)"></circle>
+      <text x="245" y="268" text-anchor="middle" font-size="11" fill="var(--text-muted)">叶子 = M(1+B·N) 条回复</text>
+      <text x="245" y="288" text-anchor="middle" font-size="11" fill="var(--text-muted)">token ≈ 并行采样的 60%</text>
+      <text x="245" y="318" text-anchor="middle" font-size="11" fill="var(--text-soft)">低熵前缀共享，高熵处分叉</text>
+
+      <!-- 图例 -->
+      <circle cx="146" cy="112" r="4" fill="var(--c1)"></circle>
+      <text x="156" y="116" font-size="11" fill="var(--text-muted)">低熵 token</text>
+      <circle cx="146" cy="134" r="5.5" fill="var(--accent)"></circle>
+      <text x="156" y="138" font-size="11" fill="var(--text-muted)">高熵分叉点</text>
+
+      <line x1="360" y1="178" x2="398" y2="178" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"></line>
+
+      <!-- 3. 多数投票 -->
+      <rect x="400" y="146" width="96" height="64" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="448" y="172" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">多数投票</text>
+      <text x="448" y="190" text-anchor="middle" font-size="11" fill="var(--text-soft)">伪标签 y*</text>
+      <line x1="496" y1="178" x2="534" y2="178" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"></line>
+
+      <!-- 4. 奖励与优势 -->
+      <rect x="536" y="146" width="104" height="64" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="588" y="170" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">奖励 R / 优势 Â</text>
+      <text x="588" y="188" text-anchor="middle" font-size="11" fill="var(--text-soft)">GRPO 组内归一化</text>
+      <line x1="640" y1="178" x2="676" y2="178" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#arw-a)"></line>
+
+      <!-- 5. EAR -->
+      <rect x="678" y="18" width="208" height="324" rx="14" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+      <text x="782" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-deep)">EAR · 相对熵缩放</text>
+      <rect x="700" y="66" width="164" height="86" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="782" y="94" text-anchor="middle" font-size="12" fill="var(--text)">高熵回复</text>
+      <text x="782" y="114" text-anchor="middle" font-size="12" fill="var(--accent)" font-weight="600">γ &lt; 1，优势打折</text>
+      <text x="782" y="134" text-anchor="middle" font-size="11" fill="var(--text-soft)">更像「蒙对」，别学太快</text>
+      <rect x="700" y="164" width="164" height="86" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="782" y="192" text-anchor="middle" font-size="12" fill="var(--text)">低熵回复</text>
+      <text x="782" y="212" text-anchor="middle" font-size="12" fill="var(--c1)" font-weight="600">γ &gt; 1，最多 ×1.2</text>
+      <text x="782" y="232" text-anchor="middle" font-size="11" fill="var(--text-soft)">更像「真会」，可以放大</text>
+      <text x="782" y="286" text-anchor="middle" font-size="11" fill="var(--text-muted)">γ 裁剪到 [0.8, 1.2]</text>
+      <text x="782" y="308" text-anchor="middle" font-size="11" fill="var(--text-muted)">只改优势，不改奖励方向</text>
+
+      <!-- 回环到策略 -->
+      <path d="M782 342 L782 356 L52 356 L52 206" stroke="var(--text-soft)" stroke-width="1.5" fill="none" marker-end="url(#arw)"></path>
+      <text x="420" y="350" text-anchor="middle" font-size="11" fill="var(--text-muted)">策略优化后回到同一提示词继续迭代</text>
+    </svg>
+    <figcaption>
+      图 1：ETTRL 的完整回路。左框是采样侧的熵机制，右框是奖励/优势侧的熵机制；中间的投票与 GRPO 归一化是 TTRL 原样保留的部分。
+    </figcaption>
+  </figure>
+
+  <p>为什么第二个机制能起作用，论文的解释是消融式的。对 ETMR，论文 §5.1 的口径是「相对容易的数据集，较难的数据集（如 AIME）上相对增益更大」，并归因于高熵处分叉带来更强的探索、让伪标签更准；但增益要参照基线水平来读：AIME 上基线普遍只有 7.9–15.8，Llama-3.1-8B 10.0→16.9 才显得大，而 MATH-500 上基线已在 63–73，同样的分叉换不来更准的伪标签，Adv-Res 在 Llama-3.1-8B 的 MATH-500 上也从 63.7 退到 61.3（↓3.8%），说明这一档本来就难涨——ETMR 在该行跌到 59.5。所以「难题涨得多」在表格里的确定性表述是「AIME 的相对增幅最大」，不涵盖 MATH-500 的退步。EAR 的增益则在「非数学、小模型」上更大，因为它们的内在不确定性更高，更容易被高熵的幸运样本带偏。两个机制在各自擅长的模型上增益最大，这就是「同一份熵、两种用法」的经验证据。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>难题涨得多、小模型涨得多，MATH-500 基本让位</h2></div>
+  <p class="sec-sub">三张表、三个模型，全部 Pass@1（贪心解码）。每个组件单独替换 TTRL 的一个环节。</p>
+
+  <div class="tabs" id="res-tabs">
+    <button class="tab active" data-tbl="etmr">Table 1 · ETMR vs TTRL</button>
+    <button class="tab" data-tbl="ear">Table 2 · Adv-Res vs Adv-Clip vs TTRL</button>
+  </div>
+
+  <div class="tbl-scroll" id="res-table"></div>
+  <p class="sec-sub" style="margin-top:6px">Δ 相对 =（新值 − TTRL 基线）/ 基线，保留 1 位小数、四舍五入，本页按表中绝对数逐格复算。原文 Table 2 有两处与复算不符：Qwen2.5-Base-3B 的 AMC 写 ↑3.2%（40.7→41.4 实为 ↑1.7%），Llama-3.1-8B 的 MATH-500 写 ↓0.8%（63.7→61.3 实为 ↓3.8%）；其余 22 格一致。Table 1 的 24 格全部一致。</p>
+  <div class="chart" id="res-chart" style="margin-top:22px"></div>
+  <div class="legend">
+    <span><i style="background:var(--c1)"></i>TTRL 基线</span>
+    <span><i style="background:var(--accent)" id="res-legend-label">ETMR / Adv-Res</span>
+  </div>
+
+  <p style="margin-top:22px">几处值得注意的地方：</p>
+  <ul>
+    <li><strong>相对提升最大的不是最大模型，而是最「偏科」的。</strong>ETMR 在 Llama-3.1-8B 的 AIME 上 10.0→16.9（+69.0%），在 Qwen2.5-Math-1.5B 上 15.8→21.0（+32.9%），到 Qwen2.5-Base-3B 只剩 +16.5%。</li>
+    <li><strong>MATH-500 上 ETMR 反而退步。</strong>Llama-3.1-8B 从 63.7 掉到 59.5（−6.6%），Qwen2.5-Base-3B 也从 72.2 掉到 71.7。分叉树省下的 token 在较容易的数据上没有换成更好的伪标签。</li>
+    <li><strong>EAR 和 Adv-Clip 几乎打平，但机理不同。</strong>两边各有胜场：Adv-Clip 在 Qwen2.5-Base-3B 的 AMC（42.0 vs 41.4）和 MATH-500（71.3 vs 72.4）、Llama-3.1-8B 的 AMC（34.7 vs 36.4）和 MATH-500（63.2 vs 61.3）上领先；Adv-Res 主要在难题 AIME 上领先——Qwen2.5-Base-3B 13.1 vs 10.0、Qwen2.5-Math-1.5B 19.6 vs 19.4，Llama-3.1-8B 两队同为 13.5；MATH-500 上 Qwen2.5-Math-1.5B 两队同为 77.3，另外两组 Adv-Clip 分别高 0.3 和 1.9。Avg 三行依次为 49.3/49.1、42.3/41.1、37.1/37.1。</li>
+    <li><strong>论文正文口径略大于表格。</strong>摘要写「68%」，Table 1 是 69.0%；正文称 Adv-Res 让 Qwen2.5-3B「提升 65%」，Table 2 是 65.8%。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>省 token 不等于省时间，省出来的也不全是收益</h2></div>
+  <p class="sec-sub">论文在 Limitation 和讨论里自己点了几条，其余可以从表格里读出来。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文自述</span><h4>墙上时间达不到理论值</h4></div>
+    <p>ETMR 的 token 减少是理论值；树状 rollout 是流水线式的，并行采样则能吃满 batch。Verl 缺原生混合调度支持，所以实际加速有限。此外，ETMR 对温度很敏感，过高会训练崩塌；相对熵系数和裁剪上界在论文中也都随数据集、模型而变，作者没有做系统搜索。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">数据可读</span><h4>60% 的 token 换来的分叉，在简单数据上会亏</h4></div>
+    <p>Table 1 里 MATH-500 的两处负增益说明：当模型本来就有较高准确率、多数样本路径相似时，刻意在低熵处旧有路径上分叉并没有提供额外多样性，反而稀释了 vote-then-sample 的样本量。ETMR 适配的是「模型自己都拿不准」的难题。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">机制边界</span><h4>它仍然完全依赖投票出的伪标签</h4></div>
+    <p>ETMR 提高伪标签准确率、EAR 降低对不可靠标签的学习速度，但二者都没有引入外部验证器或打破共识。当模型的整体分布系统性偏移（所有路径一起错），投票依然会给出一致的错误标签——论文没有针对「集体性错误」的机制。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">适用范围</span><h4>实验只有数学，模型最大 8B</h4></div>
+    <p>三个基准（AIME 2024、AMC、MATH-500）都要求答案可抽取、可比较多；投票机制在开放式写作、代码这类答案空间连续或不唯一的任务上难以直接使用。另外，本文所有增益都是在 1.5B–8B 范围内测得的，更大模型上熵的分布和校准方式可能不同。</p>
+  </div>
+  <div class="tabs" id="sec-tabs">
+    <button class="tab active" data-n="2" data-b="2">N=2, B=2</button>
+    <button class="tab" data-n="2" data-b="3">N=2, B=3</button>
+    <button class="tab" data-n="3" data-b="3">N=3, B=3</button>
+    <button class="tab" data-n="3" data-b="1">N=3, B=1</button>
+  </div>
+  <div class="readout" id="sec-readout" style="margin-top:0">
+    <div class="r-head">选中的配置</div>
+    <div id="sec-msg"></div>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>分叉点 N</th><th>每叉分支 B</th>
+          <th class="num">叶子数 M(1+BN), M=12</th>
+          <th class="num">Eq. 11 比例</th>
+          <th>读法</th>
+        </tr>
+      </thead>
+      <tbody id="sec-tbody"></tbody>
+    </table>
+  </div>
+  <p class="sec-sub" style="margin-top:-8px">点是原文给出的配置，选中后一行高亮：N 越大、B 越大，共享的前缀越多，比例越低；B=1 时不产生真正的分叉，比例恒为 1。</p>
+
+  <svg viewBox="0 0 820 230" role="img" aria-label="ETMR 效率示意：一棵树的 token 消耗随 N 下降，实验配置 N=2、B=2 落在 60%" style="width:100%;height:auto;display:block">
+    <line x1="60" y1="190" x2="790" y2="190" stroke="var(--border-strong)" stroke-width="1"></line>
+    <line x1="60" y1="30" x2="60" y2="190" stroke="var(--border-strong)" stroke-width="1"></line>
+    <text x="60" y="214" text-anchor="middle" font-size="11" fill="var(--text-soft)">N=1</text>
+    <text x="212" y="214" text-anchor="middle" font-size="11" fill="var(--text-soft)">N=2</text>
+    <text x="364" y="214" text-anchor="middle" font-size="11" fill="var(--text-soft)">N=3</text>
+    <text x="516" y="214" text-anchor="middle" font-size="11" fill="var(--text-soft)">N=4</text>
+    <text x="668" y="214" text-anchor="middle" font-size="11" fill="var(--text-soft)">N=5</text>
+    <text x="30" y="196" font-size="11" fill="var(--text-soft)">0%</text>
+    <text x="30" y="110" font-size="11" fill="var(--text-soft)">50%</text>
+    <text x="30" y="36" font-size="11" fill="var(--text-soft)">100%</text>
+    <!-- B=1 曲线 -->
+    <polyline fill="none" stroke="var(--c1)" stroke-width="2" points="60,86 212,86 364,86 516,86 668,86"></polyline>
+    <!-- B=2 曲线（N=1..5） -->
+    <polyline fill="none" stroke="var(--accent)" stroke-width="2"
+      points="60,110 212,126 364,134 516,138 668,141.6"></polyline>
+    <!-- B=3 曲线 -->
+    <polyline fill="none" stroke="var(--c2)" stroke-width="2"
+      points="60,126 212,154 364,165 516,172 668,176.4"></polyline>
+    <circle cx="212" cy="126" r="5" fill="var(--accent)"></circle>
+    <text x="222" y="120" font-size="11" fill="var(--accent-deep)">60% · 实验配置</text>
+    <circle cx="364" cy="134" r="4" fill="var(--accent)"></circle>
+    <text x="372" y="146" font-size="11" fill="var(--text-muted)">57.1%</text>
+    <text x="660" y="82" font-size="11" fill="var(--c1)">B=1</text>
+    <text x="760" y="70" font-size="11" fill="var(--accent)">B=2</text>
+    <text x="760" y="196" font-size="11" fill="var(--c2)">B=3</text>
+    <text x="410" y="24" text-anchor="middle" font-size="11" fill="var(--text-soft)">纵轴：Eq. 11 的 token 比例（相对同条数并行采样，M 抵消）</text>
+  </svg>
+</section>
+
+<footer>
+  <div>ETTRL: Balancing Exploration and Exploitation in LLM Test-Time Reinforcement Learning Via Entropy Mechanism · Jia Liu, ChangYi He, YingQiao Lin, MingMin Yang, FeiYang Shen, ShaoGuo Liu</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.11356" target="_blank" rel="noopener">https://arxiv.org/abs/2508.11356</a>（v2，2025-08-29；arXiv 上暂未附代码链接）<br>
+    笔记：<a href="/ettrlbalancing-exploration-and-exploitation-in-llm-test-time-reinforcement-learning-via-entropy-mechanism/">ETTRL：BALANCING EXPLORATION AND EXPLOITATION IN LLM TEST-TIME REINFORCEMENT LEARNING VIA ENTROPY MECHANISM</a><br>
+    与笔记的出入（笔记原文未改动）：其一，笔记把 60% 的算例写成 N=3、B=2，原文 Eq. 11 的 60% 对应实验配置 N=2、B=2，N=3、B=2 应为 57.1%；其二，笔记说 AIME 上「68% 相对提升」，原文摘要写 68%、Table 1 为 69.0%；其三，笔记 EAR 公式写成 1−α、1+β 的非对称裁剪，原文是对称裁剪 1±0.2，且 γ 本身未说明范围；其四，笔记称 EAR「几乎都优于」Adv-Clip，原文 Table 2 中 Llama-3.1-8B 在 AIME 与 Adv-Clip 同为 13.5，Qwen2.5-Math-1.5B 的 AMC 为 51.0 对 50.5。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- 工具 ---------- */
+  function $(id) { return document.getElementById(id); }
+
+  /* ============================================================
+     交互 1：ETMR 分叉树 —— 叶子数与 token 比例
+     ============================================================ */
+  var treeSlots = $('tree-slots');
+  var nRange = $('n-range');
+  var bRange = $('b-range');
+
+  function fmtPct(x) { return (x * 100).toFixed(1) + '%'; }
+
+  function renderTree() {
+    if (!treeSlots || !nRange || !bRange) return;
+    var N = parseInt(nRange.value, 10);
+    var B = parseInt(bRange.value, 10);
+    var nv = $('n-v'), bv = $('b-v');
+    if (nv) nv.textContent = String(N);
+    if (bv) bv.textContent = String(B);
+
+    /* 论文 Eq. 8：叶子数；M 固定为实验里的 12 */
+    var M = 12;
+    var leaves = M * (1 + B * N);
+    /* 论文 Eq. 11 的均匀假设简化 */
+    var ratio = (1 + 0.5 * B * N) / (1 + B * N);
+
+    treeSlots.innerHTML = '';
+    var names = ['M', 'N', 'B', '叶子数', 'token 比'];
+    var vals = [M, N, B, leaves, fmtPct(ratio)];
+    var subs = ['树数', '分叉点', '每叉分支', 'M(1+B·N)', 'Eq. 11'];
+    for (var i = 0; i < names.length; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot' + (i === 3 ? ' hit' : '');
+      var nm = document.createElement('div');
+      nm.className = 'slot-name';
+      nm.textContent = names[i];
+      var vl = document.createElement('div');
+      vl.className = 'slot-val';
+      vl.textContent = String(vals[i]);
+      var sb = document.createElement('div');
+      sb.style.fontSize = '10.5px';
+      sb.style.color = 'var(--text-soft)';
+      sb.textContent = subs[i];
+      slot.appendChild(nm);
+      slot.appendChild(vl);
+      slot.appendChild(sb);
+      treeSlots.appendChild(slot);
+    }
+
+    var msg = $('tree-msg');
+    if (!msg) return;
+    var html = '叶子数 <strong>' + leaves + '</strong> 条；若用并行采样拿到同样条数，token 是该数的 100%。' +
+      '按 Eq. 11，树状消耗约为 <strong>' + fmtPct(ratio) + '</strong>，省下的 ' + fmtPct(1 - ratio) + ' 来自共享低熵前缀。';
+    if (N === 2 && B === 2) {
+      html += ' <span class="warn">这正是论文实验配置：12×(1+4)=60 条，60/100 = 60%，与原文一致。</span>';
+    } else if (N === 3 && B === 2) {
+      html += ' <span class="warn">这是论文 Eq. 11 下方的文字算例，理论上为 57.1%，原文写的 60% 与之有 3 个百分点的出入。</span>';
+    }
+    msg.innerHTML = html;
+  }
+
+  if (nRange) nRange.addEventListener('input', function () {
+    var preset = document.querySelectorAll('#etmr-preset .rule-btn');
+    for (var i = 0; i < preset.length; i++) {
+      preset[i].classList.remove('active');
+      if (parseInt(preset[i].getAttribute('data-n'), 10) === parseInt(nRange.value, 10) &&
+          parseInt(preset[i].getAttribute('data-b'), 10) === parseInt(bRange.value, 10)) {
+        preset[i].classList.add('active');
+      }
+    }
+    renderTree();
+  });
+  if (bRange) bRange.addEventListener('input', function () {
+    var preset = document.querySelectorAll('#etmr-preset .rule-btn');
+    for (var i = 0; i < preset.length; i++) {
+      preset[i].classList.remove('active');
+      if (parseInt(preset[i].getAttribute('data-n'), 10) === parseInt(nRange.value, 10) &&
+          parseInt(preset[i].getAttribute('data-b'), 10) === parseInt(bRange.value, 10)) {
+        preset[i].classList.add('active');
+      }
+    }
+    renderTree();
+  });
+
+  var presetBtns = document.querySelectorAll('#etmr-preset .rule-btn');
+  for (var p = 0; p < presetBtns.length; p++) {
+    presetBtns[p].addEventListener('click', function () {
+      for (var k = 0; k < presetBtns.length; k++) presetBtns[k].classList.remove('active');
+      this.classList.add('active');
+      if (nRange) nRange.value = this.getAttribute('data-n');
+      if (bRange) bRange.value = this.getAttribute('data-b');
+      renderTree();
+    });
+  }
+
+  renderTree();
+
+  /* ============================================================
+     交互 2：EAR 相对熵缩放 —— 可编辑的四个熵值
+     ============================================================ */
+  var earSlots = $('ear-slots');
+  var earDefaults = [0.4, 0.6, 0.7, 0.5];
+
+  function buildEarSlots() {
+    if (!earSlots) return;
+    earSlots.innerHTML = '';
+    var vals = earDefaults.slice();
+    for (var i = 0; i < vals.length; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot';
+      var nm = document.createElement('div');
+      nm.className = 'slot-name';
+      nm.textContent = 'H' + (i + 1);
+      var input = document.createElement('input');
+      input.type = 'number';
+      input.className = 'slot-in';
+      input.min = '0';
+      input.max = '10';
+      input.step = '0.05';
+      input.value = String(vals[i]);
+      input.setAttribute('data-ear', String(i));
+      input.addEventListener('input', renderEar);
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.id = 'ear-val-' + i;
+      val.style.marginTop = '6px';
+      slot.appendChild(nm);
+      slot.appendChild(input);
+      slot.appendChild(val);
+      earSlots.appendChild(slot);
+    }
+  }
+
+  function renderEar() {
+    if (!earSlots || !$('ar-a') || !$('ar-b')) return;
+    var inputs = document.querySelectorAll('#ear-slots input[data-ear]');
+    if (!inputs.length) return;
+    var H = [];
+    var sum = 0;
+    for (var i = 0; i < inputs.length; i++) {
+      var v = parseFloat(inputs[i].value);
+      if (!isFinite(v) || v < 0) v = 0;
+      H.push(v);
+      sum += v;
+    }
+    var mean = sum / H.length;
+    var alpha = parseFloat($('ar-a').value);
+    var beta = parseFloat($('ar-b').value);
+    var av = $('ar-a-v'), bv = $('ar-b-v');
+    if (av) av.textContent = alpha.toFixed(2);
+    if (bv) bv.textContent = beta.toFixed(1);
+
+    var mults = [];
+    for (var j = 0; j < H.length; j++) {
+      var gamma = 1;
+      if (mean > 0) gamma = 1 + (mean - H[j]) / mean;
+      var clipped = Math.min(1 + alpha, Math.max(1 - alpha, gamma));
+      mults.push({ g: gamma, m: clipped });
+      var el = $('ear-val-' + j);
+      if (el) el.textContent = 'γ=' + gamma.toFixed(2) + ' → ×' + clipped.toFixed(2);
+      var slotEl = inputs[j].closest('.slot');
+      if (slotEl) {
+        slotEl.classList.toggle('hit', H[j] > mean + 1e-9);
+      }
+    }
+
+    var msg = $('ear-msg');
+    if (!msg) return;
+    var html = '组内平均熵 <strong>avg = ' + mean.toFixed(3) + '</strong>。';
+    if (mean <= 0) {
+      html += ' 平均熵为 0 时定义失效，所有 γ 取 1。';
+    } else {
+      var hi = 0, lo = 0, hiV = -Infinity, loV = Infinity;
+      for (var k = 0; k < H.length; k++) {
+        if (H[k] > hiV) { hiV = H[k]; hi = k; }
+        if (H[k] < loV) { loV = H[k]; lo = k; }
+      }
+      html += ' 最高熵 H' + (hi + 1) + '=' + H[hi].toFixed(2) + ' → γ=' + mults[hi].g.toFixed(3) +
+        '，裁剪后 <strong>×' + mults[hi].m.toFixed(2) + '</strong>（更怀疑，优势打折）。' +
+        ' 最低熵 H' + (lo + 1) + '=' + H[lo].toFixed(2) + ' → γ=' + mults[lo].g.toFixed(3) +
+        '，裁剪后 <strong>×' + mults[lo].m.toFixed(2) + '</strong>（更自信，优势放大）。';
+      var outside = 0;
+      for (var q = 0; q < mults.length; q++) if (Math.abs(mults[q].g) < 0.9 || mults[q].g > 1.2) outside++;
+      if (outside > 0) html += ' <span class="warn">有 ' + outside + ' 个 γ 被截断，说明 α=' + alpha.toFixed(2) + ' 的限制在起作用。</span>';
+    }
+    html += ' 对比 Adv-Clip：它把每条 token 的原始优势直接裁到 [−' + beta.toFixed(1) + ', +' + beta.toFixed(1) + ']，不区分熵高低。';
+    msg.innerHTML = html;
+  }
+
+  function resetEar() {
+    if (!earSlots) return;
+    buildEarSlots();
+    var a = $('ar-a'), b = $('ar-b');
+    if (a) a.value = '0.2';
+    if (b) b.value = '2';
+    renderEar();
+  }
+
+  buildEarSlots();
+  if ($('ar-a')) $('ar-a').addEventListener('input', renderEar);
+  if ($('ar-b')) $('ar-b').addEventListener('input', renderEar);
+  if ($('ear-reset')) $('ear-reset').addEventListener('click', resetEar);
+  renderEar();
+
+  var secTbody = $('sec-tbody');
+  if (secTbody) {
+    var data = [
+      [2, 2, 12 * 5, (1 + 2) / (1 + 4)],
+      [2, 3, 12 * 7, (1 + 3) / (1 + 6)],
+      [3, 3, 12 * 10, (1 + 4.5) / (1 + 9)],
+      [3, 1, 12 * 4, (1 + 1.5) / (1 + 3)]
+    ];
+    var readMap = {
+      '2-2': '原文实验配置，正好 60%',
+      '2-3': '每叉多一条，省得更多',
+      '3-3': '式 11 里最低的一档',
+      '3-1': 'B=1 没有分叉，比例恒为 1'
+    };
+    var rowsHtml = '';
+    var secTable = secTbody.parentNode;
+    while (secTable && secTable.tagName !== 'TABLE') secTable = secTable.parentNode;
+    for (var s = 0; s < data.length; s++) {
+      var row = data[s];
+      rowsHtml += '<tr data-n="' + row[0] + '" data-b="' + row[1] + '"><td class="num">' + row[0] +
+        '</td><td class="num">' + row[1] + '</td><td class="num">' + row[2] +
+        '</td><td class="num">' + fmtPct(row[3]) + '</td><td>' + readMap[row[0] + '-' + row[1]] + '</td></tr>';
+    }
+    secTbody.innerHTML = rowsHtml;
+
+    function markSec(n, b) {
+      if (!secTable) return;
+      var trs = secTable.querySelectorAll('tbody tr');
+      for (var t = 0; t < trs.length; t++) {
+        var on = parseInt(trs[t].getAttribute('data-n'), 10) === n &&
+                 parseInt(trs[t].getAttribute('data-b'), 10) === b;
+        trs[t].className = on ? 'best' : '';
+      }
+      var msg = $('sec-msg');
+      if (!msg) return;
+      var leaves = 12 * (1 + b * n);
+      var ratio = (1 + 0.5 * b * n) / (1 + b * n);
+      var txt = 'N=' + n + '，B=' + b + '：一棵树 ' + leaves + ' 个叶子，按 Eq. 11 消耗同条数并行采样的 <strong>' +
+        fmtPct(ratio) + '</strong>。';
+      if (n === 2 && b === 2) txt += ' <span class="warn">实验配置，正好 60%，和原文的 60%（TTRL 用 64 条、ETMR 用 60 条）对得上。</span>';
+      if (n === 3 && b === 2) txt += ' <span class="warn">原文 Eq. 11 下方把这个配置也写作 60%，实为 57.1%。</span>';
+      msg.innerHTML = txt;
+    }
+
+    var secTabs = document.querySelectorAll('#sec-tabs .tab');
+    for (var si = 0; si < secTabs.length; si++) {
+      secTabs[si].addEventListener('click', function () {
+        for (var sj = 0; sj < secTabs.length; sj++) secTabs[sj].classList.remove('active');
+        this.classList.add('active');
+        markSec(parseInt(this.getAttribute('data-n'), 10), parseInt(this.getAttribute('data-b'), 10));
+      });
+    }
+    markSec(data[0][0], data[0][1]);
+  }
+
+  /* ============================================================
+     表格与对比图
+     ============================================================ */
+  var RES = {
+    etmr: {
+      legend: 'ETMR',
+      rows: [
+        { m: 'Qwen2.5-Math-1.5B', d: [15.8, 48.9, 73.0, 45.9], v: [21.0, 50.8, 76.9, 49.6], dv: [32.9, 3.9, 5.3, 8.1] },
+        { m: 'Qwen2.5-Base-3B', d: [7.9, 40.7, 72.2, 40.3], v: [9.2, 41.7, 71.7, 40.9], dv: [16.5, 2.5, -0.7, 1.5] },
+        { m: 'Llama-3.1-8B', d: [10.0, 32.3, 63.7, 35.3], v: [16.9, 35.4, 59.5, 37.3], dv: [69.0, 9.6, -6.6, 5.7] }
+      ]
+    },
+    ear: {
+      legend: 'Adv-Res',
+      rows: [
+        { m: 'Qwen2.5-Math-1.5B', d: [15.8, 48.9, 73.0, 45.9], v: [19.6, 51.0, 77.3, 49.3], dv: [24.1, 4.3, 5.9, 7.4] },
+        { m: 'Qwen2.5-Base-3B', d: [7.9, 40.7, 72.2, 40.3], v: [13.1, 41.4, 72.4, 42.3], dv: [65.8, 1.7, 0.3, 5.0] },
+        { m: 'Llama-3.1-8B', d: [10.0, 32.3, 63.7, 35.3], v: [13.5, 36.4, 61.3, 37.1], dv: [35.0, 12.7, -3.8, 5.1] }
+      ]
+    }
+  };
+  var BENCH = ['AIME 2024', 'AMC', 'MATH-500', 'Avg'];
+
+  function renderResult(key) {
+    var tableHost = $('res-table');
+    if (!tableHost) return;
+    var cfg = RES[key];
+    if (!cfg) return;
+
+    var html = '<table><thead><tr><th>模型</th><th>方法</th>';
+    for (var b = 0; b < BENCH.length; b++) html += '<th style="text-align:right">' + BENCH[b] + '</th>';
+    html += '</tr></thead><tbody>';
+    for (var i = 0; i < cfg.rows.length; i++) {
+      var r = cfg.rows[i];
+      html += '<tr><td rowspan="3">' + r.m + '</td><td>TTRL</td>';
+      for (var j = 0; j < 4; j++) html += '<td class="num">' + r.d[j].toFixed(1) + '</td>';
+      html += '</tr><tr class="best"><td>' + cfg.legend + '</td>';
+      for (var k = 0; k < 4; k++) html += '<td class="num">' + r.v[k].toFixed(1) + '</td>';
+      html += '</tr><tr><td>Δ 相对</td>';
+      for (var q = 0; q < 4; q++) {
+        var sign = r.dv[q] > 0 ? '↑' : (r.dv[q] < 0 ? '↓' : '');
+        if (r.dv[q] === 0) sign = '';
+        var absv = Math.abs(r.dv[q]).toFixed(1) + '%';
+        html += '<td class="num">' + (r.dv[q] === 0 ? '=' : sign + absv) + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    tableHost.innerHTML = html;
+
+    var lab = $('res-legend-label');
+    if (lab) lab.textContent = cfg.legend;
+
+    var chart = $('res-chart');
+    if (!chart) return;
+    chart.innerHTML = '';
+    var maxAbs = 75;
+    for (var m = 0; m < cfg.rows.length; m++) {
+      var row = cfg.rows[m];
+      var crow = document.createElement('div');
+      crow.className = 'crow narrow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = row.m.replace('Qwen2.5-', 'Q2.5-').replace('Llama-3.1-', 'Llama-');
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      for (var t = 0; t < 4; t++) {
+        var cb = document.createElement('div');
+        cb.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        var val = row.dv[t];
+        fill.style.background = 'var(--accent)';
+        fill.style.height = Math.min(100, Math.abs(val) / maxAbs * 100) + '%';
+        if (val < 0) { fill.style.top = '0'; fill.style.bottom = 'auto'; fill.style.borderRadius = '0 0 6px 6px'; }
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = (val > 0 ? '+' : '') + val.toFixed(1) + '%';
+        cb.appendChild(track);
+        cb.appendChild(num);
+        bars.appendChild(cb);
+      }
+      crow.appendChild(name);
+      crow.appendChild(bars);
+      chart.appendChild(crow);
+    }
+  }
+
+  var resTabs = document.querySelectorAll('#res-tabs .tab');
+  for (var ti = 0; ti < resTabs.length; ti++) {
+    resTabs[ti].addEventListener('click', function () {
+      for (var x = 0; x < resTabs.length; x++) resTabs[x].classList.remove('active');
+      this.classList.add('active');
+      renderResult(this.getAttribute('data-tbl'));
+    });
+  }
+  renderResult('etmr');
+})();
+</script>
+</body>
+</html>

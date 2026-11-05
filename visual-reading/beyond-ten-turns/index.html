@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beyond Ten Turns · 把批同步拆开，搜索智能体才敢走 128 轮</title>
+<meta name="description" content="ASearcher 用全异步 Agentic RL 把轨迹执行与模型更新解耦，让搜索智能体在 128 轮上限下训练；配合 Injection / Fuzzing 的数据合成智能体。ASearcher-Web-QwQ-v2 在 GAIA / xBench-DeepSearch 上 Avg@4 达 58.7 / 51.1，H800 约 16k 小时。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-soft{fill:var(--bg-soft);stroke:var(--border)}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+.pipe-dash{stroke:var(--text-soft);stroke-width:1;stroke-dasharray:4 4;fill:none}
+
+/* ---- 异步时间线模拟器 ---- */
+.tl{display:flex;flex-direction:column;gap:8px;margin:16px 0 4px}
+.tl-row{display:grid;grid-template-columns:70px 1fr 48px;gap:8px;align-items:center}
+.tl-name{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right;white-space:nowrap}
+.tl-track{position:relative;height:20px;background:var(--bg-soft);border-radius:4px;overflow:hidden}
+.tl-bar{position:absolute;top:2px;bottom:2px;border-radius:3px;background:var(--bg-surface);border:1px solid var(--c2);color:var(--c2);font-family:"JetBrains Mono",monospace;font-size:9.5px;line-height:14px;text-align:center;white-space:nowrap;overflow:hidden}
+.tl-bar.ok{background:var(--c2-soft);border-color:var(--c2);color:var(--c2);font-weight:600}
+.tl-bar.early{opacity:.38;border-style:dashed}
+.tl-bar.long{background:var(--c1-soft);border-color:var(--c1);color:var(--c1);font-weight:600}
+.tl-len{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);text-align:right}
+.tl-upd{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.tl-upd-lab{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;fill:var(--accent-deep);text-anchor:middle}
+.tl-idle{fill:var(--text-soft);fill-opacity:.12;stroke:var(--text-soft);stroke-width:1;stroke-dasharray:3 3}
+.tl-idle-lab{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft)}
+.tl-axis{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-soft)}
+.tl-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin-top:4px}
+.tl-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.tl-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+.tl-metrics .metric-l{border:1px solid var(--border);border-radius:8px;padding:9px 10px;background:var(--bg);min-width:0}
+.tl-metrics .ml-k{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft)}
+.tl-metrics .ml-v{font-family:"JetBrains Mono",monospace;font-size:17px;font-weight:600;color:var(--text);line-height:1.35}
+.tl-metrics .metric-l.warn .ml-v{color:var(--c1)}
+.tl-metrics .metric-l.good .ml-v{color:var(--accent)}
+.tl-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:8px 0 0}
+@media (max-width:520px){
+  .tl-row{grid-template-columns:56px 1fr 38px;gap:5px}
+  .tl-name,.tl-len{font-size:10px}
+  .tl-metrics{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Beyond Ten Turns</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2508.07976v4</span>
+  <h1>Beyond Ten Turns：把批同步拆开之后，搜索智能体才敢走完 128 轮</h1>
+  <p class="hero-sub">
+    开源搜索智能体差在<strong>搜索智能</strong>：能不能拆开模糊问题、给出精确查询、从嘈杂网页里抠出关键信息、并回头验证结论。已有的在线 RL 通常只给 10 轮以内的工具调用，因为批同步训练里一条超长轨迹会让整批 GPU 空转。
+    ASearcher 把轨迹执行和模型更新彻底解耦，换来 128 轮的上限——训练中出现了<strong>超过 100 次工具调用、超过 400k 输出 token</strong>的轨迹；代价是训练会吃掉上千 GPU 小时。
+  </p>
+  <div class="meta">
+    <span>Jiaxuan Gao 等 · 清华 IIIS / 蚂蚁 / UW</span>
+    <a href="https://arxiv.org/abs/2508.07976" target="_blank" rel="noopener">arXiv 2508.07976 ↗</a>
+    <a href="https://github.com/inclusionAI/ASearcher" target="_blank" rel="noopener">代码 inclusionAI/ASearcher ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    长时程搜索卡在两件事上：<strong>轨迹走不长</strong>，以及<strong>能当训练题的难题太少</strong>。前者是系统工程问题，后者是数据问题；ASearcher 把两个都当作瓶颈，而不是只调算法。
+  </p>
+  <p>
+    核心机制是<strong>全异步 Agentic RL</strong>：轨迹各自并行、互不等待；一旦收集到足够轨迹就立即启动训练步，不等那条最长的轨迹。于是轮次上限可以从 ≤10 抬到 128，而 GPU 在生成阶段几乎不空转。
+  </p>
+  <p>
+    数据端是<em>合成智能体</em>：从种子问题出发反复 Injection（注入外部事实）和 Fuzzing（模糊关键信息），再用三步验证筛掉太简单、无答案、或不需要搜索就能答对的题。14,107 个种子最终留下 25,624 条。
+  </p>
+  <p>
+    结果是 ASearcher-Web-QwQ-v2 在 GAIA 上 Avg@4 <strong>58.7</strong>、xBench-DeepSearch <strong>51.1</strong>，超过同尺寸开源智能体；但这个数字背后是约 <strong>16k H800 GPU 小时</strong>和端到端评测时实测的长时间空等——它换来的是能力上限，不是便宜。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">128<small> 轮</small></div>
+      <div class="k">Web-QwQ 轨迹轮次上限<br>7B / 14B 为 32；已有工作 ≤10</div>
+    </div>
+    <div class="metric">
+      <div class="v">58.7 / 51.1</div>
+      <div class="k">GAIA / xBench Avg@4（v2）<br>v1 为 52.8 / 42.1</div>
+    </div>
+    <div class="metric">
+      <div class="v">16k<small> H800·h</small></div>
+      <div class="k">Web-QwQ 总训练时长<br>batch 64；QwQ-32B 基座</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>难题的解法是一条长链，而批同步只给链的每一步派一个「最慢的人」</h2></div>
+  <p class="sec-sub">先看清为什么「多给几轮」不是改个参数就能做到：轮数一放长，批同步训练的等待时间会指数式地失控。</p>
+
+  <p>
+    论文用一枚金牌数的问题开场：中国在 2012 伦敦奥运会拿了多少金、银、铜牌？网上两套说法互相打架（38 / 27 / 22 对 39 / 31 / 22），真正的答案要先找到官方报告里「因兴奋剂检测被取消」的记录，才能定下来。这类任务要求智能体处理输入的高不确定性、生成精确查询、从海量信息中抽取要点、消解冲突，最后<strong>回头验证</strong>——论文把这一整套能力叫 <strong>Search Intelligence</strong>。
+  </p>
+
+  <p>
+    这些事情一步做不完。论文在 GAIA、xBench-DeepSearch、Frames 上强制智能体至少使用不同的轮数，同一个模型<strong>轮数越多，准确率越高</strong>（Fig. 6 Left）——也就是说，「能走多远」本身就是能力的一部分。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>长轨迹既必要，又是批同步训练的效率杀手</h4></div>
+    <p>
+      一条轨迹由多轮「LLM 生成 → 调工具 → 再生成」串联而成，单条就要串行地跑很久；而同一批里不同轨迹的长度差极大——论文观察到<strong>最长的轨迹所用的 token 能比短的差两个数量级</strong>。在批同步（batch generation）训练里，一个训练步必须等整批采完，于是批里回响的一直是那条最慢的轨迹的空转。
+    </p>
+    <p>两个问题叠在一起就成死结：想涨能力要多给轮数，但轮数一多，空转占比急剧上升，训练变得不可负担。</p>
+  </div>
+
+  <p>
+    另一个瓶颈不在训练循环里，而在训练题本身：在线 RL 需要大量<strong>有唯一答案、足够难、又必须用工具</strong>的问题。现有开源搜索智能体的训练数据（如 HotpotQA）要么过时、要么过于简单、要么规模太小，RL 在它们身上学不出复杂的搜索策略。所以这篇论文要同时回答：<strong>训练系统怎么撑住长轨迹，训练题从哪来。</strong>
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成的路各自卡在一半：RL 学的太浅，提示工程的模型太弱</h2></div>
+  <p class="sec-sub">论文的第二节是一个 GAIA 案例的对照——同一道题，三条轨迹暴露出两种开箱方案的两种失败方式。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">在线 RL</span><h4>Search-R1 类：轮数被锁死</h4></div>
+      <p>
+        用多跳 QA 加 RL 训练工具调用（Search-R1、R1-Searcher、DeepResearcher 等），确实能让工具调用次数上升，但它们<strong>人为限制轮数</strong>——论文举例 Search-R1 每轨迹 ≤10 轮，案例里训练时只设 4 轮。
+      </p>
+      <p><strong>盲区：</strong>轮数不够，只能学到拆一句查询、搜一次这类初级策略。案例中的 Search-R1-32B 拆不开多变量问题、只发模糊查询，还有明显幻觉，最后没能解决任何一个未知量。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">提示工程 / 离线 RL</span><h4>Search-o1 类：会搜但不会收</h4></div>
+      <p>
+        用强 LRM（如 QwQ）+ 提示驱动，不做在线 RL 也能发出大量工具调用；近期还有工作在其上做离线 RL。
+      </p>
+      <p><strong>盲区：</strong>没经 RL 的模型能在海量调用中找到物种、文章、论文，却在<strong>抽关键信息</strong>和<strong>验证错误结论</strong>上掉链子——案例里即使已经碰到直接指向答案的信息，仍被前面的错误结论带偏。论文还指出离线 RL 在更广的领域里表现不如在线 RL。</p>
+    </div>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>路线</th><th>长轨迹</th><th>学到深层策略</th><th>数据需求</th><th>代表</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>在线 RL（批同步）</td><td>被轮数上限压住</td><td>只到初级搜索</td><td>多跳 QA</td><td>Search-R1 · R1-Searcher</td></tr>
+        <tr><td>提示工程 / 离线 RL</td><td>能跑很多轮</td><td>会搜不会验证</td><td>无（提示）或 SFT 轨迹</td><td>Search-o1 (QwQ)</td></tr>
+        <tr class="best"><td>ASearcher</td><td>128 轮上限</td><td>端到端 RL，含验证</td><td>合成 + 筛选难题</td><td>ASearcher-Web-QwQ</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    ASearcher 的选择是：<strong>两条都要</strong>。在线 RL 负责让模型学会深层策略，但先把在线 RL 的系统约束拆掉；同时用合成智能体补足「足够难的题」。案例里 ASearcher-Web-QwQ 一次只认真看一个网站、列出所有候选答案逐一核对，找到答案后还会再花几轮验证——这正是上面两类方案各自缺失的那一半。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两级异步：轨迹之间不等，轨迹与训练之间也不等</h2></div>
+  <p class="sec-sub">ASearcher 的「方法」不是新损失函数，而是对训练时序的重新安排；配上一套把普通问题「变难」的数据合成流程。</p>
+
+  <h3>异步之一：轨迹之间互不等待</h3>
+  <p>
+    每条轨迹独立地向工具服务器发调用请求、向推理引擎发生成请求，并发请求由服务器统一调度。轨迹 A 在等网页返回时，轨迹 B 的 LLM 生成照常进行。这一层几乎所有高吞吐系统都会做，问题不大。
+  </p>
+
+  <h3>异步之二：训练步不等最慢的轨迹</h3>
+  <p>
+    关键在于第二层。批同步系统里，即便 rollout 本身是并发的，一个训练步仍要等<strong>整批</strong>采完。One-Step-Off RL 把第 N 步训练和第 N+1 步生成重叠起来，但批仍然被最慢的那条轨迹卡住。
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">批同步</span>：训练步 N+1 必须等 <span class="hl-b">批内最长轨迹</span> 结束<br>
+    <span class="hl-c">全异步</span>：攒够一批已完成的轨迹 → <span class="hl-c">立即</span>开训；长轨迹可以跨版本继续跑
+  </div>
+  <div class="eq-cap">训据论文 Fig. 7 的描述：全异步模式下，训练步无需等「轨迹 7」，而是先用已经到齐的轨迹 9 开跑</div>
+
+  <p>
+    代价是长轨迹可能跨过多个<strong>模型版本</strong>：它的后半段是旧策略生成的，策略一变，GRPO 的比例就有偏。论文只用稀疏的终局奖励、并在组内做相对比较（见下一节），这让样本陈旧化的伤害可控；但它是这套系统相对同步训练最实质的近似，论文没有给出它的量化分析。
+  </p>
+
+  <h3>数据端：把题变难，再确认它只能靠搜索解决</h3>
+  <p>数据合成智能体从种子问题出发，每一步二选一：</p>
+  <ul>
+    <li><strong>Injection</strong>：选问题里的一个实体，从外部（如维基百科）取一条相关事实，塞进问题。题干变长、线索变深，但答案是唯一的。</li>
+    <li><strong>Fuzzing</strong>：把精确信息模糊化——「Catskill Mountain Railroad」换成「a historic mountain railway」，1934 年换成「early 1930s」。不确定性升高，也更难被参数记忆直接答中。</li>
+  </ul>
+
+  <p>
+    每个版本都要过三步验证：<strong>基础质量</strong>（清晰、答案有事实支撑）、<strong>难度测量</strong>（让不带工具的 QwQ-32B 直接答）、<strong>答案唯一性</strong>（检查「答错」的那些是否其实也成立）。题目合成完毕后，再<strong>剔掉不用搜索就能答对</strong>的题——它们对训练搜索能力没有贡献。
+  </p>
+
+  <div class="slots s5" aria-label="数据合成规模">
+    <div class="slot"><div class="slot-name">种子问题</div><div class="slot-val">14,107</div></div>
+    <div class="slot"><div class="slot-name">平均注入</div><div class="slot-val">6.3 次</div></div>
+    <div class="slot"><div class="slot-name">平均模糊</div><div class="slot-val">3.2 次</div></div>
+    <div class="slot hit"><div class="slot-name">最终保留</div><div class="slot-val">25,624</div></div>
+    <div class="slot"><div class="slot-name">训练集</div><div class="slot-val">35k</div></div>
+  </div>
+  <p class="tl-note">
+    数字取自 §3.2.2 与 §4.1：每个种子最多选 3 个高质量变体；保留样本平均 4.27 次注入、2.10 次模糊。7B/14B 与 QwQ 各有一套 35k 训练数据（含开源数据筛选后的 16k，见 04 节），均已开源。
+  </p>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>算法还是 GRPO：改的是数据从哪来、何时更新、怎么过滤</h2></div>
+  <p class="sec-sub">这一节把训练循环拆开，看异步换来了什么、又引入了哪些新的不稳定来源。</p>
+
+  <p>
+    对每个问题 <code>x</code> 采样 <code>G</code> 条轨迹，每条是一串状态-动作，动作里可以夹带 <code>&lt;search&gt;…&lt;/search&gt;</code> 这类工具调用。损失就是标准的 GRPO 裁剪目标，优势 <code>Â<sub>i</sub></code> 由组内相对奖励算出：
+  </p>
+  <div class="eq">
+    J<sub>GRPO</sub>(θ) = E<sub>x, {τ<sub>i</sub>}</sub>[ (1/G) Σ<sub>i</sub> (1/Σ<sub>t</sub>|a<sub>t</sub><sup>i</sup>|) Σ<sub>t,j</sub> min( ρ<sub>j</sub>·Â<sub>i</sub>, clip(ρ<sub>j</sub>, 1−ε, 1+ε)·Â<sub>i</sub> ) ]
+  </div>
+  <div class="eq-cap">Eq. 1 · ρ<sub>j</sub> 是第 j 个 token 的新旧概率比；按 token 数归一化，使长短轨迹对梯度贡献相当</div>
+
+  <p>真正决定能否训出长轨迹的，是下面四个训练细节：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">轮次上限</span><h4>7B/14B 用 32，Web-QwQ 用 128</h4></div>
+      <p>轮次上限比同尺寸基线高一个量级，前提是异步让长轨迹不拖垮吞吐。batch 分别为 128 与 64；Web-QwQ 训练约 <strong>16k H800 GPU 小时</strong>。</p>
+      <p><strong>Agent 本身很简单：</strong>只有搜索与网页浏览两个工具；网页摘要也由智能体自己做，并且和思考、工具调用一起在端到端 RL 里优化——不依赖外部 LLM。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">两阶段课程</span><h4>先混难度，再只留 ≥5 轮的题</h4></div>
+      <p>第一阶段数据覆盖各难度；第二阶段只保留「至少需要 5 次工具调用」的题，逼模型把长程能力激活出来。两个阶段的产物即 <code>-v1</code> 与 <code>-v2</code>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">动态过滤</span><h4>组内奖励全相同的题直接丢掉</h4></div>
+      <p>如果一组轨迹奖励完全一样（优势为 0），或许是题太容易，或许是标注本身就是错的——两者都提供不了梯度。这类题被剔除，长轨迹尾部的无效样本也被一并压掉。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">稀疏奖励</span><h4>看的是全局终局，不是中间步骤</h4></div>
+      <p>奖励只在轨迹结束时计算：从基座模型训练时用 格式奖励 × F1；微调 QwQ 时用 LLM-as-Judge 打分、不再要格式奖励。全程没有过程奖励，长轨迹的信用分配只依赖终点。</p>
+    </div>
+  </div>
+
+  <h3>数据从两处来，有一处常被忽略</h3>
+  <p>
+    第一处是<strong>开源数据筛选</strong>：先在全部开源数据上 RL 训一个模型，每题采 16 个回答，剔掉三种题——16 个回答里一题都没对（不可解）、准确率已经 ≥50%（不够难）、或 ≤1 轮就能搜到（不需要搜索）。从 <strong>304k</strong> 条里只留下 <strong>16k</strong> 条。这个「用一个弱模型能答对的题对强模型也没用」的判据，也解释了后面为什么合成题还要再过滤一轮。
+  </p>
+  <p>
+    第二处就是 03 节的合成数据。<strong>两套 35k 训练集</strong>（7B/14B 一套、QwQ 一套）都由这两路拼成，公开在同一仓库。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">工程代价</span><h4>异步省的是空转，不是总计算量</h4></div>
+    <p>
+      16k H800 小时是 Web-QwQ <em>两个阶段合计</em>的预算，它并不因为异步而消失。异步降低的是「GPU 在等最长轨迹时的空闲占比」，让你可以在同样的机器上更早把长轨迹变有用；但轨迹本身更长，token 总量反而更大。这一点在 05 节的模拟器里能直接看到。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹能跨版本继续跑，训练步却只看「攒够没攒够」</h2></div>
+  <p class="sec-sub">论文 Fig. 7 把 One-Step-Off 与全异步并排画出来；切换下面的模式，观察同一批轨迹上训练步从哪开始。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 404" role="img" aria-label="ASearcher 训练数据流：种子问题经合成智能体与验证形成训练题；全异步 rollout 与训练解耦；GRPO 更新策略后回流">
+      <defs>
+        <marker id="btt-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+
+      <text x="102" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">数据</text>
+      <text x="284" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">题目来源</text>
+      <text x="530" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">全异步训练</text>
+      <text x="668" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">回流</text>
+
+      <!-- data column -->
+      <rect x="8" y="40" width="186" height="118" rx="12" class="pipe-c1"></rect>
+      <text x="101" y="66" text-anchor="middle" class="pipe-t" font-weight="600">种子 QA</text>
+      <text x="101" y="88" text-anchor="middle" class="pipe-s pipe-m">14,107</text>
+      <circle cx="55" cy="108" r="5" class="pipe-m" fill="var(--c1)"></circle>
+      <path d="M63 108 L69 108 L69 121 M69 121 L65 116 L69 121 L73 116" fill="none" stroke="var(--c2)" stroke-width="1.4"></path>
+      <text x="76" y="124" class="pipe-s pipe-m">fuzz</text>
+
+      <rect x="8" y="264" width="186" height="118" rx="12" class="pipe-c1"></rect>
+      <text x="101" y="290" text-anchor="middle" class="pipe-t" font-weight="600">开源数据</text>
+      <text x="101" y="310" text-anchor="middle" class="pipe-s">HotpotQA · 2WikiMultiHopQA</text>
+      <text x="101" y="330" text-anchor="middle" class="pipe-s">采 16 次，剔除三类</text>
+      <text x="101" y="354" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">304k → 16k</text>
+
+      <path d="M197 99 L228 99" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+      <path d="M197 323 L228 323" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+
+      <!-- source column -->
+      <rect x="232" y="40" width="56" height="118" rx="8" class="pipe-c2"></rect>
+      <text x="260" y="92" text-anchor="middle" class="pipe-t" font-weight="600">合成</text>
+      <text x="260" y="110" text-anchor="middle" class="pipe-t" font-weight="600">智能体</text>
+
+      <rect x="232" y="264" width="56" height="118" rx="8" class="pipe-c1"></rect>
+      <text x="260" y="316" text-anchor="middle" class="pipe-t" font-weight="600">难度</text>
+      <text x="260" y="334" text-anchor="middle" class="pipe-t" font-weight="600">筛选</text>
+
+      <path d="M292 99 L320 99 L320 191" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+      <path d="M292 323 L320 323 L320 227" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+
+      <rect x="300" y="192" width="132" height="34" rx="8" class="pipe-box"></rect>
+      <text x="366" y="214" text-anchor="middle" class="pipe-s pipe-m">训练集 · 35k × 2</text>
+
+      <path d="M436 209 L462 209" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+
+      <!-- async column -->
+      <rect x="466" y="40" width="130" height="112" rx="12" class="pipe-accent"></rect>
+      <text x="531" y="64" text-anchor="middle" class="pipe-t" font-weight="600">异步轨迹 rollout</text>
+      <text x="531" y="86" text-anchor="middle" class="pipe-s">路径各自执行，不互相等</text>
+      <text x="531" y="116" text-anchor="middle" class="pipe-s">上限：32 / 128 轮</text>
+      <text x="531" y="136" text-anchor="middle" class="pipe-s">长轨迹可跨版本</text>
+
+      <rect x="466" y="176" width="130" height="66" rx="12" class="pipe-box"></rect>
+      <text x="531" y="200" text-anchor="middle" class="pipe-t" font-weight="600">轨迹缓冲区</text>
+      <text x="531" y="222" text-anchor="middle" class="pipe-s">攒够即触发，不等最慢的</text>
+
+      <path d="M531 152 L531 174" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+
+      <rect x="466" y="260" width="130" height="86" rx="12" class="pipe-accent"></rect>
+      <text x="531" y="285" text-anchor="middle" class="pipe-t" font-weight="600">动态过滤 + GRPO</text>
+      <text x="531" y="307" text-anchor="middle" class="pipe-s">剔除组内同奖励的题</text>
+      <text x="531" y="327" text-anchor="middle" class="pipe-s">终局奖励 · 组内相对优势</text>
+
+      <path d="M531 242 L531 258" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+
+      <rect x="618" y="276" width="94" height="54" rx="10" class="pipe-box"></rect>
+      <text x="665" y="299" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">π<sub>θ</sub></text>
+      <text x="665" y="316" text-anchor="middle" class="pipe-s">新策略</text>
+      <path d="M598 303 L616 303" class="pipe-line" marker-end="url(#btt-arrow)"></path>
+
+      <path d="M665 330 L665 360 L531 360 L531 348" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#btt-arrow)"></path>
+      <text x="590" y="378" text-anchor="middle" class="pipe-s">下一轮 rollout</text>
+
+      <path d="M284 60 L284 40 L408 40 L408 191" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#btt-arrow)"></path>
+      <text x="346" y="32" text-anchor="middle" class="pipe-s">注入 / 模糊改写</text>
+    </svg>
+    <figcaption>
+      图 1：ASearcher 的数据流（示意）。左侧合成题与筛选题都是 35k 训练集的一部分；右侧的「缓冲区」与「训练步」在批同步系统里是绑定的，全异步把它们拆开。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>为什么「攒够就开训」比「等整批」快？</strong> 同步时，一个 batch 的总时长等于其中最慢轨迹的时长；批越大、长度分布越重尾，平均利用率越低。异步把控制变量从「最慢」换成「完成数」，长尾只会推迟它自己所在的那个训练步，不会拖住整批。</li>
+          <li><strong>跨版本是什么意思？</strong> 一条 128 轮的轨迹可能持续到模型已经更新好几次。这条轨迹的前段由旧策略生成、后段由新策略生成，但它进入训练时被当作一次采样的整体。论文未量化这部分陈旧带来的策略偏差。</li>
+          <li><strong>合成题和检查题都去掉了一次。</strong> 合成阶段剔掉「QwQ 不用工具就能答对」的题；开源数据阶段剔掉「弱模型 16 次中 ≥50% 答对」的题。两处过滤都在回答同一个问题：这道题到底在检验搜索能力，还是在检验参数记忆？</li>
+          <li><strong>图中数字：</strong>14,107、304k → 16k、35k 来自 §3.2 与 §4.1；轮次上限 32 / 128 来自 §4.1。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+     一条轨迹的每一步都是「LLM 生成 → 工具返回」的串行循环，时间轴上的长度就是这条链的长度。下面的模拟用论文 Fig. 7 的 12 条轨迹，把两种调度画在同一时间轴上，好让「空转」可见。
+  </p>
+
+  <div class="sim" id="sched-sim">
+    <div class="sim-top" id="sched-modes">
+      <button class="rule-btn" data-mode="sync" type="button">One-Step-Off（批同步）<span class="r-sub">批内异步，批间同步</span></button>
+      <button class="rule-btn active" data-mode="async" type="button">Fully Async<span class="r-sub">攒够即训练</span></button>
+    </div>
+
+    <div class="slots s2" id="sched-slots"></div>
+
+    <div class="tl" id="sched-tl" aria-label="12 条轨迹的时间线"></div>
+
+    <svg viewBox="0 0 600 96" role="img" aria-label="训练步在时间轴上的位置" style="width:100%;height:auto;margin-top:2px">
+      <line x1="0" y1="62" x2="600" y2="62" class="pipe-line"></line>
+      <g id="upd-band"></g>
+      <g id="axis-tick"></g>
+    </svg>
+
+    <div class="tl-legend">
+      <span><i style="background:var(--c2-soft);border:1px solid var(--c2)"></i>已结束的轨迹</span>
+      <span><i style="background:var(--bg-surface);border:1px dashed var(--c2)"></i>仍在跑，被训练步提前抛下</span>
+      <span><i style="background:var(--c1-soft);border:1px solid var(--c1)"></i>长轨迹 Traj 7</span>
+      <span><i style="background:var(--accent-soft);border:1px solid var(--accent)"></i>训练步</span>
+    </div>
+
+    <div class="readout" id="sched-readout" style="margin-top:14px">
+      <div class="r-head">当前调度</div>
+      <div id="sched-msg"></div>
+    </div>
+
+    <div class="tl-metrics" id="sched-metrics"></div>
+    <p class="tl-note">
+      时间单位取 Fig. 7 中最短轨迹（Traj 1）的长度为 1。批同步：训练步 N 需要 1,2,3,4,5,6,8 全部完成（t=7），最长的 Traj 7 在 t=10 结束；全异步：训练步 N 在 t=3 已可启动，收集到 1,2,3,4,6,8,9 共 7 条，Traj 7 跨版本继续。
+    </p>
+  </div>
+
+  <p>
+    这个模拟把问题量化了：同一批轨迹，<strong>训练步的启动时间从 t=7 提前到 t=3</strong>——少等的 4 个时间单位几乎正好等于 Traj 7 超出其他轨迹的那一截。这正是论文声称「近满利用率」的来源：不是让轨迹变短，而是让等待不再由最长者决定。注意 t=3 时只有 7 条轨迹到齐，缓冲区门槛比同步的小，这也是全异步的收益所在。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>同一基座，同一道题，答对率从 48 提到 59</h2></div>
+  <p class="sec-sub">重点看两处对照：v1 对同尺寸开源智能体，v1 → v2 对同一系统只换训练题目难度。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>挑战基准（LLM-as-Judge）</th><th style="text-align:right">QwQ-32B 直答</th><th style="text-align:right">Search-o1 (QwQ)</th><th style="text-align:right">v1</th><th style="text-align:right">v2</th><th style="text-align:right">v2 Pass@4</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GAIA Avg@4 ↑</td><td class="num">23.1</td><td class="num">48.1</td><td class="num">52.8</td><td class="num">58.7</td><td class="num">74.7</td></tr>
+        <tr><td>xBench-DeepSearch Avg@4 ↑</td><td class="num">11.8</td><td class="num">40.3</td><td class="num">42.1</td><td class="num">51.1</td><td class="num">75.0</td></tr>
+        <tr><td>Frames Avg@4 ↑</td><td class="num">29.9</td><td class="num">63.6</td><td class="num">70.9</td><td class="num">74.5</td><td class="num">85.5</td></tr>
+        <tr><td>HLE-500 Pass@1 ↑</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">21.5</td><td class="num">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tl-note">数字取自 Table 4 与 Table 5（Table 5 只列 v2 的 Pass@1）。表 4 中还有 Search-R1-32B（GAIA 28.6、xBench 19.5、Frames 44.1）等基线，均低于 v1。</p>
+
+  <p>
+    <strong>v1 → v2 是数据分布带来的纯收益：</strong>两阶段的第二阶段只保留需要 ≥5 次工具调用的题，模型在三个基准上又各涨了一截（GAIA +5.9、xBench +9.0、Frames +3.6）。这比换更强的系统更说明问题：难度的<strong>分布</strong>本身就能把长程能力推上去。
+  </p>
+
+  <details>
+    <summary>与商用系统、外部总结、测试时扩展<span class="sum-sub">Table 5 的零样本迁移</span></summary>
+    <div class="details-body">
+      <p>ASearcher 训练时只用一个模型，但网页摘要环节可以换成外部模型：用 DeepSeek-V3 做时摘要，v2 在 GAIA / xBench / Frames / HLE-500 上分别升到 <strong>60.3 / 56.4 / 76.6 / 23.4</strong>。</p>
+      <p>测试时每道题独立跑 K=16 次、用 DeepSeek-V3 聚合结论，四项分别达到 <strong>71.8 / 75.0 / 83.4 / 24.6</strong>。作为参照，官方报告里的 Kimi-Researcher 是 xBench 69.0、Frames 78.8；Claude-4-Sonnet 是 GAIA 68.3、xBench 64.6。</p>
+      <p>这是「能力可达」而非「训练即超出商用」：GAIA 71.8 靠的是 16 倍推理次数，不是单个 rollout 的 58.7。</p>
+    </div>
+  </details>
+
+  <h3>训练动态：长程行为是长出来的，但不是一次长齐</h3>
+  <p>
+    Fig. 6 显示 Web-QwQ 的工具调用随训练上升，到第 200 步附近<strong>平均最多约 40 次</strong>，个别轨迹峰值<strong>约 70 次</strong>，单条轨迹输出 token 最多超过 <strong>150k</strong>。论文摘要里写的「超过 100 次、超过 400k」出现在 Fig. 1 的训练统计中，观测尺度与主文不同；本页数字以主文 §4.3 为准。
+  </p>
+  <p>
+    基座模型这一侧有两个更值得注意的对比：<strong>7B 学不会网页浏览</strong>，14B 能在训练后段学会打开网页答难题——作者推测是 7B 容量不足以稳定地压缩长网页；另外高质筛选后的训练集让 7B 的搜索查询数上到 6（高于 Search-R1、R1-Searcher 报告的数字）。
+  </p>
+
+  <h3>一个反直觉发现：验证行为出现在第二阶段</h3>
+  <p>
+    Fig. 11 跟踪「alternatively / however / wait」这类反思词，和「doc / mention」这类指向外部资料的词。前者在训练全程稳步上升；后者<strong>在第 200 步之后才明显上升</strong>——正好是第二阶段、只保留 ≥5 轮难题的时候。换句话说，光是给更多轮数并不会自动学出「回头验证」；把训练题换成必须验证才能做对的题，它才出现。
+  </p>
+
+  <h3>GAIA 案例：同一道题上的三种搜索行为</h3>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Search-R1-32B</span><h4>拆不开</h4></div>
+      <p>训练轮数只有 4，只能把「多变量」当成一句话搜；对搜索结果过度自信，出现幻觉，未知量一个也没解决。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Search-o1 (QwQ)</span><h4>搜得广，收不拢</h4></div>
+      <p>能靠大量调用找到四个相关实体，但容易漏掉关键句；一旦得出错误结论，即使后面碰到证据也不回头。没有验证步骤。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">ASearcher-Web-QwQ</span><h4>逐站核对</h4></div>
+      <p>拆分精确查询、一次只读一个网站、列出所有候选答案逐一分析；搜不到直接证据时会跨文档推理；在报出「Mice」之后还会多花几轮确认。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它把「能走多远」打开，但没把「为什么能走对」解释清楚</h2></div>
+  <p class="sec-sub">按论文自己的数据和设计反推，至少有四处地方，它的收益不等于它声称的所有原因。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>异步与长轮数、难题数据是纠缠在一起变的</h4></div>
+    <p>
+      论文没有把异步系统、128 轮上限、两阶段课程、合成数据分别做消融。v1 → v2 的增益来自难度筛选（数据），而 v1 相对基线既换了训练系统，也换了数据来源。v4 的案例里，故事读起来像一个因果链，但其中每一环的贡献都没有单独测量。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>跨版本轨迹的策略偏差没有被量化</h4></div>
+    <p>
+      全异步允许长轨迹跨越多个模型版本（≥128 轮的轨迹几乎必然如此），GRPO 的组内比较里可能混着不同策略的样本。这在短轨迹的推理任务里是常见近似，但这里是这篇论文的「长程」本身，偏差恰恰在最关键的那部分。论文只在理念上依赖稀疏终局奖励来缓解，没给超参之外的稳定性数据。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>忠实度：不同模型执行同一方法的差距比方法本身更大</h4></div>
+    <p>
+      7B 学不会网页浏览，14B 才行；7B/14B 的上限只有 32 轮，Web-QwQ 才有 128 轮。方法能在小模型上复现，但<strong>长程能力的涌现依赖于 base 模型的容量</strong>。论文自己的假设也是「容量不足、无法稳定压缩长网页」。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>算力与评测口径：读数要分清</h4></div>
+    <p>
+      16k H800 小时的两个阶段预算，是全部开源项目级别而不是可随手复现的开销。GAIA 用文本专用子集的 103 题、其余用官方测试集全量，这种「GAIA 103 题」的口径比排行榜常见的 GAIA 500 题口径窄，数字不宜跨基准直接比较。另外，Avg@4 / Pass@4 来自 4 个随机种子，论文未报告方差。
+    </p>
+  </div>
+
+  <h3>延伸的未解问题</h3>
+  <ul>
+    <li><strong>奖励是否被 Judge 带偏？</strong> Web-QwQ 的奖励完整依赖 LLM-as-Judge。裁判自身的偏差会原样进入策略；论文没有报告换成另一个 Judge 的结果。</li>
+    <li><strong>「超过 100 次」该信哪个数？</strong> 主文训练动态给出的是「约 40 次平均、约 70 次峰值、超过 150k token」，而摘要与 Fig. 1 用「超过 100 次、超过 400k」。两者能否对齐，需要看原始训练日志；本页采用主文数字。</li>
+    <li><strong>搜索之外的任务能直接套吗？</strong> 整套设计绑定在「可以判对错的终局答案」与「慢工具」上；开放式的调研、写作类任务没有唯一答案，稀疏奖励和合成验证都不直接可用。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>ASearcher 没有发明新的 RL 算法，它做的事情是把「训得动」和「有题训」这两个前置条件先补齐，然后再用长轮数去解锁能力。</strong>「训得动」来自把批同步的时钟换成完成数，「有题训」来自把种子题变得不得不一直搜。这两件事的贡献和代价都还没有拆开，但对想要训练长程搜索智能体的人来说，它们是两个绕不开的工程前提。
+  </p>
+</section>
+
+<footer>
+  <div>Beyond Ten Turns: Unlocking Long-Horizon Agentic Search with Large-Scale Asynchronous RL · Jiaxuan Gao, Wei Fu, Minyang Xie, Shusheng Xu, Chuyi He, Zhiyu Mei, Banghua Zhu, Yi Wu · 清华 IIIS / 蚂蚁集团 / 华盛顿大学 · arXiv 2508.07976v4</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.07976" target="_blank" rel="noopener">arxiv.org/abs/2508.07976</a><br>
+    代码：<a href="https://github.com/inclusionAI/ASearcher" target="_blank" rel="noopener">inclusionAI/ASearcher</a><br>
+    笔记：<a href="/beyond-ten-turnsunlocking-long-horizon-agentic-search-with-large-scale-asynchronous-rl/">Beyond Ten Turns：Unlocking Long-Horizon Agentic Search with Large-Scale Asynchronous RL</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文 arXiv v4 核对修正，未改动笔记文件）：</strong><br>
+    1. 笔记的 GAIA 52.8 / xBench 42.1 / Frames 70.9 与 <strong>v1</strong> 检查点吻合；v4 新增的两阶段课程结果 <strong>v2</strong> 是 58.7 / 51.1 / 74.5。<br>
+    2. 笔记写「总字符数超过 15 万」；原文是 <em>token</em>，主文 §4.3 为「最多超过 150k tokens」，摘要与 Fig. 1 为「超过 400k」——两个尺度原文并存。<br>
+    3. 笔记写「工具调用峰值可达 70 次」；主文是平均最多约 40 次、峰值约 70 次，而摘要的「超过 100 次」来自另一统计口径。<br>
+    4. 笔记写「合成 25,624 个样本」「14,107 个种子」——正确；但漏了开源数据筛选 304k → 16k，以及两套 35k 训练集。<br>
+    5. 笔记写「约 7600 个 H800 GPU 小时」；v4 原文是「approximately 16k H800 GPU hours in total」，本页按原文。<br>
+    6. 笔记说 GAIA「提升 20.8%」（43.7 → 52.8）、xBench「提升 46.7%」（28.7 → 42.1）。原文 v4 Fig. 8 给出的绝对提升是 GAIA +15.0（→ 58.7）、xBench +22.4、Frames +14.6；20.8 / 46.7 这两个比例无法从 v4 的原文数字复现，可能出自早期版本。<br>
+    7. 笔记说「最多 128 轮」是全局设置；原文 7B / 14B 是 32 轮，只有 Web-QwQ 是 128 轮。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 调度时间线模拟器（数据取自论文 Fig. 7）
+   ============================================================ */
+(function () {
+  /* 数字 = 时间单位；最短轨迹 Traj 1 长度 = 1 */
+  var TRAJ = [
+    { id: 1, len: 1, role: 'N' }, { id: 2, len: 1, role: 'N' },
+    { id: 3, len: 1, role: 'N' }, { id: 4, len: 1, role: 'N' },
+    { id: 5, len: 1, role: 'N' }, { id: 6, len: 1, role: 'N' },
+    { id: 7, len: 10, role: 'long' },
+    { id: 8, len: 1, role: 'N' }, { id: 9, len: 1, role: 'NEXT' },
+    { id: 10, len: 2, role: 'NEXT' }, { id: 11, len: 1, role: 'NEXT' },
+    { id: 12, len: 3.2, role: 'NEXT' }
+  ];
+  var SCENE = {
+    sync: { trainAt: 7, batchN: [1, 2, 3, 4, 5, 6, 8] },
+    async: { trainAt: 3, batchN: [1, 2, 3, 4, 6, 8, 9] }
+  };
+  var TMAX = 10;
+
+  var mode = 'async';
+
+  var slotsEl = document.getElementById('sched-slots');
+  var tlEl = document.getElementById('sched-tl');
+  var updEl = document.getElementById('upd-band');
+  var axisEl = document.getElementById('axis-tick');
+  var msgEl = document.getElementById('sched-msg');
+  var metEl = document.getElementById('sched-metrics');
+  var btns = document.querySelectorAll('#sched-modes .rule-btn');
+  if (!slotsEl || !tlEl || !updEl || !msgEl || !metEl) return;
+
+  function renderSlots() {
+    var sc = SCENE[mode];
+    function sec(title, start, end) {
+      return '<div class="slot"><div class="slot-name">' + title + '</div>' +
+        '<div class="slot-val">' + start.toFixed(1) + ' → ' + end.toFixed(1) + '</div>' +
+        '<div class="slot-val" style="font-size:11px;color:var(--text-soft)">跨度 ' + (end - start).toFixed(1) + '</div></div>';
+    }
+    slotsEl.innerHTML = sec('批 N 已收齐', 0, sc.trainAt) +
+      sec('Traj 7 结束', 0, 10);
+  }
+
+  function renderTimeline() {
+    var sc = SCENE[mode];
+    var html = '';
+    TRAJ.forEach(function (t) {
+      var cls = 'tl-bar';
+      if (t.role === 'long') cls += ' long';
+      else if (t.role === 'N') cls += ' ok';
+      else cls += (mode === 'sync' ? ' early' : ' ok');
+      var widthPct = (t.len / TMAX) * 100;
+      var inner = t.id === 7 ? (t.len + 'u') : ('Traj ' + t.id);
+      html += '<div class="tl-row">' +
+        '<div class="tl-name">Traj ' + t.id + '</div>' +
+        '<div class="tl-track">' +
+          '<div class="' + cls + '" style="left:0;width:' + widthPct + '%">' + inner + '</div>' +
+        '</div>' +
+        '<div class="tl-len">' + t.len + 'u</div>' +
+        '</div>';
+    });
+    tlEl.innerHTML = html;
+
+    /* 训练步位置（600 宽画布） */
+    var x = (sc.trainAt / TMAX) * 600;
+    var arrow = '';
+    arrow += '<line x1="' + x + '" y1="18" x2="' + x + '" y2="74" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="4 3"></line>';
+    arrow += '<rect x="' + Math.max(0, x - 58) + '" y="22" width="116" height="22" rx="6" class="tl-upd"></rect>';
+    arrow += '<text x="' + x + '" y="37" class="tl-upd-lab">Train Step N</text>';
+    updEl.innerHTML = arrow;
+
+    /* 同步时的 idle 区间：t=7 → t=10 等 Traj 7 */
+    var axis = '';
+    if (mode === 'sync') {
+      axis += '<rect x="' + ((7 / TMAX) * 600) + '" y="54" width="' + ((3 / TMAX) * 600) + '" height="16" class="tl-idle"></rect>';
+      axis += '<text x="' + ((8.5 / TMAX) * 600) + '" y="86" text-anchor="middle" class="tl-idle-lab">等 Traj 7 的空转</text>';
+    } else {
+      axis += '<rect x="' + ((3 / TMAX) * 600) + '" y="54" width="24" height="16" fill="var(--accent)" opacity=".55"></rect>';
+    }
+    axisEl.innerHTML = axis;
+  }
+
+  function renderMsg() {
+    var sc = SCENE[mode];
+    if (mode === 'sync') {
+      msgEl.innerHTML =
+        '批 N 共 8 条轨迹，训练步必须等 1,2,3,4,5,6,8 全部完成——那意味着最早在 <strong>t=' + sc.trainAt + '</strong> 才能开训。' +
+        '但 Traj 7 要到 t=10 才结束，所以从 t=' + sc.trainAt + ' 到 t=10 这段 GPU 在空转；' +
+        '下一个训练步只能推迟到 Traj 7 结束之后再开。' +
+        '<span class="warn">长度分布越重尾，这段空转越大。</span>';
+    } else {
+      msgEl.innerHTML =
+        '训练步 N 在 <strong>t=' + sc.trainAt + '</strong> 时已有 7 条轨迹到齐（1,2,3,4,6,8,9），立即开训；' +
+        'Traj 7 没有被中断，继续跑到 t=10，之后并入下一个训练步。' +
+        '<span class="warn">代价：训练步 N+1 也须等 Traj 7，但它不再阻塞 N。</span>';
+    }
+  }
+
+  function renderMetrics() {
+    var sc = SCENE[mode];
+    var idle = 10 - sc.trainAt;
+    function m(k, v, unit, cls) {
+      return '<div class="metric-l ' + (cls || '') + '"><div class="ml-k">' + k + '</div>' +
+        '<div class="ml-v">' + v + (unit ? '<span style="font-size:11px;color:var(--text-soft)"> ' + unit + '</span>' : '') + '</div></div>';
+    }
+    metEl.innerHTML =
+      m('训练步 N 启动', 't=' + sc.trainAt, '', mode === 'async' ? 'good' : 'warn') +
+      m('批 N 到齐轨迹', String(sc.batchN.length), '条', '') +
+      m('Traj 7 结束', 't=10', '', '') +
+      m('启动后仍需等待', String(idle), '时间单位', mode === 'sync' ? 'warn' : '');
+  }
+
+  function renderAll() {
+    renderSlots();
+    renderTimeline();
+    renderMsg();
+    renderMetrics();
+    btns.forEach(function (b) {
+      if (b.getAttribute('data-mode') === mode) b.classList.add('active'); else b.classList.remove('active');
+    });
+  }
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      mode = b.getAttribute('data-mode');
+      renderAll();
+    });
+  });
+
+  renderAll();
+})();
+
+/* ============================================================
+   2) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

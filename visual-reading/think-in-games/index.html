@@ -1,0 +1,815 @@
+
+<!-- LEDGER
+| 75.2 | Table 2a | 29.87+45.33 |
+| 4.24 | Table 2a | 90.91-86.67 |
+| 4.89 | Table 2a | 4.24/86.67*100 |
+| 8.02 | Table 2a | 90.91-82.89 |
+| 9.68 | Table 2a | 8.02/82.89*100 |
+| 20.17 | Table 2a | 86.84-66.67 |
+| 30.25 | Table 2a | 20.17/66.67*100 |
+| 0.17 | Table 2a | 86.84-86.67 |
+| 0.20 | Table 2a | 0.17/86.67*100 |
+| 3.78 | Table 2a | 86.67-82.89 |
+| 4.36 | Table 2a | 3.78/86.67*100 |
+| 29.87 | Table 2a | 83.12-53.25 |
+| 9.09 | Table 2a | 79.22-70.13 |
+| 12.96 | Table 2a | 9.09/70.13*100 |
+| 12.99 | Table 2a | 83.12-70.13 |
+| 18.52 | Table 2a | 12.99/70.13*100 |
+| 5.20 | Table 2a | 83.12-77.92 |
+| 1.30 | Table 2a | 79.22-77.92 |
+| 1.64 | Table 2a | 1.30/79.22*100 |
+| 3.40 | Table 2a | 2.82/82.89*100 |
+| 16.88 | Table 2a | 70.13-53.25 |
+| 31.70 | Table 2a | 16.88/53.25*100 |
+| 2.82 | Table 2a | 85.71-82.89 |
+| 6.03 | Table 2a | 0.17/2.82*100 |
+| 6.67 | Table 2a | 0.17/2.55*100 |
+| 4.92 | Table 2a | 0.17/3.45*100 |
+| 0.375 | §3.2 / §4.2 | 3/8 |
+
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Think in Games · 把「选哪个宏动作」变成一道可打分的语言题</title>
+<meta name="description" content="TiG 用王者荣耀真实对局把「选宏动作 + 写理由」变成语言建模任务：规则二值奖励 + GRPO，SFT 蒸馏自 DeepSeek-R1。Qwen-2.5-32B 动作预测从 66.67% 到 86.84%，Qwen-3-14B 经 SFT+GRPO 达 90.91%，高于 DeepSeek-R1 的 86.67%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.angles{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}
+.angles .slot{padding:8px 4px}
+@media (max-width:880px){.angles{grid-template-columns:repeat(2,1fr)}}
+.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin:20px 0 8px;font-family:"JetBrains Mono",monospace}
+.flow .st{background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;padding:8px 4px;text-align:center;font-size:10.5px;color:var(--text-muted);position:relative;line-height:1.3}
+.flow .st .id{display:block;font-size:9.5px;color:var(--text-soft)}
+.flow .st .pri{display:block;font-size:9px;margin-top:2px;color:var(--c2)}
+.flow .st.lbl{border-color:var(--c2);background:var(--c2-soft);color:var(--c2);font-weight:600}
+.flow .st.fill{background:var(--c1-soft);color:var(--c1);font-weight:600}
+.flow .st.win{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+.flow-cap{font-size:12px;color:var(--text-soft);margin:0 0 10px}
+.rank{display:grid;grid-template-columns:120px 1fr 52px;gap:10px;align-items:center;font-size:12.5px;margin:6px 0}
+.rank .nm{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-muted);line-height:1.3}
+.rank .track{height:16px;background:var(--bg-soft);border-radius:4px;overflow:hidden}
+.rank .fill{height:100%;border-radius:4px;transition:width .35s ease}
+.rank .val{font-family:"JetBrains Mono",monospace;text-align:right;font-size:12px}
+.chip{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:11px;padding:1px 7px;border-radius:100px;margin-right:4px}
+.chip.on{background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+.chip.off{background:var(--bg-soft);color:var(--text-soft)}
+details.deep-hide{border:none;background:transparent;margin:8px 0}
+details.deep-hide summary{padding:4px 0;font-size:13px;color:var(--c2)}
+@media (max-width:880px){
+  .flow{grid-template-columns:repeat(5,1fr);gap:3px}
+  .flow .st{font-size:9px;padding:6px 2px}
+  .flow .st .id,.flow .st .pri{display:none}
+  .rank{grid-template-columns:84px 1fr 46px;font-size:11px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Think in Games</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent · arXiv 2025 · 2508.21365v1</span>
+  <h1>Think in Games：把「这一刻该推哪路」变成一道能自动打分的语言题</h1>
+  <p class="hero-sub">
+    传统 RL 智能体「知道怎么做」却说不清为什么，LLM「知道为什么」却在盘面里做不出动作。
+    论文用王者荣耀（HoK）真实对局把两者的目标压成同一个：<strong>给定 JSON 盘面，先在 &lt;think&gt; 里写分析，再在 &lt;answer&gt; 里选出 40 个宏动作中的 1–2 个</strong>；
+    专家动作只用来打二值分，GRPO 组内比较后回传。
+  </p>
+  <div class="meta">
+    <span>Yi Liao, Yu Gu, Yuan Sui 等 8 人 · Tencent · 无公开代码仓库</span>
+    <a href="https://arxiv.org/abs/2508.21365" target="_blank" rel="noopener">arXiv 2508.21365 ↗</a>
+    <a href="https://arxiv.org/html/2508.21365v1" target="_blank" rel="noopener">v1 HTML ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    这篇的「任务」很简单：<strong>动作预测</strong>——看主玩家此刻的盘面，说出他会做的 1–2 个宏动作（§2.2 称 K=40，附录 Table 5 实际列 id 0–43 共 44 项，id 25 = Enemy High-ground Minions <span class="infer">推断</span>：K=40 与 44 项并存于原文，此处只并列、不裁断）。
+    难点不在分类器，而在动作是<em>人可以写理由、机器可以判对错</em>的离散标签，于是整个 RL 决策被重写成「结构化语言生成」。
+  </p>
+  <p>
+    训练分两段：SFT 数据蒸馏自 DeepSeek-R1（§4.2），让模型先学会「看盘面 → 写分析 → 给动作」的格式；
+    再上 GRPO（§3.2、附录 C），奖励是 <strong>答案集合与专家动作集合完全相等的二值信号</strong>，不加格式奖励，也不训奖励模型。
+  </p>
+  <p>
+    结果在离线动作预测上：Qwen-2.5-32B 只用 GRPO 160 步，从 66.67% 到 86.84%（<em>+20.17 个百分点</em>）；Qwen-3-14B 经 SFT+GRPO 2000 步到 90.91%，比 DeepSeek-R1 的 86.67% 高 <em>4.24 个百分点</em>。
+    但<strong>不是越训越好、也不是越多阶段越好</strong>——14B 在 480 步反而只有 77.92%（见 06）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2a">90.91<small>%</small></div>
+      <div class="k">Qwen-3-14B + SFT + GRPO（2000 步）动作预测准确率<br>高于 DeepSeek-R1 的 86.67%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2a">+20.17<small> pp</small></div>
+      <div class="k">Qwen-2.5-32B + GRPO（160 步）相对基线的绝对点差<br>86.84 − 66.67</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 5">40<small> 个宏动作</small></div>
+      <div class="k">动作空间规模（正文 §2.2 称 K=40）<br>附录 Table 5 实际列 id 0–43 共 44 项</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>会背攻略不等于会打：缺的是「在哪个盘面上做什么」</h2></div>
+  <p class="sec-sub">读完这一节要明白：论文要的不是更强的分类器，而是把决策题目写成「可写理由、可判对错」的样子。</p>
+
+  <p>论文开头给了一个很具体的例子（§1）：LLM 从攻略里学得到「不要推线太深」，但「太深」的边界只能从实际对局里摸出来。
+  作者把这条差距命名为<strong>陈述性知识 vs 程序性知识</strong>——前者来自文本，后者只能来自与环境的交互。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">传统 RL 智能体</span><h4>知道怎么做，说不出为什么</h4></div>
+      <p>§5 原文：「their decision-making processes are typically opaque」。同时依赖大量领域工程与训练量，换环境难迁移。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">通用 LLM</span><h4>说得清原理，盘面上做不出</h4></div>
+      <p>§1：知识是静态的、来自网页，不是来自与游戏环境的直接交互；prompt 里塞攻略也「does not fundamentally transform declarative knowledge into procedural understanding」。</p>
+    </div>
+  </div>
+
+  <p>要弥合它，需要一个<strong>动作空间干净、反馈明确</strong>的场地。论文选了 MOBA（王者荣耀），并把动作抽象成 40 个宏动作：不是按哪个键，而是「打小龙 / 守中路塔 / 在中路抱团」这类团队目标（§2.2、Table 5）。
+  这一层抽象同时解决两件事：LLM 不用学手速，专家动作可以当标签，奖励可以写成一条规则。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句定义</span><h4>任务：f : (s<sub>t</sub>, i<sub>t</sub>) ↦ (a<sub>t</sub>, c<sub>t</sub>)</h4></div>
+    <p>输入当前盘面 <code>s<sub>t</sub></code>（JSON）与指令 <code>i<sub>t</sub></code>，输出动作集合 <code>a<sub>t</sub> ⊆ A</code>（1–2 个）与推理链 <code>c<sub>t</sub></code>（§2.3）。评估就是看 <code>a<sub>t</sub></code> 与专家动作对不对得上。</p>
+  </div>
+
+  <p>注意一个容易忽略的限定：动作是<strong>非互斥</strong>的（Table 1 提示词：「从不互斥的候选选项中选出最接近的1-2个建议」）。所以这道题本质是「预测一个 1–2 元动作集合」，而不是「在 40 选 1 里挑一个」。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路都只走了一半：一条会做不能说，一条能说不会做</h2></div>
+  <p class="sec-sub">本节对照的是论文 §1、§5 自己划的两条线，以及论文对 DeepSeek-R1 的预实验（附录 B）。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">搜索 / 启发式 / RL</span><h4>行为对，过程不透明</h4></div>
+      <p>§1：搜索算法、手工启发式和 RL 在各自环境里成绩亮眼，但「rely on extensive domain-specific engineering and require massive amounts of training」，且过程「typically opaque」。</p>
+      <p><strong>卡点：</strong>策略不是用语言写出来的，也就无法让人检查理由，更难直接迁移到新环境。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">直接用通用 LLM（含 DeepSeek-R1）</span><h4>懂机制，但没吃过对局</h4></div>
+      <p>附录 B 对 DeepSeek-R1 的预实验列了两条限制：(1) Efficiency——模型太大，难以保证实时场景的响应；(2) Performance ceiling——分析能力「relies on the combination of data and strategy guides」，例如「avoid pushing the lane too far」里的「too far」需要实际经验。</p>
+      <p><strong>卡点：</strong>上限由攻略文本决定，而不是由盘面交互决定；可惜论文没有给出这段预实验的量化数据。</p>
+    </div>
+  </div>
+
+  <p>论文的位置在两者中间：保留 RL「从反馈里学」的骨架（GRPO，附录 C 称 PPO 在高方差奖励与信用分配上吃力，GRPO 用组内相对优势缓解），把动作与解释都交给 LLM 用语言写完，
+  并用一件传统 RL 很难做的事打分段——<strong>把「专家做了什么」当成唯一的判卷人</strong>。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">和标准 GRPO 的差别</span><h4>附录 C 列了三条改动</h4></div>
+    <ul style="margin-bottom:0">
+      <li>奖励换成针对宏动作对错的<strong>规则二值奖励</strong>，不用人类偏好、不训神经奖励模型；</li>
+      <li>动作空间<strong>压成有限可解释集合</strong>，简化奖励计算与评估；</li>
+      <li><strong>去掉格式奖励</strong>，理由是「our model demonstrates strong structural adherence by design」。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心两式（Eq. 4 奖励、Eq. 1 优势）：二值奖励，加组内标准化</h2></div>
+  <p class="sec-sub">读完这节要能自己算出一组 G 个回答各自的优势值，并知道这个得分机制看不见什么。</p>
+
+  <p>奖励函数（Eq. 4，§3.2）：</p>
+  <div class="eq">
+    r<sub>t</sub> = <span class="hl-a">1</span> &nbsp;if&nbsp; Â<sub>t</sub> = A<sub>t</sub><sup>*</sup>
+    &nbsp;&nbsp;&nbsp;&nbsp; r<sub>t</sub> = <span class="hl-b">0</span> &nbsp;otherwise
+  </div>
+  <div class="eq-cap">Eq. 4 · 预测动作集合与专家动作集合（来自 replay 数据）完全一致得 1，否则 0；没有部分得分</div>
+
+  <p>优势（Eq. 1，§3.2）：</p>
+  <div class="eq">
+    Â<sub>i,t</sub> = ( r<sub>i</sub> − <span class="hl-a">mean(r)</span> ) / <span class="hl-b">std(r)</span>
+  </div>
+  <div class="eq-cap">Eq. 1 · 同一盘面采样 G 个回答，用组内均值与标准差把 0/1 奖励压成相对分数</div>
+
+  <p>然后把 <code>Â</code> 塞进带 clip 和 KL 惩罚的 GRPO 目标（Eq. 3）：裁掉过大的概率比更新，再用 Eq. 2 的近似 KL 拉回参考模型。
+  <strong>注意 Eq. 1 没有写 std(r) 的分母口径</strong>——本页交互统一用<strong>总体标准差（÷G）</strong>，手算块与 JS 同口径。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="rollout-btns">
+      <button class="rule-btn active" data-pack="0">低准确率轮次<span class="r-sub">3 / 8 正确</span></button>
+      <button class="rule-btn" data-pack="1">高准确率轮次<span class="r-sub">6 / 8 正确</span></button>
+    </div>
+
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>组大小 G <span class="v" id="g-v">8</span></label>
+        <input type="range" id="group-g" min="2" max="16" step="1" value="8">
+      </div>
+    </div>
+
+    <div class="angles" id="pack-view"></div>
+
+    <p style="font-size:13px;color:var(--text-soft);margin:12px 0 6px">交替几位，拼一个自定义奖励序列（点击切换 0 / 1）：</p>
+    <div class="angles" id="toggler"></div>
+
+    <div class="readout" id="adv-readout" data-src="§3.2">
+      <div class="r-head">本轮读出</div>
+      <div id="adv-msg"></div>
+    </div>
+
+    <details class="deep-hide">
+      <summary>只看整体：不同正确率下的平均优势绝对值</summary>
+      <div id="acc-rows" style="margin-top:8px"></div>
+      <p style="font-size:12px;color:var(--text-soft);margin:8px 0 0">
+        每个组合用「前 w 位正确」的奖励序列计算，均值 = w/G，均值绝对优势 = 平均 |Â|。在 0 和 1 之间的重叠区，|Â| 很会缩小；
+        奖励二值化的代价就在这里：<strong>它只衡量「是否与专家动作集合相同」，不衡量动作在比赛中的好坏。</strong>
+        <span class="infer">推断</span>（依据：Eq. 4 仅比较与 replay 标签是否相等，§3.2 与附录 C 均未引入胜负或终局奖励）。
+      </p>
+    </details>
+  </div>
+
+  <details>
+    <summary>手算两组：G=8 时每个回答的优势<span class="sum-sub">总体标准差（÷G），与上方交互逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>A 组：奖励序列 r = [1,0,0,0,0,1,1,0]</strong>（3 个 1，5 个 0）</p>
+      <ul>
+        <li>mean = 3 / 8 = <code>0.375</code></li>
+        <li>总体方差 = [3 × (1−0.375)² + 5 × (0−0.375)²] / 8 = [3 × 0.390625 + 5 × 0.140625] / 8 = 1.875 / 8 = 0.234375</li>
+        <li>std = √0.234375 = <code>0.4841</code></li>
+        <li>正确回答：Â = (1 − 0.375) / 0.4841 = <code>1.291</code>；错误回答：Â = (0 − 0.375) / 0.4841 = <code>−0.775</code></li>
+        <li>若改用样本标准差（÷(G−1)），std = 0.5175，优势变成 1.208 / −0.725——<strong>本页不用这个口径</strong>。</li>
+      </ul>
+      <p><strong>B 组：奖励序列 r = [1,1,0,1,1,0,1,1]</strong>（6 个 1，2 个 0）</p>
+      <ul>
+        <li>mean = 6 / 8 = <code>0.750</code></li>
+        <li>总体方差 = [6 × 0.25² + 2 × 0.75²] / 8 = [0.375 + 1.125] / 8 = 0.1875</li>
+        <li>std = √0.1875 = <code>0.4330</code></li>
+        <li>正确回答：Â = 0.25 / 0.4330 = <code>0.577</code>；错误回答：Â = −0.75 / 0.4330 = <code>−1.732</code></li>
+      </ul>
+      <p style="margin-bottom:0">边界：G=16 且全部正确或全部错误时 std = 0，交互把优势记为 <code>0.000</code>；<strong>原文没有写这时 GRPO 如何处理</strong>，这一步是页面自定的保护，不是论文规则。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>交互覆盖了什么、没覆盖什么<span class="sum-sub">按 SPEC §1.3-G 列出分支</span></summary>
+    <div class="details-body">
+      <ul style="margin-bottom:0">
+        <li><strong>覆盖：</strong>Eq. 1 的组内均值、总体标准差与逐回答优势；Eq. 4 的 0/1 奖励（用点击或预设序列表示奖励取值）。</li>
+        <li><strong>未覆盖：</strong>Eq. 3 的 clip 目标、Eq. 2 的 token 级 KL、生成过程本身、动作集合的相等判定法则——论文只说 <code>Â<sub>t</sub> = A<sub>t</sub>*</code>，没有写清当两边的动作数不同（1 个 vs 2 个）时如何判等。</li>
+        <li>因此交互是<strong>简化模拟</strong>，不是对训练循环的复现。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>数据靠重标注变密，训练靠两段接力</h2></div>
+  <p class="sec-sub">读完这节要知道训练信号从哪来、每段各用了多少步，以及硬件规模。</p>
+
+  <h3>数据：专家对局 + 重标注，每分钟抽一帧</h3>
+  <ul>
+    <li>数据来自<strong>匿名化的真实对局</strong>，胜负各半，只保留水平高于某阈值的玩家（§3.1）。</li>
+    <li>每局抽取完整盘面序列，主玩家的动作为真值；由于转换会导致标签稀疏/不一致，用<strong>重标注算法</strong>加密（§3.1.1–3.1.2）：</li>
+    <li>先在窗口 <code>L<sub>fill</sub></code> 内<strong>向前回填</strong>检测到的动作标签；再在 <code>L<sub>overwrite</sub></code> 窗口内，按 Table 5 的优先级用高优先动作<strong>覆盖低优先</strong>。</li>
+    <li>重标注后<strong>每分钟随机抽一帧</strong>做训练样本。</li>
+  </ul>
+  <p>注意粒度：<code>L<sub>fill</sub></code>、<code>L<sub>overwrite</sub></code> 的取值、优先级函数里的 criticality / time_window / game_impact 权重，原文都未给出数值。</p>
+
+  <h3>训练：SFT 学格式，GRPO 学对错</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">SFT</span><h4>蒸馏 DeepSeek-R1 的推理</h4></div>
+      <p>§4.2：SFT 训练数据从 DeepSeek-R1「distill」，用 Megatron-LM 训练。目标是拿到「看盘面 → 写 &lt;think&gt; → 给 &lt;answer&gt;」的格式与推理习惯。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">GRPO</span><h4>拿真实对局打分</h4></div>
+      <p>§4.2：online RL 阶段用 §3 采集的真实对局，OpenRLHF 实现 GRPO。论文称 T 为「online RL」，但数据是 replay 里的专家动作，不是与游戏引擎实时交互（见 07）。</p>
+    </div>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th style="text-align:right">GRPO 步数上限（§4.2）</th><th style="text-align:right">Table 2a 报告点</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen-2.5-14B</td><td class="num">up to 700</td><td class="num">360 / 480 / 600</td></tr>
+        <tr><td>Qwen-2.5-32B</td><td class="num">up to 160</td><td class="num">160</td></tr>
+        <tr><td>Qwen-3-14B</td><td class="num">over 2,000</td><td class="num">400 / 2000</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">上表为 §4.2 与 Table 2a 的转录。步数随模型不同是作者明说的「Due to computational constraints」；论文没有解释为什么不是每个模型都报同一组步数。</p>
+
+  <p>工程设定（§4.1）：4 台服务器 × 8 张 NVIDIA H20（96 GB）；<code>prompt_max_len = 8192</code>，<code>generate_max_len = 2048</code>。组大小 G、采样温度、学习率等 GRPO 超参原文未给出。</p>
+
+  <p>通用能力方面，Table 2 用 Ape210K、SchoolChinese、MMLU、Ceval、CharacterEval、BBH、IfEval 七项检查是否遗忘——数据已转录进 06 节。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条数据的生命周期：从一帧盘面到一个优势值</h2></div>
+  <p class="sec-sub">把 §3.1、§3.2 和 Figure 1 的流程按时间顺序串起来。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 250" role="img" aria-label="TiG 训练流程：对局抽取、重标注、抽帧、组采样、GRPO 更新、检查点">
+      <defs>
+        <marker id="arw" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="#6B6660"></path>
+        </marker>
+      </defs>
+      <!-- step 1 -->
+      <rect x="10" y="30" width="150" height="80" rx="10" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1.2"></rect>
+      <text x="85" y="55" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" font-weight="700" fill="#2E5A6B">① 真实对局</text>
+      <text x="85" y="75" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#2E5A6B">匿名化 · 胜负各半</text>
+      <text x="85" y="93" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#2E5A6B">主玩家动作 = 真值</text>
+      <!-- step 2 -->
+      <rect x="185" y="30" width="150" height="80" rx="10" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.2"></rect>
+      <text x="260" y="55" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" font-weight="700" fill="#5A4A8C">② 重标注</text>
+      <text x="260" y="75" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#5A4A8C">L_fill 向前回填</text>
+      <text x="260" y="93" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#5A4A8C">L_overwrite 按优先级覆盖</text>
+      <!-- step 3 -->
+      <rect x="360" y="30" width="150" height="80" rx="10" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.2"></rect>
+      <text x="435" y="55" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" font-weight="700" fill="#5A4A8C">③ 抽帧</text>
+      <text x="435" y="75" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#5A4A8C">每分钟随机 1 帧</text>
+      <text x="435" y="93" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#5A4A8C">§3.1.1</text>
+      <!-- step 4 -->
+      <rect x="535" y="20" width="160" height="100" rx="10" fill="none" stroke="#2E5A6B" stroke-width="1.5" stroke-dasharray="5 3"></rect>
+      <text x="615" y="42" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" font-weight="700" fill="#2E5A6B">④ 同一盘面 × G</text>
+      <text x="615" y="62" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#2E5A6B">&lt;think&gt;…&lt;/think&gt;</text>
+      <text x="615" y="80" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#2E5A6B">&lt;answer&gt;a, b&lt;/answer&gt;</text>
+      <text x="615" y="98" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#2E5A6B">G 个回答各自得 r ∈ {0,1}</text>
+      <!-- step 5 -->
+      <rect x="720" y="20" width="150" height="100" rx="10" fill="#F4DCD0" stroke="#C04E2D" stroke-width="1.5"></rect>
+      <text x="795" y="42" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="11" font-weight="700" fill="#7A2E16">⑤ GRPO 更新</text>
+      <text x="795" y="62" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#7A2E16">Â = (r − mean)/std</text>
+      <text x="795" y="80" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#7A2E16">clip + KL 惩罚</text>
+      <text x="795" y="98" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10" fill="#7A2E16">更新 π<sub>θ</sub></text>
+      <!-- arrows -->
+      <line x1="160" y1="70" x2="183" y2="70" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arw)"></line>
+      <line x1="335" y1="70" x2="358" y2="70" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arw)"></line>
+      <line x1="510" y1="70" x2="533" y2="70" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arw)"></line>
+      <line x1="695" y1="70" x2="718" y2="70" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arw)"></line>
+      <!-- feedback -->
+      <path d="M795,120 L795,160 L260,160 L260,112" fill="none" stroke="#C04E2D" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#arw)"></path>
+      <text x="527" y="178" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#7A2E16">下一批盘面 → 下一组采样（不是训练到布告栏里，训练数据已是固定 replay）</text>
+      <!-- bottom row: off-policy caveat -->
+      <rect x="10" y="200" width="860" height="38" rx="8" fill="#FFFFFF" stroke="#E8DCC7"></rect>
+      <text x="20" y="224" font-family="JetBrains Mono,monospace" font-size="10.5" fill="#6B6660">SFT 平行支路：DeepSeek-R1 生成/蒸馏的训练样本 → 先用 SFT 学格式 → 再进 ⑤；Table 2a 中 32B 只有 GRPO（steps=160），14B 有 SFT / GRPO / SFT+GRPO 三种组合。</text>
+    </svg>
+    <figcaption>根据 §3.1（重标注与抽帧）、§3.2 与论文 Figure 1 的文字说明整理；Figure 1 原图未转录，此处是流程重画，不是对原图的复制。</figcaption>
+  </figure>
+
+  <p><strong>推理时</strong>没有 GRPO 的那一圈：盘面 JSON + Table 1 的中文提示词 + 40 个候选动作 → 一条 &lt;think&gt; + &lt;answer&gt;。
+  论文 §4.1 提到评估时会「re-sample a subset of examples and slightly modify the output format」来防止数据泄漏，但没说改了哪些格式。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>训练确实在涨，但不是单调涨：14B 在 480 步反而更低</h2></div>
+  <p class="sec-sub">本节所有数字来自 Table 2a（动作预测准确率，保留两位小数的原文写法）；差异均以百分点（pp）标注绝对差，括号内给相对差。</p>
+
+  <div class="tabs" id="acc-tabs">
+    <button class="tab active" data-key="32b">Qwen-2.5-32B</button>
+    <button class="tab" data-key="14b">Qwen2.5-14B</button>
+    <button class="tab" data-key="q3">Qwen-3-14B</button>
+  </div>
+  <div class="sim" style="padding:18px">
+    <div id="acc-chart"></div>
+    <div class="legend" style="margin-top:10px">
+      <span><i style="background:var(--c1)"></i>基线 / 只 GRPO</span>
+      <span><i style="background:var(--accent)"></i>SFT + GRPO（本文）</span>
+    </div>
+    <div class="readout" id="acc-readout" data-src="Table 2a" style="margin-top:12px"><div class="r-head">同组读数</div><div id="acc-msg"></div></div>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型 / 方法（Table 2a）</th><th style="text-align:right">准确率 %</th></tr></thead>
+      <tbody>
+        <tr><td>QwQ-32B（参照）</td><td class="num">75.22</td></tr>
+        <tr><td>Deepseek-R1（参照）</td><td class="num">86.67</td></tr>
+        <tr><td>Qwen-2.5-32B</td><td class="num">66.67</td></tr>
+        <tr class="best"><td>Qwen-2.5-32B + GRPO（本文，steps=160）</td><td class="num">86.84</td></tr>
+        <tr><td>Qwen2.5-14B</td><td class="num">53.25</td></tr>
+        <tr><td>Qwen2.5-14B + SFT</td><td class="num">70.13</td></tr>
+        <tr><td>Qwen2.5-14B + GRPO（steps=360）</td><td class="num">79.22</td></tr>
+        <tr><td>Qwen2.5-14B + SFT + GRPO（本文，steps=480）</td><td class="num">77.92</td></tr>
+        <tr class="best"><td>Qwen2.5-14B + SFT + GRPO（本文，steps=600）</td><td class="num">83.12</td></tr>
+        <tr><td>Qwen-3-14B</td><td class="num">82.89</td></tr>
+        <tr><td>Qwen-3-14B + SFT + GRPO（本文，steps=400）</td><td class="num">85.71</td></tr>
+        <tr class="best"><td>Qwen-3-14B + SFT + GRPO（本文，steps=2000）</td><td class="num">90.91</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft)">上表逐行转录自 Table 2a（原文按模型分块，这里保留原顺序）。QwQ-32B 与 Deepseek-R1 是参照行，不属于本文训练结果。</p>
+
+  <ul>
+    <li><strong>32B 只用 GRPO 就追平 DeepSeek-R1：</strong>86.84 对 86.67，高 <code>0.17 pp</code>（相对 0.20%，0.17 / 86.67）。原文把 32B+GRPO 的 86.84 与 R1 的 86.67 并列在同一张表里，没有单独评论这 0.17 pp。</li>
+    <li><strong>14B 不是「SFT + GRPO 更好」：</strong>480 步的 77.92 比只做 GRPO 360 步的 79.22 低 <code>1.30 pp</code>（<span class="infer">推断</span>：可能是步数或 checkpoint 选择差异，原文只写「Due to computational constraints, we vary the number of training steps」）。</li>
+    <li><strong>14B 的 SFT 单独就很强：</strong>70.13，GRPO 再叠上 600 步后到 83.12（比 SFT 高 <code>12.99 pp</code>，相对 18.52%）。</li>
+    <li><strong>14B 原始版不弱但不如 R1：</strong>82.89，比 DeepSeek-R1 低 <code>3.78 pp</code>（3.78 / 86.67 = 4.36%）。</li>
+  </ul>
+
+  <p>通用能力（Table 2）的转录如下——论文结论是「preserves, and in some cases slightly improves」：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th>ape_210k</th><th>SchoolChinese</th><th>MMLU</th><th>Ceval</th><th>CharacterEval</th><th>BBH</th><th>IfEval</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen2.5-14B</td><td class="num">79.0</td><td class="num">95.7</td><td class="num">76.2</td><td class="num">76.7</td><td class="num">3.05</td><td class="num">60.7</td><td class="num">64.8</td></tr>
+        <tr><td>Qwen2.5-14B+SFT+GRPO</td><td class="num">78.8</td><td class="num">95.8</td><td class="num">76.3</td><td class="num">76.2</td><td class="num">3.04</td><td class="num">61.3</td><td class="num">64.9</td></tr>
+        <tr><td>Qwen3-14B</td><td class="num">93.5</td><td class="num">91.6</td><td class="num">80.3</td><td class="num">83.1</td><td class="num">3.01</td><td class="num">65.8</td><td class="num">65.8</td></tr>
+        <tr><td>Qwen3-14B+SFT+GRPO</td><td class="num">94.1</td><td class="num">91.3</td><td class="num">80.4</td><td class="num">82.8</td><td class="num">3.01</td><td class="num">66.9</td><td class="num">65.3</td></tr>
+        <tr><td>Qwen2.5-32B</td><td class="num">84.0</td><td class="num">98.1</td><td class="num">83.2</td><td class="num">87.7</td><td class="num">3.13</td><td class="num">67.5</td><td class="num">85.8</td></tr>
+        <tr><td>Qwen-2.5-32B + GRPO</td><td class="num">85.0</td><td class="num">97.9</td><td class="num">83.5</td><td class="num">87.4</td><td class="num">3.13</td><td class="num">69.7</td><td class="num">85.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft)">原文特别提到「a consistent improvement in the logical reasoning task (BBH)」——但与原文的「consistent」并列看，Ceval、CharacterEval、IfEval 多项训练后下降，例如 Ceval 76.7 → 76.2、IfEval 85.8 → 85.3。</p>
+
+  <h3>错误分布（Figure 2b）：一个方向上的变化</h3>
+  <p>Figure 2b 的雷达图（原图为位图，本页未转录各轴数值）对比 Qwen-2.5-32B、DeepSeek-R1、Qwen-2.5-32B + GRPO 的 5 类错误，图例只有三种颜色，<strong>没有区分 GRPO 的步数</strong>。肉眼可读的趋势是：GRPO 模型在 Situational Misjudgement、Spatio-Temporal Miscoordination 与 Basic Game Knowledge Errors 三轴上均比基线更靠内。<span class="infer">推断</span>（依据：审稿人 450dpi 读图估计，Basic Game Knowledge Errors 轴 GRPO ≈2、基线 ≈3；图仅作示位，无点值）。
+
+  <h3>问答任务（Table 3）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th rowspan="2">模型</th><th colspan="3">Game-state Strong Related</th><th colspan="3">Game-state Weak Related</th></tr>
+      <tr><th style="text-align:right">0</th><th style="text-align:right">1</th><th style="text-align:right">2</th><th style="text-align:right">0</th><th style="text-align:right">1</th><th style="text-align:right">2</th></tr></thead>
+      <tbody>
+        <tr><td>Deepseek-R1</td><td class="num">17.14%</td><td class="num">25.71%</td><td class="num">57.14%</td><td class="num">3.70%</td><td class="num">16.67%</td><td class="num">79.63%</td></tr>
+        <tr><td>Qwen-2.5-32B</td><td class="num">31.43%</td><td class="num">38.57%</td><td class="num">30.07%</td><td class="num">34.78%</td><td class="num">26.09%</td><td class="num">39.13%</td></tr>
+        <tr class="best"><td>Qwen-2.5-32B + GRPO（steps=160）</td><td class="num">21.43%</td><td class="num">38.57%</td><td class="num">40.00%</td><td class="num">28.89%</td><td class="num">33.33%</td><td class="num">37.78%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft)">评分 0 = Incorrect，1 = Partially Correct，2 = Correct（Table 3 表注）。「Strong Related」的 2 分数在 GRPO 后为 40.00%，仍低于 R1 的 57.14%；「Weak Related」的 2 分数 37.78%，低于 R1 的 79.63%。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它考的是「像专家」，不是「比专家强」，也不是「在线」</h2></div>
+  <p class="sec-sub">论文自己在 §7 列了四条限制，下面再补三条从数据里能读出来的。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">限制 1 · §7</span><h4>依赖底座模型</h4></div>
+    <p>原文：「The effectiveness of TiG is inherently tied to the capabilities of the underlying LLM backbones.」复杂或实时场景下底座的短板会直接变成策略的短板。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">限制 2 · §7</span><h4>只在数字游戏里验证</h4></div>
+    <p>原文：「The generalizability of TiG to other interactive domains—such as robotics or real-world tasks—remains to be thoroughly investigated.」论文全部实验只在王者荣耀完成。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">限制 3 · §7</span><h4>样本效率仍不是免费的</h4></div>
+    <p>原文：「it still requires a substantial amount of environment interaction. This requirement may be prohibitive in scenarios where data collection is expensive or time-consuming.」注意：这里的交互来自 replay 数据，而非与引擎实时交互。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">限制 4 · §7</span><h4>理由未必忠实</h4></div>
+    <p>原文：「In some cases, these explanations may not fully or accurately reflect the underlying decision-making process.」&lt;think&gt; 是联合生成的文本，不是对内部计算的审计。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">补充 5 · 奖励设计</span><h4>目标是模仿，不是赢</h4></div>
+    <p>Eq. 4 只有「与专家动作集合是否相等」这一个信号，没有胜负、没有终局奖励，也没有对「理由写得好不好」的单独评分。模型学的是<strong>跟专家一致</strong>；能否超越专家或发现新策略，论文没有实验回答。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">补充 6 · 标签质量</span><h4>重标注 + 每分钟一帧会丢失盘面粒度</h4></div>
+    <p>真值先经过回填与优先级覆盖，再每分钟抽一帧；动作集合是否「相等」又要精确比较。这两步都会把「玩家本来做什么」压成更粗的标签。<code>L<sub>fill</sub></code>、<code>L<sub>overwrite</sub></code> 未给数值，无法估计这种压缩的影响。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">补充 7 · 训练曲线</span><h4>步数与准确率不是单调关系</h4></div>
+    <p>Table 2a 中 14B 的 480 步（77.92%）低于 360 步纯 GRPO（79.22%），而 3-14B 400 步（85.71%）到 2000 步（90.91%）才拉开。训练步数、checkpoint 选择和样本量对最终数字的影响在论文中没有被分离。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>TiG 的卖点是「用语言写出决策 + 用规则自动判卷」，在离线动作预测上确实能把 14B 顶到超过大模型；但它不改变「监督来自专家」这个前提，也不等于在线交互训练。</strong></p>
+</section>
+
+<footer>
+  <div>论文：Think in Games: Learning to Reason in Games via Reinforcement Learning with Large Language Models（Yi Liao, Yu Gu, Yuan Sui, Zining Zhu, Yifan Lu, Guohua Tang, Zhongqian Sun, Wei Yang · Tencent）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.21365" target="_blank" rel="noopener">arXiv:2508.21365</a>（本页以 v1，2025-08-29 为准）<br>
+    笔记：<a href="/think-in-gameslearning-to-reason-in-games-via-reinforcement-learning-with-large-language-models/">Think in Games（博客笔记）</a><br>
+    <strong>笔记勘误：</strong>笔记称 Qwen-2.5-32B + GRPO「提升超过 20 个百分点」，Table 2a 实为 66.67 → 86.84，即 20.17 pp，结论成立但没有给出精确差；笔记称「图2b … 核心决策错误比例显著低于原始模型」，Figure 2b 的 Basic Game Knowledge Errors 轴 GRPO 也低于基线（≈2 vs ≈3），Game State Misinterpretation 两线接近（≈4 vs ≈5），问题在「显著」而非「低于」<span class="infer">推断</span>（依据：450dpi 读图估计，无点值）；笔记称「即使在逻辑推理任务上略有提升」，但 Table 2 的 BBH 提升区间为 0.6–2.2（14B 61.3−60.7、Qwen3-14B 66.9−65.8、32B 69.7−67.5），不能概括为「略有」。<br>
+    图 1 / 图 2 / 图 3 原图未转录；本页的流程图是按 §3.1、§3.2 重画，不是原图。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+
+  /* ============================================================
+     交互 1：GRPO 组内优势计算器
+     优势口径：总体标准差（÷G），与手算块一致
+     ============================================================ */
+  var PRESETS = [
+    [1, 0, 0, 0, 0, 1, 1, 0],
+    [1, 1, 0, 1, 1, 0, 1, 1]
+  ];
+  var packIdx = 0;
+  var G = 8;
+
+  function fmt3(x) { return (Math.abs(x) < 0.0005 ? 0 : x).toFixed(3); }
+
+  function compute(r) {
+    var n = r.length;
+    var mean = 0, i;
+    for (i = 0; i < n; i++) mean += r[i];
+    mean = n ? mean / n : 0;
+    var v = 0;
+    for (i = 0; i < n; i++) v += (r[i] - mean) * (r[i] - mean);
+    v = n ? v / n : 0;
+    var sd = Math.sqrt(v);
+    var adv = [];
+    for (i = 0; i < n; i++) adv.push(sd === 0 ? 0 : (r[i] - mean) / sd);
+    return { mean: mean, sd: sd, adv: adv };
+  }
+
+  function currentPack() {
+    var base = PRESETS[packIdx];
+    var out = [];
+    for (var i = 0; i < G; i++) out.push(i < base.length ? base[i] : base[base.length - 1]);
+    return out;
+  }
+
+  function renderPack() {
+    var pack = currentPack();
+    var res = compute(pack);
+    var host = document.getElementById('pack-view');
+    if (host) {
+      host.innerHTML = '';
+      pack.forEach(function (r, i) {
+        var box = document.createElement('div');
+        box.className = 'slot' + (r === 1 ? ' hit' : '');
+        box.style.cssText = 'padding:8px 4px;cursor:default';
+        var nm = document.createElement('div');
+        nm.className = 'slot-name';
+        nm.textContent = '#' + (i + 1);
+        var vl = document.createElement('div');
+        vl.className = 'slot-val';
+        vl.textContent = 'r=' + r;
+        var ad = document.createElement('div');
+        ad.className = 'slot-val';
+        ad.style.cssText = 'color:var(--accent-deep);font-size:11.5px';
+        ad.textContent = fmt3(res.adv[i]);
+        box.appendChild(nm); box.appendChild(vl); box.appendChild(ad);
+        host.appendChild(box);
+      });
+    }
+    var msg = document.getElementById('adv-msg');
+    if (msg) {
+      var w = 0;
+      pack.forEach(function (r) { w += r; });
+      msg.innerHTML =
+        'G = <strong>' + G + '</strong>，正确 <strong>' + w + '</strong> 个 · ' +
+        'mean = ' + w + ' / ' + G + ' = <strong>' + res.mean.toFixed(4) + '</strong> · ' +
+        'std(总体) = <strong>' + res.sd.toFixed(4) + '</strong>' +
+        (res.sd === 0
+          ? '<br><span class="warn">组内全对或全错，std = 0，优势记为 0.000（页面自定的保护，原文未写此时 GRPO 如何处理）</span>'
+          : '<br>正确（r=1）优势 = (1 − ' + res.mean.toFixed(4) + ') / ' + res.sd.toFixed(4) + ' = <strong>' + fmt3((1 - res.mean) / res.sd) + '</strong>；' +
+            '错误（r=0）优势 = (0 − ' + res.mean.toFixed(4) + ') / ' + res.sd.toFixed(4) + ' = <strong>' + fmt3((0 - res.mean) / res.sd) + '</strong>');
+    }
+    if (needsRefreshExport) {
+      needsRefreshExport = false;
+      renderToggler();
+    }
+    renderAccRows();
+  }
+
+  function renderAccRows() {
+    var host = document.getElementById('acc-rows');
+    if (!host) return;
+    host.innerHTML = '';
+    for (var w = 0; w <= G; w++) {
+      var r = [];
+      for (var i = 0; i < G; i++) r.push(i < w ? 1 : 0);
+      var res = compute(r);
+      var s = 0;
+      for (var j = 0; j < G; j++) s += Math.abs(res.adv[j]);
+      var mad = G ? s / G : 0;
+      var row = document.createElement('div');
+      row.className = 'rank';
+      var nm = document.createElement('div');
+      nm.className = 'nm';
+      nm.textContent = w + ' / ' + G + ' 正确';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = 'var(--c2)';
+      fill.style.width = (Math.min(1, mad / 1.2) * 100).toFixed(1) + '%';
+      track.appendChild(fill);
+      var val = document.createElement('div');
+      val.className = 'val';
+      val.textContent = mad.toFixed(3);
+      row.appendChild(nm); row.appendChild(track); row.appendChild(val);
+      host.appendChild(row);
+    }
+  }
+
+  // 自定义奖励序列：以当前 preset 为起点，允许单独翻转
+  var custom = PRESETS[0].slice();
+  var customMode = false;
+  var needsRefreshExport = false;
+
+  function renderToggler() {
+    var host = document.getElementById('toggler');
+    if (!host) return;
+    host.innerHTML = '';
+    for (var i = 0; i < 8; i++) {
+      (function (idx) {
+        var b = document.createElement('button');
+        var on = custom[idx] === 1;
+        b.className = 'slot' + (on ? ' hit' : '');
+        b.style.cssText = 'padding:8px 4px;cursor:pointer;font-family:inherit;background:' + (on ? '' : 'var(--bg-surface)');
+        b.setAttribute('type', 'button');
+        var nm = document.createElement('div');
+        nm.className = 'slot-name';
+        nm.textContent = '#' + (idx + 1);
+        var vl = document.createElement('div');
+        vl.className = 'slot-val';
+        vl.textContent = 'r=' + custom[idx];
+        b.appendChild(nm); b.appendChild(vl);
+        b.addEventListener('click', function () {
+          custom[idx] = custom[idx] === 1 ? 0 : 1;
+          customMode = true;
+          needsRefreshExport = true;
+          applyCustom();
+        });
+        host.appendChild(b);
+      })(i);
+    }
+  }
+
+  function applyCustom() {
+    // 自定义序列固定 8 位；G 滑块不作用于自定义模式
+    var res = compute(custom.slice(0, G));
+    var host = document.getElementById('pack-view');
+    if (host) {
+      host.innerHTML = '';
+      custom.slice(0, G).forEach(function (r, i) {
+        var box = document.createElement('div');
+        box.className = 'slot' + (r === 1 ? ' hit' : '');
+        box.style.cssText = 'padding:8px 4px;cursor:default';
+        var nm = document.createElement('div');
+        nm.className = 'slot-name';
+        nm.textContent = '#' + (i + 1);
+        var vl = document.createElement('div');
+        vl.className = 'slot-val';
+        vl.textContent = 'r=' + r;
+        var ad = document.createElement('div');
+        ad.className = 'slot-val';
+        ad.style.cssText = 'color:var(--accent-deep);font-size:11.5px';
+        ad.textContent = fmt3(res.adv[i]);
+        box.appendChild(nm); box.appendChild(vl); box.appendChild(ad);
+        host.appendChild(box);
+      });
+    }
+    var msg = document.getElementById('adv-msg');
+    if (msg) {
+      var w = custom.slice(0, G).reduce(function (a, b) { return a + b; }, 0);
+      msg.innerHTML =
+        '自定义序列（前 ' + G + ' 位）· 正确 <strong>' + w + '</strong> · ' +
+        'mean = <strong>' + res.mean.toFixed(4) + '</strong> · std(总体) = <strong>' + res.sd.toFixed(4) + '</strong>' +
+        (res.sd === 0 ? '<br><span class="warn">全对/全错，优势记为 0.000</span>' : '');
+    }
+    renderToggler();
+  }
+
+  var btns = document.querySelectorAll('#rollout-btns .rule-btn');
+  btns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      packIdx = parseInt(btn.dataset.pack, 10) || 0;
+      custom = PRESETS[packIdx].slice();
+      customMode = false;
+      needsRefreshExport = true;
+      G = 8;
+      var gEl = document.getElementById('group-g');
+      if (gEl) gEl.value = '8';
+      var gv = document.getElementById('g-v');
+      if (gv) gv.textContent = '8';
+      renderPack();
+      renderToggler();
+    });
+  });
+
+  var gSlider = document.getElementById('group-g');
+  if (gSlider) {
+    gSlider.addEventListener('input', function (e) {
+      G = parseInt(e.target.value, 10) || 2;
+      var gv = document.getElementById('g-v');
+      if (gv) gv.textContent = String(G);
+      if (customMode) { applyCustom(); } else { renderPack(); }
+    });
+  }
+
+  renderPack();
+  renderToggler();
+  renderAccRows();
+
+  /* ============================================================
+     交互 2：Table 2a 动作预测准确率切换
+     常量逐字复制自 Table 2a
+     ============================================================ */
+  var ACC = {
+    '32b': [
+      { name: 'Qwen-2.5-32B', v: 66.67, cls: 'b1' },
+      { name: 'Qwen-2.5-32B + GRPO (160)', v: 86.84, cls: 'b3' },
+      { name: 'DeepSeek-R1 (参照)', v: 86.67, cls: 'b2' }
+    ],
+    '14b': [
+      { name: 'Qwen2.5-14B', v: 53.25, cls: 'b1' },
+      { name: 'Qwen2.5-14B + SFT', v: 70.13, cls: 'b1' },
+      { name: 'Qwen2.5-14B + GRPO (360)', v: 79.22, cls: 'b1' },
+      { name: 'Qwen2.5-14B + SFT + GRPO (480)', v: 77.92, cls: 'b3' },
+      { name: 'Qwen2.5-14B + SFT + GRPO (600)', v: 83.12, cls: 'b3' }
+    ],
+    'q3': [
+      { name: 'Qwen-3-14B', v: 82.89, cls: 'b1' },
+      { name: 'Qwen-3-14B + SFT + GRPO (400)', v: 85.71, cls: 'b3' },
+      { name: 'Qwen-3-14B + SFT + GRPO (2000)', v: 90.91, cls: 'b3' },
+      { name: 'DeepSeek-R1 (参照)', v: 86.67, cls: 'b2' }
+    ]
+  };
+  var COLORS = { b1: 'var(--c1)', b2: 'var(--c2)', b3: 'var(--accent)' };
+  var ACC_MSG = {
+    '32b': '只用 GRPO 160 步：<strong>66.67 → 86.84</strong>，绝对 +20.17 pp（相对 30.25%，20.17 / 66.67）；与 DeepSeek-R1 的 86.67 相比高 <strong>0.17 pp</strong>。',
+    '14b': 'SFT 把基线从 53.25 抬到 70.13（+16.88 pp，相对 31.70%）。480 步 SFT+GRPO 为 77.92，<strong>低于</strong> 360 步纯 GRPO 的 79.22（差 1.30 pp，相对 1.64%）；600 步才反超到 83.12。',
+    'q3': '400 步 85.71（+2.82 pp，相对 3.40%），2000 步 90.91（<strong>+8.02 pp</strong>，相对 9.68%）。2000 步比 DeepSeek-R1 高 <strong>4.24 pp</strong>（相对 4.89%）。'
+  };
+
+  function renderAcc(key) {
+    var host = document.getElementById('acc-chart');
+    if (!host) return;
+    var rows = ACC[key] || [];
+    var minV = 50;
+    host.innerHTML = '';
+    rows.forEach(function (d) {
+      var row = document.createElement('div');
+      row.className = 'rank';
+      var nm = document.createElement('div');
+      nm.className = 'nm';
+      nm.textContent = d.name;
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = COLORS[d.cls] || 'var(--c1)';
+      fill.style.width = Math.max(1, (d.v - minV) / (100 - minV) * 100).toFixed(1) + '%';
+      track.appendChild(fill);
+      var val = document.createElement('div');
+      val.className = 'val';
+      val.textContent = d.v.toFixed(2);
+      row.appendChild(nm); row.appendChild(track); row.appendChild(val);
+      host.appendChild(row);
+    });
+    var msg = document.getElementById('acc-msg');
+    if (msg) msg.innerHTML = ACC_MSG[key] || '';
+  }
+
+  var tabs = document.querySelectorAll('#acc-tabs .tab');
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      renderAcc(btn.dataset.key);
+    });
+  });
+  renderAcc('32b');
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLVMR · 给推理过程本身发规则奖励，让长时程 Agent 不再靠巧合成功</title>
+<meta name="description" content="RLVMR 让 Agent 用 planning / explore / reflection / monitor 四种标签写明自己的思考，用可程序验证的规则给这些步骤发过程奖励，并用 GRPO-MR 把轨迹优势与同标签相对优势按 α=0.5 合成。Qwen-7B 在 ALFWorld 未见任务 L2 上达到 83.6%，重复动作率从 GRPO 的 21.5% 降到 2.3%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+
+/* ---- 同标签分组示意 ---- */
+.grp-chips{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 2px}
+.grp-chips span{font-size:12.5px;border-radius:7px;padding:5px 10px;border:1px solid var(--border);background:var(--bg)}
+.grp-chips .g1{background:var(--c1-soft);border-color:var(--c1);color:var(--c1)}
+.grp-chips .g2{background:var(--c2-soft);border-color:var(--c2);color:var(--c2)}
+.grp-chips .g3{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-deep)}
+
+/* ---- 优势网格模拟器 ---- */
+.adv-grid{display:grid;grid-template-columns:66px repeat(6,1fr);gap:7px;margin:16px 0}
+.ag-head{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);text-align:center;padding:4px 0;white-space:nowrap}
+.ag-label{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--text-muted);text-align:right;padding-right:2px;align-self:center;line-height:1.4}
+.ag-cell{border:1px solid var(--border);background:var(--bg);border-radius:7px;padding:6px 2px 5px;text-align:center;min-width:0;line-height:1.25;cursor:pointer;transition:all .15s ease;font-family:inherit;color:inherit}
+.ag-cell:hover{border-color:var(--border-strong)}
+.ag-cell.rewarded{border-color:var(--accent);background:var(--accent-soft)}
+.ag-cell.sel{outline:2.5px solid var(--c2);outline-offset:2px}
+.ag-cell .ac-tag{font-family:"JetBrains Mono",monospace;font-size:9px;color:var(--text-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ag-cell .ac-r{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--text)}
+.ag-cell .ac-a{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;line-height:1.3}
+.ag-cell .ac-a.up{color:var(--c3)}
+.ag-cell .ac-a.down{color:var(--accent)}
+.ag-trail{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--text-muted);margin:0 0 4px}
+.ag-trail code{background:var(--bg-soft);padding:1px 6px;border-radius:4px;font-size:11.5px}
+
+@media (max-width:560px){
+  .adv-grid{grid-template-columns:46px repeat(6,1fr);gap:4px}
+  .ag-cell{padding:5px 1px}
+  .ag-cell .ac-tag{font-size:8px}
+  .ag-cell .ac-r{font-size:9.5px}
+  .ag-cell .ac-a{font-size:11px}
+  .ag-label{font-size:9.5px}
+  .ag-head{font-size:9px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">RLVMR</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 腾讯混元</span>
+  <h1>RLVMR：奖励「怎么想」，而不只是奖励「做成了」</h1>
+  <p class="hero-sub">
+    长时程 Agent 的 GRPO 只看到最后一刻的成败信号：一条轨迹只要最终成功，路上多少重复、无效、自相矛盾的动作都会被一并强化。论文把这种「结果对、过程乱」定义为 <strong>inefficient exploration</strong>。
+    RLVMR 的处理方式是让 Agent 用四种标签声明自己此刻在做哪类思考，再用规则给这些步骤发可验证的过程奖励，与结果奖励一起合成每步优势。
+  </p>
+  <div class="meta">
+    <span>Zijing Zhang, Ziyang Chen, Mingxiao Li, Zhaopeng Tu, Xiaolong Li · Hunyuan AI Digital Human, Tencent</span>
+    <a href="https://arxiv.org/abs/2507.22844" target="_blank" rel="noopener">arXiv 2507.22844 ↗</a>
+    <a href="https://github.com/Tencent/DigitalHuman/tree/main/RLVMR" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    两种常见训练范式各缺一半：<strong>SFT</strong> 在见过的任务上动作短、无效动作少，但换成未见任务就退化；<strong>仅结果的 GRPO</strong> 泛化更好，却学会了「不管怎么绕，成功就行」。7B 模型在 ALFWorld 未见任务 L2 上的重复动作率，SFT 是 14.4%，GRPO 是 31.2%。
+  </p>
+  <p>
+    RLVMR 的抓手是把「思考」变成可检查的字段：每步先输出一个元认知标签，再输出动作。<em>探索新对象/位置、失败后反思并纠正、输出格式合规</em>都写成规则判定，不训练奖励模型；只有 planning 奖励要看整条轨迹是否最终成功。
+  </p>
+  <p>
+    优势不再只有轨迹级一项：GRPO-MR 把同批次里<strong>同一标签</strong>的步骤分成一组做组内标准化，再和轨迹级优势按 <code>A = α·A<sup>traj</sup> + (1−α)·A<sup>MR</sup><sub>tag</sub></code> 合成，α 默认 0.5。训练前先在一批带标签轨迹上做 5 轮 SFT 冷启动。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">83.6<small>%</small></div>
+      <div class="k">ALFWorld 未见任务 L2 · Qwen-7B<br>GiGPO 67.2 / GRPO 52.3（Table 1）</div>
+    </div>
+    <div class="metric">
+      <div class="v">2.3<small>%</small></div>
+      <div class="k">重复动作率 · 7B · L0<br>GRPO 21.5，约为其 1/9（§4.2 与图 5）</div>
+    </div>
+    <div class="metric">
+      <div class="v">−28.1<small>%</small></div>
+      <div class="k">平均动作数相对 GRPO 的降幅<br>L2 上 21.7 → 15.4（Table 2）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>只奖励最终成败，等于告诉 Agent「结果对就行」</h2></div>
+  <p class="sec-sub">先看清「低效探索」长什么样，再判断为什么加模型、加数据都治不了它。</p>
+
+  <p>
+    ALFWorld 和 ScienceWorld 都是纯文本的长时程任务：一个回合最多 <code>30</code> 步（§4.1、附录 A.2），Agent 每步交替给出思考与动作，通常只在回合结束才拿到「成功 / 失败」。论文把交互写成 MDP <code>(S, A, O, F, R)</code>，优化目标为 <code>max<sub>θ</sub> 𝔼<sub>τ~π</sub>[R(τ)]</code>（Eq. 1）——reward 只存在于轨迹末尾，中间每一步对它的贡献没有任何区分。
+  </p>
+
+  <p>
+    论文 §2.2 给了一个具体的 GRPO 轨迹片段：任务是把两个钥匙串放进保险箱（L2 未见任务）。第 7 步 Agent 已经到了 <code>dresser 1</code>，第 8 步拿到了 <code>keychain 1</code>，思考里也写明了「还得找第二个钥匙串」。但接下来它连续执行 <code>go to dresser 1</code>，环境只回 <code>Nothing happens.</code>。思考和动作脱节了：策略只是复现训练数据里的动作分布，推理没有真正参与决策。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">完整判据</span><h4>成功率告诉你做没做成，但不说做了什么</h4></div>
+    <p>SFT 和 GRPO 的成功率可以很高，但成功路径里混着多少重复、无效步骤，目标函数完全不看。论文因此给出一个更完整的三指标判据：成功率，加无效动作率与重复动作率——后两者直接量化「低效探索」。</p>
+  </div>
+
+  <p>
+    论文接着用 7B 模型在 ALFWorld 三个难度层上的数字说明这不是个别现象：从 L0（见过的任务与类别）到 L2（连任务类别都没见过），重复动作率的变化是 <strong>SFT 13.9% → 14.4%，GRPO 21.5% → 31.2%</strong>（图 3；同图也给出 RLVMR 的对应值）。难度一升，两种范式都更乱，只是乱法不同：SFT 升得慢，GRPO 升得猛。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成的路，一条怕新任务，一条不管过程</h2></div>
+  <p class="sec-sub">把每一层的数字摆出来：SFT 的能力上限停在哪，GRPO 的过程有多乱，加模型尺寸又能不能救。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">SFT</span><h4>模仿专家轨迹：省步数，但不会应变</h4></div>
+      <p>在成功轨迹上做监督微调。7B 模型在 ALFWorld 上的成功率从零样本 ReAct 的 23.1% 升到 L0 的 63.3%，L0 无效动作率 6.2%，动作最短（10.8 步，Table 2）。</p>
+      <p><strong>盲区：</strong>碰到专家数据里没有的情形就退回去。L2 成功率掉到 37.5%，重复动作率从 L0 的 13.9% 升到 L1 的 24.5%（§2.3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">GRPO</span><h4>只比较最终回报：泛化更好，过程失控</h4></div>
+      <p>同一初始状态采样多条轨迹，用最终回报做组内比较。7B 在 L1 拿到 77.3%、L2 拿到 52.3%，明显超过 SFT。</p>
+      <p><strong>盲区：</strong>任何通往成功的路径都会被强化。7B 在 L0 重复动作 21.5%、无效动作 14.8%，到 L2 重复动作率升到 31.2%。</p>
+    </div>
+  </div>
+
+  <p>
+    一个自然的反驳是「换大一点的模型不就行了」。论文的数据恰好相反：从 1.5B 放大到 7B，GRPO 在 L2 上的成功率从 29.7% 升到 52.3%，但重复动作率也从 27.1% 升到 31.2%。更大的模型把能力用在了更高效地沿用坏策略上——问题出在优化目标，不在容量。
+  </p>
+
+  <p>
+    §4.1 的对比方法里还有两个「已经有过程/细粒度信号」的代表：<strong>ETO</strong> 用轨迹上的步骤级反馈迭代修正动作，<strong>GiGPO</strong> 用两层分组做更细的信用分配。两者都优于 GRPO，但都没有显式监督「推理质量」。论文的整个增量，是把「好的思考」本身变成可验证、可奖励的对象。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>范式</th><th style="text-align:right">ALFWorld 7B L0</th><th style="text-align:right">L1</th><th style="text-align:right">L2</th><th>过程质量（7B · L2）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SFT</td><td class="num">63.3</td><td class="num">57.0</td><td class="num">37.5</td><td>重复动作 14.4%</td></tr>
+        <tr><td>GRPO</td><td class="num">79.3</td><td class="num">77.3</td><td class="num">52.3</td><td>重复动作 31.2% / 无效动作 13.5%</td></tr>
+        <tr class="best"><td>RLVMR</td><td class="num">91.4</td><td class="num">91.8</td><td class="num">83.6</td><td>重复动作 11.7% / 无效动作 7.1%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left">成功率取自 Table 1；过程质量取自图 5 的 RLVMR、图 3 的 SFT / GRPO（均为百分比）</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>每步先声明「我在做什么思考」，再按规则给这一步打分</h2></div>
+  <p class="sec-sub">方法分三层：可检查的标签、规则化的过程奖励、按标签分组的相对优势。</p>
+
+  <h3>第一层：把 ReAct 的「思考」拆成四个可检查的标签</h3>
+  <p>
+    ReAct 里思考是一个整体，无法定位哪里好哪里坏。RLVMR 要求每步输出一个 XML 风格的元认知标签，动作统一放在 <code>&lt;action&gt;</code> 里（§3.2）：
+  </p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">planning</span></div><p>开局或需要重规划时，把任务拆成高层步骤；对应的奖励要求整条轨迹最终成功才发。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">explore</span></div><p>面对不确定或卡住时提出假设、选备选；动作指向新对象或新位置时获得探索奖励。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pa">reflection / monitor</span></div><p>失败后回顾并纠正；常规执行时对照计划看子目标。反思奖励要求反思后紧跟一个纠正动作。</p></div>
+  </div>
+
+  <h3>第二层：奖励由可验证规则判定，不训练奖励模型</h3>
+  <div class="eq">
+    R(τ) = r<sub>s</sub>（成功）/ 0（失败）
+    &nbsp;&nbsp;&nbsp;&nbsp; r<sub>t</sub> = r<sup>MR</sup><sub>t</sub> + r<sup>format</sup><sub>t</sub>
+  </div>
+  <div class="eq-cap">轨迹级只有成败；每一步的奖励来自 <code>r<sub>planning</sub></code>、<code>r<sub>explore</sub></code>、<code>r<sub>reflection</sub></code> 与格式惩罚 <code>−λ<sub>format</sub></code>（§3.4.1）</div>
+  <p>
+    这四种奖励全部是程序化判定：探索奖励看「是否指向新对象/位置」，反思奖励看「失败序列之后是否出现反思且紧跟纠正动作」，格式惩罚看输出是否同时包含至少一个元认知标签和一个 <code>&lt;action&gt;</code>（附录 A.2，λ<sub>format</sub> = 0.1）。不需要额外的奖励模型，也不依赖 LLM 裁判。
+  </p>
+
+  <h3>第三层：同标签相对优势，把「这类思考」横向比较</h3>
+  <p>
+    轨迹级优势沿用 GRPO：<code>A<sup>traj</sup><sub>k</sub> = (R(τ<sub>k</sub>) − μ<sub>R</sub>) / σ<sub>R</sub></code>（Eq. 2），整条轨迹共享一个数。RLVMR 再加一层：把同一个 batch 里所有步骤<strong>按标签分组</strong>，组内标准化元认知奖励（Eq. 3）：
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 720 210" role="img" aria-label="同一个 batch 中所有步骤按元认知标签分组：explore 组、reflection 组、planning 组各自做组内标准化">
+      <defs>
+        <marker id="rlvmr-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+      <text x="24" y="26" class="pipe-s">同一 batch · 16 个环境 × 8 条轨迹</text>
+
+      <rect x="24" y="42" width="144" height="120" rx="10" class="pipe-c1"></rect>
+      <text x="96" y="70" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">&lt;explore&gt; 组</text>
+      <text x="96" y="94" text-anchor="middle" class="pipe-s">所有 explore 步骤的 r<sup>MR</sup></text>
+      <text x="96" y="118" text-anchor="middle" class="pipe-s">μ<sub>explore</sub>、σ<sub>explore</sub></text>
+      <text x="96" y="144" text-anchor="middle" class="pipe-t pipe-m">→ A<sup>MR</sup><sub>t,tag</sub></text>
+
+      <rect x="288" y="42" width="144" height="120" rx="10" class="pipe-c2"></rect>
+      <text x="360" y="70" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">&lt;reflection&gt; 组</text>
+      <text x="360" y="94" text-anchor="middle" class="pipe-s">所有 reflection 步骤的 r<sup>MR</sup></text>
+      <text x="360" y="118" text-anchor="middle" class="pipe-s">μ<sub>reflection</sub>、σ<sub>reflection</sub></text>
+      <text x="360" y="144" text-anchor="middle" class="pipe-t pipe-m">→ A<sup>MR</sup><sub>t,tag</sub></text>
+
+      <rect x="552" y="42" width="144" height="120" rx="10" class="pipe-box"></rect>
+      <text x="624" y="70" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">&lt;planning&gt; 组</text>
+      <text x="624" y="94" text-anchor="middle" class="pipe-s">所有 planning 步骤的 r<sup>MR</sup></text>
+      <text x="624" y="118" text-anchor="middle" class="pipe-s">μ<sub>planning</sub>、σ<sub>planning</sub></text>
+      <text x="624" y="144" text-anchor="middle" class="pipe-t pipe-m">→ A<sup>MR</sup><sub>t,tag</sub></text>
+
+      <path d="M168 102 L282 102" class="pipe-line" marker-end="url(#rlvmr-arrow)"></path>
+      <path d="M432 102 L546 102" class="pipe-line" marker-end="url(#rlvmr-arrow)"></path>
+
+      <text x="360" y="196" text-anchor="middle" class="pipe-s">每组用自己的均值与标准差归一化：一次反思和同批次的另一次反思比，不与探索动作比</text>    </svg>
+    <figcaption>图 1：同标签分组（依据 §3.4.2 与 Figure 4 下半部分重画）。Figure 4 里三个「Meta-reasoning Type Grouping」框，就是把同一 batch 中各类型标签的步骤分别归组、算出各组优势。</figcaption>
+  </figure>
+
+  <p>最终每步优势是两个信号的加权和（Eq. 4），再进入带 KL 正则的裁剪目标（Eq. 5）：</p>
+  <div class="eq">
+    <span class="hl-c">A<sub>t</sub></span>
+    = α · <span class="hl-a">A<sup>traj</sup><sub>k</sub></span>
+    + (1 − α) · <span class="hl-b">A<sup>MR</sup><sub>t,tag</sub></span>
+    &nbsp;&nbsp;&nbsp;&nbsp; (α = 0.5)
+  </div>
+  <div class="eq-cap">青灰是整条轨迹共享的成败基调，紫是同类思考之间的相对好坏；权重各一半</div>
+
+  <p>
+    为什么必须先<strong>按标签</strong>分组、再做标准化？如果把整个 batch 的所有步骤混在一起求 μ、σ，可得分的步骤（比如拿到探索奖励的）天然会拉高均值；一条一切正常的轨迹，它的每一步都会拿到负的优势。按标签分组后，一条正常轨迹在某一类思考里拿到负值，另一条有真实纠正动作的轨迹在同类思考里拿到正值——这正是「过程质量」要表达的比较。下面的模拟器把这个差别做成了可切换的按钮。
+  </p>
+
+  <h3>自己动手：同一条轨迹，两种归一化方式给出两套优势</h3>
+  <p>
+    玩具情节照搬论文里的两个片段：GRPO 反例中「已在 dresser 1、仍在找第二个钥匙串，却反复 go to dresser 1」（§2.2），以及 RLVMR 案例中第 14 步幻觉、第 15 步反思并「清点背包」（§4.2）。未得奖的步骤记 0.40，拿到探索 / 纠正奖励的步骤记 0.60，格式合规不加不减。「整批混在一起」只看当前这一条轨迹，「合成最终优势」则放入一对成功 / 失败轨迹，各 3 条。
+  </p>
+
+  <div class="sim" id="rlvmr-sim">
+    <div class="sim-top" id="adv-modes">
+      <button class="rule-btn active" data-mode="tag" type="button">同标签分组<span class="r-sub">Eq. 3 · RLVMR</span></button>
+      <button class="rule-btn" data-mode="whole" type="button">整批混在一起<span class="r-sub">不分标签归一化</span></button>
+      <button class="rule-btn" data-mode="mix" type="button">合成最终优势<span class="r-sub">Eq. 4 · 对比成功与失败轨迹</span></button>
+    </div>
+
+    <div class="ag-trail" id="adv-trail"></div>
+    <div class="adv-grid" id="adv-grid" role="grid" aria-label="三条轨迹、六步的元认知奖励与优势网格"></div>
+
+    <div class="legend" style="margin-bottom:14px">
+      <span><i style="background:var(--accent-soft);border:1px solid var(--accent)"></i>获得元认知奖励</span>
+      <span><i style="background:var(--bg-soft);border:1px solid var(--border-strong)"></i>未获得（基线奖励）</span>
+      <span><i style="background:var(--c2-soft);border:1px solid var(--c2)"></i>当前选中</span>
+    </div>
+
+    <div class="readout" id="adv-readout">
+      <div class="r-head">当前选中</div>
+      <div id="adv-calc"></div>
+    </div>
+
+    <p class="fine" style="color:var(--text-soft);font-size:12.5px;line-height:1.7;margin:12px 0 0">
+      提示：先看「同标签分组」——τ1 第 4–5 步重复去同一抽屉，在 explore 组里被压低；τ3 第 5 步的反思纠正被抬高。再点「整批混在一起」，所有未得奖步骤都变成负值，好的反思与无意义的重复拿到了同一个数。
+    </p>
+  </div>
+
+  <details>
+    <summary>这个模拟简化了什么？<span class="sum-sub">与论文公式的差异</span></summary>
+    <div class="details-body">
+      <p>归一化严格按 Eq. 3：组内减均值、除标准差。为了让奖励连续、可手算，模拟用的是 0.40 / 0.60 两档，和格式罚分 −0.1；论文的 <code>r<sub>planning</sub></code>、<code>r<sub>explore</sub></code>、<code>r<sub>reflection</sub></code> 具体数值论文没有逐一给出。</p>
+      <p>论文里没有单独的 <code>&lt;monitor&gt;</code> 奖励，只有 planning / explore / reflection 三种；模拟把 monitor 步骤也归入「未获得奖励」的基线档。</p>
+      <p>「合成最终优势」里，失败轨迹的 <code>R(τ)</code> 记为 0、成功记为 1、同组各 3 条，于是 <code>A<sup>traj</sup> = ±0.5</code>；这正是 Eq. 2 的结果。真实 batch 是附录 A.2 的默认配置：16 个环境 × 8 条轨迹，α 与 1−α 两路权重都是 0.5。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>零样本生成不了标签，所以先用少量带标签轨迹把语法教会</h2></div>
+  <p class="sec-sub">两阶段：200 条轨迹的 SFT 冷启动只负责「会写标签」，推理能力靠 RL 阶段配合密集奖励练出来。</p>
+
+  <p>
+    跳出 §3.4 的公式，这套方法能跑起来还有两个前置条件。第一，<strong>模型得先会按格式写元认知标签</strong>。论文报告，尤其是 1.5B 模型，如果跳过冷启动，RL 过程中常常输出无法解析的结果，训练不稳定甚至策略坍塌（§4.4）。冷启动的构造方式是：取一批只含观察-动作对的成功轨迹，让更强的教师模型（如 GPT-4）推断每个动作之前最可能属于哪类思考并打上标签，再让目标模型在这批标注数据上模仿。
+  </p>
+  <p>
+    第二，<strong>每一步的分数必须能即时判定</strong>，否则过程奖励就没法在在线采样时输出。RLVMR 用规则而不是模型打分，代价是奖励的种类受限于能被程序检查的行为——探索到新状态、失败后的纠正、格式是否合规。这也是「verifiable」一词在论文里的含义。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>环节</th><th>设置</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>基座模型</td><td>Qwen2.5-1.5B-Instruct / 7B-Instruct，ReAct 框架</td><td>§2.1、附录 A.2</td></tr>
+        <tr><td>冷启动 SFT</td><td>200 条轨迹，batch 16 / GPU，lr 1e-5，5 个 epoch</td><td>§4.1、附录 A.2</td></tr>
+        <tr><td>RL 框架</td><td>veRL 基础上修改；batch 16 / GPU</td><td>附录 A.2</td></tr>
+        <tr><td>Rollout 规模</td><td>每步从 16 个环境采样，每个环境 8 条轨迹</td><td>附录 A.2</td></tr>
+        <tr><td>优势权重</td><td>outcome 与 meta-reasoning 两路各 0.5（即 α = 0.5）</td><td>§4.1、附录 A.2</td></tr>
+        <tr><td>格式罚分 / KL</td><td>−0.1；KL 系数 0.01</td><td>§4.1、附录 A.2</td></tr>
+        <tr><td>回合上限</td><td>两个环境都最多 30 步</td><td>§4.1、附录 A.2</td></tr>
+        <tr><td>RL 训练轮数</td><td>RLVMR 100 轮，RL 基线 150 轮</td><td>§4.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    算力配置论文没有交代；但可以确定额外开销不来自新模型：过程奖励是纯规则判定，GRPO-MR 只多了一次按标签重索引与组内标准化，更新目标仍是 PPO 式的裁剪 surrogate（Eq. 5），不带 critic。冷启动 5 个 epoch、200 条轨迹的量级，也明显小于一般的 SFT 流水线。
+  </p>
+
+  <details>
+    <summary>消融：三块组件，缺一块掉多少<span class="sum-sub">Table 3 · 1.5B · L2</span></summary>
+    <div class="details-body">
+      <p>在 Qwen2.5-1.5B 上做 L2 消融：完整版 ALFWorld 56.3 / ScienceWorld 26.5。</p>
+      <ul>
+        <li><strong>去掉元认知优势 A<sup>MC</sup></strong>：45.3 / 20.3，ALFWorld 掉 11.0 点。这一档等价于在冷启动模型上跑标准 GRPO。</li>
+        <li><strong>去掉结果优势 A<sup>T</sup></strong>：12.5 / 7.8，几乎失效。规则奖励会把模型推向「多做探索动作」这类局部最优，但没有成败信号告诉它方向。</li>
+        <li><strong>去掉冷启动 CS</strong>：40.6 / 18.8。小模型缺了标签语法的基础，训练会不稳。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条数据流：冷启动 → 带标签 rollout → 两类分组 → 合成优势</h2></div>
+  <p class="sec-sub">注意分组发生在 rollout 之后：多出来的全是算术，没有新的采样，也没有新的模型。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 360" role="img" aria-label="RLVMR 数据流：先在标注轨迹上冷启动，再在线 rollout 得到带标签轨迹，按元认知类型分组和按轨迹结果分组，合成优势后更新策略">
+      <defs>
+        <marker id="rlvmr-arrow2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+
+      <!-- phase labels -->
+      <text x="120" y="20" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">冷启动</text>
+      <text x="420" y="20" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">RL 阶段</text>
+      <path d="M244 152 L290 152" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+
+      <!-- cold start -->
+      <rect x="8" y="34" width="236" height="250" rx="12" class="pipe-box"></rect>
+      <rect x="22" y="50" width="208" height="46" rx="8" class="pipe-c1"></rect>
+      <text x="126" y="68" text-anchor="middle" class="pipe-t">成功轨迹（仅观察-动作）</text>
+      <text x="126" y="86" text-anchor="middle" class="pipe-s">教师模型推断每步的思考类型</text>
+      <path d="M126 96 L126 110" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+      <rect x="22" y="112" width="208" height="46" rx="8" class="pipe-c1"></rect>
+      <text x="126" y="130" text-anchor="middle" class="pipe-t">带元认知标签的轨迹</text>
+      <text x="126" y="148" text-anchor="middle" class="pipe-s">200 条</text>
+      <path d="M126 158 L126 172" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+      <rect x="22" y="174" width="208" height="46" rx="8" class="pipe-c1"></rect>
+      <text x="126" y="192" text-anchor="middle" class="pipe-t">SFT · 5 个 epoch</text>
+      <text x="126" y="210" text-anchor="middle" class="pipe-s">学会标签语法</text>
+      <path d="M126 220 L126 236" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+      <rect x="22" y="238" width="208" height="34" rx="8" class="pipe-c1"></rect>
+      <text x="126" y="259" text-anchor="middle" class="pipe-t">冷启动模型 π<sub>0</sub></text>
+
+      <!-- rollout -->
+      <rect x="290" y="34" width="250" height="196" rx="12" class="pipe-box"></rect>
+      <text x="415" y="60" text-anchor="middle" class="pipe-t" font-weight="600">16 环境 × 8 条轨迹</text>
+      <text x="415" y="82" text-anchor="middle" class="pipe-s">每步：&lt;tag&gt;思考&lt;/tag&gt; + &lt;action&gt;动作&lt;/action&gt;</text>
+      <rect x="304" y="96" width="222" height="28" rx="6" class="pipe-c2"></rect>
+      <text x="415" y="115" text-anchor="middle" class="pipe-s" style="fill:var(--c2)">规则判定 r<sup>MR</sup> + 格式罚分</text>
+      <rect x="304" y="132" width="222" height="28" rx="6" class="pipe-accent"></rect>
+      <text x="415" y="151" text-anchor="middle" class="pipe-s" style="fill:var(--accent-deep)">回合结束：R(τ) 成败</text>
+      <rect x="304" y="168" width="222" height="28" rx="6" class="pipe-box"></rect>
+      <text x="415" y="187" text-anchor="middle" class="pipe-s">单调递增的动作数曲线（图 6）</text>
+      <text x="415" y="214" text-anchor="middle" class="pipe-s">全部信息来自已有 rollout</text>
+
+      <!-- grouping -->
+      <rect x="560" y="34" width="152" height="84" rx="10" class="pipe-c2"></rect>
+      <text x="636" y="56" text-anchor="middle" class="pipe-t pipe-m" font-weight="600" style="font-size:12px">按标签分组</text>
+      <text x="636" y="76" text-anchor="middle" class="pipe-s">Eq. 3 组内标准化</text>
+      <text x="636" y="94" text-anchor="middle" class="pipe-s">→ A<sup>MR</sup><sub>t,tag</sub></text>
+      <text x="636" y="110" text-anchor="middle" class="pipe-s">权重 1 − α = 0.5</text>
+
+      <rect x="560" y="146" width="152" height="84" rx="10" class="pipe-c1"></rect>
+      <text x="636" y="168" text-anchor="middle" class="pipe-t pipe-m" font-weight="600" style="font-size:12px">按轨迹结果分组</text>
+      <text x="636" y="188" text-anchor="middle" class="pipe-s">Eq. 2 组内标准化</text>
+      <text x="636" y="206" text-anchor="middle" class="pipe-s">→ A<sup>traj</sup><sub>k</sub></text>
+      <text x="636" y="222" text-anchor="middle" class="pipe-s">权重 α = 0.5</text>
+
+      <path d="M540 130 L552 130 L552 76 L560 76" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+      <path d="M540 160 L552 160 L552 188 L560 188" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+
+      <!-- combine -->
+      <rect x="560" y="254" width="152" height="54" rx="10" class="pipe-accent"></rect>
+      <text x="636" y="276" text-anchor="middle" class="pipe-t pipe-m" font-weight="600" style="font-size:11.5px">A<sub>t</sub> = 0.5·A<sup>traj</sup> + 0.5·A<sup>MR</sup></text>
+      <text x="636" y="294" text-anchor="middle" class="pipe-s">裁剪目标 + KL（Eq. 5）</text>
+      <path d="M636 118 L636 146" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+      <path d="M636 230 L636 254" class="pipe-line" marker-end="url(#rlvmr-arrow2)"></path>
+
+      <!-- feedback -->
+      <path d="M636 308 L636 334 L126 334 L126 272" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#rlvmr-arrow2)"></path>
+      <text x="380" y="352" text-anchor="middle" class="pipe-s">更新后的策略进入下一轮 rollout，α、冷启动模型固定</text>
+    </svg>
+    <figcaption>
+      图 2：RLVMR 训练数据流（依据 §3.3、§3.4.2 与 Figure 4 重画）。原图 Figure 4 左列为冷启动、右列为 rollout 与分组；此处把两条优势的合成位置也画了进去，方便对上 Eq. 4。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>冷启动只解决语法问题。</strong> 200 条轨迹、5 个 epoch 的目的不是学会解题，而是让模型能稳定产出「至少一个元认知标签 + 一个 action」的输出结构，否则 RL 阶段拿不到可解析的奖励。</li>
+          <li><strong>两类分组并行。</strong> 「按标签分组」衡量同类思考的相对质量；「按轨迹结果分组」衡量整条轨迹的成败。前者是紫色槽位，后者是青灰槽位，最终以 0.5 / 0.5 相加进入优势。</li>
+          <li><strong>没有新采样。</strong> 分组与标准化都作用在已采到的轨迹上；过程奖励是规则判定，不需要奖励模型或额外的 LLM 调用。</li>
+          <li><strong>反馈回路。</strong> 图 6 的单调下降的动作数曲线，正是这条回路持续生效的结果。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    流程里最容易忽略的是<strong>冷启动模型与策略的关系</strong>：附录 A.2 把 KL 正则的参考策略记为 π<sub>ref</sub>，冷启动 SFT 后的模型是天然候选；论文没有逐字点名这个对应关系，页面上按「冷启动产物作为初始策略」来画。此处若有出入，以原文附录为准。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>越难越涨：未见任务 L2 上，7B 比最强的过程型基线高 16.4 点</h2></div>
+  <p class="sec-sub">五张表与两幅图：成功率、过程质量、动作长度、训练曲线，所有数字可在论文与附录中查到。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>方法</th><th style="text-align:right">ALFWorld L1 ↑</th><th style="text-align:right">ScienceWorld L2 ↑</th><th>对照重点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-4o</td><td>ReAct</td><td class="num">66.0</td><td class="num">41.0</td><td>提示基线</td></tr>
+        <tr><td>DeepSeek-R1</td><td>ReAct</td><td class="num">70.2</td><td class="num">29.1</td><td>提示基线</td></tr>
+        <tr><td rowspan="3">Qwen-7B</td><td>+ GRPO</td><td class="num">77.3</td><td class="num">26.6</td><td>仅结果</td></tr>
+        <tr><td>+ GiGPO</td><td class="num">90.2</td><td class="num">25.8</td><td>两层分组</td></tr>
+        <tr class="best"><td>+ RLVMR</td><td class="num">91.8</td><td class="num">32.2</td><td>轨迹 + 同标签优势</td></tr>
+        <tr><td rowspan="3">Qwen-1.5B</td><td>+ GRPO</td><td class="num">71.1</td><td class="num">10.9</td><td>仅结果</td></tr>
+        <tr><td>+ GiGPO</td><td class="num">83.2</td><td class="num">4.7</td><td>两层分组</td></tr>
+        <tr class="best"><td>+ RLVMR</td><td class="num">87.9</td><td class="num">26.5</td><td>小模型追近 7B 基线</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left">成功率（%）取自 Table 1：ALFWorld 列为 L1（未见变体、见过类别），ScienceWorld 列为 L2（变体与类别都未见）。7B 的 ALFWorld L2 是 GRPO 52.3 / GiGPO 67.2 / RLVMR 83.6。</p>
+
+  <h3>三个值得注意的读法</h3>
+  <ul>
+    <li><strong>增益集中在 L2。</strong> 7B 上 RLVMR 对 GiGPO 的领先幅度是 L0 +1.9、L1 +1.6、L2 +16.4 个百分点。在见过的任务上，过程型基线的能力已经接近上限；越往模型没见过的任务类别走，过程监督的价值越大。</li>
+    <li><strong>1.5B 的 RLVMR 追平了以 7B 为基座的 AgentGym。</strong> ScienceWorld L0 上 1.5B RLVMR 为 46.9，AgentGym（Llama-2-Chat-7B 起步）同为 46.9；ALFWorld L0 上 89.1 高于 AgentGym 的 76.6。</li>
+    <li><strong>L1 上 1.5B 反超 GPT-4o：87.9 vs 66.0；L2 上 7B 反超 GPT-4o：83.6 vs 68.8。</strong> 论文据此论证「过程监督比放大模型更有效」。但差距并不在全档位成立：L2 上 1.5B 的 RLVMR 是 56.3，低于 GPT-4o 的 68.8 与 DeepSeek-R1 的 67.3。</li>
+  </ul>
+
+  <h3>过程质量：难度一升，RLVMR 的重复动作率不跟着涨</h3>
+  <p>
+    下图按 L0 / L1 / L2 切换，看 7B 模型在 GRPO（紫）与 RLVMR（陶土红）之间，重复动作率与无效动作率的差距如何随难度变化。两者都来自 Figure 5（b、d 面板），数值可逐柱核对。
+  </p>
+
+  <div class="tabs" id="eff-tabs">
+    <button class="tab active" data-level="L0" type="button">L0 · 见过的任务</button>
+    <button class="tab" data-level="L1" type="button">L1 · 未见变体</button>
+    <button class="tab" data-level="L2" type="button">L2 · 未见类别</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div id="eff-desc" class="readout" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="eff-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--c2)"></i>GRPO</span>
+      <span><i style="background:var(--accent)"></i>RLVMR</span>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">7B 模型上，重复动作率在三种难度下分别是 GRPO 21.5 / 24.5 / 31.2，RLVMR 2.3 / 7.8 / 11.7；无效动作率是 GRPO 14.8 / 25.4 / 13.5，RLVMR 5.6 / 6.5 / 7.1。两组的绝对值都随难度上升，但 GRPO 在 L1 的无效动作上冲到了 25.4，接近同难度下 SFT 的 5.5 的四倍半——这与 §2.2 的钥匙串例子是同一个现象。</p>
+
+  <h3>效率与稳定性：动作更短，收敛曲线更平</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>环境</th><th>Level</th><th style="text-align:right">Vanilla</th><th style="text-align:right">SFT</th><th style="text-align:right">GRPO</th><th style="text-align:right">GiGPO</th><th style="text-align:right">RLVMR</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="3">ALFWorld</td><td>L0</td><td class="num">28.8</td><td class="num">23.2</td><td class="num">15.8</td><td class="num">12.6</td><td class="num">10.8</td></tr>
+        <tr><td>L1</td><td class="num">29.1</td><td class="num">24.5</td><td class="num">18.1</td><td class="num">14.7</td><td class="num">11.6</td></tr>
+        <tr><td>L2</td><td class="num">28.9</td><td class="num">27.5</td><td class="num">21.7</td><td class="num">19.4</td><td class="num">15.4</td></tr>
+        <tr><td rowspan="3">ScienceWorld</td><td>L0</td><td class="num">25.8</td><td class="num">22.9</td><td class="num">15.4</td><td class="num">14.7</td><td class="num">12.5</td></tr>
+        <tr><td>L1</td><td class="num">27.9</td><td class="num">25.7</td><td class="num">26.7</td><td class="num">25.2</td><td class="num">18.8</td></tr>
+        <tr><td>L2</td><td class="num">26.8</td><td class="num">26.2</td><td class="num">27.6</td><td class="num">26.3</td><td class="num">20.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left">Table 2：平均动作长度（越短越好）。表头未标明模型尺寸，论文 §4.3 的解读以「RLVMR 在所有场景都更短」为准</p>
+
+  <p>
+    ALFWorld L2 上，RLVMR 平均 15.4 步，比 GRPO 的 21.7 少 28.1%，比 GiGPO 的 19.4 少 20.6%（§4.3）。ScienceWorld 上优势同样存在，且基线在 L1/L2 的动作数反而比 L0 更长——策略在学着尝试更多更复杂的动作，却没有明确的推理策略。图 6 的训练曲线显示，RLVMR 在 ALFWorld 上约 100 步内就把成功率拉到 0.9 以上，动作长度也持续下降；GRPO 与 GiGPO 的动作数下降更慢，ScienceWorld 上还有反复抬升。
+  </p>
+
+  <details>
+    <summary>反直觉发现：更好的过程，不等于每一项都更好<span class="sum-sub">几个值得对照的数字</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>重复动作率上，SFT 在 L2 比 RLVMR 更「干净」。</strong> 7B · L2：SFT 14.4，RLVMR 11.7——差距只有 2.7 点；但在 L0 上 SFT 是 13.9，RLVMR 是 2.3。RLVMR 的优势不是绝对的低，而是「不像 GRPO 那样随难度失控」。</li>
+        <li><strong>L1 上 SFT 的无效动作率（5.5）比 RLVMR（6.5）还低。</strong> SFT 的「短」是把动作限制在见过的模板里换来的，一到 L2 无效动作率就升到 6.3，重复率升到 14.4。</li>
+        <li><strong>SciWorld L2 上 7B 的 GRPO 是 26.6，比 SFT 的 23.4 高。</strong> 但 RLVMR 的 32.2 说明：在这类需要实验步骤推理的环境里，过程监督的增益比 ALFWorld 更依赖模型尺寸。</li>
+        <li><strong>1.5B 的 RLVMR 在 ALFWorld L0 是 89.1，7B 的 GRPO 是 79.3。</strong> 不是模型越大越好，是训练目标选对以后，「小模型 » 大模型 + 错误的奖励」。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>过程奖励能验证的是「思考类型」，不是「思考对不对」</h2></div>
+  <p class="sec-sub">它的核心资产是一组规则和标签，收益上限就落在这组规则能覆盖的行为上。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>规则奖励很窄：只看四类行为，不评价推理内容</h4></div>
+    <p>
+      探索奖励只看「是否瞄准新对象或新位置」，反思奖励只看「失败后是否纠正」。一个错误但「看起来像反思」的步骤，只要后面跟着一个动作，依然可能拿到正奖励。论文没有给出基于语义正确性的验证手段，这也意味着奖励可以被「格式上正确」的轨迹刷高。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>冷启动依赖更强的教师模型</h4></div>
+    <p>
+      附录 A.2 说明冷启动在 200 条教师标注轨迹上训练，论文正文举的例子是 GPT-4。教师模型的标注质量、API 成本与可复现性都被带进了流水线。消融里去掉冷启动，1.5B 在 L2 上从 56.3 掉到 40.6。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>评价环境仍然只是文本模拟器</h4></div>
+    <p>
+      ALFWorld 与 ScienceWorld 都是纯文本、离散动作、回合上限 30 步。论文 §6 把多模态、机器人、软件工程列为 future work；在连续状态、嘈杂观测或需要视觉反馈的场景里，规则型的探索奖励怎么写，论文没有回答。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>α 与组内归一化的写法需要自行实现</h4></div>
+    <p>
+      正文与附录都只给 α = 0.5 一个值，没有报告 α 在 [0,1] 上的扫描或敏感性；也没有说明 <code>σ<sub>tag</sub></code> 在标签组过小或方差为 0 时的处理（例如某个标签只在一个环境里出现）。这些都是复现时要额外决定的设计点，论文的代码在 <span class="mono">Tencent/DigitalHuman</span> 仓库的 RLVMR 目录下，可作为参考。
+    </p>
+  </div>
+
+  <h3>什么时候别用：先问三个问题</h3>
+  <ul>
+    <li><strong>你的「好过程」能被程序判定吗？</strong> 如果质量只能靠模型评判或人工标注，这套零奖励模型的路线就退化成 PRM，成本和会引入新的误差源。</li>
+    <li><strong>你有少量专家轨迹可用吗？</strong> 没有冷启动模型就无法稳定产出标签，RL 阶段解析不了奖励。消融显示这是 1.5B 上的必要条件。</li>
+    <li><strong>你的收益主要来自未见任务类别吗？</strong> 如果评测集中在见过的变体，SFT 的效率和 GiGPO 的细粒度信用已经接近上限；RLVMR 的主要边际收益在 L2。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>RLVMR 的贡献不是「有了过程奖励就更好」，而是证明了过程奖励必须和组内相对比较、标签条件化、结果信号三者配合，且过程奖励本身必须是可计算的。</strong>
+    </p>
+</section>
+
+<footer>
+  <div>RLVMR: Reinforcement Learning with Verifiable Meta-Reasoning Rewards for Robust Long-Horizon Agents · Zijing Zhang, Ziyang Chen, Mingxiao Li, Zhaopeng Tu, Xiaolong Li · Hunyuan AI Digital Human, Tencent · arXiv 2507.22844（2025-07-30）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.22844" target="_blank" rel="noopener">arXiv:2507.22844</a><br>
+    代码：<a href="https://github.com/Tencent/DigitalHuman/tree/main/RLVMR" target="_blank" rel="noopener">Tencent/DigitalHuman · RLVMR</a><br>
+    笔记：<a href="/rlvmrreinforcement-learning-with-verifiable-meta-reasoning-rewards-for-robust-long-horizon-agents/">RLVMR：Reinforcement Learning with Verifiable Meta-Reasoning Rewards for Robust Long-Horizon Agents</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记写 7B L2 比 GiGPO「提升 16.4%」；原文是 16.4 个<strong>百分点</strong>（67.2 → 83.6）。<br>
+    2. 笔记把消融数字（w/o A<sup>MC</sup> 45.3%、w/o A<sup>T</sup> 12.5%）直接写成「ALFWorld L2 从 56.3 降至」；它们来自 Table 3 的 1.5B 消融，与主表 Table 1 不是同一组实验，阅读时容易混淆。<br>
+    3. 笔记写「1.5B 在 ALFWorld L1 上 87.9% 远超 GPT-4o 66.0%」方向正确；但同表 L2 上 1.5B 只有 56.3，低于 GPT-4o 的 68.8，笔记没有提这一档。<br>
+    4. 笔记表格标题写「表1」但只摘录了 Table 1 的部分行；完整的九档结果见本页 06 节与论文附录 Table 4 / Table 5（分任务类型）。<br>
+    5. 笔记说「三种标签」后列出了四种（planning / explore / reflection / monitor）。原文确实定义四个标签，但只有前三类有对应奖励，monitor 没有独立奖励项，这点笔记没写出。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 优势模拟器
+   τ1 / τ2 / τ3 × 6 步；同标签分组 = Eq. 3；整批 = 所有步骤同一 μ/σ
+   ============================================================ */
+(function () {
+  var BASE = 0.4, GOOD = 0.6;
+  var TRAJS = [
+    { id: 'τ1', outcome: 1, steps: [
+      { tag: 'plan', r: GOOD, note: '开局分析：找第二个钥匙串' },
+      { tag: 'explore', r: GOOD, note: '去 dresser 区搜索' },
+      { tag: 'reflection', r: BASE, note: '普通确认，没有纠正' },
+      { tag: 'explore', r: BASE, note: 'go to dresser 1（原地重复）' },
+      { tag: 'explore', r: BASE, note: 'go to dresser 1（再次重复）' },
+      { tag: 'monitor', r: BASE, note: '检查子目标' }
+    ]},
+    { id: 'τ2', outcome: 0, steps: [
+      { tag: 'plan', r: BASE, note: '计划过于笼统' },
+      { tag: 'explore', r: GOOD, note: '探索新房间' },
+      { tag: 'explore', r: BASE, note: '打开同一抽屉' },
+      { tag: 'reflection', r: BASE, note: '反思后没有纠正' },
+      { tag: 'explore', r: BASE, note: '继续在旧位置找' },
+      { tag: 'monitor', r: BASE, note: '检查子目标' }
+    ]},
+    { id: 'τ3', outcome: 1, steps: [
+      { tag: 'plan', r: GOOD, note: '拆解两个钥匙串的子目标' },
+      { tag: 'explore', r: GOOD, note: '系统性地假设位置' },
+      { tag: 'reflection', r: BASE, note: '常规确认' },
+      { tag: 'monitor', r: BASE, note: '跟踪当前子目标' },
+      { tag: 'reflection', r: GOOD, note: '幻觉后反思，清点背包并纠正' },
+      { tag: 'explore', r: GOOD, note: '去新位置搜索' }
+    ]}
+  ];
+
+  function mean(arr) { return arr.reduce(function (a, b) { return a + b; }, 0) / arr.length; }
+  function std(arr) {
+    var m = mean(arr);
+    var v = arr.reduce(function (a, x) { return a + (x - m) * (x - m); }, 0) / arr.length;
+    return Math.sqrt(v);
+  }
+  function z(r, m, s) { return s > 1e-9 ? (r - m) / s : 0; }
+
+  /* tag groups: collect every step's r across all trajectories */
+  var tagGroups = {};
+  TRAJS.forEach(function (tr, i) {
+    tr.steps.forEach(function (st, t) {
+      if (!tagGroups[st.tag]) tagGroups[st.tag] = [];
+      tagGroups[st.tag].push(st.r);
+    });
+  });
+  var tagStats = {};
+  Object.keys(tagGroups).forEach(function (k) {
+    tagStats[k] = { m: mean(tagGroups[k]), s: std(tagGroups[k]) };
+  });
+  var allR = [];
+  TRAJS.forEach(function (tr) { tr.steps.forEach(function (st) { allR.push(st.r); }); });
+  var allM = mean(allR), allS = std(allR);
+
+  /* trajectory-level advantage: 3 wins, 3 losses -> mean .5, std .5 */
+  var outs = TRAJS.map(function (t) { return t.outcome; });
+  var outM = mean(outs), outS = std(outs);
+
+  var mode = 'tag';
+  var sel = { i: 0, t: 3 };
+
+  function AMR(i, t) {
+    var st = TRAJS[i].steps[t];
+    if (mode === 'whole') return z(st.r, allM, allS);
+    return z(st.r, tagStats[st.tag].m, tagStats[st.tag].s);
+  }
+  function ATraj(i) { return z(TRAJS[i].outcome, outM, outS); }
+  function finalA(i, t) { return 0.5 * ATraj(i) + 0.5 * AMR(i, t); }
+
+  function fmt(x) {
+    if (Math.abs(x) < 0.005) x = 0;
+    return (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(2);
+  }
+
+  function renderTrail() {
+    var host = document.getElementById('adv-trail');
+    if (!host) return;
+    if (mode === 'mix') {
+      host.innerHTML = '轨迹级 <code>A<sup>traj</sup></code>：τ1 成功 → +0.50，τ2 失败 → −0.50，τ3 成功 → +0.50（3 胜 3 负）';
+    } else if (mode === 'whole') {
+      host.innerHTML = '整批 ' + allR.length + ' 步一起：<code>μ = ' + allM.toFixed(2) + '</code>，<code>σ = ' + allS.toFixed(3) + '</code>';
+    } else {
+      host.innerHTML = Object.keys(tagStats).map(function (k) {
+        return k + ' 组 <code>μ=' + tagStats[k].m.toFixed(2) + ' σ=' + tagStats[k].s.toFixed(3) + '</code>';
+      }).join('');
+    }
+  }
+
+  function renderGrid() {
+    var host = document.getElementById('adv-grid');
+    if (!host) return;
+    host.innerHTML = '';
+    var corner = document.createElement('div');
+    corner.className = 'ag-head';
+    host.appendChild(corner);
+    for (var t = 0; t < 6; t++) {
+      var h = document.createElement('div');
+      h.className = 'ag-head';
+      h.textContent = 't' + (t + 1);
+      host.appendChild(h);
+    }
+    TRAJS.forEach(function (tr, i) {
+      var lab = document.createElement('div');
+      lab.className = 'ag-label';
+      lab.innerHTML = tr.id + '<br><span style="color:' + (tr.outcome ? 'var(--c1)' : 'var(--text-soft)') + '">' + (tr.outcome ? '成功' : '失败') + '</span>';
+      host.appendChild(lab);
+      tr.steps.forEach(function (st, t) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ag-cell' + (st.r > BASE + 1e-9 ? ' rewarded' : '') + (sel.i === i && sel.t === t ? ' sel' : '');
+        btn.setAttribute('data-i', String(i));
+        btn.setAttribute('data-t', String(t));
+        var val, sign;
+        if (mode === 'mix') { val = finalA(i, t); sign = null; }
+        else { val = AMR(i, t); sign = val > 1e-9 ? 'up' : (val < -1e-9 ? 'down' : ''); }
+        btn.innerHTML =
+          '<div class="ac-tag">' + st.tag + '</div>' +
+          '<div class="ac-r">' + st.r.toFixed(2) + '</div>' +
+          '<div class="ac-a ' + (sign || '') + '">' + fmt(val) + '</div>';
+        host.appendChild(btn);
+      });
+    });
+  }
+
+  function renderReadout() {
+    var host = document.getElementById('adv-calc');
+    if (!host) return;
+    var tr = TRAJS[sel.i], st = tr.steps[sel.t];
+    var html = '<p><strong>' + tr.id + ' 第 ' + (sel.t + 1) + ' 步</strong> · 标签 <span class="mono">&lt;' + st.tag + '&gt;</span> · 元认知奖励 <span class="mono">r = ' + st.r.toFixed(2) + '</span>　' + st.note + '</p>';
+
+    if (mode === 'whole') {
+      html += '<p>不分组：全部 ' + allR.length + ' 步的 μ = ' + allM.toFixed(2) + '、σ = ' + allS.toFixed(3) + '，所以 <code>A = (' + st.r.toFixed(2) + ' − ' + allM.toFixed(2) + ') / ' + allS.toFixed(3) + ' = ' + fmt(AMR(sel.i, sel.t)) + '</code>。</p>';
+      html += '<p><span class="warn">所有未得奖步骤都是负值</span>，一个拿到探索奖励的步骤会把整批的均值抬高；好的反思与无意义的重复在这里没有区别。</p>';
+    } else if (mode === 'tag') {
+      var g = tagGroups[st.tag], gm = tagStats[st.tag];
+      html += '<p>' + st.tag + ' 组在哪里？同批次的 <span class="mono">' + g.length + '</span> 个 ' + st.tag + ' 步骤内，μ = ' + gm.m.toFixed(2) + '、σ = ' + gm.s.toFixed(3) + '，所以 <code>A<sup>MR</sup><sub>tag</sub> = (' + st.r.toFixed(2) + ' − ' + gm.m.toFixed(2) + ') / ' + gm.s.toFixed(3) + ' = ' + fmt(AMR(sel.i, sel.t)) + '</code>。</p>';
+      var good = g.filter(function (x) { return x > BASE + 1e-9; }).length;
+      html += '<p>组内 ' + good + ' 步得奖、' + (g.length - good) + ' 步未得奖。' + (st.r > BASE + 1e-9 ? '这一步在同类思考里得到正优势。' : '这一步与同类里得奖的步骤相比处于劣势，但不会因为别的标签拉低而失真。') + '</p>';
+    } else {
+      html += '<p>最终优势 <code>A<sub>t</sub> = 0.5 × A<sup>traj</sup> + 0.5 × A<sup>MR</sup><sub>tag</sub></code> = 0.5 × ' + fmt(ATraj(sel.i)) + ' + 0.5 × ' + fmt(AMR(sel.i, sel.t)) + ' = <strong>' + fmt(finalA(sel.i, sel.t)) + '</strong>。</p>';
+      html += '<p>τ1 与 τ3 的轨迹级基调相同（都是 +0.50），差异全部来自过程：τ3 第 5 步的反思纠正拿到 +0.7953，τ1 第 4、5 步的重复动作拿到 −0.8165。' + (tr.outcome ? '' : ' τ2 整体失败，轨迹级 −0.50 会压住它所有的过程收益。') + '</p>';
+    }
+    host.innerHTML = html;
+  }
+
+  function renderAll() {
+    renderTrail();
+    renderGrid();
+    renderReadout();
+  }
+
+  var grid = document.getElementById('adv-grid');
+  if (grid) {
+    grid.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('.ag-cell') : null;
+      if (!btn) return;
+      sel.i = parseInt(btn.getAttribute('data-i'), 10);
+      sel.t = parseInt(btn.getAttribute('data-t'), 10);
+      renderAll();
+    });
+  }
+
+  var modeBtns = document.querySelectorAll('#adv-modes .rule-btn');
+  modeBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      modeBtns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      mode = btn.getAttribute('data-mode');
+      renderAll();
+    });
+  });
+
+  var host0 = document.getElementById('adv-grid');
+  if (host0) renderAll();
+})();
+
+/* ============================================================
+   2) 过程质量对比图（图 5 的 7B 部分）
+   ============================================================ */
+(function () {
+  var DATA = {
+    L0: {
+      desc: '<div class="r-head">L0 · 见到的任务变体与类别</div>7B 上 RLVMR 把重复动作率压到 2.3，无效动作率压到 5.6，都低于同难度下的 SFT（13.9 / 6.2）。',
+      rep: { GRPO: 21.5, RLVMR: 2.3 },
+      inv: { GRPO: 14.8, RLVMR: 5.6 }
+    },
+    L1: {
+      desc: '<div class="r-head">L1 · 未见变体、见过类别</div>GRPO 的无效动作率在这里冲到 25.4，接近 RLVMR 的 6.5 的四倍；重复动作率 24.5 对 7.8。',
+      rep: { GRPO: 24.5, RLVMR: 7.8 },
+      inv: { GRPO: 25.4, RLVMR: 6.5 }
+    },
+    L2: {
+      desc: '<div class="r-head">L2 · 未见变体与类别</div>最容易出现「结果对、过程乱」的一档：GRPO 重复动作率 31.2，RLVMR 11.7，仍不到 SFT 的 14.4。',
+      rep: { GRPO: 31.2, RLVMR: 11.7 },
+      inv: { GRPO: 13.5, RLVMR: 7.1 }
+    }
+  };
+  var max = { rep: 40, inv: 30 };
+  var METRICS = [
+    { key: 'rep', name: '重复动作率' },
+    { key: 'inv', name: '无效动作率' }
+  ];
+
+  function renderChart(level) {
+    var cfg = DATA[level];
+    var desc = document.getElementById('eff-desc');
+    if (desc) desc.innerHTML = cfg.desc;
+    var chart = document.getElementById('eff-chart');
+    if (!chart) return;
+    chart.innerHTML = '';
+
+    METRICS.forEach(function (m) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = m.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+
+      ['GRPO', 'RLVMR'].forEach(function (k) {
+        var v = cfg[m.key][k];
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = (k === 'RLVMR') ? 'var(--accent)' : 'var(--c2)';
+        fill.style.height = Math.max(2, v / max[m.key] * 100) + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = k + ' ' + v.toFixed(1);
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+  }
+
+  var tabs = document.querySelectorAll('#eff-tabs .tab');
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      tab.classList.add('active');
+      renderChart(tab.getAttribute('data-level'));
+    });
+  });
+
+  if (document.getElementById('eff-chart')) renderChart('L0');
+})();
+
+/* ============================================================
+   3) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  if (!el || !el.closest) return;
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

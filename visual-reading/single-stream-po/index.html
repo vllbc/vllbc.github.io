@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPO · 扔掉 group，给每个 prompt 记一本账</title>
+<meta name="description" content="Single-stream Policy Optimization（SPO，arXiv 2509.13232v2）用 KL 自适应的 Beta 价值追踪器替代 GRPO 的组内基线，在全 batch 上归一化优势，并用优先采样做课程学习。Qwen3-8B 上五个数学基准平均 maj@32 比 GRPO 高 3.4 个百分点（63.8 vs 60.4）。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.sm-whn{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:4px 0 14px}
+.sm-whn .slot-val{font-size:14px}
+.sm-whn .k{font-size:11px;color:var(--text-soft);margin-top:4px}
+.vp-hero .v{font-size:20px}
+.vp-hero .k{font-size:11.5px;color:var(--text-soft);margin-top:3px;line-height:1.5}
+.logwrap .slot-name{text-align:left;margin-bottom:2px}
+.logwrap .slot-val{text-align:left;font-size:12.5px;font-weight:500}
+.selrow{display:grid;grid-template-columns:110px 1fr 60px;gap:10px;align-items:center;margin:7px 0;font-size:12.5px}
+.selrow .nm{font-family:"JetBrains Mono",monospace;color:var(--text-muted)}
+.selrow .selbar{height:6px;border-radius:100px;background:var(--border);overflow:hidden}
+.selrow .selbar i{display:block;height:100%;border-radius:100px;background:var(--c2)}
+.selrow .pct{text-align:right;font-family:"JetBrains Mono",monospace;color:var(--text-soft)}
+.strag{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px}
+.strag div{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:9px 11px;text-align:center}
+.strag .v{font-family:"JetBrains Mono",monospace;font-weight:600;color:var(--text)}
+.strag .k{font-size:11px;color:var(--text-soft);margin-top:3px}
+@media (max-width:880px){
+  .sm-whn{grid-template-columns:1fr 1fr}
+  .selrow{grid-template-columns:84px 1fr 50px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM-RL · arXiv 2025 · 2509.13232v2</span>
+  <h1>SPO：扔掉 group，给每个 prompt 记一本「陈旧度会衰减」的账</h1>
+  <p class="hero-sub">
+    GRPO 靠一次性生成 G 条回答、在组内做相对比较来降方差，代价是<strong>退化组白算</strong>和<strong>组内同步等待</strong>。
+    SPO 回到「一个 prompt 一条回答」的单流范式，用 KL 自适应的 Beta 追踪器给每个 prompt 维护一个持久基线，再在整个 batch 上归一化优势。
+    代价是多了一套需要离线预热的追踪器；另外 Algorithm 1 直接更新在线的 ṽ、而不是 Eq. 8 写的 ṽ<sub>−1</sub>，这一点下面单独说。
+  </p>
+  <div class="meta">
+    <span>Zhongwen Xu, Zihan Ding · 腾讯（Equal contribution）</span>
+    <a href="https://arxiv.org/abs/2509.13232v2" target="_blank" rel="noopener">arXiv 2509.13232v2 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>组内基线的问题不是「不准确」，而是「不持久」。</strong>GRPO 每次重新抽 G 条回答估计基线，G 小则噪声大；更要命的是当 G 条全对或全错时，优势全归零——论文的 Figure 3a 画出了 GRPO 退化组比例的完整训练曲线（文中描述为「从大约 60% 升到超过 80%」），以及 SPO 的近零优势比例。
+  </p>
+  <p>
+    <strong>SPO 把基线从「横截面」改成「时间序列」。</strong>每个 prompt 维护一对 Beta 参数 (α, β)，后验均值就是成功率估计 ṽ；每观察一次结果，先用 <em>ρ = 2<sup>−D/D_half</sup></em> 把旧证据打折（D 是策略 KL），再吸收新证据。策略变得越多，忘得越快。
+  </p>
+  <p>
+    <strong>省掉 group 之后，同步屏障自然消失，采样前缀也变成「收集最先完成的样本」。</strong>论文的仿真里，组流策略要 486 s 才凑齐 24 个样本，单流只要 112 s，即 486 / 112 ≈ 4.35 倍；代价是追踪器的表格化存储与冷启动。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">63.8<small> vs 60.4</small></div>
+      <div class="k">五基准平均 maj@32：SPO vs GRPO，绝对差 +3.4 个百分点（Qwen3-8B，32 次采样）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 5">4.35<small>×</small></div>
+      <div class="k">凑齐 24 样本批次的吞吐：112 s vs 486 s（仿真，非真实 wall-clock）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Appendix D">2,048<small> vs 256</small></div>
+      <div class="k">每步 prompt 数：SPO 单样本、GRPO 每 prompt 8 条，两者总 rollout 数对齐</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>组内基线把「降方差」和「同步等待」绑在了一起</h2></div>
+  <p class="sec-sub">先接受一个前提：策略梯度的方差要压，但压方差的手段不该反过来拖慢数据采集。</p>
+
+  <p>REINFORCE 的梯度估计是 <code>E[R(x,y) ∇log π(y|x)]</code>。减去一个与动作无关的基线 b(x)，梯度仍无偏、方差更低（论文 §3.1），最优基线就是真值函数 V<sub>π</sub>(x)。问题在于 V<sub>π</sub> 未知。GRPO 的做法：同一 prompt 一次生成 G 条回答，用组均值当基线。</p>
+
+  <div class="eq">
+    b<sub>GRPO</sub>(x) = (1/G) Σ<sub>j</sub> R(x, y<sub>j</sub>) &nbsp;&nbsp;&nbsp;
+    b<sub>RLOO</sub>(x, y<sub>i</sub>) = (1/(G−1)) Σ<sub>j≠i</sub> R(x, y<sub>j</sub>)
+  </div>
+  <div class="eq-cap">Eq. 4 · 组均值 / 留一法基线，都是「就地」估计</div>
+
+  <p>这套做法有两个结构性后果，两者都来自同一件事：<strong>基线只能从同组内少数几条回答里算出来</strong>。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">后果一</span><h4>退化组白算：全对或全错，优势为零</h4></div>
+      <p>二元奖励下，G 条全 1 或全 0 的概率是 <code>Z<sub>G</sub>(p) = p<sup>G</sup> + (1−p)<sup>G</sup></code>（Appendix C.2）。这些样本的梯度恰好为 0，生成的算力全打水漂。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">后果二</span><h4>组内同步：一条慢回答拖住整组</h4></div>
+      <p>分布式训练里要等 G 条全部 rollout 完才能算优势。多轮工具调用时，单条轨迹的交互时间差异极大，一个 straggler 就让整组空转。</p>
+    </div>
+  </div>
+
+  <p>这两点是 <span class="infer">推断</span>：论文在 §1 与 Figure 1 之后分别论证它们，这里把它们归为同一根因——「基线必须来自当场生成的组」。作者的解法正是抽掉这根，而不是给组打补丁。补丁式做法（DAPO 的动态采样）见下一节。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条已有的路：留在组里打补丁，或走离线最优值</h2></div>
+  <p class="sec-sub">对照组只有两路——组内派（GRPO / DAPO / RLOO 等）与离线最优值派（A*-PO）。SPO 恰好同时绕开两者的短板。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">组内派</span><h4>GRPO · DAPO · RLOO · OPO</h4></div>
+      <p><strong>做法：</strong>DAPO 用动态采样反复生成直到组内既有对也有错；RLOO 用留一法均值；OPO 用长度加权均值。</p>
+      <p><strong>卡在哪：</strong>基线始终来自「并发生成的 G 条」，同步屏障与生成成本原样保留。论文 Appendix C.1 给了动态采样的期望代价 <code>E[N|p] = 1/(p(1−p)) − 1</code>。<span data-src="Appendix C.1">p = 0.1 时 E[N] ≈ 10.11</span>，越接近全对/全错越贵。论文还提醒：报动态采样的结果时，横轴的「step」是学习步，采样步通常是其倍数（如 5×）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">离线最优值派</span><h4>A*-PO</h4></div>
+      <p><strong>做法：</strong>两阶段。第一阶段离线估计最优值函数 V*；第二阶段在线训练时把它当固定基线做优势回归。</p>
+      <p><strong>卡在哪：</strong>V* 绑在初始参考策略 π<sub>ref</sub> 的 KL 正则目标上，训练中策略漂移越远，它越不代表当前的 V<sub>π</sub>。Appendix E 认为工具调用场景恰恰需要学新能力、策略漂移大，V* 的假设因此不再成立。论文还提到 A*-PO 更新时计算 π<sub>ref</sub> 要多占一块 GPU 显存（论文未解释原因，这里照录）。</p>
+    </div>
+  </div>
+
+  <p>换个角度说：<strong>组内派把方差压低了，却把「估计的样本数」锁死在 G；A*-PO 把样本数放开到 1，却把估计锁死在离线那一刻。</strong>SPO 想两边都不锁——样本数 1，估计随时更新。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>给每个 prompt 一本 Beta 账，策略变多少就忘多少</h2></div>
+  <p class="sec-sub">三个组件：KL 自适应价值追踪器、全 batch 优势归一化、按不确定度优先采样。追踪器是灵魂。</p>
+
+  <h3>组件一：KL 自适应价值追踪器（Eq. 5–7）</h3>
+  <p>二元奖励用 Bernoulli 过程建模，成功率的后验取 Beta 分布，估计值就是后验均值 <code>ṽ = α/(α+β)</code>。每次拿到新结果 r ∈ {0,1}：</p>
+
+  <div class="eq">
+    α = <span class="hl-c">ρ(x)</span>·α<sub>−1</sub> + r(x,y) &nbsp;&nbsp;&nbsp; β = <span class="hl-c">ρ(x)</span>·β<sub>−1</sub> + (1 − r(x,y))<br>
+    <span class="hl-c">ρ(x) = 2<sup>−D(x)/D_half</sup></span> &nbsp;&nbsp; D(x) = 当前策略与本 prompt 上次作用时策略的 KL
+  </div>
+  <div class="eq-cap">Eq. 5 + §4.1 · 红字：陈旧证据按策略漂移打折，D_half 控制遗忘速率（ρ 被夹在 [ρ<sub>min</sub>, ρ<sub>max</sub>]）</div>
+
+  <p>论文把这一步等价写成 EMA：<code>ṽ = ṽ<sub>−1</sub> + η(x)(r − ṽ<sub>−1</sub>)</code>，学习率 <code>η(x) = (ρ·N<sub>eff,−1</sub>(x) + 1)<sup>−1</sup></code>（Eq. 7），N<sub>eff</sub> = α + β + 1。<span class="infer">推断</span>：该式在初始化 N<sub>0</sub> = 1/(1−ρ<sub>min</sub>) 下与 Eq. 5 并非逐位等价，细节见下一节的手算块。<span class="infer">推断</span>：ρ 越大，历史权重越大、单条新回答改动越小，所以 D 越大（策略变得越多）时，追踪器反应越快——这正是「KL 自适应」的含义。</p>
+
+  <p>初始化用离线样本：每个 prompt 采 n<sub>0</sub> 条，<code>ṽ<sub>0</sub> = 均值</code>；初始证据量取平衡态 <code>N<sub>0</sub> = 1/(1−ρ<sub>min</sub>)</code>，<code>α<sub>0</sub> = N<sub>0</sub>·ṽ<sub>0</sub></code>、<code>β<sub>0</sub> = N<sub>0</sub>(1−ṽ<sub>0</sub>)</code>（Eq. 6、Algorithm 2，实验取 n<sub>0</sub> = 8）。Appendix D 给出 ρ<sub>min</sub> = 0.875、ρ<sub>max</sub> = 0.96，于是 N<sub>0</sub> = 8。</p>
+
+  <h3>组件二：优势与归一化（Eq. 8–10）</h3>
+  <div class="eq">
+    A(x,y) = r(x,y) − ṽ<sub>−1</sub>(x) &nbsp;&nbsp;&nbsp; Ã = (A − μ<sub>ℬ</sub>) / σ<sub>ℬ</sub> &nbsp;&nbsp;&nbsp; L<sup>CLIP</sup>（Eq. 10）
+  </div>
+  <div class="eq-cap">Eq. 8–10 · 基线用更新前的 ṽ<sub>−1</sub>；μ<sub>ℬ</sub>、σ<sub>ℬ</sub> 取自整个 prompt batch ℬ，而非单个 group</div>
+
+  <h3>组件三：优先采样（Eq. 11）</h3>
+  <div class="eq">
+    w<sub>i</sub>(x) ∝ √( ṽ<sub>−1</sub>(x)(1 − ṽ<sub>−1</sub>(x)) ) + ϵ
+  </div>
+  <div class="eq-cap">Eq. 11 · 第一项是 Bernoulli 的标准差，越高越「半懂不懂」；ϵ 默认 0.05，保证每个 prompt 都有非零概率</div>
+
+  <p>这一项把「课程」做成了前置调度：<strong>不是生成之后再挑，而是在生成之前就知道该抽谁</strong>。论文 §4.4 的说法是，这让 SPO 在 <em>response generation 之前</em> 就解决了调度问题。</p>
+
+  <h3>动手：追踪器与采样权重</h3>
+  <p>下面这个模拟器按 Eq. 5 更新追踪器、按 Eq. 11 算采样权重。ρ<sub>min</sub>、ρ<sub>max</sub>、ϵ 逐字取自 Appendix D 与 §4.3；n<sub>0</sub> = 8 取自 Appendix A；初始成功数、KL 与三条新观察由你设定。Eq. 7 的原文读数在日志第二行给出，供与 Eq. 5 对账（两者不等的原因见手算块）。</p>
+
+  <div class="sim" id="tracker-sim">
+    <div class="slots s3 sm-whn">
+      <div class="slot">
+        <div class="slot-name">ρ = 2<sup>−D/D_half</sup></div>
+        <div class="slot-val" data-src="§4.1" id="tk-rho">—</div>
+        <div class="k">KL 折扣因子（夹在 [0.875, 0.96]）</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">N₀ = 1/(1−ρ<sub>min</sub>)</div>
+        <div class="slot-val" data-src="Appendix D">8</div>
+        <div class="k">初始证据量（由 ρ<sub>min</sub>=0.875）</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">ṽ₀ = α₀/(α₀+β₀)</div>
+        <div class="slot-val" data-src="Algorithm 2" id="tk-v0">—</div>
+        <div class="k">离线初值估计</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>n<sub>0</sub> 初始采样数 <span class="v" id="n0-v">8</span></label>
+        <input type="range" id="n0" min="2" max="16" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label>初始成功次数 c<sub>0</sub> <span class="v" id="c0-v">4</span></label>
+        <input type="range" id="c0" min="0" max="8" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label>D/D<sub>half</sub>（策略漂移） <span class="v" id="drift-v">1.00</span></label>
+        <input type="range" id="drift" min="0" max="3" step="0.1" value="1">
+      </div>
+      <div class="ctrl">
+        <label>r₁（第 1 条观察） <span class="v" id="r1-v">1</span></label>
+        <input type="range" id="r1" min="0" max="1" step="1" value="1">
+      </div>
+      <div class="ctrl">
+        <label>r₂（第 2 条观察） <span class="v" id="r2-v">0</span></label>
+        <input type="range" id="r2" min="0" max="1" step="1" value="0">
+      </div>
+      <div class="ctrl">
+        <label>r₃（第 3 条观察） <span class="v" id="r3-v">1</span></label>
+        <input type="range" id="r3" min="0" max="1" step="1" value="1">
+      </div>
+    </div>
+
+    <div class="readout" data-src="§4.1 Eq. 5" id="tk-readout" style="margin-top:4px">
+      <div class="r-head">跟踪日志 · D_half 取 0.05（假设值，论文未给）</div>
+      <div class="logwrap" id="tk-log"></div>
+    </div>
+
+    <div class="readout" data-src="§4.3 Eq. 11" style="margin-top:12px">
+      <div class="r-head">同一批 KL 下的六个 prompt</div>
+      <div id="tk-sel"></div>
+      <p style="margin:10px 0 0;font-size:12.5px;color:var(--text-soft)">左列第一个 ṽ 是上面日志的 ṽ₀（超过 0.99 时显示为 0.99），其余为参考点；调度权重 = √(ṽ(1−ṽ)) + ϵ，ϵ = 0.05。条形按同一缩放因子画出，只比较相对长短——注意 ṽ = 0.2 与 ṽ = 0.8 权重相同，Bernoulli 标准差关于 0.5 对称。</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两组参数，逐位核对<span class="sum-sub">与上方读数同一套逻辑，D_half = 0.05</span></summary>
+    <div class="details-body">
+      <p><strong>口径。</strong>ρ = 2<sup>−D/D_half</sup> 再夹到 [0.875, 0.96]；N<sub>0</sub> = 1/(1−0.875) = 8；ṽ<sub>0</sub> = c<sub>0</sub>/n<sub>0</sub>，α<sub>0</sub> = N<sub>0</sub>ṽ<sub>0</sub>，β<sub>0</sub> = N<sub>0</sub>(1−ṽ<sub>0</sub>)；每步按 Eq. 5 更新后取 R = α/(α+β)。本交互不涉及标准差。</p>
+      <p><strong>组 A：</strong>n<sub>0</sub> = 8、c<sub>0</sub> = 4、D/D<sub>half</sub> = 1、r = (1, 0, 1)。ρ = 2<sup>−1</sup> = 0.5 → 夹到 0.875。ṽ<sub>0</sub> = 0.5，α<sub>0</sub> = β<sub>0</sub> = 4。</p>
+      <ul>
+        <li>第 1 步：α = 0.875×4 + 1 = 4.5，β = 0.875×4 + 0 = 3.5 → R = 4.5/8 = <code>0.562500</code></li>
+        <li>第 2 步：α = 0.875×4.5 + 0 = 3.9375，β = 0.875×3.5 + 1 = 4.0625 → R = 3.9375/8 = <code>0.492188</code></li>
+        <li>第 3 步：α = 0.875×3.9375 + 1 = 4.4453125，β = 0.875×4.0625 + 0 = 3.5546875 → R = 4.4453125/8 = <code>0.555664</code></li>
+      </ul>
+      <p><strong>组 B：</strong>n<sub>0</sub> = 8、c<sub>0</sub> = 2、D/D<sub>half</sub> = 2、r = (1, 1, 0)。ρ = 2<sup>−2</sup> = 0.25 → 夹到 0.875。ṽ<sub>0</sub> = 0.25，α<sub>0</sub> = 2，β<sub>0</sub> = 6。</p>
+      <ul>
+        <li>第 1 步：α = 0.875×2 + 1 = 2.75，β = 0.875×6 + 0 = 5.25 → R = <code>0.343750</code></li>
+        <li>第 2 步：α = 0.875×2.75 + 1 = 3.40625，β = 0.875×5.25 + 0 = 4.59375 → R = <code>0.425781</code></li>
+        <li>第 3 步：α = 0.875×3.40625 + 0 = 2.98046875，β = 0.875×4.59375 + 1 = 5.01953125 → R = <code>0.372559</code></li>
+      </ul>
+      <p><strong>Eq. 7 原文写法（η = (ρN<sub>eff,−1</sub>+1)<sup>−1</sup>，N<sub>eff</sub> = α+β+1）作对照：</strong>两组初始都有 α+β = 8，N<sub>eff,−1</sub> = 9，η = 1/8.875 ≈ 0.112676。组 A 第 1 步 0.5 + 0.112676×0.5 ≈ <code>0.556338</code>（表更新为 0.562500）；组 B 第 1 步 0.25 + 0.112676×0.75 ≈ <code>0.334507</code>（表更新为 0.343750）。</p>
+      <p><strong>差异从哪来。</strong><span class="infer">推断</span>：Eq. 5 可精确改写成 δ<sub>new</sub> = ρδ<sub>−1</sub> + (1−ρ)，其中 δ = α+β+1；于是 R 的 EMA 系数应是 ρδ<sub>−1</sub>/(ρδ<sub>−1</sub>+1−ρ)。当 α+β = N<sub>0</sub> = 1/(1−ρ) 时它恰好等于 1−ρ = 0.125（组 A 手算一致），而原文 Eq. 7 在同一初始化下给出 1/8.875，差的就是被省掉的 (1−ρ)；ρ = 1 时二者重合。原文没说明 Eq. 7 是近似，所以本页模拟器以 Eq. 5 为唯一结果，并把 Eq. 7 的读数放在日志第二行作对照。</p>
+      <p>Appendix D 的「window sizes W<sub>min</sub> = 1/(1−ρ<sub>min</sub>) = 8、W<sub>max</sub> = 25」在 PDF 里公式被压成乱码，但数值自洽：1/(1−0.875) = 8、1/(1−0.96) = 25。本页的 N<sub>0</sub> = 8 借的是同一个式子，含义不同（证据量 vs 窗口长度）。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>把「组」拆成流水线：采样、基线、归一化各自解耦</h2></div>
+  <p class="sec-sub">SPO 的工程价值不在公式复杂，而在于每一步都不再需要等其他 prompt。</p>
+
+  <p>Algorithm 1 的主循环只有几行：按 Eq. 11 算权重 → 按权重抽 B 个 prompt → 每个 prompt 采 1 条回答、算优势、更新追踪器 → 在 batch 上归一化 → 用 PPO-Clip 更新。SPO 与 GRPO 在训练开销上的差异，可以逐项对照：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>环节</th><th>GRPO（随机多项式训练配置，Appendix D）</th><th>SPO（同文配置）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>每步 prompt 数</td><td class="num">256</td><td class="num">2,048</td></tr>
+        <tr><td>每 prompt 回答数</td><td class="num">8</td><td class="num">1</td></tr>
+        <tr><td>每步 rollout 总数</td><td class="num">2,048</td><td class="num">2,048</td></tr>
+        <tr><td>基线来源</td><td>同组 8 条回答的均值</td><td>历史追踪器 ṽ<sub>−1</sub>(x)</td></tr>
+        <tr><td>归一化分母</td><td>组内标准差 σ<sub>G</sub></td><td>batch 内标准差 σ<sub>ℬ</sub></td></tr>
+        <tr><td>每步梯度更新次数</td><td class="num">8</td><td class="num">8</td></tr>
+        <tr><td>max response tokens</td><td class="num">16,384</td><td class="num">16,384</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="text-align:left;margin-top:-4px">据 Appendix D 整理。两边的 rollout 总数对齐（256×8 = 2,048×1），论文的目的就是让「单流」不是靠少采样取胜。</p>
+
+  <p>除此之外的训练设定（Appendix D）：verl + ReTool 实现；策略学习率 1×10<sup>−6</sup>；沿用 DAPO 的 Clip-Higher，ε<sub>low</sub> = 0.2、ε<sub>high</sub> = 0.28；采样 temperature 1.0、top-p 1.0；工具交互最多 8 轮。评估时 temperature 0.6、top-p 0.95、top-k 20，最长 32,768 token。</p>
+
+  <p><strong>开销侧还有一笔账：</strong>每个 prompt 至少要存一对 (α, β) 和「上次作用该 prompt 的策略」，后者的 KL 每次都要重算或缓存 log-prob。论文没有报告这部分的内存与计算量，<span class="infer">推断</span>：在 prompt 数以百万计时，这是表格型追踪器的主要成本。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一张图看清：同步屏障是怎么被拆掉的</h2></div>
+  <p class="sec-sub">论文 Figure 1 与 §5.4 的仿真放在一起读，组内派与单流派的差别只在「等谁」这一件事上。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 330" role="img" aria-label="GRPO 组内同步与 SPO 单流采集对比图" style="width:100%;height:auto">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#6B6660"></path>
+        </marker>
+      </defs>
+      <!-- 左：GRPO -->
+      <rect x="10" y="10" width="410" height="260" rx="14" fill="#DDE9EE" opacity="0.55"></rect>
+      <text x="30" y="38" font-size="14" font-weight="700" fill="#2E5A6B" font-family="Inter, 'Noto Sans SC', sans-serif">GRPO · 组内同步</text>
+      <text x="30" y="58" font-size="11" fill="#6B6660" font-family="'JetBrains Mono', monospace">1 prompt → 8 条轨迹，必须全部完成</text>
+      <!-- timeline -->
+      <line x1="40" y1="210" x2="380" y2="210" stroke="#8C857B" stroke-width="1"></line>
+      <text x="40" y="228" font-size="10" fill="#8C857B" font-family="'JetBrains Mono', monospace">t=0</text>
+      <text x="330" y="228" font-size="10" fill="#8C857B" font-family="'JetBrains Mono', monospace">t=508s</text>
+      <!-- 6 fast bars -->
+      <rect x="40" y="72" width="70" height="8" rx="2" fill="#2E5A6B"></rect>
+      <rect x="40" y="86" width="55" height="8" rx="2" fill="#2E5A6B"></rect>
+      <rect x="40" y="100" width="64" height="8" rx="2" fill="#2E5A6B"></rect>
+      <rect x="40" y="114" width="80" height="8" rx="2" fill="#2E5A6B"></rect>
+      <rect x="40" y="128" width="72" height="8" rx="2" fill="#2E5A6B"></rect>
+      <rect x="40" y="142" width="76" height="8" rx="2" fill="#2E5A6B"></rect>
+      <rect x="120" y="80" width="240" height="4" rx="2" fill="#D4C4A6"></rect>
+      <rect x="105" y="94" width="255" height="4" rx="2" fill="#D4C4A6"></rect>
+      <rect x="114" y="108" width="246" height="4" rx="2" fill="#D4C4A6"></rect>
+      <rect x="130" y="122" width="230" height="4" rx="2" fill="#D4C4A6"></rect>
+      <rect x="122" y="136" width="238" height="4" rx="2" fill="#D4C4A6"></rect>
+      <rect x="126" y="150" width="234" height="4" rx="2" fill="#D4C4A6"></rect>
+      <text x="250" y="88" font-size="9.5" fill="#8C857B" font-family="'JetBrains Mono', monospace">空转等待</text>
+      <!-- stragglers -->
+      <rect x="40" y="168" width="335" height="8" rx="2" fill="#C04E2D"></rect>
+      <rect x="40" y="182" width="380" height="8" rx="2" fill="#C04E2D"></rect>
+      <rect x="40" y="196" width="315" height="8" rx="2" fill="#C04E2D"></rect>
+      <text x="300" y="246" font-size="10" fill="#7A2E16" font-family="'JetBrains Mono', monospace">508s / 444s / 409s：三条 straggler</text>
+      <line x1="380" y1="66" x2="380" y2="210" stroke="#C04E2D" stroke-width="1.5" stroke-dasharray="4 3"></line>
+      <text x="386" y="140" font-size="12" font-weight="700" fill="#C04E2D" font-family="'JetBrains Mono', monospace" transform="rotate(90 386 140)">组完成 508s</text>
+
+      <!-- 右：SPO -->
+      <rect x="440" y="10" width="410" height="260" rx="14" fill="#F4DCD0" opacity="0.55"></rect>
+      <text x="460" y="38" font-size="14" font-weight="700" fill="#7A2E16" font-family="Inter, 'Noto Sans SC', sans-serif">SPO · 单流采集（仿真）</text>
+      <text x="460" y="58" font-size="11" fill="#6B6660" font-family="'JetBrains Mono', monospace">48 条独立轨迹，取最先完成的 24 条</text>
+      <line x1="470" y1="210" x2="810" y2="210" stroke="#8C857B" stroke-width="1"></line>
+      <text x="470" y="228" font-size="10" fill="#8C857B" font-family="'JetBrains Mono', monospace">t=0</text>
+      <text x="760" y="228" font-size="10" fill="#8C857B" font-family="'JetBrains Mono', monospace">t=112s</text>
+      <g fill="#C04E2D">
+        <rect x="470" y="72" width="60" height="5" rx="2"></rect>
+        <rect x="470" y="81" width="48" height="5" rx="2"></rect>
+        <rect x="470" y="90" width="70" height="5" rx="2"></rect>
+        <rect x="470" y="99" width="55" height="5" rx="2"></rect>
+        <rect x="470" y="108" width="78" height="5" rx="2"></rect>
+        <rect x="470" y="117" width="52" height="5" rx="2"></rect>
+        <rect x="470" y="126" width="64" height="5" rx="2"></rect>
+        <rect x="470" y="135" width="72" height="5" rx="2"></rect>
+        <rect x="470" y="144" width="58" height="5" rx="2"></rect>
+        <rect x="470" y="153" width="80" height="5" rx="2"></rect>
+        <rect x="470" y="162" width="66" height="5" rx="2"></rect>
+        <rect x="470" y="171" width="74" height="5" rx="2"></rect>
+      </g>
+      <text x="560" y="90" font-size="9.5" fill="#7A2E16" font-family="'JetBrains Mono', monospace">已完成 12 条（示意，非逐条数据）</text>
+      <rect x="545" y="72" width="225" height="104" rx="6" fill="none" stroke="#C04E2D" stroke-width="1" stroke-dasharray="3 3"></rect>
+      <text x="552" y="190" font-size="10" fill="#7A2E16" font-family="'JetBrains Mono', monospace">48 条中已有 24 条完成即开训</text>
+      <line x1="650" y1="66" x2="650" y2="210" stroke="#C04E2D" stroke-width="1.5" stroke-dasharray="4 3"></line>
+      <text x="656" y="140" font-size="12" font-weight="700" fill="#C04E2D" font-family="'JetBrains Mono', monospace" transform="rotate(90 656 140)">批次齐 112s</text>
+
+      <!-- bottom annotation -->
+      <line x1="300" y1="285" x2="300" y2="312" stroke="#8C857B" stroke-width="1" marker-end="url(#arw)"></line>
+      <line x1="300" y1="312" x2="840" y2="312" stroke="#8C857B" stroke-width="1"></line>
+      <line x1="840" y1="312" x2="840" y2="290" stroke="#8C857B" stroke-width="1" marker-end="url(#arw)"></line>
+      <text x="470" y="304" font-size="12" font-weight="600" fill="#1A1816" font-family="Inter, 'Noto Sans SC', sans-serif">486s → 112s，4.35×（Figure 5c 的速度比；按 486/112 复算为 4.34）</text>
+    </svg>
+    <figcaption>
+      图 1：左为 Figure 4b / Figure 5a 的组内瓶颈（6 条快轨迹被迫等 3 条 straggler）；右为 Figure 5b 的单流采集（48 取 24）。图中条长为示意，时间数字取自 §5.4。
+    </figcaption>
+  </figure>
+
+  <p>Figure 4a 给的是低方差对照：轨迹耗时接近时，组完成时间 133 s，等待代价可忽略。所以瓶颈不是「组」本身，而是「耗时分布的长尾」——<span class="infer">推断</span>：越接近长程、多轮工具调用的任务，单流的收益越大；任务链越短、方差越小，两者越接近。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均 maj@32 高 3.4 个点，但这 3.4 主要来自 BRUMO 25 一项</h2></div>
+  <p class="sec-sub">Table 1 是在 Qwen3-8B 上训练 TIR 后的对比，五个数学竞赛基准，maj@32 与 avg@32 并用。</p>
+
+  <p>表 1（Table 1，单位为 %，每个单元格独立采样 32 次）：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">方法</th>
+          <th colspan="2" style="text-align:center">AIME 24</th>
+          <th colspan="2" style="text-align:center">AIME 25</th>
+          <th colspan="2" style="text-align:center">BeyondAIME</th>
+          <th colspan="2" style="text-align:center">BRUMO 25</th>
+          <th colspan="2" style="text-align:center">HMMT 25</th>
+          <th colspan="2" style="text-align:center">平均</th>
+        </tr>
+        <tr>
+          <th>maj@32</th><th>avg@32</th><th>maj@32</th><th>avg@32</th><th>maj@32</th><th>avg@32</th><th>maj@32</th><th>avg@32</th><th>maj@32</th><th>avg@32</th><th>maj@32</th><th>avg@32</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Qwen3-8B（未训练）</td>
+          <td class="num">77.8</td><td class="num">64.4</td><td class="num">70.5</td><td class="num">58.4</td><td class="num">45.2</td><td class="num">38.0</td><td class="num">55.1</td><td class="num">49.4</td><td class="num">36.8</td><td class="num">30.3</td><td class="num">57.1</td><td class="num">48.1</td>
+        </tr>
+        <tr>
+          <td>GRPO</td>
+          <td class="num">83.3</td><td class="num">77.6</td><td class="num">72.1</td><td class="num">64.2</td><td class="num">45.6</td><td class="num">39.0</td><td class="num">56.7</td><td class="num">56.9</td><td class="num">44.2</td><td class="num">40.9</td><td class="num">60.4</td><td class="num">55.7</td>
+        </tr>
+        <tr class="best">
+          <td>SPO</td>
+          <td class="num">84.0</td><td class="num">74.9</td><td class="num">76.5</td><td class="num">65.0</td><td class="num">46.9</td><td class="num">40.3</td><td class="num">64.0</td><td class="num">59.0</td><td class="num">47.5</td><td class="num">40.6</td><td class="num">63.8</td><td class="num">56.0</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>maj@32 上 SPO 在五个基准上都高于 GRPO，逐项绝对差（SPO − GRPO，单位：个百分点）：</p>
+  <ul>
+    <li>AIME 24：84.0 − 83.3 = <strong>+0.7</strong>（相对 GRPO +0.8%，0.7 / 83.3）</li>
+    <li>AIME 25：76.5 − 72.1 = <strong>+4.4</strong>（相对 +6.1%）</li>
+    <li>BeyondAIME：46.9 − 45.6 = <strong>+1.3</strong>（相对 +2.9%）</li>
+    <li>BRUMO 25：64.0 − 56.7 = <strong>+7.3</strong>（相对 +12.9%）</li>
+    <li>HMMT 25：47.5 − 44.2 = <strong>+3.3</strong>（相对 +7.5%）</li>
+    <li>平均：63.8 − 60.4 = <strong>+3.4 个百分点</strong>（相对 +5.6%）。<span class="infer">推断</span>：五项简单平均为 63.8 vs 60.4，与表内「平均」一致，说明该列是五项等权平均；用 5 项差值的均值复算同样得 +3.4（0.7+4.4+1.3+7.3+3.3 = 17.0，÷5 = 3.4）。</li>
+  </ul>
+
+  <p>avg@32 上优势小得多：平均 56.0 vs 55.7，绝对差 <strong>+0.3 个百分点</strong>（相对 +0.5%）；单看不稳定的项，AIME 24 反而低 2.7 个点（74.9 vs 77.6），HMMT 25 低 0.3 个点（40.6 vs 40.9）。论文自己的定性是「GRPO 在 avg@32 上仍具竞争力，SPO 在 maj@32 上稳定占优」（§5.2）。</p>
+
+  <p><strong>拆项看：</strong>+3.4 的平均里有 7.3 来自 BRUMO 25，占五项差值总和的 17.0 中的 7.3（约 43%）。去掉 BRUMO 25，其余四项分别 +0.7、+4.4、+1.3、+3.3，平均 +2.4。</p>
+
+  <h3>信号：退化率与方差</h3>
+  <p>Figure 3a：GRPO 的退化组占比（蓝线）从约 60% 升到 80% 以上。SPO 统计的是 |A| ≤ τ 的「近零优势」比例，τ = 10<sup>−4</sup>（红线）与 0.02（绿线）；原文说即便 τ = 0.02 也远低于 GRPO 的退化率，但没有给出具体数值。Figure 3b：SPO 的基线相比无基线（原始奖励方差）的方差降低「nearly 50%」——同样只有定性描述，没有数字。</p>
+
+  <p><strong>吞吐：</strong>Figure 5 是仿真，不是真实训练 wall-clock。组流策略即使并行跑 6 组、取最快的 3 组，仍需 486 s 凑齐 24 个样本；单流从 48 条里取最早完成的 24 条，112 s 完成。<span class="infer">推断</span>：486 / 112 = 4.343，论文写作 4.35× 是四舍五入；若以 GRPO 的 486 s 为分母写相对节省，（486 − 112）/ 486 = 77.0%，等价说法；这里统一报倍数，避免与「相对提升百分比」混淆。</p>
+
+  <h3>消融（附录 E，AIME 25，avg@16，256 对 batch）</h3>
+  <ul>
+    <li>去掉价值追踪器基线（“w/o Baseline”）：性能显著下降，论文称追踪器是最关键组件。</li>
+    <li>去掉离线初始化（“w/o Offline Init”）：前期训练不稳定，有性能下探，之后虽回升但达不到有初始化的水平。</li>
+    <li>对比 A*-PO：SPO 的自适应基线优于后者的静态 V*。</li>
+  </ul>
+  <p>这三项消融只有曲线（Figure 6），没有以数字形式给出终值，所以这一页不报具体点数。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别用：奖励不是二元、prompt 海量、或想拿 wall-clock 说事</h2></div>
+  <p class="sec-sub">论文自己也承认的局限，加上几处从公式和实验条件读出来的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>冷启动不是免费的</h4></div>
+    <p>追踪器需要离线估计 ṽ<sub>0</sub>（实验取 n<sub>0</sub> = 8）。Appendix A 的消融（Figure 6c）显示没有离线初始化的训练前期会不稳。<span class="infer">推断</span>：论文说共享了离线数据集以让人跳过这一步，但换任务/换模型时这笔预热仍要自己付。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>表格型追踪器不泛化</h4></div>
+    <p>每个 prompt 一对 (α, β)，没见过的 prompt 无从估计。prompt 种数极多时存储开销线性增长，论文未讨论。<span class="infer">推断</span>：这也是为什么离线初始化与共享数据集对复现如此关键。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>实验面很窄：一个 8B 模型 + 一个训练集</h4></div>
+    <p>全部主实验只有 Qwen3-8B、DAPO 数据集的英文子集、TIR 场景，五个基准都是数学竞赛。更大的模型、非数学域、非二元奖励都没有主实验；推广到一般奖励时，论文建议直接用同样的 EMA 去跟踪 ṽ，而不是走 α、β。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>「4.35×」来自仿真，且是无偏性上的取舍</h4></div>
+    <p>Figure 4/5 是构造出来的耗时分布，不是实跑吞吐。另外 Eq. 8 说基线 ṽ<sub>−1</sub> 必须来自更新前，但 Algorithm 1 第 9 行在归一化之前就用本次结果 r 更新了追踪器；<span class="infer">推断</span>（由 Algorithm 1 与 §4.1 的顺序读出）：若实现照字面先更新再算下一轮基线，基线就依赖本次动作，无偏性论证不再严格成立。结论仍然成立与否，需要看代码，而论文没有公开代码链接。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>SPO 换掉的不是「少算」，而是「等谁」。</strong>它最适合的场景是 rollout 耗时方差大、奖励二元、且 prompt 集合有限可维护的 agentic RL；如果奖励连续、prompt 海量、或者你要的是真实训练墙钟数据，它目前给出的证据还不够。</p>
+</section>
+
+<footer>
+  <div>Single-stream Policy Optimization · Zhongwen Xu, Zihan Ding（Tencent）· 本页依据 arXiv 2509.13232v2 撰写，只引用该版本。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.13232v2" target="_blank" rel="noopener">https://arxiv.org/abs/2509.13232v2</a>（v1 为 2025-09-16，v2 为 2025-09-23，均以 v2 为准）<br>
+    笔记：<a href="/single-stream-policy-optimization/">Single-stream Policy Optimization</a><br>
+    笔记勘误（不改原文）：笔记把 A*-PO 写成「A*-PO 等」并列在其他改进方法中，原文将它列为对照中唯一的离线最优值派；笔记称 8B 实验中「idle wait 508 s」为图 4 的数字，原文图 4 中 508 s 是慢轨迹本身的交互时长、组完成时间为 508 s。笔记把 Eq. 7「equivalent to an adaptive EMA」当成精确等价，本页手算显示它在 N<sub>0</sub> = 1/(1−ρ<sub>min</sub>) 的初始化下与 Eq. 5 相差一个 (1−ρ) 项；笔记也未提及 Algorithm 1 的归一化与追踪器更新顺序。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ==========================================================
+     交互：KL 自适应价值追踪器（Eq. 5–7）+ 优先采样权重（Eq. 11）
+     ========================================================== */
+  var RHO_MIN = 0.875;           // Appendix D
+  var RHO_MAX = 0.96;            // Appendix D
+  var EPS = 0.05;                // §4.3 默认
+  var DHALF = 0.05;              // 未在原文给出，页面内假设值
+  var N0 = 1 / (1 - RHO_MIN);    // Eq. 6：= 8
+
+  function byId(id) { return document.getElementById(id); }
+
+  var ids = ['n0', 'c0', 'drift', 'r1', 'r2', 'r3'];
+  var els = {};
+  var ok = true;
+  ids.forEach(function (k) {
+    els[k] = byId(k);
+    if (!els[k]) ok = false;
+  });
+
+  function val(k) { return parseFloat(els[k].value); }
+
+  function rhoFor(drift) {
+    var r = Math.pow(2, -drift);
+    return Math.min(RHO_MAX, Math.max(RHO_MIN, r));
+  }
+
+  function fmt6(x) { return x.toFixed(6); }
+
+  function initTracker() {
+    var n0 = Math.max(1, val('n0'));
+    var c0 = Math.min(n0, val('c0'));
+    var v0 = c0 / n0;
+    return { rho: rhoFor(val('drift')), a: N0 * v0, b: N0 * (1 - v0) };
+  }
+
+  function renderLog() {
+    var log = byId('tk-log');
+    if (!log) return;
+    var t = initTracker();
+    var rho = t.rho;
+    var a = t.a, b = t.b;
+    var rows = [];
+    rows.push('<div class="slot"><div class="slot-name">ṽ₀ = c₀/n₀</div><div class="slot-val">' +
+      fmt6(a / (a + b)) + ' &nbsp;（α₀=' + fmt6(a) + ', β₀=' + fmt6(b) + '）</div></div>');
+    var rewards = [val('r1'), val('r2'), val('r3')];
+    var Neff = a + b + 1;
+    for (var i = 0; i < rewards.length; i++) {
+      var r = rewards[i];
+      var v_prev = a / (a + b);
+      var eta = 1 / (rho * Neff + 1);       // 原文 Eq. 7 的系数，仅作对照
+      a = rho * a + r;                       // Eq. 5 表格更新
+      b = rho * b + (1 - r);
+      var v = a / (a + b);
+      Neff = a + b + 1;
+      rows.push('<div class="slot"><div class="slot-name">第 ' + (i + 1) + ' 步 · r=' + r +
+        ' &nbsp;η(Eq.7)=' + eta.toFixed(6) + '</div><div class="slot-val">α=' + fmt6(a) + '&nbsp; β=' + fmt6(b) +
+        '&nbsp; → ṽ=' + fmt6(v) +
+        '<br><span style="color:var(--text-soft);font-weight:400">Eq.7 原文写法 η=' + eta.toFixed(6) +
+        ' → ' + fmt6(v_prev + eta * (r - v_prev)) + '</span></div></div>');
+    }
+    log.innerHTML = rows.join('');
+    var rv = byId('tk-rho');
+    if (rv) rv.textContent = rho.toFixed(3);
+    var v0el = byId('tk-v0');
+    if (v0el) v0el.textContent = fmt6(t.a / (t.a + t.b));
+  }
+
+  function renderSelection(v0) {
+    var host = byId('tk-sel');
+    if (!host) return;
+    // 固定取六个 ṽ 值（含当前 ṽ0），其余为等距参考点
+    var vs = [Math.min(v0, 0.99), 0.2, 0.5, 0.8, 0.95, 1.0];
+    var ws = vs.map(function (v) { return Math.sqrt(v * (1 - v)) + EPS; });
+    var maxw = Math.max.apply(null, ws);
+    host.innerHTML = vs.map(function (v, i) {
+      var pct = (ws[i] / maxw) * 100;
+      return '<div class="selrow"><span class="nm">ṽ=' + v.toFixed(2) + '</span>' +
+        '<span class="selbar"><i style="width:' + pct.toFixed(1) + '%"></i></span>' +
+        '<span class="pct">' + ws[i].toFixed(4) + '</span></div>';
+    }).join('');
+  }
+
+  if (ok) {
+    var labels = { n0: 'n0-v', c0: 'c0-v', drift: 'drift-v', r1: 'r1-v', r2: 'r2-v', r3: 'r3-v' };
+    ids.forEach(function (k) {
+      els[k].addEventListener('input', function () {
+        var lab = byId(labels[k]);
+        if (lab) {
+          var x = val(k);
+          lab.textContent = (k === 'drift') ? x.toFixed(2) : String(x);
+        }
+        // c0 不能超过 n0
+        if (k === 'n0') {
+          var c0el = byId('c0');
+          if (c0el && parseFloat(c0el.value) > val('n0')) {
+            c0el.value = String(Math.round(val('n0')));
+            var c0lab = byId('c0-v');
+            if (c0lab) c0lab.textContent = String(Math.round(val('n0')));
+          }
+        }
+        renderLog();
+        renderSelection(initTracker().a / (initTracker().a + initTracker().b));
+      });
+    });
+    renderLog();
+    var t0 = initTracker();
+    renderSelection(t0.a / (t0.a + t0.b));
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeroSearch · 不搜真实网络，也能训出会搜索的 LLM</title>
+<meta name="description" content="ZeroSearch 用 SFT 微调的小模型模拟搜索引擎，在 RL 训练中完全脱离真实 API；用课程式 rollout 逐步降低文档质量。7B 模拟器与真实 Google 持平，14B 反超，成本从 $586.7 降到 $70.8。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调 */
+.infer{font-size:11px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:0 5px;margin:0 2px;font-family:"JetBrains Mono",monospace;letter-spacing:.03em;vertical-align:1px;white-space:nowrap}
+.sec-sub .infer{font-size:10.5px}
+.tpl{background:var(--bg-soft);border:1px dashed var(--border-strong);border-radius:var(--radius);padding:14px 16px;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.9;color:var(--text);overflow-x:auto;white-space:pre;margin:16px 0}
+.tpl .u{color:var(--accent);font-weight:600}
+.tpl .n{color:var(--c1);font-weight:600}
+.flow{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:22px 0}
+.flow .step{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 12px;position:relative;box-shadow:var(--shadow-sm)}
+.flow .step .sn{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--accent);letter-spacing:.06em}
+.flow .step h5{margin:4px 0 6px;font-size:14px;font-weight:600;line-height:1.4}
+.flow .step p{font-size:12.5px;color:var(--text-muted);margin:0;line-height:1.65}
+.flow .step .src2{display:block;margin-top:8px;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft)}
+@media (max-width:880px){.flow{grid-template-columns:1fr 1fr}}
+@media (max-width:520px){.flow{grid-template-columns:1fr}}
+.cur-track{position:relative;height:34px;background:var(--bg-soft);border-radius:8px;overflow:hidden;margin:8px 0 4px;border:1px solid var(--border)}
+.cur-track .noisy{position:absolute;left:0;top:0;bottom:0;background:var(--c1-soft);border-right:1.5px solid var(--c1);transition:width .45s ease}
+.cur-track .noisy .lbl{position:absolute;left:8px;top:50%;transform:translateY(-50%);font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--c1);font-weight:600;white-space:nowrap}
+.cur-track .useful .lbl2{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--accent);font-weight:600;white-space:nowrap}
+.pct-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0}
+.pct-grid .pc{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 8px;text-align:center}
+.pct-grid .pc .k{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);margin-bottom:4px}
+.pct-grid .pc .pv{font-family:"JetBrains Mono",monospace;font-size:14px;font-weight:600;color:var(--text)}
+.pct-grid .pc.now{border-color:var(--accent);background:var(--accent-soft)}
+@media (max-width:520px){.pct-grid{grid-template-columns:repeat(3,1fr)}}
+.rl-card{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}
+.rl-card > div{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:16px 18px}
+.rl-card h5{margin:0 0 6px;font-size:14px;font-weight:600}
+.rl-card .r{font-family:"JetBrains Mono",monospace;font-size:20px;font-weight:600;color:var(--accent)}
+.rl-card .s{font-size:12px;color:var(--text-soft);line-height:1.6}
+@media (max-width:520px){.rl-card{grid-template-columns:1fr}}
+details code{white-space:nowrap}
+.calc{font-family:"JetBrains Mono",monospace;font-size:12.5px;background:var(--bg-soft);border-radius:6px;padding:10px 12px;margin:8px 0;line-height:1.9;overflow-x:auto}
+.tbl-scroll td.fn{font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--text-muted)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">ZeroSearch</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">两条路</a>
+      <a href="#method">模拟器</a>
+      <a href="#train">课程训练</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent · RL · arXiv 2505.04588</span>
+  <h1>ZeroSearch：训练时用一个 LLM 假装成搜索引擎</h1>
+  <p class="hero-sub">
+    用 RL 教 LLM 搜索，要反复调用真实搜索 API：费用高、返回文档质量又不可控。
+    这篇论文把搜索引擎换成一个用 SFT 微调过的小模型，在训练里生成「有用」或「噪声」文档，
+    再用课程式 rollout 让难度由易到难。推理时照样接真实 Google。
+  </p>
+  <div class="meta">
+    <span>Tongyi Lab, Alibaba Group · arXiv 2505.04588 v3</span>
+    <a href="https://arxiv.org/abs/2505.04588v3" target="_blank" rel="noopener">arXiv 2505.04588v3 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    训练一个「会搜索的智能体」，最贵的一环是环境：每次 rollout 都要真的去问搜索引擎。
+    论文把它换成一个 <strong>SFT 微调的 LLM</strong>——提示词里写 <code>useful</code> 就生成能答对的文档，写 <code>noisy</code> 就生成「相关但答不上」的文档，文档质量因此变成可编程的旋钮。
+  </p>
+  <p>
+    在这个旋钮上，论文加了<strong>课程式 rollout</strong>：训练步数越往后，生成噪声文档的概率 <code>p<sub>i</sub></code> 越高（Eq. 1）。模型先学会输出格式和基本搜索，再被逐步推入能吵的检索环境。
+  </p>
+  <p>
+    默认模拟器是 SFT 过的 Qwen-2.5-14B-Instruct。在 Table 3 里，六对「同骨干、同算法」的对比中，ZeroSearch 的平均 EM 都高于真实搜索的 Search-R1。
+    代价是模拟器要占 GPU：Table 8 里 14B 模拟器约 $70.8 GPU 成本，换掉 Google 约 $586.7 的 API 成本。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 4">34.47<small> / 32.81</small></div>
+      <div class="k">Qwen-2.5-3B-Base 策略模型：SFT-14B 模拟器 vs Google 的 Avg EM（Table 4）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 8"><small>$</small>586.7 <small>→ $</small>70.8</div>
+      <div class="k">约 64,000 次查询的训练成本：真实 API vs 14B 模拟器</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">+1.65</div>
+      <div class="k">六对 base/instruct 对比的 Avg EM 平均差值（百分点，本文计算；逐对见 06）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>难的不是让 LLM 会搜，而是让它「练得起」搜索</h2></div>
+  <p class="sec-sub">读完你应该知道：把搜索引擎放进 RL 训练循环，会同时炸掉预算和训练稳定性。</p>
+
+  <p>给 LLM 接搜索，常见路线有三代：<strong>提示词工程</strong>（拆查询、多轮检索）、<strong>SFT</strong>（让小模型模仿搜索轨迹）、<strong>测试时扩展</strong>（推理时做 MCTS 之类的搜索树）。论文认为前两者太依赖提示与模型本身能力，后者推理开销大<code>§1</code>。</p>
+
+  <p>更近的一步是直接拿 RL 去训「什么时候搜、搜什么、拿到结果怎么用」。Search-R1、R1-Searcher、ReSearch 都走这条路；DeepResearcher 和 WebThinker 则直接与 Google 这类商业引擎交互，训练环境最接近真实<code>§1</code>。问题就出在这一步：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">成本</span><h4>rollout 是反复发生的</h4></div>
+      <p>RL 要多次采样、多次 rollout，训练过程可能涉及<strong>数十万次</strong>搜索请求。每次都要付 API 钱，规模一上去费用就不可控<code>§1</code>。Table 8 给了一个小规模的账：约 64,000 次查询、约 12 小时，Google 路线的 API 成本是 $586.7。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">质量</span><h4>返回什么，你说了不算</h4></div>
+      <p>真实引擎返回的文档质量不可预测，给训练注入噪声。文档太差，模型学不会正确理解任务；文档太好，后段训练又缺乏挑战<code>Appendix A</code>。这种「忽好忽坏」是 RL 不稳定的来源之一。</p>
+    </div>
+  </div>
+
+  <p>所以问题的真正形状是：<strong>能不能把「搜索环境」从外部服务搬进训练循环内部</strong>，让它的成本接近零、质量由训练者调节？</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路：静态语料够稳定但不够真，真实引擎够真但不够稳</h2></div>
+  <p class="sec-sub">论文把相关工作切成两格，每一格各有一个结构性短板；ZeroSearch 要同时拿到两边的长处。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">A 路</span><h4>Search-R1 / R1-Searcher / ReSearch：本地静态语料</h4></div>
+      <p><strong>做法：</strong>在 Wikipedia 之类的静态本地语料上做检索，RL 只训搜索与推理行为<code>§2.2</code>。</p>
+      <p><strong>长处：</strong>语料固定，环境可控。</p>
+      <p><strong>短板：</strong>抓不住真实世界交互的复杂性——返回的是「检索到的片段」，而不是引擎在实时场景里给你的那套东西。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">B 路</span><h4>DeepResearcher / WebThinker：接真实商业引擎</h4></div>
+      <p><strong>做法：</strong>训练时直接与商业搜索引擎交互，环境最接近真实网页搜索<code>§2.2</code>。</p>
+      <p><strong>长处：</strong>分布最真实。</p>
+      <p><strong>短板：</strong>文档质量不可控 + API 成本高、受限流，系统规模被卡住。</p>
+    </div>
+  </div>
+
+  <p>论文的定位很明确：保留 B 路的「文档长什么样」的文本风格，但把生成方换成自己可控的模型。作者给的判断是——真实引擎和模拟 LLM 的主要差别只在<strong>返回内容的文本风格</strong>，而这种风格可以靠轻量 SFT 补上<code>§1</code>。</p>
+
+  <p>这也决定了论文只拿 <strong>Search-R1</strong> 做 RL 类基线：理由是不需要复杂奖励设计、数据筛选或复杂训练流水线，可以和模拟引擎做直接对等的比较<code>§4.2</code>。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心方法：把「生成什么质量的文档」变成一个提示词开关</h2></div>
+  <p class="sec-sub">读完你应该知道：模拟器怎么被造出来、「useful / noisy」两个词到底控制了什么、以及为什么少了 SFT 就退化。</p>
+
+  <h3>3.1 三步造出模拟器（Search Simulation Tuning）</h3>
+  <ul>
+    <li><strong>收轨迹：</strong>让 LLM 以多轮方式和真实引擎交互，直到给出答案，从中抽成「查询—文档」对<code>§3.3</code>。</li>
+    <li><strong>打标签：</strong>用 LLM 作裁判，逐条判断文档是否包含足够信息回答对应查询：够 → <em>useful</em>，不够 → <em>noisy</em><code>§3.3</code>。</li>
+    <li><strong>轻量 SFT：</strong>让模型学会按查询生成两类文档。提示词里还会带上<strong>问题和标准答案</strong>，用来拓宽模拟器的知识边界；微调后它就能在 rollout 时动态控制质量<code>§3.3</code>。</li>
+  </ul>
+
+  <h3>3.2 模拟模板（Table 2）</h3>
+  <p>Table 2 的模板里，中括号中的 <span class="u">useful</span> / <span class="n">noisy</span> 是可替换的词，其余是固定上下文。</p>
+  <div class="tpl">You are the Google search engine.
+Given a query, you need to generate five [<span class="u">useful</span> / <span class="n">noisy</span>] documents for the query.
+The user is trying to answer the question: [question] whose answer is [ground truth].
+Each document should contain about 30 words, and these documents should contain [<span class="u">useful</span> /
+<span class="n">noisy</span>] information.
+Query: [query]
+[<span class="u">Useful</span> / <span class="n">Noisy</span>] Output:</div>
+  <p class="eq-cap">Table 2：每次生成五篇约 30 词的文档；问题与标准答案也放进提示，帮助扩展模拟器的知识覆盖</p>
+
+  <p>策略模型一侧沿用 Search-R1 的多轮模板（Table 1）：<code>&lt;think&gt;</code> 推理、<code>&lt;search&gt;</code> 发起查询、<code>&lt;information&gt;</code> 接收模拟文档、<code>&lt;answer&gt;</code> 作答。检索文档数在所有方法里统一为 5<code>§4.3</code>。</p>
+
+  <h3>3.3 SFT 到底带来了什么：Table 4 的模拟器对比</h3>
+  <p>Table 4 固定策略模型为 Qwen-2.5-3B-Base，只换训练时的「搜索引擎」：从 Prompt-3B 到 SFT-14B，再到真实 Google。SFT 越好，最终策略越强。</p>
+
+  <div class="tbl-scroll">
+  <table>
+    <thead>
+      <tr><th>训练用搜索引擎</th><th>NQ</th><th>TriviaQA</th><th>PopQA</th><th>HotpotQA</th><th>2Wiki</th><th>MuSiQue</th><th>Bamboogle</th><th>Avg</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Base Model（不训练）</td><td class="num">12.40</td><td class="num">19.40</td><td class="num">11.20</td><td class="num">4.40</td><td class="num">6.80</td><td class="num">2.00</td><td class="num">5.56</td><td class="num">8.82</td></tr>
+      <tr><td>Prompt-3B</td><td class="num">35.80</td><td class="num">56.00</td><td class="num">42.20</td><td class="num">25.60</td><td class="num">27.00</td><td class="num">4.20</td><td class="num">15.28</td><td class="num">29.44</td></tr>
+      <tr><td>Prompt-7B</td><td class="num">38.40</td><td class="num">59.40</td><td class="num">43.40</td><td class="num">27.80</td><td class="num">30.00</td><td class="num">11.00</td><td class="num">9.72</td><td class="num">31.39</td></tr>
+      <tr><td>Prompt-14B</td><td class="num">40.00</td><td class="num">55.40</td><td class="num">42.00</td><td class="num">26.80</td><td class="num">33.20</td><td class="num">10.60</td><td class="num">12.50</td><td class="num">31.50</td></tr>
+      <tr><td>SFT-3B</td><td class="num">37.00</td><td class="num">55.20</td><td class="num">43.00</td><td class="num">30.20</td><td class="num">28.20</td><td class="num">10.00</td><td class="num">9.72</td><td class="num">30.47</td></tr>
+      <tr><td>SFT-7B</td><td class="num">40.40</td><td class="num">60.40</td><td class="num">45.40</td><td class="num">31.20</td><td class="num">30.80</td><td class="num">12.60</td><td class="num">13.89</td><td class="num">33.53</td></tr>
+      <tr class="best"><td>SFT-14B</td><td class="num">43.00</td><td class="num">61.60</td><td class="num">41.40</td><td class="num">33.80</td><td class="num">34.60</td><td class="num">13.00</td><td class="num">13.89</td><td class="num">34.47</td></tr>
+      <tr><td>Google</td><td class="num">40.60</td><td class="num">60.00</td><td class="num">44.20</td><td class="num">29.20</td><td class="num">32.00</td><td class="num">11.20</td><td class="num">12.50</td><td class="num">32.81</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 4（原表数字，EM 指标；策略模型均为 Qwen-2.5-3B-Base；评测统一走 SerpAPI 的 Google）</p>
+
+  <p>逐对算清楚（百分点，基于 Table 4 的 Avg 列）：</p>
+  <ul>
+    <li><strong>同尺寸，SFT 胜过 Prompt：</strong>3B 差 +1.03（30.47 − 29.44）、7B 差 +2.14、14B 差 +2.97。论文的解释是 prompt 方式仍有明显的分布差距，SFT 才能把「生成真实风格文档」学进去<code>§5.2</code>。</li>
+    <li><strong>与 Google 的距离：</strong>SFT-7B 比 Google 高 0.72 点，SFT-14B 高 1.66 点（34.47 − 32.81）；SFT-3B 反而低 2.34 点。也就是说「3B 就能训出可用搜索」成立，但「越过真实引擎」这条线在 7B 靠规模才被突破<code>§5.2</code>。</li>
+  </ul>
+  <p>还有一组容易漏读的数：<strong>哪怕模拟器只有 Prompt-3B，策略模型也从 8.82 涨到 29.44</strong>，比 SFT-3B 低 2.34 点，但相对不训练的 Base 已经是一个量级的变化。所以干净环境的「有」比「多真」更重要一部分——这是论文自己强调的 Scalability 论点<code>§1</code>。</p>
+
+  <details id="t4-q">
+    <summary>模拟器并非单调受益？7B / 14B 的个别列反向<span class="sum-sub">点开看数据与推断</span></summary>
+    <div class="details-body">
+      <p>看 Table 4 的单列：SFT-14B 的 PopQA 是 41.40，低于 SFT-7B 的 45.40，也低于 Prompt-7B 的 43.40；Prompt-14B 的 TriviaQA 55.40 也低于 Prompt-7B 的 59.40。也就是说，「更大更细调的模拟器」在 Avg 上更好，但不是每一列都更好。</p>
+      <p><span class="infer">推断</span>（依据：Table 4 单列数字对比）14B 模拟器在生成「noisy」文档时可能更接近真实干扰分布，PopQA 这类依赖实体精确匹配的任务反而更敏感；但论文没有对这一列现象做解释，这里只作为读表时的注意点，不建议据此下结论。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 课程训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练：文档难度是一条从易到难的曲线，而不是固定难度</h2></div>
+  <p class="sec-sub">读完你应该知道：噪声概率 p<sub>i</sub> 怎么随训练步数变、三组模型的实际曲线差多少、以及 Random 基线为什么输了。</p>
+
+  <p>rollout 时策略模型发出查询，模拟器按 <code>p<sub>i</sub></code> 决定生成 useful 还是 noisy 文档。论文用 Eq. 1 把「难度」写成训练步数的函数：</p>
+
+  <div class="eq">
+    p<sub>i</sub> = p<sub>s</sub> + &nbsp;
+    <span class="hl-a">( b<sup>i/m</sup> − 1 ) / ( b − 1 )</span> &nbsp;·&nbsp;
+    <span class="hl-c">( p<sub>e</sub> − p<sub>s</sub> )</span>
+  </div>
+  <div class="eq-cap">Eq. 1 · i 当前步、m 总步数、b 指数底数（默认 4）、p<sub>s</sub>/p<sub>e</sub> 初始/最终噪声概率</div>
+
+  <p>把 <code>x = i/m</code> 拿掉看结构：<code>(b<sup>x</sup> − 1)/(b − 1)</code> 是从 0 涨到 1 的曲线，<code>x</code> 很小时它就是 <code>x</code> 本身（线性起步），<code>x</code> 接近 1 时陡增。所以噪声比例<strong>前松后紧</strong>：前一半训练里模型主要在干净文档上学会格式和基本搜索，后段才被迫处理噪声<code>§3.4</code>。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="cur-btns">
+      <button class="rule-btn active" data-cfg="q7">Qwen-2.5-7B<span class="r-sub">p<sub>s</sub>=0 → p<sub>e</sub>=0.75</span></button>
+      <button class="rule-btn" data-cfg="q3">Qwen-2.5-3B<span class="r-sub">p<sub>s</sub>=0 → p<sub>e</sub>=0.25</span></button>
+      <button class="rule-btn" data-cfg="ll">LLaMA-3.2-3B<span class="r-sub">p<sub>s</sub>=0.25 → p<sub>e</sub>=0.5</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>训练进度 i / m <span class="v" id="cur-i-v">0.00</span></label>
+        <input type="range" id="cur-i" min="0" max="1" step="0.005" value="0">
+      </div>
+      <div class="ctrl">
+        <label>指数底数 b <span class="v" id="cur-b-v">4</span></label>
+        <input type="range" id="cur-b" min="1.2" max="16" step="0.2" value="4">
+      </div>
+    </div>
+
+    <div class="cur-track" id="cur-track">
+      <div class="noisy" id="cur-noisy" style="width:0%">
+        <span class="lbl">noisy</span>
+        <span class="lbl2" id="cur-useful-lbl">useful</span>
+      </div>
+    </div>
+
+    <div class="readout" id="cur-readout" data-src="Eq. 1 / Appendix F">
+      <div class="r-head">当前噪声概率</div>
+      <div id="cur-msg">拖动滑块看 p<sub>i</sub> 的变化。</div>
+    </div>
+
+    <div class="pct-grid" id="cur-grid"></div>
+    <p style="font-size:12.5px;color:var(--text-soft);margin:0">参考点：i/m = 0、0.25、0.5、0.75、1.0 处的 p<sub>i</sub>（默认 b=4 时）。切换模型会更新 p<sub>s</sub>/p<sub>e</sub>，p<sub>s</sub>/p<sub>e</sub> 取自 Appendix F；m=200 步见 Appendix D。</p>
+  </div>
+
+  <p><strong>建议这样读：</strong>先把滑块拖到 i/m = 0.5。Qwen-2.5-7B 的噪声概率此时正好是 0.25，而 Qwen-2.5-3B 在曲线末端的 p<sub>e</sub> 也才 0.25——两条课程最后到达的难度不同，这是 Table 5/6 里 3B 组更容易接近「课程优势上限」的原因之一<span class="infer">推断</span>（依据：Appendix F 的 p<sub>e</sub> 设定与 Table 6 中 3B 的课程/随机差距小于 LLaMA）。</p>
+
+  <h3>Random 基线为什么输：Table 6</h3>
+  <p>Table 6 里 Random 的意思是训练全程把噪声概率<strong>固定为 0.5</strong>，不是随机变<code>§5.5</code>。两个骨干上，课程组都比 Random 高：</p>
+  <div class="rl-card">
+    <div>
+      <h5>Qwen-2.5-3B-Base</h5>
+      <div class="r">+1.88 <small style="font-size:12px;color:var(--text-soft)">点</small></div>
+      <div class="s">Curriculum 34.47 vs Random 32.59（Table 6，Avg EM）</div>
+    </div>
+    <div>
+      <h5>LLaMA-3.2-3B-Base</h5>
+      <div class="r">+1.23 <small style="font-size:12px;color:var(--text-soft)">点</small></div>
+      <div class="s">Curriculum 36.07 vs Random 34.84（Table 6，Avg EM）</div>
+    </div>
+  </div>
+  <p>注意这两组只学了一门课：从干净到噪声。Random 的开局就是一半噪声，模型还没学会调格式就被噪声淹没，这正是论文所说的「先学会调用搜索、再面对噪声」<code>§5.5</code>。</p>
+
+  <details id="cur-calc">
+    <summary>手算两块：Eq. 1 与 Table 6 的差值<span class="sum-sub">点开核对 JS 与手算是否逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>参数取自：</strong>p<sub>s</sub>/p<sub>e</sub> 取自 Appendix F；b 默认 4 取自 §3.4；Curriculum/Random 取自 Table 6。页面 JS 用 <code>Math.pow(b, i/m)</code> 实现，手算同样只用到 pow，步骤对齐。</p>
+
+      <p><strong>① 7B 组，i/m = 0.25，b = 4：</strong></p>
+      <div class="calc">
+p = 0.75 × (4<sup>0.25</sup> − 1) / (4 − 1)
+  = 0.75 × (1.41421356 − 1) / 3
+  = 0.75 × 0.41421356 / 3
+  = 0.75 × 0.1380712 = <strong>0.1035534</strong>  → 显示为 1036（×10⁻⁴）</div>
+
+      <p><strong>② LLaMA 组，i/m = 0.5，b = 4：</strong></p>
+      <div class="calc">
+p = 0.25 + (4<sup>0.5</sup> − 1) / (4 − 1) × (0.5 − 0.25)
+  = 0.25 + (2 − 1) / 3 × 0.25
+  = 0.25 + 0.3333333 × 0.25 = 0.25 + 0.0833333
+  = <strong>0.3333333</strong>  → 显示为 3333（×10⁻⁴）</div>
+
+      <p><strong>Table 6 差值：</strong></p>
+      <div class="calc">Qwen-2.5-3B-Base：34.47 − 32.59 = 1.88 点
+LLaMA-3.2-3B-Base：36.07 − 34.84 = 1.23 点</div>
+      <p style="margin-bottom:0">页面卡片显示的 +1.88 与 +1.23 即上述两式结果，未做相对换算。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 5. 架构/流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条 rollout 里，谁在生成文档、谁在学</h2></div>
+  <p class="sec-sub">读完你应该知道：训练时模拟器是冻结的、只在跑的 token 上有梯度，以及为什么这对 PPO / GRPO 都成立。</p>
+
+  <p>论文 Figure 1 画的是「没有搜索引擎的 PPO / GRPO」：上面一行是 PPO 的价值模型 + GAE，下面一行是 GRPO 的组内奖励计算，两行的起点都是同一个<strong>Rollout Module：模拟 LLM 替代引擎</strong>。模拟器参数在整个训练中冻结<code>§3.1</code>。</p>
+
+  <figure>
+    <svg viewBox="0 0 820 330" role="img" aria-label="ZeroSearch 训练时的一条 rollout 流程">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#6B6660"></path>
+        </marker>
+      </defs>
+      <!-- 行 1 -->
+      <text x="16" y="66" font-family="'Noto Sans SC',sans-serif" font-size="13" fill="#6B6660">① 查询</text>
+      <text x="150" y="66" font-family="'Noto Sans SC',sans-serif" font-size="13" fill="#6B6660">② 模拟器生成文档</text>
+      <text x="400" y="66" font-family="'Noto Sans SC',sans-serif" font-size="13" fill="#6B6660">③ 策略模型继续推理</text>
+      <text x="620" y="66" font-family="'Noto Sans SC',sans-serif" font-size="13" fill="#6B6660">④ 判分</text>
+
+      <rect x="16" y="80" width="110" height="52" rx="10" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1.4"></rect>
+      <text x="71" y="104" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#2E5A6B" font-weight="600">policy</text>
+      <text x="71" y="121" text-anchor="middle" font-family="'Noto Sans SC',sans-serif" font-size="11" fill="#2E5A6B">发出 &lt;search&gt;</text>
+
+      <rect x="150" y="76" width="216" height="60" rx="10" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.4"></rect>
+      <text x="258" y="100" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#5A4A8C" font-weight="600">simulation LLM（冻结）</text>
+      <text x="258" y="118" text-anchor="middle" font-family="'Noto Sans SC',sans-serif" font-size="11" fill="#5A4A8C">按概率 p 生成 useful / noisy</text>
+
+      <rect x="400" y="80" width="196" height="52" rx="10" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1.4"></rect>
+      <text x="498" y="104" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#2E5A6B" font-weight="600">policy</text>
+      <text x="498" y="121" text-anchor="middle" font-family="'Noto Sans SC',sans-serif" font-size="11" fill="#2E5A6B">吸收 &lt;information&gt;</text>
+
+      <rect x="626" y="76" width="178" height="60" rx="10" fill="#F4DCD0" stroke="#C04E2D" stroke-width="1.4"></rect>
+      <text x="715" y="100" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="13" fill="#7A2E16" font-weight="600">F1 reward</text>
+      <text x="715" y="118" text-anchor="middle" font-family="'Noto Sans SC',sans-serif" font-size="11" fill="#7A2E16">只看答案准确率</text>
+
+      <line x1="126" y1="106" x2="146" y2="106" stroke="#6B6660" stroke-width="1.6" marker-end="url(#arr)"></line>
+      <line x1="366" y1="106" x2="396" y2="106" stroke="#6B6660" stroke-width="1.6" marker-end="url(#arr)"></line>
+      <line x1="596" y1="106" x2="622" y2="106" stroke="#6B6660" stroke-width="1.6" marker-end="url(#arr)"></line>
+
+      <!-- 回路 -->
+      <path d="M 715 140 L 715 170 L 71 170 L 71 136" fill="none" stroke="#6B6660" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arr)"></path>
+      <text x="393" y="188" text-anchor="middle" font-family="'Noto Sans SC',sans-serif" font-size="12" fill="#6B6660">多轮：需要时可以再搜，直到给出 &lt;answer&gt;（Table 1 模板）</text>
+
+      <!-- 行 3 -->
+      <rect x="16" y="216" width="788" height="98" rx="12" fill="#FFFFFF" stroke="#E8DCC7" stroke-width="1.4"></rect>
+      <text x="34" y="242" font-family="'Noto Sans SC',sans-serif" font-size="13" fill="#1A1816" font-weight="600">⑤ 计算优势与更新：只在策略模型自己生成的 token 上算梯度</text>
+      <text x="34" y="266" font-family="'Noto Sans SC',sans-serif" font-size="12" fill="#6B6660">文档 token 被 loss mask 掉（§3.6）——它们由冻结模拟器产生，策略管不到</text>
+      <rect x="34" y="280" width="120" height="24" rx="6" fill="#DDE9EE"></rect>
+      <text x="94" y="297" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11.5" fill="#2E5A6B">REINFORCE / GRPO</text>
+      <rect x="170" y="280" width="76" height="24" rx="6" fill="#DDE9EE"></rect>
+      <text x="208" y="297" text-anchor="middle" font-family="'JetBrains Mono',monospace" font-size="11.5" fill="#2E5A6B">PPO + GAE</text>
+      <text x="262" y="297" font-family="'Noto Sans SC',sans-serif" font-size="11.5" fill="#8C857B">Figure 1 的两条训练分支</text>
+
+      <text x="16" y="324" font-family="'JetBrains Mono',monospace" font-size="10.5" fill="#8C857B">Figure 1（重绘）· 训练时没有真实搜索引擎；推理时全部方法统一接 Google</text>
+    </svg>
+    <figcaption>Figure 1 的重绘：左侧策略模型与右侧冻结模拟器的交互被放进标准 RL 循环；下方两支是 PPO 与 GRPO 的差别。</figcaption>
+  </figure>
+
+  <h3>三个工程细节决定了它跑得稳</h3>
+  <ul>
+    <li><strong>奖励用 F1 而不是 EM：</strong>初版实验里 EM 奖励容易被打成「答案写长一点以扩大命中」的策略，即 reward hacking；改用 F1 平衡精确率和召回率。格式不加额外奖励，因为模型自己就稳定输出合规格式<code>§3.5</code>。</li>
+    <li><strong>文档 token 不算损失：</strong>rollout 序列里既有策略模型的 token，也有模拟器给的文档 token。对后者不掩码会引入不稳定；LLaMA-3.2-3B 上的消融（Table 7）里，掩码 Avg 为 36.07，不掩码为 34.53，差 1.54 点<code>§3.6</code>。</li>
+    <li><strong>server 与训练并行：</strong>实验中模拟器部署在 4×H20，RL 训练在另 4×H20；加更多 GPU 能提高模拟器生成吞吐、加速大规模 rollout<code>§4.3</code> / <code>§1</code>。</li>
+  </ul>
+
+  <p>算法侧只测了三种：REINFORCE、GRPO、PPO。以 Qwen-2.5-3B-Base 为策略模型时，Avg 分别为 34.47 / 33.17 / 32.67，REINFORCE 最高；论文说这与 Search-R1 的观察一致<code>§5.4</code>。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：六对模型全赢，但每一对的赢面并不一样大</h2></div>
+  <p class="sec-sub">读完你应该知道：与 Search-R1 的逐对差值分布、以 EM 为指标时哪些列并不占优，以及成本表的实际形状。</p>
+
+  <p>Table 3 的条件：七个数据集（NQ / TriviaQA / PopQA / HotpotQA / 2Wiki / MuSiQue / Bamboogle），训练集是 NQ + HotpotQA 合并；评测并非零样本——所用指标是 EM<code>§4.1</code>，返回文档数统一 5，评测全部走 SerpAPI 的 Google<code>§4.3</code>；默认模拟器为 SFT 过的 Qwen-2.5-14B-Instruct，默认算法 REINFORCE<code>§4.3</code>。基线中包含 Search-R1，也用真实 Google 做引擎。</p>
+
+  <h3>6.1 ZeroSearch vs Search-R1：逐对差值</h3>
+  <table>
+    <thead><tr><th>策略模型</th><th>ZeroSearch Avg</th><th>Search-R1 Avg</th><th>差值（点）</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen-2.5-7B-Base</td><td class="num">40.93</td><td class="num">39.51</td><td class="num">+1.42</td></tr>
+      <tr><td>Qwen-2.5-7B-Instruct</td><td class="num">39.08</td><td class="num">38.17</td><td class="num">+0.91</td></tr>
+      <tr><td>Qwen-2.5-3B-Base</td><td class="num">34.47</td><td class="num">32.81</td><td class="num">+1.66</td></tr>
+      <tr><td>Qwen-2.5-3B-Instruct</td><td class="num">31.70</td><td class="num">28.13</td><td class="num">+3.57</td></tr>
+      <tr><td>LLaMA-3.2-3B-Base</td><td class="num">36.07</td><td class="num">34.21</td><td class="num">+1.86</td></tr>
+      <tr><td>LLaMA-3.2-3B-Instruct</td><td class="num">30.98</td><td class="num">30.48</td><td class="num">+0.50</td></tr>
+    </tbody>
+  </table>
+  <p class="eq-cap">Table 3（EM，Avg 列为七数据集平均；差值由本页计算）</p>
+
+  <div class="tabs" id="m3-tabs">
+    <button class="tab active" data-key="q7b">Qwen-7B-Base</button>
+    <button class="tab" data-key="q3b">Qwen-3B-Base</button>
+    <button class="tab" data-key="lb">LLaMA-3B-Base</button>
+  </div>
+  <div class="sim" style="padding:18px">
+    <div id="m3-chart"></div>
+    <div class="cx" id="m3-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>Search-R1（真实 Google）</span>
+      <span><i style="background:var(--accent)"></i>ZeroSearch（SFT-14B 模拟器）</span>
+    </div>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:10px">数值逐字取自 Table 3 的 base 行。</p>
+
+  <p>读这张表要注意三点：</p>
+  <ul>
+    <li><strong>差值集中在一个点上下：</strong>六对差值 0.50–3.57 点，均值 +1.65，跨模型的总体标准差 0.97 点<span class="infer">推断</span>（由 Table 3 的 6 个差值计算；本身是描述统计，不是显著性检验）。最大的一对出现在 Qwen-2.5-3B-Instruct（+3.57）。</li>
+    <li><strong>Avg 领先 ≠ 每一列领先：</strong>例如 Qwen-2.5-3B-Base 的 PopQA，ZeroSearch 41.40 低于 Search-R1 的 44.20；LLaMA-3.2-3B-Base 的 Bamboogle 15.28 对 19.44。论文的表述是「consistently outperforms baselines」<code>§4.4</code>，指的是每个骨干上的 <strong>Avg</strong> 行。</li>
+    <li><strong>Instruct 版本的总分普遍低于 Base：</strong>六对里每种骨干的 Instruct 都比 Base 低 1.2–7.0 点，是模型家族本身的差别，不是方法差别。</li>
+  </ul>
+
+  <h3>6.2 成本：真正省下来的是什么</h3>
+  <p>Table 8 的设定：约 64,000 次搜索请求、约 12 小时（Qwen-2.5-7B 骨干、batch 64、rollout 重复 5 次、200 步）<code>Appendix D</code>。API 按 SerpAPI 价格估，GPU 按 AWS 价格估。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>模拟器</th><th>Queries</th><th>训练时长</th><th>GPU</th><th>API 成本</th><th>GPU 成本</th><th>总成本</th></tr></thead>
+    <tbody>
+      <tr><td>SFT-3B</td><td class="num">~64,000</td><td class="num">~12 h</td><td class="num">1 × A100</td><td class="num">$0.0</td><td class="num">$17.7</td><td class="num">$17.7</td></tr>
+      <tr><td>SFT-7B</td><td class="num">~64,000</td><td class="num">~12 h</td><td class="num">2 × A100</td><td class="num">$0.0</td><td class="num">$35.4</td><td class="num">$35.4</td></tr>
+      <tr><td>SFT-14B</td><td class="num">~64,000</td><td class="num">~12 h</td><td class="num">4 × A100</td><td class="num">$0.0</td><td class="num">$70.8</td><td class="num">$70.8</td></tr>
+      <tr><td>Google</td><td class="num">~64,000</td><td class="num">~12 h</td><td class="num">—</td><td class="num">$586.7</td><td class="num">$0.0</td><td class="num">$586.7</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 8（原表数字）</p>
+
+  <p>用默认的 SFT-14B 和 Google 比：总成本从 $586.7 降到 $70.8，<strong>绝对少 $515.9</strong>，<strong>相对 Google 降低 87.93%</strong>（515.9 / 586.7），约为原来的 1/8.29。注意这是「模拟器只跑这一份 RL 训练」的账；论文自己也提醒，模拟器 GPU 在 rollout 时用满、在策略更新时闲下来，存在闲置浪费<code>Appendix D</code>。</p>
+
+  <h3>6.3 一笔容易误读的账：64,000 从哪来</h3>
+  <p>Appendix D 写的是 batch 64 × rollout 重复 5 × 200 步，直接乘出来是 64,000 次查询；这恰好等于 batch 64 × 1,000 步。两组乘数是对得上的<span class="infer">推断</span>（64×5×200 = 64×1,000 = 64,000）。论文没有说明这两个数的对应关系，这里不作为确定结论。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：模拟器换掉了 API 账单，但换不掉「知识截止」和「GPU 闲置」</h2></div>
+  <p class="sec-sub">读完你应该知道：论文自己承认的局限有哪些，以及从数据能读出的额外限制。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">paper</span><h4>需要 GPU 承诺</h4></div>
+    <p>论文 §6 的局限讨论很直接：模拟搜索 LLM 需要 GPU 服务器，虽然比商业 API 便宜，却增加了基础设施成本；Appendix D 进一步指出 GPU 利用率不均衡，建议让多个 RL 任务共享一个模拟器 server 来摊薄<code>§6, Appendix D</code>。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">data</span><h4>模拟器的知识边界靠「问题 + 答案」撑</h4></div>
+    <p>模板里带上问题和标准答案，是为了扩宽模拟器的知识覆盖<code>Table 2</code>。这项设计的代价是：训练数据里模拟器「知道」答案，学习信号来自可用的答案而非真实的「无结果」。<span class="infer">推断</span>（依据：Table 2 模板把 ground truth 写进提示，而真实引擎不会）。在这种设定下，模型学到的「没有找到」行为可能偏少。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">data</span><h4>训练集与评测集不完全同分布</h4></div>
+    <p>训练只用 NQ + HotpotQA 的合并集<code>§4.3</code>；七个评测集里 TriviaQA / PopQA / 2Wiki / MuSiQue / Bamboogle 都是 OOD。Table 4 里 SFT-14B vs Google 的反超本身是在这七个集子上测的，换一组难集需要重新核。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">metric</span><h4>指标只看答案对不对</h4></div>
+    <p>论文的奖励只看答案准确率（F1），不加格式奖励，也不罚「瞎搜」<code>§3.5</code>。Fig 2c 显示训练中交互轮数随奖励一起上升再稳定<code>§5.3</code>——这意味着「用更少的搜索拿到同样答案」这种效率目标并不在它的优化里。</p>
+  </div>
+
+  <p>一句话：<strong>ZeroSearch 换掉的不是「真实网页」这件事，而是训练循环里对真实网页的不受控依赖</strong>。推理时模型依然面对 Google；模拟器在什么情况下比 Google 更适合做老师，取决于课程设计——Table 4 的 SFT-7B 与 Google 只差 0.72 点，这个差距比 14B 的「反超」更贴近这套方法的稳定预期。</p>
+</section>
+
+<footer>
+  <div data-paper-title="ZeroSearch: Incentivize the Search Capability of LLMs without Searching">
+    ZeroSearch: Incentivize the Search Capability of LLMs without Searching（Hao Sun 等，Tongyi Lab, Alibaba Group）。
+  </div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2505.04588v3" target="_blank" rel="noopener">https://arxiv.org/abs/2505.04588v3</a>（本页全部数字以 v3 为准；首发 2025-05）<br>
+    笔记：<a href="/zerosearchincentivize-the-search-capability-of-llms-without-searching/">ZEROSEARCH：Incentivize the Search Capability of LLMs without Searching</a>
+  </div>
+  <div class="src" style="font-size:12.5px;color:var(--text-soft)">
+    笔记勘误（未修改原笔记）：笔记称 Table 4 中「SFT-14B 超过 Google，平均分 34.47 vs 32.81」，这一点与 v3 一致；但笔记未注明该表是在 <strong>Qwen-2.5-3B-Base 策略模型</strong>下测的（Table 4 caption），也不应把 34.47 与 Table 3 里 Qwen-2.5-3B-Base 的 Avg 混为同一实验。另，笔记转述 Table 8「降低近 8 倍」与「降低 87%」并存：按原表计算（$586.7 → $70.8），相对 Google 降低 87.93%，绝对少 $515.9，总成本约为 Google 的 1/8.29——两者口径不同（相对降幅 vs 倍数），并非矛盾。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+     1) 课程噪声概率模拟器（Eq. 1，参数取自 Appendix F）
+     ============================================================ */
+  var CFG = {
+    q7: { ps: 0.0,  pe: 0.75, label: 'Qwen-2.5-7B（Base/Instruct）' },
+    q3: { ps: 0.0,  pe: 0.25, label: 'Qwen-2.5-3B（Base/Instruct）' },
+    ll: { ps: 0.25, pe: 0.50, label: 'LLaMA-3.2-3B（Base/Instruct）' }
+  };
+  var cfgKey = 'q7';
+
+  var iEl = document.getElementById('cur-i');
+  var bEl = document.getElementById('cur-b');
+  var iV = document.getElementById('cur-i-v');
+  var bV = document.getElementById('cur-b-v');
+  var noisyEl = document.getElementById('cur-noisy');
+  var usefulLbl = document.getElementById('cur-useful-lbl');
+  var msgEl = document.getElementById('cur-msg');
+  var gridEl = document.getElementById('cur-grid');
+
+  function pi(x, ps, pe, b) {
+    return ps + (Math.pow(b, x) - 1) / (b - 1) * (pe - ps);
+  }
+  function fmt4(v) { return Math.round(v * 10000); }
+  function fmtPct(v) { return (v * 100).toFixed(2) + '%'; }
+
+  function renderGrid(b) {
+    if (!gridEl) return;
+    var cfg = CFG[cfgKey];
+    var pts = [0, 0.25, 0.5, 0.75, 1];
+    var html = '';
+    for (var k = 0; k < pts.length; k++) {
+      var v = pi(pts[k], cfg.ps, cfg.pe, b);
+      var isNow = Math.abs(parseFloat(iEl.value) - pts[k]) < 0.0026;
+      html += '<div class="pc' + (isNow ? ' now' : '') + '">' +
+              '<div class="k">i/m=' + pts[k].toFixed(2) + '</div>' +
+              '<div class="pv">' + fmtPct(v) + '</div></div>';
+    }
+    gridEl.innerHTML = html;
+  }
+
+  function renderCur() {
+    if (!iEl || !noisyEl) return;
+    var x = parseFloat(iEl.value);
+    var b = parseFloat(bEl.value);
+    var cfg = CFG[cfgKey];
+    var v = pi(x, cfg.ps, cfg.pe, b);
+    iV.textContent = x.toFixed(2);
+    bV.textContent = b.toFixed(1).replace(/\.0$/, '');
+    noisyEl.style.width = (v * 100).toFixed(2) + '%';
+    usefulLbl.style.display = v > 0.55 ? 'none' : 'inline';
+    msgEl.innerHTML =
+      '<strong>' + cfg.label + '</strong>：i/m = ' + x.toFixed(3) +
+      '，b = ' + b.toFixed(1).replace(/\.0$/, '') + ' 时，' +
+      '生成 <strong>noisy</strong> 文档的概率为 <strong>' + fmtPct(v) + '</strong>' +
+      '（×10<sup>-4</sup> 计数 ' + fmt4(v) + '）。' +
+      ' useful 文档概率 ' + fmtPct(1 - v) + '。';
+    renderGrid(b);
+  }
+
+  if (iEl && bEl) {
+    iEl.addEventListener('input', renderCur);
+    bEl.addEventListener('input', renderCur);
+  }
+  var curBtns = document.querySelectorAll('#cur-btns .rule-btn');
+  for (var c = 0; c < curBtns.length; c++) {
+    curBtns[c].addEventListener('click', function () {
+      for (var j = 0; j < curBtns.length; j++) curBtns[j].classList.remove('active');
+      this.classList.add('active');
+      cfgKey = this.dataset.cfg;
+      renderCur();
+    });
+  }
+  renderCur();
+
+  /* ============================================================
+     2) Table 3 base 行的逐数据集柱状对比
+     ============================================================ */
+  var M3 = {
+    q7b: {
+      name: 'Qwen-2.5-7B-Base',
+      zs: [42.40, 66.40, 60.40, 32.00, 34.00, 18.00, 33.33],
+      sr: [43.40, 61.40, 54.60, 31.20, 37.20, 18.20, 30.56]
+    },
+    q3b: {
+      name: 'Qwen-2.5-3B-Base',
+      zs: [43.00, 61.60, 41.40, 33.80, 34.60, 13.00, 13.89],
+      sr: [40.60, 60.00, 44.20, 29.20, 32.00, 11.20, 12.50]
+    },
+    lb: {
+      name: 'LLaMA-3.2-3B-Base',
+      zs: [43.40, 63.80, 48.40, 32.20, 35.60, 13.80, 15.28],
+      sr: [41.20, 60.00, 44.00, 29.60, 31.60, 13.60, 19.44]
+    }
+  };
+  var DS = ['NQ', 'TriviaQA', 'PopQA', 'HotpotQA', '2Wiki', 'MuSiQue', 'Bamboogle'];
+
+  var m3chart = document.getElementById('m3-chart');
+  var m3x = document.getElementById('m3-x');
+
+  function renderM3(key) {
+    if (!m3chart) return;
+    var d = M3[key];
+    if (!d) return;
+    var html = '';
+    var names = [
+      { n: 'Search-R1', v: d.sr, cls: 'var(--c1)' },
+      { n: 'ZeroSearch', v: d.zs, cls: 'var(--accent)' }
+    ];
+    for (var r = 0; r < names.length; r++) {
+      html += '<div class="crow"><div class="cname">' + names[r].n + '</div><div class="cbars">';
+      for (var k = 0; k < 7; k++) {
+        var val = names[r].v[k];
+        html += '<div class="cbar" title="' + DS[k] + ' ' + val.toFixed(2) + '">' +
+                '<div class="track"><div class="fill" style="background:' + names[r].cls +
+                ';height:' + Math.max(2, val) + '%"></div></div>' +
+                '<div class="num">' + val.toFixed(1) + '</div></div>';
+      }
+      html += '</div></div>';
+    }
+    m3chart.innerHTML = html;
+    if (m3x) {
+      var xs = '';
+      for (var q = 0; q < DS.length; q++) xs += '<span>' + DS[q] + '</span>';
+      m3x.innerHTML = xs;
+    }
+  }
+
+  var m3tabs = document.querySelectorAll('#m3-tabs .tab');
+  for (var t = 0; t < m3tabs.length; t++) {
+    m3tabs[t].addEventListener('click', function () {
+      for (var j = 0; j < m3tabs.length; j++) m3tabs[j].classList.remove('active');
+      this.classList.add('active');
+      renderM3(this.dataset.key);
+    });
+  }
+  renderM3('q7b');
+})();
+</script>
+</body>
+</html>

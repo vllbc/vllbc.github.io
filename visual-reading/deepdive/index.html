@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepDive · 从知识图谱「反向造题」，再用多轮 RL 教会模型深搜</title>
+<meta name="description" content="DeepDive 在知识图谱上选择性随机游走、模糊属性造出高难度深搜问答，再用多轮 GRPO 加冗余查询惩罚训练 32B 模型；BrowseComp 上从仅 SFT 的 9.5% 提升到 15.3%，工具调用越多、并行采样选「最少调用」的答案，准确率还能继续涨。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调 */
+.tbx-wrap{background:var(--bg-surface);border:1px solid var(--border-strong);border-radius:var(--radius-xl);padding:22px 22px 18px;margin:24px 0;box-shadow:var(--shadow-md)}
+.tbx-svg{display:block;width:100%;height:auto;margin-bottom:6px}
+.tbx-val{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text);text-anchor:middle}
+.tbx-lbl{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft);text-anchor:middle}
+.tbx-winner{font-size:13px;fill:var(--accent);font-weight:700;text-anchor:middle}
+.chk-in{display:flex;gap:12px;align-items:flex-start;font-size:14px;color:var(--text);margin:4px 0 14px;cursor:pointer;line-height:1.6}
+.chk-in input{accent-color:var(--accent);margin-top:4px;flex:none}
+.chk-in .sum-sub{display:inline;margin-left:4px}
+.result-table td:first-child,.result-table th:first-child{white-space:nowrap}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">DeepDive</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Deep Search Agent · arXiv 2025 · 2509.10446</span>
+  <h1>DeepDive：从知识图谱「反向造题」，再用多轮 RL 教会模型深搜</h1>
+  <p class="hero-sub">
+    开源模型在 BrowseComp 这类「答案藏在十几个网页之外」的题上普遍不到 10%。论文把差距归因于两件事：<strong>没有足够难的题</strong>，也<strong>没有让模型在多轮搜索里被奖励的训练方法</strong>。
+    DeepDive 的做法是先在图谱上走一条长链、把中间线索模糊化造出难题，再用带<strong>冗余查询惩罚</strong>的多轮 GRPO 在这些题上训练。
+  </p>
+  <div class="meta">
+    <span>Rui Lu, Zhenyu Hou, Zihan Wang 等 · 清华 / Z.AI / 东北大学</span>
+    <a href="https://arxiv.org/abs/2509.10446" target="_blank" rel="noopener">arXiv 2509.10446 ↗</a>
+    <a href="https://github.com/THUDM/DeepDive" target="_blank" rel="noopener">代码与数据 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    深搜训练卡在<strong>数据</strong>上：HotpotQA 这类题几个明确实体搜一下就有答案，而 BrowseComp 的题要求你在多个「模糊实体」之间反复推理、搜索、验证。人工造这种题太贵，DeepDive 就用<strong>知识图谱</strong>自动造。
+  </p>
+  <p>
+    造题流程是「先定答案，再逆向写题」：按出度范围 <em>4–8</em> 筛节点，走一条长度 5–9 的长链，用 LLM 挑下一个节点保证连贯，再把链上每个节点的属性模糊化（「1948 年」写成「20 世纪 40 年代末」），最后用一个带搜索的前沿模型做难度筛——<strong>问 4 次只要答对 1 次就丢弃</strong>。
+  </p>
+  <p>
+    训练端是端到端多轮 GRPO：<strong>格式全对 + 答案判对才给 1 分</strong>，再减去 <em>λ·S(T)</em> 惩罚同一个轨迹里高度相似的重复查询。这个小惩罚让模型在分数略降的情况下少调约 14% 的工具。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">15.3%</div>
+      <div class="k">DeepDive-32B 在 BrowseComp 的准确率<br>仅 SFT 时 9.5%，WebSailor-32B 10.5%</div>
+    </div>
+    <div class="metric">
+      <div class="v">3,250</div>
+      <div class="k">KG 合成 QA 总数<br>1,016 条 SFT + 2,234 条 RL</div>
+    </div>
+    <div class="metric">
+      <div class="v">24.8%</div>
+      <div class="k">并行采样 8 次、选最少工具调的答案<br>多数投票只有 18.8%，pass@8 上限 37.6%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>难点不在「搜得到」，而在「先搞清楚该搜谁」</h2></div>
+  <p class="sec-sub">先看清 BrowseComp 这类题的形状：能不能搜到答案，取决于能不能先把模糊的描述还原成具体实体。</p>
+
+  <p>论文 Figure 2 用一道 HotpotQA 题和一道 BrowseComp 题做对比。HotpotQA 问「World Fellowship Center 东边的山有多高」，实体是明确的，搜一次就能定位。BrowseComp 的题则给出一串绕圈子的描述——「偶尔打破第四面墙、曾在 1960–80 年代播出不到 50 集电视剧的虚构角色」——每个描述都指向一个模糊实体，必须<strong>边搜边推理</strong>，一步步把范围收窄。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">HotpotQA 型</span><h4>Definite Entity</h4></div>
+      <p>问题里给出可以直接搜索的实体名，推理链短、可预测。<strong>只需要 Browse</strong>，不需要长程推理。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">BrowseComp 型</span><h4>Blurry Entity</h4></div>
+      <p>问题里是一组特征描述，实体本身要借搜索+推理才能锁定。<strong>Browse 与 Reason 必须交替</strong>，网页信息往往分散、矛盾、难以定位。</p>
+    </div>
+  </div>
+
+  <p>这就带来两个互为因果的缺口。论文在引言里明确指出，开源模型落后的原因是：</p>
+  <ul>
+    <li><strong>数据缺口：</strong>现有 QA 数据集的问题过于简单，不反映真正的「难找」；手工标注又贵到难以规模化的程度。这类题目「连领域专家也要花数小时」才能搜出来。</li>
+    <li><strong>训练缺口：</strong>即便强推理模型（论文点名 DeepSeek-R1）也只是浅层调用工具、经常出现幻觉。已有的浏览类 agent（R1-Searcher、ReSearch、DeepResearcher 等）主要在 HotpotQA / 2WikiMultiHopQA 一类数据集上训练评测，没有针对长程深搜。</li>
+  </ul>
+
+  <p>所以问题可以拆成两问：<strong>怎么批量造出足够难的题？怎么让模型学会在工具环境里长程地搜？</strong>后面两节分别对应论文的两大支柱。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路：题太简单，或者只学会了「搜一下就答」</h2></div>
+  <p class="sec-sub">数据侧和训练侧各有一路主流做法，DeepDive 是在它们各自的短板处补位。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">数据侧</span><h4>用现成多跳 QA / 人工标注</h4></div>
+      <p>HotpotQA、2WikiMultiHopQA、Bamboogle、Musique 等数据集让 agent 有题可训，但题目结构可预测，搜几次明确实体就能作答。</p>
+      <p><strong>卡点：</strong>难度不够，学不会「在模糊线索间迭代」「在矛盾信息里筛证据」。人工造 BrowseComp 级题目则成本高、难扩展。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">训练侧</span><h4>在简单数据上做检索式 RL</h4></div>
+      <p>R1-Searcher、ReSearch、Search-R1、DeepResearcher 等用 RL 优化「推理 + 检索」的组合，但训练和评测主要停留在多跳 QA 场景。</p>
+      <p><strong>卡点：</strong>训练目标只追求「找到答案」，对「探索是否充分、查询是否重复」没有约束；模型容易收敛到浅层查询模式。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">DeepDive 的拆分</span><h4>数据用图谱「可控地变难」，训练用多轮 GRPO + 多样性惩罚</h4></div>
+    <p>数据侧从 KG 自动合成：图谱天然支持多跳、每个节点都带属性，属性能被选择性遮盖——难度是「旋钮」而不是「祈祷」。训练侧沿用 GRPO，但在奖励里加入 <code>r(T) − λ·S(T)</code>，把「问得重复」直接扣分。</p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把答案「藏」进图谱长链：先定终点，再逆向写题</h2></div>
+  <p class="sec-sub">数据合成的全部巧思，就是让图上的路径决定答案在哪、让模糊化决定题目有多难。</p>
+
+  <p>知识图谱记作 <code>G = (V, E)</code>，每个实体 <code>v<sub>i</sub></code> 带着一组属性 <code>A(v)</code>。论文先挑一条路径：</p>
+
+  <div class="eq">
+    P = [v<sub>0</sub>, v<sub>1</sub>, …, v<sub>k</sub>]&nbsp;&nbsp;&nbsp;
+    N(v<sub>i</sub>) = { u | (v<sub>i</sub>, u) ∈ E ∧ d<sub>min</sub> ≤ d(u) ≤ d<sub>max</sub> }&nbsp;&nbsp;&nbsp;
+    v<sub>i+1</sub> = <span class="hl-c">LLM-select</span>(P<sub>i</sub>, N(v<sub>i</sub>))
+  </div>
+  <div class="eq-cap">Eq. 4–5 · 候选集按出度 d 过滤；再从候选里由 LLM 选与当前路径最相关的下一个节点，兼顾「复杂」和「连贯」</div>
+
+  <p>然后，把路径上每个节点和它的属性拼成「属性富集路径」 <code>P<sub>A</sub></code>，从<b>终点 <code>v<sub>k</sub></code></b> 的属性里选一个 <code>a<sup>i</sup><sub>k</sub></code> 作为标准答案，并由 LLM 对整条路径做模糊化：</p>
+
+  <div class="eq">
+    (q, a<sup>i</sup><sub>k</sub>) = <span class="hl-c">LLM-obscure</span>(P<sub>A</sub>)
+  </div>
+  <div class="eq-cap">Eq. 3 · 问题 q 描述的是「怎么从起点一步步走到终点」，答案却是终点的某个属性——答案和问题描述在文本上并不相邻</div>
+
+  <p>论文写明的合成超参是：路径长度 <code>k ∈ [5, 9]</code>，出度 <code>d = 3</code>，<code>d<sub>min</sub> = 4</code>，<code>d<sub>max</sub> = 8</code>；模糊化用 Gemini-2.5-Pro；图谱数据来自 KILT 与 AMiner 两个公开图谱。最终产出 3,250 条，随机拆成 1,016 条 SFT、2,234 条 RL。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么要卡出度</span><h4>太热门会被猜中，太冷门走不下去</h4></div>
+    <p>出度太高的节点是「过度热门」的实体，模型很容易猜到；出度太低则无法扩展路径。上界 <code>d<sub>max</sub> = 8</code> 砍掉热门枢纽，下界 <code>d<sub>min</sub> = 4</code> 保证每一步都有足够分支让 LLM 挑选。这与直接把出度固定在 <code>d = 3</code> 形成对照：固定的路径完全由度数决定，而 DeepDive 还多一层 <strong>LLM-select 的语义把关</strong>。</p>
+  </div>
+
+  <p>题目造出来还不算完，论文再用一个<strong>带基础搜索能力的前沿模型（如 GPT-4o）做难度筛</strong>：每道题测 4 次，只要任何一次答对就丢弃，只有 4 次全失败的题才保留。这一步直接把「模型查表就能答」的题筛出数据集。</p>
+
+  <h3>自己动手：固定出度 vs 度数区间 + LLM 挑选</h3>
+  <p>下面把 10 个候选节点按实际出度排开。拖动出度区间，看哪些节点能进入下一步的候选集、有多少条路径可以延伸；点「让 LLM 挑选」看与路径语义不相关的节点被剔除后还剩多少。</p>
+
+  <div class="tbx-wrap">
+    <svg class="tbx-svg" viewBox="0 0 640 220" role="img" aria-label="候选节点出度条形图，区间内的节点高亮">
+      <rect x="448" y="4" width="1.2" height="188" style="fill:var(--border-strong)"></rect>
+      <rect id="tbx-dmin-shade" x="382" y="4" width="0" height="188" style="fill:var(--accent-soft);opacity:.55"></rect>
+      <rect id="tbx-dmax-shade" x="448" y="4" width="0" height="188" style="fill:var(--accent-soft);opacity:.55"></rect>
+      <text x="448" y="203" class="tbx-lbl" style="text-anchor:middle;fill:var(--accent)">d</text>
+      <g id="tbx-bars"></g>
+      <line x1="300" y1="4" x2="300" y2="192" style="stroke:var(--c2);stroke-dasharray:4 4;stroke-width:1.5"></line>
+      <text x="297" y="203" class="tbx-lbl" style="text-anchor:end;fill:var(--c2)">d = 3</text>
+    </svg>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>下界 d<sub>min</sub> <span class="v" id="tbx-dmin-v">4</span></label>
+        <input type="range" id="tbx-dmin" min="0" max="12" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label>上界 d<sub>max</sub> <span class="v" id="tbx-dmax-v">8</span></label>
+        <input type="range" id="tbx-dmax" min="0" max="12" step="1" value="8">
+      </div>
+    </div>
+
+    <label class="chk-in">
+      <input type="checkbox" id="tbx-llm">
+      <span>让 LLM 挑选：2 个与当前路径语义无关的节点会被剔除<span class="sum-sub">（类比论文 Eq. 5 的 LLM-select；这里固定为 2 个，便于手算）</span></span>
+    </label>
+
+    <div class="actions">
+      <button class="act primary" id="tbx-reset">恢复论文设置（4–8）</button>
+    </div>
+
+    <div class="readout" id="tbx-readout">
+      <div class="r-head">实时结果</div>
+      <div id="tbx-msg">拖动滑块调整区间，观察候选节点数量变化。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个模拟简化了什么？<span class="sum-sub">点开看与论文公式的差异</span></summary>
+    <div class="details-body">
+      <p>论文并没有公布具体的度分布和 LLM-select 的命中率；这里的 10 个节点与「剔除 2 个」都是为了让你手算而设定的最小示例，反映的是 Eq. 4–5 的逻辑，不是论文数据。</p>
+      <p>真实实现中，<code>N(v<sub>i</sub>)</code> 是对当前节点所有邻居按出度区间筛出的候选集，LLM 每次只选 1 个下一个节点；这里把候选数直接理解为「可延伸路径条数」，是为了让「广度」和「零候选」两种失败模式可见。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>奖励 = 严格二元对错 − 重复查询扣分</h2></div>
+  <p class="sec-sub">训练端的全部创新集中在一个减号上：对错之外，再惩罚「在同一个轨迹里反复问几乎相同的问题」。</p>
+
+  <p>轨迹沿用 ReAct 式循环：思考 <code>c<sub>t</sub></code> → 动作 <code>a<sub>t</sub></code>（search / click / open）→ 观测 <code>o<sub>t</sub></code>，直到模型用终止动作 <code>a<sub>eos</sub></code> 给出答案。一条轨迹是</p>
+
+  <div class="eq">
+    T = [q, (c<sub>1</sub>, a<sub>1</sub>, o<sub>1</sub>), …, (c<sub>m</sub>, a<sub>m</sub>, o<sub>m</sub>), c<sub>ans</sub>, a<sub>eos</sub>],&nbsp;&nbsp; m ≤ n
+  </div>
+  <div class="eq-cap">Eq. 1 · 多轮循环直到模型自认为信息足够；最大轮数 n 在评测时逐级调高</div>
+
+  <p>严格二元奖励要求<strong>每一步格式都对</strong>，且终止答案经 LLM-as-Judge 判定与标准一致：</p>
+
+  <div class="eq">
+    r(T) = 1&nbsp;&nbsp;if&nbsp;&nbsp;(∀i, Format(c<sub>i</sub>, a<sub>i</sub>)) ∧ Judge(a<sub>eos</sub>, a<sup>*</sup>);&nbsp;&nbsp;&nbsp;否则 0
+  </div>
+  <div class="eq-cap">Eq. 8 · 用 LLM judge 是因为实体可能有多种合法写法（"Inter" vs "Inter Corp."）</div>
+
+  <p>冗余惩罚用轨迹内所有查询两两之间的 Jaccard 相似度平均值来度量，再以系数 λ 从奖励里扣除：</p>
+
+  <div class="eq">
+    S(T) = <span style="display:inline-block;text-align:center;vertical-align:middle;line-height:1.2"><span>1</span><span style="display:block;border-top:1px solid var(--text);padding-top:2px">T(T−1)</span></span>
+    Σ<sub>i≠j</sub> sim(q<sub>i</sub>, q<sub>j</sub>),&nbsp;&nbsp; sim(q<sub>i</sub>, q<sub>j</sub>) = |q<sub>i</sub> ∩ q<sub>j</sub>| / |q<sub>i</sub> ∪ q<sub>j</sub>|
+    <br>
+    r′(T) = r(T) − λ · S(T)
+  </div>
+  <div class="eq-cap">Eq. 7、9 · S(T) ∈ [0, 1]：查询全相同为 1，完全不相交为 0；训练中 λ = 0.1</div>
+
+  <p>GRPO 部分沿用标准形式：每个问题采样 G 条轨迹，组内标准化得到优势 <code>A<sub>i</sub></code>，再用裁剪的目标函数（Eq. 6）更新策略。一个关键的工程选择是 <strong>KL 系数 β = 0</strong>——论文引用已有工作（Vassoyan et al., 2025）说明去掉 KL 惩罚、放开探索，对这类任务更有利。</p>
+
+  <h3>自己动手：Jaccard 相似度与 π 近似</h3>
+  <p>论文 Figure 4 的例子：query 1 =「deep neural network」（3 个词），query 2 =「neural network eval」（3 个词），交集 2、并集 4，相似度 2/4 = 0.5。勾选要放进轨迹的查询，看 S(T) 怎么变——<strong>注意：它算的是两两平均，不是「相邻平均」</strong>，查询越多，分母 T(T−1) 涨得越快。</p>
+
+  <div class="sim" id="jac-sim">
+    <div class="sim-top" id="jac-btns">
+      <button class="rule-btn active" data-set="paper">论文 Figure 4<span class="r-sub">3 条查询</span></button>
+      <button class="rule-btn" data-set="bad">重复搜索<span class="r-sub">4 条同义改写</span></button>
+      <button class="rule-btn" data-set="good">互补搜索<span class="r-sub">4 条不同角度</span></button>
+    </div>
+
+    <div id="jac-list" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin:16px 0"></div>
+
+    <div class="slots s2" style="margin-bottom:6px">
+      <div class="slot">
+        <div class="slot-name">S(T) 两两平均相似度</div>
+        <div class="slot-val" id="jac-s">0.00</div>
+      </div>
+      <div class="slot hit">
+        <div class="slot-name">r′ = r − λ·S，λ=0.1，取 r=1</div>
+        <div class="slot-val" id="jac-r">1.00</div>
+      </div>
+    </div>
+
+    <div class="readout">
+      <div class="r-head">计算明细</div>
+      <div id="jac-msg"></div>
+    </div>
+  </div>
+
+  <p>有两种边界值得记住：一是 <strong>λ 与准确率存在权衡</strong>——Figure 7b/7c 报告加入冗余惩罚后，后期准确率约高 20%，工具调用约少 14%。二是 <strong>惩罚是「平均」而非「最大」</strong>，所以一条轨迹只要保持整体多样，偶尔的重复查询不会把奖励一棍子打没；但如果模型收敛到「换个说法再搜一次」，S(T) 会快速逼近 1，扣满 0.1。</p>
+
+  <p>训练配置：SFT 用 Claude-4-Sonnet-Thinking 拒绝采样生成 858 条冷启动轨迹，backbone 为 GLM-Z1-9B-0414 与 QwQ-32B，各训 3 epoch、全局 batch 32、学习率 1×10<sup>−5</sup>、最大上下文 104,800；RL 用 Slime 框架，rollout 8、每 prompt 16 样本、全局 batch 128、temperature 1.0、最大上下文 51,200 tokens、学习率 1×10<sup>−6</sup>。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>整条流水线：图谱造题 → 冷启动 SFT → 多轮 RL</h2></div>
+  <p class="sec-sub">论文 Figure 3（造题）与 Figure 4（训练）拼起来，就是下面这张端到端流程。</p>
+
+  <figure>
+    <svg viewBox="0 0 840 470" role="img" aria-label="DeepDive 端到端流程：KG 造题、难度筛选、拆分 SFT/RL、多轮 RL 训练">
+      <defs>
+        <marker id="dd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <!-- 顶行：KG 造题 -->
+      <text x="20" y="22" class="mono" style="font-size:11px;fill:var(--text-soft);letter-spacing:.08em">DATA · KG SYNTHESIS</text>
+
+      <rect x="20" y="36" width="180" height="104" rx="10" style="fill:var(--bg-soft);stroke:var(--border-strong)"></rect>
+      <text x="110" y="62" class="mono" style="font-size:12px;fill:var(--c1);text-anchor:middle;font-weight:700">1  Selective Walk</text>
+      <text x="110" y="84" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">KILT / AMiner</text>
+      <text x="110" y="102" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">k ∈ [5,9]</text>
+      <text x="110" y="120" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">4 ≤ d(u) ≤ 8</text>
+
+      <rect x="230" y="36" width="180" height="104" rx="10" style="fill:var(--bg-soft);stroke:var(--border-strong)"></rect>
+      <text x="320" y="62" class="mono" style="font-size:12px;fill:var(--c1);text-anchor:middle;font-weight:700">2  LLM-Select</text>
+      <text x="320" y="84" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">逐跳选最相关邻居</text>
+      <text x="320" y="102" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">P = [v₀ … v_k]</text>
+
+      <rect x="440" y="36" width="180" height="104" rx="10" style="fill:var(--bg-soft);stroke:var(--border-strong)"></rect>
+      <text x="530" y="62" class="mono" style="font-size:12px;fill:var(--c2);text-anchor:middle;font-weight:700">3  Obscure</text>
+      <text x="530" y="84" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">Gemini-2.5-Pro</text>
+      <text x="530" y="102" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">属性 → 模糊描述</text>
+      <text x="530" y="120" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">答案 = v_k 的某属性</text>
+
+      <rect x="650" y="36" width="170" height="104" rx="10" style="fill:var(--bg-soft);stroke:var(--border-strong)"></rect>
+      <text x="735" y="62" class="mono" style="font-size:12px;fill:var(--c2);text-anchor:middle;font-weight:700">4  Difficulty Filter</text>
+      <text x="735" y="84" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">GPT-4o + search</text>
+      <text x="735" y="102" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">测 4 次，对 1 次即弃</text>
+      <text x="735" y="120" class="mono" style="font-size:10.5px;fill:var(--accent);text-anchor:middle;font-weight:700">3,250 条留存</text>
+
+      <line x1="200" y1="88" x2="226" y2="88" style="stroke:var(--text-soft);stroke-width:1.5" marker-end="url(#dd-arrow)"></line>
+      <line x1="410" y1="88" x2="436" y2="88" style="stroke:var(--text-soft);stroke-width:1.5" marker-end="url(#dd-arrow)"></line>
+      <line x1="620" y1="88" x2="646" y2="88" style="stroke:var(--text-soft);stroke-width:1.5" marker-end="url(#dd-arrow)"></line>
+
+      <!-- 拆分 -->
+      <line x1="735" y1="140" x2="735" y2="170" style="stroke:var(--text-soft);stroke-width:1.5"></line>
+      <line x1="200" y1="170" x2="735" y2="170" style="stroke:var(--text-soft);stroke-width:1.5"></line>
+      <line x1="200" y1="170" x2="200" y2="196" style="stroke:var(--text-soft);stroke-width:1.5" marker-end="url(#dd-arrow)"></line>
+      <line x1="640" y1="170" x2="640" y2="196" style="stroke:var(--text-soft);stroke-width:1.5" marker-end="url(#dd-arrow)"></line>
+      <text x="230" y="163" class="mono" style="font-size:10.5px;fill:var(--text-soft)">1,016 · SFT</text>
+      <text x="590" y="163" class="mono" style="font-size:10.5px;fill:var(--text-soft)">2,234 · RL</text>
+
+      <!-- 底行：训练 -->
+      <rect x="20" y="200" width="360" height="96" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong)"></rect>
+      <text x="200" y="226" class="mono" style="font-size:12px;fill:var(--c1);text-anchor:middle;font-weight:700">5  Cold-start SFT</text>
+      <text x="200" y="248" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">Claude-4-Sonnet-Thinking 拒绝采样</text>
+      <text x="200" y="266" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">858 条高质量轨迹</text>
+      <text x="200" y="284" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">GLM-Z1-9B / QwQ-32B</text>
+
+      <rect x="460" y="200" width="360" height="96" rx="10" style="fill:var(--accent-soft);stroke:var(--accent)"></rect>
+      <text x="640" y="226" class="mono" style="font-size:12px;fill:var(--accent-deep);text-anchor:middle;font-weight:700">6  Multi-turn GRPO (Slime)</text>
+      <text x="640" y="248" class="mono" style="font-size:10.5px;fill:var(--accent-deep);text-anchor:middle">r′ = r − λ·S(T)，λ = 0.1</text>
+      <text x="640" y="266" class="mono" style="font-size:10.5px;fill:var(--accent-deep);text-anchor:middle">KL β = 0 · rollout 8 · 16/prompt</text>
+      <text x="640" y="284" class="mono" style="font-size:10.5px;fill:var(--accent-deep);text-anchor:middle">max ctx 51,200 · lr 1e-6</text>
+
+      <line x1="380" y1="248" x2="456" y2="248" style="stroke:var(--accent);stroke-width:1.8" marker-end="url(#dd-arrow)"></line>
+      <text x="418" y="240" class="mono" style="font-size:10px;fill:var(--accent);text-anchor:middle">热启动</text>
+
+      <!-- 评测 -->
+      <line x1="640" y1="296" x2="640" y2="330" style="stroke:var(--text-soft);stroke-width:1.5" marker-end="url(#dd-arrow)"></line>
+
+      <rect x="90" y="334" width="660" height="100" rx="10" style="fill:var(--bg-soft);stroke:var(--border-strong)"></rect>
+      <text x="420" y="358" class="mono" style="font-size:12px;fill:var(--text);text-anchor:middle;font-weight:700">7  Test-time Scaling</text>
+      <text x="420" y="380" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">单次：调大 max tool calls（8 → 128）</text>
+      <text x="420" y="398" class="mono" style="font-size:10.5px;fill:var(--text-muted);text-anchor:middle">多次：并行采样 K 次，选「工具调用最少」的答案 &gt; 多数投票</text>
+      <text x="420" y="416" class="mono" style="font-size:10.5px;fill:var(--text-soft);text-anchor:middle">评测：LLM-as-Judge（Llama-3.1-70B），每个数据集跑两次取平均</text>
+    </svg>
+    <figcaption>
+      图 1：根据论文 Figure 3、Figure 4 与 §3.1 训练细节重绘。灰色为数据合成与既有组件，陶土红为论文的多轮 RL 核心。
+    </figcaption>
+  </figure>
+
+  <p>有两个容易忽略的细节：一是<b>训练时的环境</b>是真实 API（Serper 检索返回前 10 条、Jina 负责 click/open），不是离线快照，所以模型学到的是真实网页的噪声分布；二是<b>训练期的评测</b>只在 BrowseComp-266 子集上做（最多 75 轮），训练饱和后才换到完整 1,266 题、上限提到 128 轮——这解释了为什么 Figure 5 的曲线比最终表 1 的数字更低。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>开源里第一档：15.3%，但离闭源深研仍有 36 个点</h2></div>
+  <p class="sec-sub">看三个层面：和谁比、RL 带来了什么、推理时加计算能加到多高。</p>
+
+  <h3>和基线的对照（Table 1，准确率 %）</h3>
+  <div class="tbl-scroll">
+    <table class="result-table">
+      <thead>
+        <tr><th>模型</th><th class="num">BrowseComp</th><th class="num">BrowseComp-ZH</th><th class="num">Xbench-DS</th><th class="num">SEAL-0</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>OpenAI DeepResearch</td><td class="num">51.5*</td><td class="num">42.9*</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Claude-4-Sonnet-Thinking†</td><td class="num">14.7</td><td class="num">30.8</td><td class="num">53.0</td><td class="num">37.8</td></tr>
+        <tr><td>GPT-4o†</td><td class="num">1.9*</td><td class="num">12.8</td><td class="num">30.0</td><td class="num">9.1</td></tr>
+        <tr><td>Claude-3.7-Sonnet†</td><td class="num">4.5</td><td class="num">14.2</td><td class="num">29.0</td><td class="num">14.4</td></tr>
+        <tr><td>WebSailor-32B</td><td class="num">10.5*</td><td class="num">25.5*</td><td class="num">53.3*</td><td class="num">—</td></tr>
+        <tr><td>DeepSeek-R1-0528</td><td class="num">3.2</td><td class="num">28.7</td><td class="num">37.0</td><td class="num">5.4</td></tr>
+        <tr><td>QwQ-32B†</td><td class="num">1.3</td><td class="num">14.5</td><td class="num">27.0</td><td class="num">4.5</td></tr>
+        <tr><td>DeepDive-32B (SFT only)</td><td class="num">9.5</td><td class="num">23.0</td><td class="num">48.5</td><td class="num">23.9</td></tr>
+        <tr class="best"><td>DeepDive-32B</td><td class="num">15.3</td><td class="num">29.7</td><td class="num">51.8</td><td class="num">25.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">† 表示论文为这些非浏览模型接上了浏览工具；* 表示直接沿用原论文报告的数字。Table 1 中 Xbench-DeepSearch 的 DeepDive-32B 为 51.8，Table 3 同行为 50.0，以 Table 1 为准。</p>
+
+  <ul>
+    <li><strong>开源第一档：</strong>15.3% 领先 WebSailor-32B 的 10.5%，也压过带浏览的 Claude-4-Sonnet-Thinking（14.7）与 Claude-3.7-Sonnet†（4.5）。</li>
+    <li><strong>但离闭源深研很远：</strong>OpenAI DeepResearch 是 51.5%，论文在局限性一节把原因归给「合成数据难度上限仍显著低于 BrowseComp」。</li>
+    <li><strong>RL 的增益不对称：</strong>Figure 1 右侧报告 32B 模型在四个基准分别 +5.8（BrowseComp）、+6.7（ZH）、+1.6（Xbench）、+3.3（SEAL-0）；9B 模型的增益明显更小，论文推测是小模型推理能力有限、或在合成数据上过拟合。</li>
+    <li><strong>数据比模型尺度更关键：</strong>Table 2 中 QwQ-32B 直接做 SFT，用 HotpotQA 只到 BrowseComp-266 的 4.9%，用论文数据到 7.5%；在此之上做 RL，两者分别是 9.2% 与 12.0%。</li>
+  </ul>
+
+  <h3>推理时加计算：工具调用越多越好，但选答案的方式更重要</h3>
+  <div class="tabs" id="scale-tabs">
+    <button class="tab active" data-k="1">K = 1 · 单次尝试</button>
+    <button class="tab" data-k="8">K = 8 · 并行 8 次</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="readout" id="scale-desc" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="slots" id="scale-slots"></div>
+    <div id="scale-bars" class="chart" style="margin-top:18px"></div>
+  </div>
+
+  <p>Figure 6c 的两个对照：多数投票把 BrowseComp-266 从 12.0 提到 18.8，而「选工具调用最少的那个答案」提到 24.8，逼近 pass@8 的理论上限 37.6。论文给出的解释是——<strong>模型对好答案有信心时会早早停手，额外调用往往反映的是不确定</strong>。工具调用扩展上（Figure 6a），最大工具调用达到 16 以上后，RL 版明显拉开与 SFT 版的差距。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>奖励变「严」反而学得更好</h4></div>
+    <p>Figure 7a：去掉格式奖励后曲线基本停在 8.0 附近不动，加上格式奖励后整段训练期高出约 2 个绝对点。Figure 7b：加入冗余惩罚后后期准确率约高 20%，同时工具调用约少 14%。严格的格式约束没有「饿死」稀疏奖励，反而让优化更稳定。</p>
+  </div>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别指望它：难度天花板、过度搜索、任务错配</h2></div>
+  <p class="sec-sub">论文自己承认的边界，配上实验里能读出来的边界。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">论文承认</span><h4>难度天花板</h4></div>
+      <p>合成数据难度上限「显著低于 BrowseComp」，这是 15.3% 与 DeepResearch 51.5% 差距的直接原因。题目再难，也逃不出图谱结构 + LLM 模糊化这两道加工。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">论文承认</span><h4>过度搜索</h4></div>
+      <p>主要用难题训练，导致 DeepDive-32B 出现 over-search：即使已有答案，也倾向继续调用工具。论文把「最优训练步数 / 更合适的奖励设计」列为未来工作。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">从实验读出</span><h4>增益依赖模型尺度</h4></div>
+      <p>9B 模型 RL 后 BrowseComp 从 5.6 到 6.3、SEAL-0 反而从 15.2 到 12.2。论文对此的解释是小模型推理能力有限、易对合成数据过拟合——所以不要把 32B 的结论直接外推到更小的模型。</p>
+    </div>
+  </div>
+
+  <h3>需要谨慎套用的三个场景</h3>
+  <ul>
+    <li><strong>评测口径不一致：</strong>训练期用 BrowseComp-266 子集，最终用完整 1,266 题且轮数上限从 75 提到 128；跨论文比较数字时要注意这些设定差异。</li>
+    <li><strong>依赖外部 API 的实景环境：</strong>训练与评测都依赖 Serper / Jina，搜索结果的排序变化会直接影响可复现性。</li>
+    <li><strong>答案判定的模糊性：</strong>严格二元奖励 + LLM judge 对同义写法的容错有限；对开放式、多正解的领域题，这套奖励未必适用。</li>
+  </ul>
+
+  <p style="margin-top:16px">一句话：<strong>DeepDive 解决的是「用可控成本把题变难、把搜索过程奖励对」，而不是「把难度上限推到 BrowseComp」。</strong>论文给出的下一步是补一份<i>半自动 i.i.d. 数据</i>——用带搜索的 o3 辅助人工造 2,997 英文 + 275 中文题，论文报告单靠它做 RL 后 32B 模型 BrowseComp 到 22.2%（§4）。这也印证了：数据难度依旧是这条路线的主变量。</p>
+</section>
+
+<footer>
+  <div>
+    <strong>DeepDive: Advancing Deep Search Agents with Knowledge Graphs and Multi-Turn RL</strong><br>
+    页面基于 arXiv 原文整理，交互中的数值均可在原文表格与图中找到；模拟器只用于说明公式结构，标注为「示例数据」的部分不是论文数字。
+    <br><br>
+    笔记勘误：博客笔记把|BrowseComp 结果写作 14.8%（远超 WebSailor-32B 的 10.5%）——这与最终版（v2，2025-10）的 15.3% 不一致，疑为早期版本或转述误差，以原文为准。另外，笔记提到的一个 3,090 条数据集数字在正文中对应的是 3,250 条（1,016 SFT + 2,234 RL）。笔记原文件未改动。
+  </div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.10446" target="_blank" rel="noopener">arXiv:2509.10446</a> · Preprint（v2，2025-10-14）<br>
+    代码与数据：<a href="https://github.com/THUDM/DeepDive" target="_blank" rel="noopener">THUDM/DeepDive</a><br>
+    笔记：<a href="/deepdiveadvancing-deep-search-agents-with-knowledge-graphs-and-multi-turn-rl/">DeepDive：Advancing Deep Search Agents with Knowledge Graphs and Multi-Turn RL</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+     1) 出度区间模拟器（焦点 + 上下文）
+     ============================================================ */
+  var CANDS = [
+    { id: 'A', d: 0, rel: true  },
+    { id: 'B', d: 2, rel: true  },
+    { id: 'C', d: 3, rel: false },
+    { id: 'D', d: 4, rel: true  },
+    { id: 'E', d: 5, rel: false },
+    { id: 'F', d: 6, rel: true  },
+    { id: 'G', d: 7, rel: true  },
+    { id: 'H', d: 8, rel: false },
+    { id: 'I', d: 9, rel: true  },
+    { id: 'J', d: 11, rel: false }
+  ];
+  var TARGET_REL = 5;      /* 相关节点总数 */
+  var LLM_DROP = 2;        /* LLM 挑选时固定剔除 2 个语义无关节点 */
+  var NR = 2;              /* 每个出度值的节点数 */
+
+  var dminEl = document.getElementById('tbx-dmin');
+  var dmaxEl = document.getElementById('tbx-dmax');
+  var dminV = document.getElementById('tbx-dmin-v');
+  var dmaxV = document.getElementById('tbx-dmax-v');
+  var llmEl = document.getElementById('tbx-llm');
+  var barsEl = document.getElementById('tbx-bars');
+  var readoutEl = document.getElementById('tbx-msg');
+  var resetBtn = document.getElementById('tbx-reset');
+  var sx1 = document.getElementById('tbx-dmin-shade');
+  var sx2 = document.getElementById('tbx-dmax-shade');
+
+  var X0 = 40, X1 = 440, DMAXPX = 12;
+  function xOf(d) { return X0 + (X1 - X0) * d / DMAXPX; }
+
+  function renderBars(dmin, dmax, llmOn) {
+    if (!barsEl) return;
+    var html = '';
+    for (var i = 0; i < CANDS.length; i++) {
+      var c = CANDS[i];
+      var inRange = c.d >= dmin && c.d <= dmax;
+      var inRangeCount = 0;
+      for (var j = 0; j < CANDS.length; j++) {
+        if (CANDS[j].d >= dmin && CANDS[j].d <= dmax) inRangeCount++;
+      }
+      var fill, stroke, labelCol;
+      if (!inRange) {
+        fill = 'var(--border)'; stroke = 'var(--border-strong)'; labelCol = 'var(--text-soft)';
+      } else if (llmOn && !c.rel) {
+        fill = 'var(--c1-soft)'; stroke = 'var(--c1)'; labelCol = 'var(--c1)';
+      } else {
+        fill = 'var(--accent)'; stroke = 'var(--accent-deep)'; labelCol = 'var(--accent-deep)';
+      }
+      var y = 12 + i * 18;
+      var w = (X1 - X0) * c.d / DMAXPX;
+      if (w < 0) w = 0;
+      html += '<g>';
+      html += '<text x="20" y="' + (y + 9) + '" class="tbx-lbl" style="text-anchor:end;fill:' + labelCol + '">' + c.id + '</text>';
+      html += '<rect x="' + X0 + '" y="' + y + '" width="' + w + '" height="12" rx="3" style="fill:' + fill + ';stroke:' + stroke + ';stroke-width:.8"></rect>';
+      html += '<text x="' + (X0 + w + 6) + '" y="' + (y + 9) + '" class="tbx-lbl" style="text-anchor:start;fill:var(--text-soft)">' + c.d + '</text>';
+      html += '</g>';
+    }
+    barsEl.innerHTML = html;
+
+    if (sx1) {
+      var a = Math.min(dmin, dmax), b = Math.max(dmin, dmax);
+      var xa = xOf(a), xb = xOf(b);
+      sx1.setAttribute('x', String(xa));
+      sx1.setAttribute('width', '0');
+      sx2.setAttribute('x', String(xa));
+      sx2.setAttribute('width', String(Math.max(0, xb - xa)));
+    }
+  }
+
+  function update() {
+    if (!dminEl || !dmaxEl || !readoutEl) return;
+    var dmin = parseInt(dminEl.value, 10);
+    var dmax = parseInt(dmaxEl.value, 10);
+    var llmOn = !!(llmEl && llmEl.checked);
+    if (dminV) dminV.textContent = String(dmin);
+    if (dmaxV) dmaxV.textContent = String(dmax);
+
+    if (dmin > dmax) {
+      renderBars(Math.max(dmin, dmax), Math.max(dmin, dmax), llmOn);
+      readoutEl.innerHTML = '<span class="warn">下界大于上界，候选集为空。</span>请把 d<sub>min</sub> 拖到 d<sub>max</sub> 左侧。';
+      return;
+    }
+
+    var inRange = 0, relIn = 0, allRel = 0, i;
+    for (i = 0; i < CANDS.length; i++) {
+      var c = CANDS[i];
+      if (c.rel) allRel++;
+      if (c.d >= dmin && c.d <= dmax) {
+        inRange++;
+        if (c.rel) relIn++;
+      }
+    }
+
+    var after = inRange;
+    if (llmOn) {
+      /* 剔除 min(2, 区间内语义无关节点数) 个 */
+      after = inRange - Math.min(LLM_DROP, inRange - relIn);
+    }
+
+    if (!llmOn) {
+      after = inRange - Math.min(2, Math.max(0, inRange - relIn));
+    }
+
+    var dropCount = inRange - after;
+
+    renderBars(dmin, dmax, llmOn);
+
+    var html = '';
+    if (inRange === 0) {
+      html = '区间 [' + dmin + ', ' + dmax + '] 内没有候选节点，随机游走在这里<strong>无法继续</strong>——这正是 d<sub>min</sub> 设得过高的风险。';
+    } else {
+      html = '区间 [' + dmin + ', ' + dmax + '] 内候选 <strong>' + inRange + '</strong> 个' +
+             '（其中与路径语义相关的 ' + relIn + ' 个）。';
+      if (llmOn) {
+        html += ' LLM-select 剔除 ' + dropCount + ' 个语义无关节点，剩余 <strong>' + after + '</strong> 条路径可延伸。';
+      } else {
+        html += ' 开启 LLM 挑选后，语义无关节点会被剔除（当前剔除 ' + dropCount + ' 个）。';
+      }
+      if (dmin > 0) {
+        html += ' 出度 &lt; ' + dmin + ' 的节点被下界挡在门外。';
+      }
+      if (allRel - relIn > 0) {
+        html += ' 区间外的 ' + (allRel - relIn) + ' 个相关节点被舍弃。';
+      }
+    }
+    readoutEl.innerHTML = html;
+  }
+
+  if (dminEl && dmaxEl && readoutEl) {
+    dminEl.addEventListener('input', update);
+    dmaxEl.addEventListener('input', update);
+    if (llmEl) llmEl.addEventListener('change', update);
+    if (resetBtn) {
+      resetBtn.addEventListener('click', function () {
+        dminEl.value = '4';
+        dmaxEl.value = '8';
+        if (llmEl) llmEl.checked = false;
+        update();
+      });
+    }
+    update();
+  }
+
+  /* ============================================================
+     2) Jaccard 冗余度（r' = r - λS(T)）
+     ============================================================ */
+  var QUERY_SETS = {
+    paper: [
+      { text: 'deep neural network', sel: true },
+      { text: 'neural network eval', sel: true },
+      { text: 'deep search agent',   sel: true }
+    ],
+    bad: [
+      { text: 'human brain size',   sel: true },
+      { text: 'human brain volume', sel: true },
+      { text: 'brain size human',   sel: true },
+      { text: 'human brain weight', sel: true }
+    ],
+    good: [
+      { text: 'human brain size',     sel: true },
+      { text: 'homo sapiens evolution', sel: true },
+      { text: 'human brain volume',   sel: true },
+      { text: 'bumblebee brain',      sel: true }
+    ]
+  };
+  var LAMBDA = 0.1;
+
+  function tokens(q) { return Array.from(new Set(q.toLowerCase().split(/\s+/).filter(Boolean))); }
+  function jac(a, b) {
+    var A = tokens(a), B = tokens(b);
+    var inter = 0, unionMap = {};
+    A.forEach(function (w) { unionMap[w] = 1; if (B.indexOf(w) >= 0) inter++; });
+    B.forEach(function (w) { unionMap[w] = 1; });
+    var union = Object.keys(unionMap).length;
+    return { num: inter, den: union, v: union === 0 ? 0 : inter / union };
+  }
+
+  function computeS(queries) {
+    var T = queries.length;
+    if (T < 2) return { S: 0, edges: [] };
+    var sum = 0, edges = [];
+    for (var i = 0; i < T; i++) {
+      for (var j = i + 1; j < T; j++) {
+        var r = jac(queries[i], queries[j]);
+        sum += r.v;
+        edges.push('sim(' + (i + 1) + ',' + (j + 1) + ') = ' + r.num + '/' + r.den + ' = ' + r.v.toFixed(2));
+      }
+    }
+    /* S = 1/(T(T-1)) * Σ_{i≠j}，对称，等于无序对平均 */
+    var S = sum / ((T * (T - 1)) / 2);
+    return { S: S, edges: edges };
+  }
+
+  var LIST = document.getElementById('jac-list');
+  var SEl = document.getElementById('jac-s');
+  var REl = document.getElementById('jac-r');
+  var MSG = document.getElementById('jac-msg');
+  var curSet = 'paper';
+
+  function renderJac() {
+    if (!LIST || !SEl || !REl || !MSG) return;
+    var arr = QUERY_SETS[curSet];
+    LIST.innerHTML = '';
+    arr.forEach(function (item, idx) {
+      var lbl = document.createElement('label');
+      lbl.className = 'slot';
+      lbl.style.cursor = 'pointer';
+      lbl.style.textAlign = 'left';
+      lbl.style.display = 'flex';
+      lbl.style.alignItems = 'center';
+      lbl.style.gap = '8px';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = item.sel;
+      cb.style.accentColor = 'var(--accent)';
+      cb.setAttribute('aria-label', '查询 ' + (idx + 1));
+      cb.addEventListener('change', function () {
+        item.sel = cb.checked;
+        renderJac();
+      });
+      var span = document.createElement('span');
+      span.className = 'mono';
+      span.style.fontSize = '12px';
+      span.textContent = 'q' + (idx + 1) + ' · ' + item.text;
+      lbl.appendChild(cb);
+      lbl.appendChild(span);
+      LIST.appendChild(lbl);
+    });
+
+    var sel = arr.filter(function (x) { return x.sel; }).map(function (x) { return x.text; });
+    var res = computeS(sel);
+    var S = res.S;
+    var rPrime = 1 - LAMBDA * S;
+    SEl.textContent = S.toFixed(3);
+    REl.textContent = rPrime.toFixed(3);
+
+    var T = sel.length;
+    if (T < 2) {
+      MSG.innerHTML = '至少需要 2 条查询才能计算 S(T)。目前 <strong>' + T + '</strong> 条。';
+      return;
+    }
+    var denom = T * (T - 1) / 2;
+    var html = '选中 <strong>' + T + '</strong> 条查询，共 <strong>' + denom + '</strong> 个无序对：<br>';
+    html += res.edges.map(function (e) { return '<span class="mono" style="font-size:12px">' + e + '</span>'; }).join('　');
+    html += '<br>两两平均 <strong>S(T) = ' + S.toFixed(3) + '</strong>，';
+    html += 'r′ = 1 − 0.1 × ' + S.toFixed(3) + ' = <strong>' + rPrime.toFixed(3) + '</strong>。';
+    MSG.innerHTML = html;
+  }
+
+  var jacBtns = document.querySelectorAll('#jac-btns .rule-btn');
+  if (jacBtns.length) {
+    Array.prototype.forEach.call(jacBtns, function (btn) {
+      btn.addEventListener('click', function () {
+        Array.prototype.forEach.call(jacBtns, function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        curSet = btn.getAttribute('data-set') || 'paper';
+        renderJac();
+      });
+    });
+  }
+  if (LIST) renderJac();
+
+  /* ============================================================
+     3) 并行采样 K 切换（Figure 6c）
+     ============================================================ */
+  var SCALE = {
+    1: { rows: [
+           { name: '单次', v: 12.0, cls: 'var(--c1)' }
+         ],
+         desc: '<div class="r-head">K = 1 · 单次尝试</div>BrowseComp-266 上单次准确率 12.0%。要提升只能调大单次 max tool calls（Figure 6a），或改用并行采样。' },
+    8: { rows: [
+           { name: '单次', v: 12.0, cls: 'var(--c1)' },
+           { name: '多数投票', v: 18.8, cls: 'var(--c2)' },
+           { name: '最少工具调用', v: 24.8, cls: 'var(--accent)' },
+           { name: 'pass@8 上限', v: 37.6, cls: 'var(--border-strong)' }
+         ],
+         desc: '<div class="r-head">K = 8 · 并行 8 次</div>多数投票 12.0 → 18.8；选「工具调用最少」的答案 → 24.8，逼近 pass@8 理论上限 37.6（Figure 6c）。' }
+  };
+  var scaleDesc = document.getElementById('scale-desc');
+  var scaleBars = document.getElementById('scale-bars');
+  var scaleSlots = document.getElementById('scale-slots');
+  var scaleTabs = document.querySelectorAll('#scale-tabs .tab');
+  var MAXACC = 40;
+
+  function fmtPct(v) { return v === null || v === undefined ? '—' : v.toFixed(1) + '%'; }
+
+  function renderScale(k) {
+    if (!scaleDesc || !scaleBars) return;
+    var cfg = SCALE[k];
+    if (!cfg) return;
+    scaleDesc.innerHTML = cfg.desc;
+
+    if (scaleSlots) {
+      var sh = '';
+      cfg.rows.forEach(function (row, idx) {
+        var hit = row.name === '最少工具调用' ? ' hit' : '';
+        sh += '<div class="slot' + hit + '"><div class="slot-name">' + row.name + '</div>' +
+              '<div class="slot-val">' + fmtPct(row.v) + '</div>' +
+              '<div class="bar"><i class="b' + (idx + 1) + '" style="width:' + (row.v / MAXACC * 100).toFixed(1) + '%"></i></div></div>';
+      });
+      scaleSlots.innerHTML = sh;
+    }
+
+    var html = '';
+    cfg.rows.forEach(function (row) {
+      var pct = Math.max(2, row.v / MAXACC * 100);
+      html += '<div class="crow">' +
+        '<div class="cname">' + escapeHtml(row.name) + '</div>' +
+        '<div class="cbars"><div class="cbar"><div class="track"><div class="fill" style="background:' + row.cls + ';height:' + pct + '%"></div></div>' +
+        '<div class="num">' + fmtPct(row.v) + '</div></div></div>' +
+        '</div>';
+    });
+    scaleBars.innerHTML = html;
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  if (scaleTabs.length) {
+    Array.prototype.forEach.call(scaleTabs, function (btn) {
+      btn.addEventListener('click', function () {
+        Array.prototype.forEach.call(scaleTabs, function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderScale(parseInt(btn.getAttribute('data-k'), 10));
+      });
+    });
+    renderScale(1);
+  }
+})();
+</script>
+</body>
+</html>

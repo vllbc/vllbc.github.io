@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v5">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory-R1 · 让「存记忆」和「用记忆」都变成可以用 RL 学的决策</title>
+<meta name="description" content="Memory-R1 把外部记忆管理拆成两个 RL 微调的智能体：选 ADD/UPDATE/DELETE/NOOP 的 Memory Manager，和从 60 条候选里蒸馏答案的 Answer Agent。奖励只有一个——最终答案是否 Exact Match。152 条 QA 训练，在 LoCoMo 上用 LLaMA-3.1-8B 的 Overall 达到 F1 45.02 / BLEU-1 37.51 / LLM-as-a-Judge 62.74，相对 Mem0 分别高 48.0% / 68.8% / 37.4%（按原文四舍五入口径；J 的精确相对提升为 37.35%）。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调 */
+.chart.gauges{gap:10px}
+.gauge{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center}
+.gtrack{position:relative;height:26px;background:var(--bg-soft);border-radius:6px}
+.gfill{position:absolute;left:0;top:0;bottom:0;border-radius:6px;transition:width .25s ease}
+.gmark{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--text);border-radius:2px;opacity:.55}
+.gread{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:600;color:var(--text-muted)}
+.gread small{font-weight:400;color:var(--text-soft);font-size:11px}
+@media (max-width:880px){
+  .gauge{grid-template-columns:1fr;gap:4px}
+}
+.flow-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--text-muted);margin:8px 0 4px}
+.flow-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Memory-R1</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">架构流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent 记忆 · 强化学习 · arXiv 2508.19828</span>
+  <h1>Memory-R1：不教它何时存、何时删，只教它「答案对不对」</h1>
+  <p class="hero-sub">
+    带外部记忆库的 LLM 系统，在「这条新信息该 <code>ADD</code>、<code>UPDATE</code>、<code>DELETE</code> 还是不动」，以及「检索回来的 60 条里该信哪几条」上，大多是照提示词拍脑袋。
+    论文把这两个判断交给两个 RL 微调的智能体，奖励只有一个：<strong>最终答案是否与标准答案完全一致</strong>（Exact Match）。152 条训练 QA 就训练完成，跨三个基准（LoCoMo / MSC / LongMemEval）、Qwen-2.5 的 3B–14B 都能涨。
+  </p>
+  <div class="meta">
+    <span>Sikuan Yan et al. · LMU Munich / MCML · 页面数字以 arXiv v5（2026-01-14）为准</span>
+    <a href="https://arxiv.org/abs/2508.19828v5" target="_blank" rel="noopener">arXiv 2508.19828v5 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    问题不是「记不住」，而是<strong>不会管</strong>。外部记忆库一旦持续写入，规则式系统就会把「又领养了一只狗」误判成矛盾，<em>DELETE 掉旧记忆再 ADD</em>，把一个连续的事实拆成碎片（Figure 1）。
+  </p>
+  <p>
+    论文的办法是把记忆拆成两个角色分别学：<strong>Memory Manager</strong> 只负责挑四种原子操作之一并写出新记忆内容 <code>m′</code>；<strong>Answer Agent</strong> 只负责从 60 条候选记忆里蒸馏出有效证据再作答。两者都用 PPO 或 GRPO 训练。
+  </p>
+  <p>
+    最省事的一点是<em>奖励不需要人工标注记忆操作</em>：Manager 的奖励来自「下游冻结的 Answer Agent 能不能答对」，Answer Agent 的奖励就是 EM。代价是两阶段必须<strong>分开训练</strong>，而且结论集中在对话类基准上。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">+37.4%<small>（相对 Mem0）</small></div>
+      <div class="k">LLM-as-a-Judge 相对 Mem0<br>LoCoMo Overall，LLaMA-3.1-8B-Instruct<br>J 62.74 vs 45.68 → +17.06 点，相对 45.68 为 37.35%（Table 1；37.4% 为按原文一位小数四舍五入的写法）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 6">+19.72 点</div>
+      <div class="k">Answer Agent RL 的 F1 增益（绝对点，非百分比）<br>LoCoMo，配 GPT-4o-mini Manager；配 LLaMA-3.1-8B Manager 仅 +10.10 点（Figure 6 正文）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4.1">152 条</div>
+      <div class="k">训练 QA 对数<br>LoCoMo 剔除 adversarial 子集后按 1:1:8 切分：训练 / 验证 / 测试 = 152 / 81 / 1307</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>记忆的问题不是存不下，而是「管」的时候只有规则、没有反馈</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 LLM 失忆、RAG 加了记忆库之后反而会越管越乱。</p>
+
+  <p>论文从 LLM 的<strong>无状态</strong>说起：记忆被有限的上下文窗口卡死，窗口外的信息就没了，长对话、持续演进的任务都无法维持知识。主流补救是外挂一个记忆库，走 RAG 范式——把检索到的条目拼进 prompt。这解决了「能拿到过去」，却只解决了一半。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文 Figure 1 的案例</span><h4>「又养了一只狗」被当成「改口了」</h4></div>
+    <p>用户先说「我领养了一只叫 Buddy 的狗」，后来又说「我又领养了一只叫 Scout 的狗」。<strong>原始的记忆系统</strong>把两句话当成矛盾，发出 <code>DELETE+ADD</code>，把 Buddy 那条记忆覆盖掉，结果答案变成「1 只狗」。</p>
+    <p><strong>训练过的 Manager</strong> 只发一条 <code>UPDATE</code>，把它合并成「Andrew 有两只狗：Buddy 和 Scout」（Figure 1 图注原句「Andrew adopted 2 dogs named Buddy and Scout」），<strong>Answer Agent</strong> 再从 60 条检索记忆中蒸馏出这一条，答出「2 dogs」。</p>
+  </div>
+
+  <p>论文把难点归结为两个对称的问题：</p>
+  <ul>
+    <li><strong>管理：</strong>该记住什么、什么时候更新、什么时候丢弃？数据库式的 CRUD 操作（create / read / update / delete）被搬进了记忆系统，Mem0 等人把操作收敛到 <code>{ADD, UPDATE, DELETE, NOOP}</code>。但选哪一个，多数系统只是让原始 LLM 照着 in-context 指令选，<strong>没有任何和「答对」挂钩的学习信号</strong>（§1）。</li>
+    <li><strong>利用：</strong>检索启发式要么返回太少漏掉关键上下文，要么返回太多把无关项一股脑塞进 prompt，模型被噪声带偏。论文引用的类比是：人检索得宽，但会见后再筛选，只保留最有用的部分（§1）。</li>
+  </ul>
+
+  <p>论文还专门排除了监督微调（SFT）：要标注每一步记忆操作和每个检索决策，成本不现实。<strong>RL 只需要一个结果信号</strong>，所以被看作补齐「自适应记忆」缺失的那一块。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有工作要么是固定的记忆结构，要么有操作原语却没有学习信号</h2></div>
+  <p class="sec-sub">分两路看：一路做「记忆系统」但策略写死；一路做「LLM+RL」但没碰记忆管理。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">记忆系统</span><h4>结构做得出来，策略选不出来</h4></div>
+      <p><strong>MemGPT</strong> 用工作缓冲区和长期缓冲区加调度策略；<strong>MemoryBank</strong> 做组合式记忆控制器；<strong>ReadAgent</strong> 做 gist 记忆；<strong>Mem0</strong> 把操作定为 <code>{ADD, UPDATE, DELETE, NOOP}</code> 的模块化系统；<strong>A-Mem</strong> 会自动建、连、更新结构化记忆（§2.1 列举的顺序与对象）。</p>
+      <p><strong>卡点：</strong>操作的原语已经齐全，但「何时用哪个」依赖启发式或 in-context 指令，缺乏和长期目标挂钩的优化。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">LLM + RL</span><h4>RL 能训行为，但没训记忆</h4></div>
+      <p><strong>Toolformer / ReAct</strong> 把工具调用做成可学的问题；<strong>Search-R1</strong> 用 RL 训模型发搜索查询以最大化最终答案；<strong>Trial and Error</strong> 优化智能体选择推理路径。</p>
+      <p><strong>卡点：</strong>这些都证明 RL 能改进复杂行为序列，但<strong>记忆管理与利用在 RL 视角下几乎空白</strong>。</p>
+    </div>
+  </div>
+
+  <p>所以论文的定位很明确：沿用 Mem0 的四操作原语（论文认为它「最小且足够表达记忆动态」），但用 RL 学「选哪个」；同时把检索后的取舍也纳入 RL——这是它与前两类工作最直接的差异。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>记忆管理 = 一个策略 π<sub>θ</sub>(操作 | 新信息, 旧记忆)，奖励只来自下游答题的 EM</h2></div>
+  <p class="sec-sub">读完这节你应该能写出两阶段各自的目标函数，并知道为什么两者都必须和「答案对不对」相连。</p>
+
+  <h3>阶段一：Memory Manager 选一个操作</h3>
+  <p>对每一轮对话抽出的新信息 <code>x</code> 和当前记忆库 <code>M<sub>old</sub></code>，Manager 输出一个操作 <code>o ∈ {ADD, UPDATE, DELETE, NOOP}</code> 以及更新后的内容 <code>m′</code>：</p>
+
+  <div class="eq">
+    (o, m′) ~ <span class="hl-c">π<sub>θ</sub></span>( · | x, M<sub>old</sub> )
+  </div>
+  <div class="eq-cap">Eq. (1) · 四种操作里只选一个，并顺手写出要写入/替换成什么样</div>
+
+  <p>奖励<strong>不是</strong>「操作选得对不对」——没有这种标签。论文的做法是把操作施加到记忆库上，把新记忆库交给<strong>冻结</strong>的 Answer Agent 去答一道下游 QA，再看答对没有：</p>
+
+  <div class="eq">
+    R<sub>answer</sub> = <span class="hl-c">EM</span>( y<sub>pred</sub>, y<sub>gold</sub> )
+  </div>
+  <div class="eq-cap">Eq. (4) · 完全匹配为 1，否则 0；不需要人工标注记忆操作，天然可扩展</div>
+
+  <h3>阶段二：Answer Agent 先蒸馏，再作答</h3>
+  <p>给定问题 <code>q</code> 和检索集合 <code>M<sub>ret</sub></code>，Answer Agent 直接映射到答案：</p>
+
+  <div class="eq">
+    y ~ <span class="hl-c">π<sub>θ</sub></span>( · | q, M<sub>ret</sub> )
+  </div>
+  <div class="eq-cap">Eq. (5) · 按 Mem0 的做法固定检索 60 条候选，「蒸馏」就发生在这一次生成里——先输出它认为有用的记忆，再给答案</div>
+
+  <p>它用同样的 EM 作为奖励。<strong>关键设计</strong>：蒸馏不是单独的过滤模型，而是要求模型在作答前先复述选中的证据，再由 EM 来奖惩这个选择过程。C.2 的 prompt 里第 9 条要求「先输出你找到的有用记忆，再作答」，Figure 11 展示了这道因果链：原始模型吃到全部 60 条，被「登山」之类的无关记忆带偏答成 mountains；训练后的模型只吐出与海滩相关的两条，答出 beach。</p>
+
+  <h3>为什么两阶段要分开训</h3>
+  <p>Manager 训练时 Answer Agent 冻结，只当「评分器」；Answer Agent 训练时 Manager 固定，保证记忆输入稳定。论文给出的理由是<strong>稀疏奖励下的稳定性</strong>，这个解耦避免了「答错了到底怪记忆还是怪回答」的归因歧义。代价是它不再是端到端的多智能体 RL——论文在 Limitations 里也把端到端训练列为未来工作。</p>
+
+  <h3>交互：滤得不够有噪声，滤得过头伤证据</h3>
+  <p>论文做了 Memory Distillation 消融（Figure 5 (c,d)、§4.4 正文）：Answer Agent 用 GRPO 训练时，<strong>不做蒸馏</strong>（F1 41.0 / B1 34.4 / J 60.1）和<strong>做蒸馏</strong>（F1 45.0 / B1 37.5 / J 62.7）对比，F1 相对 +9.8%（4.0/41.0）、B1 相对 +9.0%（3.1/34.4）、J 相对 +4.3%（2.6/60.1）。论文只披露了「全留」和「蒸馏」两点。</p>
+  <p>下面把「蒸馏」抽象成一个<strong>显式打分过滤器</strong>（论文的蒸馏是隐式生成，这里仅为演示）：每轮作答先生成一个候选结果，再用相关度分数过滤，留下相关度 ≥ 阈值 <code>τ</code> 的结果。拖动 <code>τ</code>，看三条指标怎么分开走。</p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>过滤阈值 τ（相关度低于它才丢掉） <span class="v" id="tau-v">−2.0</span></label>
+        <input type="range" id="tau" min="-2" max="2" step="0.1" value="-2">
+      </div>
+      <div class="ctrl">
+        <label>真证据占比 p（60 条候选里有多少是相关记忆） <span class="v" id="p-v">0.55</span></label>
+        <input type="range" id="pv" min="0.1" max="0.9" step="0.05" value="0.55">
+      </div>
+    </div>
+    <div class="chart gauges" id="distill-gauges"></div>
+    <div class="actions">
+      <button class="act primary" id="peak-btn">跳到「三项最小值的峰值」（τ≥1.3 除外）</button>
+      <button class="act ghost" id="reset-btn">回到不蒸馏</button>
+    </div>
+    <div class="readout" id="distill-readout" data-src="Figure 5">
+      <div class="r-head">当前读数</div>
+      <div id="distill-msg">从最左（τ=−2，几乎全部保留）开始往右拖。</div>
+    </div>
+  </div>
+
+  <p><strong>验证</strong>：最左端基本等价于论文消融里的「不做蒸馏」；往右拖时，噪声先被滤掉（精确率上升）。按演示模型实算：默认 <code>p=0.55</code> 时 F1 峰出现在 <strong>τ≈0.5–0.6</strong>（τ=0.5 与 0.6 都是 F1=49.2，平台），B1 峰约在 τ≈0.9–1.0（0.9 为 62.8、1.0 为 62.8），J 峰约在 τ≈0.95（43.1）。三项最小值的峰值在 <strong>τ≈0.9</strong>（min(F1,B1,J)=43.0）——τ=1.0 时 min=42.97，基本持平；τ≥1.4 后真记忆（z~N(0,1)）几乎全被误删、三项一起归零，拖到 1.2 以后三项都开始塌。F1 峰（≈0.5–0.6）与三项最小值的峰值（≈0.9）并不重合，所以正文分开说。</p>
+  <p>端点有一个要说明的缺口：p=0.55 时 <code>q·PU(τ)=0.55</code>，而保留下来的伪相关记忆只有 ~0.16，精确率约 0.42，模型的 F1(~49 的峰值、τ=−2 处 ~33) 都不等同于论文「不做蒸馏」的 41.0——演示模型在低精度端整体偏悲观。因此下文只讨论<strong>相对趋势与峰值位置</strong>，不要把绝对值当论文读数。改变 <code>p</code> 会移动三项最小值的峰值：p 越小，最优截断点越靠左（p=0.3 约 0.6，p=0.5 约 0.9，p=0.7 与 0.9 约 1.0）；F1 峰在 p=0.1–0.9 范围内始终落在 τ=0.6。论文没有公开中间截断点的数据，<strong>这里的曲线是演示模型，不是论文结果</strong>。</p>
+
+  <details>
+    <summary>演示模型的假设与公式<span class="sum-sub">点开看怎么算、哪里不严谨</span></summary>
+    <div class="details-body">
+      <p><strong>打分：</strong>相关度 <code>z ~ N(0,1)</code>。三部分来源：<code>(1−q)·60</code> 条真实记忆 + 伪相关记忆（分数 <code>~ U(0.3, 1.4)</code>）；<code>q·60</code> 条真证据产出的结果 <code>~ N(0,1)</code>，其中 <code>q = p·b</code>，<code>b</code> 为命中率（这里取 <code>b = 1</code>，即该相关记忆都会被用上）。</p>
+      <p><strong>留下与保留：</strong><code>S(τ) = Φ(−τ) + q·PU(τ)</code>，<code>PU</code> 为伪相关记忆在 τ 以上的比例；保留条数 = round(S)（最多 60 条）。</p>
+      <p><strong>精确率 / 召回率：</strong><code>Recall = q·PU(τ) / S(τ)</code>；<code>Precision = q·keep·Recall / (q·keep·Recall + (1−q)·keep)</code>（相关条数除以保留条数）。</p>
+      <p><strong>指标：</strong>F1 = 调和平均 ×100；B1 = F1 × 1.5 × (1 − 0.3·S)（保留越少、短答越多，brevity penalty 越重）；J = (0.5·P + 0.5·R) × (1 − 0.3·S)（judge 既扣噪声也扣冗长）。</p>
+      <p><strong>为什么中间到峰：</strong>伪相关记忆集中在 0.3–1.4 区间，先滤掉它们可提升精确率；超过 1.2 后真证据也被大面积删除，召回率塌方；两端都差，所以出现了中间峰（F1 在 τ≈0.5–0.6）。改变 <code>p</code> 会移动三项最小值的峰（见上文实算）。</p>
+      <p><strong>不严谨之处：</strong>论文的蒸馏发生在生成里、与 backbone 和 prompt 绑定；这里把它简化为「按相关度分数显式截断」。所有读数都是演示模型输出，<strong>不能当作论文数据引用</strong>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>同一份 152 条 QA 训两个策略：GRPO 靠组内相对优势，省掉了 value function</h2></div>
+  <p class="sec-sub">读完这节你应该知道 PPO 和 GRPO 在这里各自吃哪个奖励、数据怎么从 LoCoMo 切出来。</p>
+
+  <p>论文把两个智能体都分别训成 PPO 或 GRPO 变体，所以报告了 <code>Memory-R1-PPO</code> 和 <code>Memory-R1-GRPO</code> 两个变体（§3.1–3.2）。</p>
+
+  <h3>PPO：裁掉过大的更新</h3>
+  <div class="eq">
+    J(θ) = 𝔼[ min( ρ<sub>θ</sub>A,&nbsp; clip(ρ<sub>θ</sub>, 1−ε, 1+ε)·A ) ]
+    &nbsp;&nbsp;，&nbsp;
+    ρ<sub>θ</sub> = π<sub>θ</sub>(·) / π<sub>old</sub>(·)
+  </div>
+  <div class="eq-cap">Eq. (2) · 采样到的操作/答案先算切比雪夫比，超出 [1−ε, 1+ε] 的部分被裁掉，保证更新稳定</div>
+
+  <p>Manager 用 PPO 时，候选操作 <code>o</code> 和内容 <code>m′</code> 从 π<sub>θ</sub> 采样，施加后交给冻结的 Answer Agent，答对与否给出标量 <code>r</code>，再估优势 <code>A</code>。Answer Agent 用 PPO 时目标相同，只是序列变成生成答案 <code>y</code>，ρ 换成 <code>π<sub>θ</sub>(y | q, M<sub>ret</sub>) / π<sub>old</sub>(…)</code>（Eq. 6）。</p>
+
+  <h3>GRPO：组内比一比，不再需要 value function</h3>
+  <p>对每个状态采 <code>G</code> 个候选动作，用<strong>组内标准化</strong>算相对优势：</p>
+  <div class="eq">
+    A<sub>i</sub> = (r<sub>i</sub> − mean(r)) / std(r) ，
+    <span class="hl-c">J(θ) = 𝔼[ (1/G) Σ ρ<sub>θ</sub><sup>(i)</sup>A<sub>i</sub> − β·D<sub>KL</sub>(π<sub>θ</sub> ‖ π<sub>ref</sub>) ]</span>
+  </div>
+  <div class="eq-cap">Eq. (3) · 优势全来自组内排名；KL 项约束策略别漂离参考策略。原文没有写明 std 除数是 G 还是 G−1；页面统一用总体标准差（÷G）</div>
+
+  <p>这里有一个容易被忽略的细节：<strong>奖励是 0/1 的 EM</strong>，所以 <code>A<sub>i</sub></code> 只有两个取值——组内有答对的，答对者得正分、答错者得负分；<strong>整组全对或全错时 std(r)=0，组内优势全部为 0</strong>，这一步就没有学习信号。这就是稀疏奖励，也是论文说「分开训练以保证稀疏奖励下的稳定性」的背景。下面的交互把这一点算给你看。</p>
+
+  <h3>交互：同一组候选，奖励怎么打分决定优势长什么样</h3>
+  <p>候选固定为 8 个、用 0/1 表示「答对/答错」的序列，只改变奖励的取值范围。三个模式分别是：<strong>模式 0 / 1</strong> 共用同一组 EM 序列 <code>[1,1,0,1,0,1,1,0]</code>，模式 1 把它整体乘以 2 得到 <code>[2,2,0,2,0,2,2,0]</code>（五个 2、三个 0，mean=1.25）；<strong>模式 2</strong> 换了一组序列 <code>[2,2,0,2,1,2,2,0]</code>（把候选 #5 从 0 换成 1：五个 2、一个 1、两个 0，mean=1.375）。看两个都答对的候选为什么拿到<strong>完全相同</strong>的优势，以及把分数拉开后优势怎么变。</p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl" style="grid-column:1 / -1">
+        <label>奖励形态（相同 0/1 序列的不同打分方式） <span class="v" id="cfg-v">0或1（EM）</span></label>
+        <input type="range" id="cfg" min="0" max="2" step="1" value="1">
+      </div>
+    </div>
+    <div class="slots s5" id="reward-slots" style="grid-template-columns:repeat(4,1fr)"></div>
+    <div class="readout" id="reward-readout" data-src="§3.1 Eq.(3)｜Figure 7">
+      <div class="r-head">Group‑relative advantage</div>
+      <div id="reward-msg">A<sub>i</sub>=(r<sub>i</sub>−mean)/std，G=8，候选固定为 <code>[1,1,0,1,0,1,1,0]</code>（论文的 EM 奖励只有 0/1）。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算验证<span class="sum-sub">三个模式（三组奖励）的 mean / std / A 都列出来</span></summary>
+    <div class="details-body">
+      <p><strong>口径</strong>：std 统一用<strong>总体标准差</strong>（除数 G=8），与页面计算器的 JS 一致（JS 里 <code>v = Σ(r−mean)²/G</code>、<code>sd = √v</code>，没有 Bessel 修正）。论文 Eq.(3) 只写 <code>std(r)</code>，没交代除数；若改用样本标准差（÷7）会把 A 同比放大 √(8/7)=1.069 倍，组内排序不变。以下数值均用 <code>python3</code> 复算至 4 位小数。</p>
+      <p><strong>模式 0（EM，r∈{0,1}）</strong>：候选 <code>A<sub>EM</sub> = [1,1,0,1,0,1,1,0]</code>，五个 1、三个 0。和 = 5，mean = 5/8 = 0.625。方差 = (5×0.375² + 3×0.625²)/8 = (0.703125 + 1.171875)/8 = 0.234375，std = √0.234375 = <code>0.4841</code>。r=1 → A = 0.375/0.4841 = <code>+0.7746</code>（5 个）；r=0 → A = −0.625/0.4841 = <code>−1.2910</code>（3 个）。</p>
+      <p><strong>模式 1（r∈{0,2}，同一序列乘 2）</strong>：候选 <code>A<sub>2</sub> = [2,2,0,2,0,2,2,0]</code>，五个 2、三个 0。和 = 10，mean = 1.25。方差 = (5×0.75² + 3×1.25²)/8 = (2.8125 + 4.6875)/8 = 0.9375，std = √0.9375 = <code>0.9682</code>（正好 2×0.4841）。r=2 → A = 0.75/0.9682 = <code>+0.7746</code>（5 个）；r=0 → A = −1.25/0.9682 = <code>−1.2910</code>（3 个）——<strong>与模式 0 完全相同</strong>，因为线性缩放会被 std 约掉。</p>
+      <p><strong>模式 2（r∈{0,1,2}，候选换成另一组）</strong>：候选 <code>A<sub>2,1</sub> = [2,2,0,2,1,2,2,0]</code>，五个 2、一个 1、两个 0。和 = 11，mean = 11/8 = 1.375。</p>
+      <p>离差平方：五个 2 各 (2−1.375)² = 0.390625（共 1.953125），两个 0 各 (−1.375)² = 1.890625（共 3.78125），一个 1 为 (1−1.375)² = 0.140625。方差 = (1.953125 + 3.78125 + 0.140625)/8 = 5.875/8 = 0.734375，std = √0.734375 = <code>0.8570</code>（总体标准差）。</p>
+      <p>代入逐项：<code>r=2</code> → A = 0.625/0.8570 = <code>+0.7293</code>（5 个）；<code>r=1</code> → A = −0.375/0.8570 = <code>−0.4376</code>（1 个）；<code>r=0</code> → A = −1.375/0.8570 = <code>−1.6045</code>（2 个）。若改用样本标准差 √(5.875/7) = 0.9161，三项同比缩放为 +0.6822 / −0.4093 / −1.5009，组内排序与结论不变。</p>
+      <p><strong>读出来的规律：</strong>「答对就是答对」：只要两个候选奖励相等，它们在 GRPO 里获得的优势就完全一样——模式 0 与模式 1 的 A 逐位相同（<code>+0.7746 / −1.2910</code>），把整组奖励乘 2 不改变任何优势。改变的只有组内不同奖励之间的差距：模式 0/1 里「答对」与「答错」相差 <code>2×0.7746 = 1.5492</code> 个离差；模式 2 把 0/2 两档换成 0/1/2 三档后，「答对（2 分）」与「答错（0 分）」拉大到 <code>(2−0)/0.8570 = 2.3337</code> 个 std，而 1 分的候选落在中间。组内优势只反映相对好坏，不反映奖励绝对值。</p>
+    </div>
+  </details>
+
+  <h3>数据从哪来，只用 152 条</h3>
+  <ul>
+    <li><strong>LoCoMo</strong> 切分：剔掉 adversarial 子集，按 1:1:8 切成 152 / 81 / 1307 条 QA（4.1 节）。</li>
+    <li><strong>Manager 训练对</strong>：算法 1——对每个对话的每一轮 <code>t</code>，用 GPT-4o-mini 根据前 50 轮构建一个临时记忆库，拼上当前轮和关联的 QA，作为一个训练元组（正文 B.2 又写前 24 轮，论文这里自相矛盾）。</li>
+    <li><strong>Answer Agent 训练对</strong>：算法 2——每个问题联检索 30 条 × 2 位说话人 = 60 条候选记忆，配上问题和金标准。</li>
+    <li><strong>训练开销（Appendix D）</strong>：主实验用 4×H100（80GB），Qwen-2.5-14B 要 8 卡；总 batch 128、每卡 micro-batch 2；prompt / 回复上限 4096 / 2048 tokens；PPO 的 actor / critic 学习率 1×10⁻⁶ / 1×10⁻⁵；训练温度 τ=1.0 鼓励探索，验证与测试用贪心 τ=0。训练框架 VERL。</li>
+  </ul>
+
+  <p>为什么能只靠 152 条？因为奖励是结果信号，不需要逐条标注记忆操作或检索选择；而 <code>152 = 81+81</code> 正好是 1:1:8 切分里的训练与验证份数。</p>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>两条流水线：写记忆时只牵 Manager，答题时才牵 Answer Agent</h2></div>
+  <p class="sec-sub">按论文 Figure 2 与 Algorithm 3–5，把「一轮对话进来」到「一个问题答完」拆成两条泳道，再把训练时的奖励回路单独画出。</p>
+
+  <figure>
+    <svg viewBox="0 0 760 396" role="img" aria-label="Memory-R1 流程示意图：Stage 1 记忆库构建与 Stage 2 记忆增强作答" style="width:100%;height:auto;overflow:visible">
+      <defs>
+        <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="#6B6660"></path>
+        </marker>
+        <marker id="arrA" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="#C04E2D"></path>
+        </marker>
+      </defs>
+
+      <!-- Stage 1 -->
+      <text x="0" y="16" font-family="'JetBrains Mono',monospace" font-size="12" font-weight="600" fill="#C04E2D" style="line-height:1.05">Stage 1 · 构建/更新记忆库</text>
+      <rect x="0" y="28" width="132" height="52" rx="9" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1"></rect>
+      <text x="66" y="52" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="66" dy="0">对话第 t 轮</tspan><tspan x="66" dy="15" font-size="11" fill="#6B6660">dialogue turn</tspan>
+      </text>
+      <rect x="150" y="28" width="132" height="52" rx="9" fill="#FBF6EA" stroke="#D4C4A6" stroke-width="1"></rect>
+      <text x="216" y="49" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="216" dy="0">抽取关键信息 f</tspan><tspan x="216" dy="15" font-size="11" fill="#6B6660">LLMExtract</tspan>
+      </text>
+      <rect x="300" y="28" width="132" height="52" rx="9" fill="#FBF6EA" stroke="#D4C4A6" stroke-width="1"></rect>
+      <text x="366" y="49" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="366" dy="0">TopK 检索旧记忆</tspan><tspan x="366" dy="15" font-size="11" fill="#6B6660">M_old</tspan>
+      </text>
+      <rect x="450" y="28" width="150" height="52" rx="9" fill="#F4DCD0" stroke="#C04E2D" stroke-width="1.4"></rect>
+      <text x="525" y="49" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="525" dy="0">Memory Manager</tspan><tspan x="525" dy="15" font-size="11" fill="#7A2E16">RL 微调 · 输出 o, m′</tspan>
+      </text>
+      <rect x="618" y="28" width="142" height="52" rx="9" fill="#F5ECD8" stroke="#D4C4A6" stroke-width="1"></rect>
+      <text x="689" y="49" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="689" dy="0">记忆库 M</tspan><tspan x="689" dy="15" font-size="11" fill="#6B6660">ADD/UPDATE/DELETE/NOOP</tspan>
+      </text>
+      <line x1="132" y1="54" x2="145" y2="54" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <line x1="282" y1="54" x2="295" y2="54" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <line x1="432" y1="54" x2="445" y2="54" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <line x1="600" y1="54" x2="613" y2="54" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <!-- loop back -->
+      <path d="M 689 80 L 689 98 L 66 98 L 66 85" fill="none" stroke="#C04E2D" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arrA)"></path>
+      <text x="380" y="94" text-anchor="middle" font-size="10.5" fill="#7A2E16" style="line-height:1.05">逐轮循环（Algorithm 3）</text>
+
+      <!-- divider -->
+      <line x1="0" y1="118" x2="760" y2="118" stroke="#E8DCC7" stroke-width="1"></line>
+
+      <!-- Stage 2 -->
+      <text x="0" y="142" font-family="'JetBrains Mono',monospace" font-size="12" font-weight="600" fill="#C04E2D" style="line-height:1.05">Stage 2 · 记忆增强作答</text>
+      <rect x="0" y="156" width="132" height="52" rx="9" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1"></rect>
+      <text x="66" y="180" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="66" dy="0">用户问题 q</tspan><tspan x="66" dy="15" font-size="11" fill="#6B6660">QA</tspan>
+      </text>
+      <rect x="150" y="156" width="132" height="52" rx="9" fill="#FBF6EA" stroke="#D4C4A6" stroke-width="1"></rect>
+      <text x="216" y="177" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="216" dy="0">RAG 检索 60 条</tspan><tspan x="216" dy="15" font-size="11" fill="#6B6660">30 × 2 speakers</tspan>
+      </text>
+      <rect x="300" y="156" width="150" height="52" rx="9" fill="#F4DCD0" stroke="#C04E2D" stroke-width="1.4"></rect>
+      <text x="375" y="177" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="375" dy="0">Answer Agent</tspan><tspan x="375" dy="15" font-size="11" fill="#7A2E16">先蒸馏，再推理</tspan>
+      </text>
+      <rect x="468" y="156" width="120" height="52" rx="9" fill="#FBF6EA" stroke="#D4C4A6" stroke-width="1"></rect>
+      <text x="528" y="177" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="528" dy="0">答案 y</tspan><tspan x="528" dy="15" font-size="11" fill="#6B6660">≤ 5–6 词</tspan>
+      </text>
+      <line x1="132" y1="182" x2="145" y2="182" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <line x1="282" y1="182" x2="295" y2="182" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <line x1="450" y1="182" x2="463" y2="182" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <!-- memory bank feeds retrieval -->
+      <path d="M 689 80 L 689 182 L 287 182" fill="none" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <text x="700" y="126" font-size="10.5" fill="#6B6660" style="line-height:1.05">同一记忆库</text>
+
+      <!-- training loop -->
+      <line x1="0" y1="238" x2="760" y2="238" stroke="#E8DCC7" stroke-width="1" stroke-dasharray="4 4"></line>
+      <text x="0" y="262" font-family="'JetBrains Mono',monospace" font-size="12" font-weight="600" fill="#5A4A8C" style="line-height:1.05">训练时的奖励回路</text>
+      <rect x="0" y="276" width="230" height="60" rx="9" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.2"></rect>
+      <text x="115" y="299" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="115" dy="0">① 训 Manager</tspan><tspan x="115" dy="16" font-size="11" fill="#5A4A8C">冻结 Answer Agent</tspan>
+      </text>
+      <rect x="265" y="276" width="230" height="60" rx="9" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.2"></rect>
+      <text x="380" y="299" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="380" dy="0">② 训 Answer Agent</tspan><tspan x="380" dy="16" font-size="11" fill="#5A4A8C">固定 Manager</tspan>
+      </text>
+      <rect x="530" y="276" width="230" height="60" rx="9" fill="#FBF6EA" stroke="#D4C4A6" stroke-width="1.2"></rect>
+      <text x="645" y="299" text-anchor="middle" font-size="12" fill="#1A1816" style="line-height:1.05">
+        <tspan x="645" dy="0">两阶段奖励都是 EM</tspan><tspan x="645" dy="16" font-size="11" fill="#6B6660">1 / 0，无人工标注</tspan>
+      </text>
+      <line x1="230" y1="306" x2="260" y2="306" stroke="#5A4A8C" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <line x1="495" y1="306" x2="525" y2="306" stroke="#5A4A8C" stroke-width="1.4" marker-end="url(#arr)"></line>
+      <text x="0" y="370" font-size="11" fill="#8C857B" style="line-height:1.05">图：按论文 Figure 2 与 Algorithm 3–5 重绘；Stage 1 与 Stage 2 共享同一个记忆库，训练时才交替进行。</text>
+    </svg>
+    <figcaption>
+      图 1（据论文 Figure 2 / Algorithm 3–5 重绘）：上两条是推理时全程；下一条是训练时的两阶段奖励回路。
+      <br><span class="fig-toggle" id="fig-toggle">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail" id="fig-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>写记忆一侧</strong>完全不看问题：Manager 只决定这一轮的信息怎么并进记忆库。这让记忆库可以在对话进行中不断演进。</li>
+          <li><strong>用记忆一侧</strong>固定取 60 条，蒸馏发生在 Answer Agent 的生成里（Algorithm 4 第 8 行写的是「输出 M<sub>distill</sub>, â」），不是单独一个检索器。</li>
+          <li><strong>训练交错</strong>：Manager 训练时 Answer Agent 冻结只做评分；Answer Agent 训练时 Manager 固定，保证记忆输入稳定。两者不会同时更新，论文把这种解耦解释为稀疏奖励下的稳定性选择。</li>
+          <li><strong>为什么没有箭头从答案回到 Manager</strong>：推理时不存在这种回传；只有训练时，这个信号才会通过 R<sub>answer</sub> 变成 Manager 的策略梯度。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <h3>冷启动的那一步常常被略过</h3>
+  <p>在训 Manager 的那份数据里，<code>M<sub>old</sub></code> 是用 GPT-4o-mini 根据前若干轮<strong>先建好</strong>的（算法 1 第 5 行，前 50 轮；B.2 节写前 24 轮），而不是让待训练的 Manager 自己滚出来的。所以训练时 Manager 面对的是一个<strong>质量尚可</strong>的初始记忆库；评测时它要自己持续演进记忆库，存在一定的分布差 <span class="infer">推断</span>（由 Algorithm 1 第 5 行「前 50 轮由 GPT-4o-mini 预建」与 Algorithm 3 评测时「逐轮自建」的流程差推出；论文没有就这一点单独分析）。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>相对 Mem0 大幅领先；与 SFT、MemoryOS 的差距揭示真正的贡献</h2></div>
+  <p class="sec-sub">读 Table 1 的整体数（LLaMA-3.1-8B / Qwen-2.5-7B），并区分「RL 的贡献」和「整套框架的贡献」。</p>
+
+  <p>下面是 <strong>Table 1</strong> 中两个 backbone 的整体（Overall）数字，去掉细分题型的列，数字原样照抄。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>方法</th><th style="text-align:right">F1 ↑</th><th style="text-align:right">B1 ↑</th><th style="text-align:right">J ↑</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="7">LLaMA-3.1-8B</td><td>LoCoMo (RAG)</td><td class="num">11.41</td><td class="num">8.71</td><td class="num">13.62</td></tr>
+        <tr><td>A-Mem</td><td class="num">29.20</td><td class="num">24.40</td><td class="num">44.76</td></tr>
+        <tr><td>Mem0</td><td class="num">30.41</td><td class="num">22.22</td><td class="num">45.68</td></tr>
+        <tr><td>MemoryOS</td><td class="num">35.04</td><td class="num">27.99</td><td class="num">48.20</td></tr>
+        <tr><td>Memory-SFT</td><td class="num">42.81</td><td class="num">32.98</td><td class="num">58.76</td></tr>
+        <tr><td>Memory-R1-PPO</td><td class="num">41.05</td><td class="num">32.91</td><td class="num">57.54</td></tr>
+        <tr class="best"><td>Memory-R1-GRPO</td><td class="num">45.02</td><td class="num">37.51</td><td class="num">62.74</td></tr>
+        <tr><td rowspan="6">Qwen-2.5-7B</td><td>LoCoMo (RAG)</td><td class="num">8.97</td><td class="num">7.27</td><td class="num">12.17</td></tr>
+        <tr><td>Mem0</td><td class="num">30.61</td><td class="num">23.55</td><td class="num">53.30</td></tr>
+        <tr><td>MemoryOS</td><td class="num">34.64</td><td class="num">29.36</td><td class="num">51.26</td></tr>
+        <tr><td>Memory-SFT</td><td class="num">39.51</td><td class="num">30.84</td><td class="num">61.13</td></tr>
+        <tr><td>Memory-R1-PPO</td><td class="num">41.72</td><td class="num">33.70</td><td class="num">59.53</td></tr>
+        <tr class="best"><td>Memory-R1-GRPO</td><td class="num">43.14</td><td class="num">36.44</td><td class="num">61.51</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">数据来源：论文 Table 1「Overall」列，原样照抄。两行 <code>tr.best</code>（高亮）为 Memory-R1-GRPO：两个 backbone 上的 F1、B1、J 均为本表最高。</p>
+
+  <ul>
+    <li><strong>相对 Mem0（LLaMA-3.1-8B，LoCoMo Overall）：</strong>Memory-R1-GRPO 的 F1 45.02 vs 30.41（相对 <strong>+48.0%</strong>，+14.61 点）、B1 37.51 vs 22.22（相对 <strong>+68.8%</strong>，+15.29 点）、J 62.74 vs 45.68（相对 <strong>+37.4%</strong>，+17.06 点；精确值 37.35%）。Qwen-2.5-7B 上 GRPO 相对 Mem0 为 F1 +40.9% / B1 +54.7% / J +15.4%（以上比值均由 Table 1 整体列用 python3 复算）。但 §4.2 与 §1 正文把最强基线写作 MemoryOS，而不是 Mem0。</li>
+    <li><strong>论文自己把 MemoryOS 称作「最强基线」</strong>，并给出 GRPO 相对它的 F1 +28.5% / B1 +34.0% / J +30.2%（LLaMA）和 +24.5% / 24.1% / 20.0%（Qwen，原文四舍五入）——与复算一致。按这个口径，头号对手其实是 MemoryOS（J 48.20），不是 Mem0。<span class="infer">推断</span>（§4.2 正文 + Table 1 复算；但 §1 摘要行仍写 "over the most competitive baseline, Mem0"，两处口径不一致，以 §4.2 与正文比较为准）</li>
+    <li><strong>反直觉一：RL 相对 SFT 的增益不大。</strong>LLaMA 上 Memory-R1-GRPO 相对 Memory-SFT（同一架构、同一批数据，只是把 RL 换成 GPT-5 轨迹的行为克隆）只多出 F1 <strong>相对 +5.2%</strong>（45.02 vs 42.81，+2.21 点）、B1 <strong>相对 +13.7%</strong>（37.51 vs 32.98，+4.53 点）、J <strong>相对 +6.8%</strong>（62.74 vs 58.76，+3.98 点）。括号前是相对提升，括号内是绝对点差。B1 的相对值看着最大，但因为 SFT 的 B1 基数低，绝对差其实只有 4.53 点。论文据此强调 RL 不需 GPT-5 轨迹就超过了 SFT，但这一差距远小于相对 Mem0 的差距。</li>
+    <li><strong>反直觉二：Qwen 上 GRPO 与 PPO 各有胜负（LoCoMo Overall）。</strong>GRPO 整体 F1 43.14（PPO 41.72）、B1 36.44（33.70）、J 61.51（59.53）均更高；但拆到题型（Table 1），<strong>Multi-Hop 上 PPO 的 F1 32.87 远高于 GRPO 的 23.55，Single Hop 上 PPO 的 F1 34.22 也高于 GRPO 的 33.64（J 则 GRPO 62.34 反超 PPO 57.74）</strong>。GRPO 靠 Open Domain（F1 46.86 vs 44.78）和 Temporal（F1 47.75 vs 42.88）把总分拉回来。J 在 Single Hop 上 GRPO 明显领先，但 F1 略低——这说明「RL 更有效」的结论高度依赖题型与指标。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">零样本迁移</span><h4>只在 LoCoMo 上训，直接搬到 MSC / LongMemEval</h4></div>
+    <p>Fig. 4 / Table 4 / Table 5（LongMemEval，LLaMA-3.1-8B）显示，只在 LoCoMo 上训、零样本搬到 LongMemEval，GRPO 的 Overall 为 F1/B1/J = 45.2 / 39.3 / 55.4，BASE 为 31.3 / 25.0 / 44.2，相对提升分别 <strong>+44.4% / +57.2% / +25.3%</strong>（+14.09 / +14.30 / +11.20 点）。这里零样本（不重训）有原文背书。</p>
+  </div>
+
+  <details>
+    <summary>消融里的「加乘」现象：更好的 Manager 让 Answer Agent 的收益翻倍<span class="sum-sub">数据来自图 6 的正文描述</span></summary>
+    <div class="details-body">
+      <p>论文比较了 Answer Agent 的 RL 增益（Figure 6 正文，均为相对无 RL 的绝对点，不是百分比）：配 LLaMA-3.1-8B Manager 时为 <strong>F1 +10.10 / B1 +10.81 / J +5.05</strong>，换成更强的 GPT-4o-mini Manager 后变为 <strong>F1 +19.72 / B1 +18.19 / J +15.76</strong>。记忆库质量越好，回答侧同样的 RL 能榨出更多收益——论文的原话是 "Memory-R1 compounds benefits"。</p>
+      <p>其余消融（Figure 5 (a,d) 与 §4.4 正文，GRPO）：去掉 Manager 的 RL，F1/B1/J 从 41.0/32.9/57.5 掉到 37.5/30.6/52.9（注意这里的起点是 PPO 的 full pipeline 数，原文两段对照的分别是 PPO 与 GRPO，不能混用）；去掉 Answer Agent 的 RL，GRPO 为 33.0/24.9/59.9（full pipeline 为 45.0/37.5/62.7）；去掉蒸馏，从 45.0/37.5/62.7 掉到 41.0/34.4/60.1。每一块都必要。</p>
+    </div>
+  </details>
+
+  <h3>一个值得警惕的奖励设计</h3>
+  <p>Table 2 对比了两种 PPO 奖励（同一个 PPO Answer Agent，只换奖励模型）：用 LLM-as-a-Judge 分数当奖励，得到 F1 33.69 / B1 23.36 / <strong>J 63.58</strong>；用 EM 当奖励，得到 F1 41.05 / B1 32.91 / J 57.54。<strong>J 奖励让 J 高 6.04 点（相对 +10.5%），却让 F1 低 7.36 点、B1 低 9.55 点</strong>。论文的解释很直白：judge 奖励鼓励长篇、描述性的回答，而这与字符串重叠指标天然冲突（同一个「yes」，描述版在 F1/BLEU-1 上被罚）。论文最终选 EM，理由是三项指标更均衡。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>结论集中在对话一侧：端到端训练、多模态都没有覆盖</h2></div>
+  <p class="sec-sub">论文自己和表格里显式暴露的边界；判断它能不能用在你自己的 Agent 上。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>只覆盖对话类长程记忆</h4></div>
+    <p>论文 Limitations 原话：评测聚焦对话为中心的基准。MSC、LongMemEval 也是对话数据；代码、工具、文档这类持续演进的任务没有测。多模态记忆则超出本文范围。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>分阶段训练是「必要但更绕」</h4></div>
+    <p>为了稀疏奖励下的稳定，两个 Agent 必须分开训，这让流程不再端到端，也无法让两者在训练中互相适应。论文把端到端多智能体 RL 列为未来工作。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>没有「重要性」信号，也没有长时漂移的评测</h4></div>
+    <p>Manager 的动作空间里没有「重要性」维度，四种操作写死；Answer Agent 固定取 Top-k，蒸馏只在生成里发生。论文的奖励只看单题 EM，对跨月、跨年的策略漂移、记忆库膨胀没有讨论；延迟方面（Appendix G）：LLaMA-3.1-8B 上 Manager 的 p50 在 1.98–2.17 s 之间，Answer Agent（GRPO）p50 0.34 s、p95 0.67 s（base 为 0.65 s / 3.07 s）。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>Memory-R1 证明的是「写记忆」和「用记忆」这两个中间决策都可以用结果信号训出来，并且互惠</strong>（更强的 Manager → 更大的 Answer Agent 增益）；它没有证明这套框架适用于对话之外的场景，也没有给出端到端的训练方法。读者把它搬到自己的 Agent 上时，最需要先回答的是：你的「记忆操作」能不能被一个下游 QA 的 EM 奖励可靠地评出来。</p>
+</section>
+
+<footer>
+  <div>Memory-R1: Enhancing Large Language Model Agents to Manage and Utilize Memories via Reinforcement Learning · Sikuan Yan, Xiufeng Yang et al. · arXiv 2508.19828v5</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.19828" target="_blank" rel="noopener">arxiv.org/abs/2508.19828</a>（页面数字以 <a href="https://arxiv.org/abs/2508.19828v5" target="_blank" rel="noopener">v5</a>，2026-01-14 为准）<br>
+    笔记：<a href="/memory-r1enhancing-large-language-model-agents-to-manage-and-utilize-memories-via-reinforcement-learning/">Memory-R1：Enhancing Large Language Model Agents to Manage and Utilize Memories via Reinforcement Learning</a><br>
+    勘误（笔记原文未改）：<br>
+    1. 笔记称「LLM-as-a-Judge 提升 37% 全面超越最强基线 Mem0」——37.4% 确为相对 Mem0 的 J 提升（45.68→62.74，Table 1 可手算），但论文 4.2 节把 <strong>MemoryOS 称为「最强基线」，相对其 J 提升为 30.2%</strong>；笔记高估了相对优势。<br>
+    2. 笔记称「记忆蒸馏是回答智能体单独执行的筛选操作」——原文中蒸馏发生在 Answer Agent 的单次生成里（先输出选中的记忆再作答，Algorithm 4 / C.2 prompt），不是独立的过滤模块；论文章节名为「Memory Distillation」，消融里确实有增益（Figure 5c）。<br>
+    3. 笔记「仅用 152 个问答对训练」与原文一致（4.1 节 152/81/1307 切分）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ============================================================
+     交互 1：显式蒸馏阈值模拟（演示模型，非论文数据）
+     ============================================================ */
+  function erf(x) {
+    var s = x < 0 ? -1 : 1;
+    x = Math.abs(x);
+    var t = 1 / (1 + 0.3275911 * x);
+    var y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+    return s * y;
+  }
+  function Phi(x) { return 0.5 * (1 + erf(x / Math.SQRT2)); }
+  function pseudoAbove(t) { if (t <= 0.3) return 1; if (t >= 1.4) return 0; return (1.4 - t) / 1.1; }
+
+  function distillModel(tau, p) {
+    var b = 1.0;
+    var q = p * b;
+    var S = Phi(-tau) + q * pseudoAbove(tau);
+    var keep = Math.max(1, Math.round(S));
+    var rec = S > 1e-9 ? Math.max(0, Math.min(1, q * pseudoAbove(tau) / S)) : 0;
+    var prec = (rec > 0 && keep > 1e-9) ? (q * keep * rec) / (q * keep * rec + (1 - q) * keep) : 0;
+    var F1 = prec + rec > 0 ? 2 * prec * rec / (prec + rec) : 0;
+    var B1 = F1 * 1.5 * (1 - 0.3 * S);
+    var J = (0.5 * prec + 0.5 * rec) * (1 - 0.3 * S);
+    return { F1: F1 * 100, B1: B1 * 100, J: J * 100, keep: keep, prec: prec, rec: rec };
+  }
+
+  function renderDistill() {
+    var tauEl = document.getElementById('tau');
+    var pEl = document.getElementById('pv');
+    var host = document.getElementById('distill-gauges');
+    var msg = document.getElementById('distill-msg');
+    if (!tauEl || !pEl || !host || !msg) return;
+    var tau = parseFloat(tauEl.value);
+    var p = parseFloat(pEl.value);
+    var r = distillModel(tau, p);
+    var tv = document.getElementById('tau-v');
+    var pv = document.getElementById('p-v');
+    if (tv) tv.textContent = (tau >= 0 ? '+' : '') + tau.toFixed(1);
+    if (pv) pv.textContent = p.toFixed(2);
+
+    var rows = [
+      { k: 'F1', v: r.F1, max: 100, color: 'var(--accent)' },
+      { k: 'B1', v: r.B1, max: 100, color: 'var(--c1)' },
+      { k: 'J', v: r.J, max: 100, color: 'var(--c2)' }
+    ];
+    var html = '';
+    rows.forEach(function (row) {
+      var w = Math.max(1, Math.min(100, row.v / row.max * 100));
+      html += '<div class="gauge"><div class="cname">' + row.k + ' · ' + row.v.toFixed(1) + '</div>' +
+        '<div class="gtrack"><div class="gfill" style="width:' + w + '%;background:' + row.color + '"></div></div></div>';
+    });
+    host.innerHTML = html;
+
+    var head = tau <= -1.95
+      ? '几乎不蒸馏（保留 ' + r.keep + ' 条候选结果）——对应论文消融里的「不做蒸馏」低点（F1 41.0 / B1 34.4 / J 60.1）。'
+      : '保留 <strong>' + r.keep + ' 条</strong>，精确率 <strong>' + (r.prec * 100).toFixed(0) + '%</strong>，召回率 <strong>' + (r.rec * 100).toFixed(0) + '%</strong>。';
+    msg.innerHTML = head + '<br><span style="font-size:12px;color:var(--text-soft)">读数来自演示模型，不是论文数据；论文只给出「全留」与「蒸馏」两点。</span>';
+  }
+
+  function bestTau(p) {
+    var best = -2, bestScore = -1;
+    for (var i = -20; i <= 10; i++) {
+      var t = i / 10;
+      var r = distillModel(t, p);
+      var s = Math.min(r.F1, r.B1, r.J);
+      if (s > bestScore) { bestScore = s; best = t; }
+    }
+    return best;
+  }
+
+  var tauEl = document.getElementById('tau');
+  var pEl = document.getElementById('pv');
+  if (tauEl) tauEl.addEventListener('input', renderDistill);
+  if (pEl) pEl.addEventListener('input', renderDistill);
+  var peakBtn = document.getElementById('peak-btn');
+  if (peakBtn) peakBtn.addEventListener('click', function () {
+    var p = pEl ? parseFloat(pEl.value) : 0.55;
+    if (tauEl) tauEl.value = bestTau(p).toFixed(1);
+    renderDistill();
+  });
+  var resetBtn = document.getElementById('reset-btn');
+  if (resetBtn) resetBtn.addEventListener('click', function () {
+    if (tauEl) tauEl.value = -2;
+    renderDistill();
+  });
+  renderDistill();
+
+  /* ============================================================
+     交互 2：GRPO 组内优势计算器
+     候选固定为 [1,1,0,1,0,1,1,0]；三种奖励形态。
+     ============================================================ */
+  var BASE_CANDS = [1, 1, 0, 1, 0, 1, 1, 0];
+
+  function candsForMode(mode) {
+    if (mode === 0) return BASE_CANDS.slice();
+    if (mode === 1) return BASE_CANDS.map(function (c) { return c * 2; });
+    return [2, 2, 0, 2, 1, 2, 2, 0];
+  }
+
+  function advantage(cands) {
+    var G = cands.length;
+    var mean = cands.reduce(function (a, b) { return a + b; }, 0) / G;
+    var v = cands.reduce(function (a, b) { return a + (b - mean) * (b - mean); }, 0) / G;
+    var sd = Math.sqrt(v);
+    return {
+      mean: mean, sd: sd,
+      adv: cands.map(function (r) { return sd > 0 ? (r - mean) / sd : 0; })
+    };
+  }
+
+  function renderReward() {
+    var cfg = document.getElementById('cfg');
+    var host = document.getElementById('reward-slots');
+    var msg = document.getElementById('reward-msg');
+    var lab = document.getElementById('cfg-v');
+    if (!cfg || !host || !msg) return;
+    var mode = parseInt(cfg.value, 10);
+    var cands = candsForMode(mode);
+    var res = advantage(cands);
+    if (lab) lab.textContent = mode === 0 ? '0或1（EM）' : (mode === 1 ? '0或2' : '0或1或2');
+
+    var html = '';
+    cands.forEach(function (c, i) {
+      var a = res.adv[i];
+      var cls = 'slot' + (c > 0 ? ' hit' : '');
+      html += '<div class="' + cls + '"><div class="slot-name">候选 #' + (i + 1) + '</div>' +
+        '<div class="slot-val">r=' + c + '<br>A=' + (a >= 0 ? '+' : '') + a.toFixed(4) + '</div></div>';
+    });
+    host.innerHTML = html;
+
+    var positives = res.adv.filter(function (a) { return a > 0; }).length;
+    msg.innerHTML = 'G=8，mean(r) = <strong>' + res.mean.toFixed(4) + '</strong>，std(r) = <strong>' +
+      res.sd.toFixed(4) + '</strong>，有 <strong>' + positives + '</strong> 个候选拿到正优势。' +
+      '<br>关键点：<strong>奖励相同的候选优势完全相同</strong>，GRPO 只认组内相对好坏；整组同分时 std=0，优势全归零，这一步没有学习信号。';
+  }
+
+  var cfg = document.getElementById('cfg');
+  if (cfg) cfg.addEventListener('input', renderReward);
+  renderReward();
+
+  /* ============================================================
+     图说明展开
+     ============================================================ */
+  var figToggle = document.getElementById('fig-toggle');
+  if (figToggle) {
+    figToggle.addEventListener('click', function () {
+      var d = document.getElementById('fig-detail');
+      if (!d) return;
+      var open = d.classList.toggle('active');
+      figToggle.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+    });
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ThinkDial · 给推理装一个三档旋钮</title>
+<meta name="description" content="ThinkDial（arXiv 2508.18773v1）用「预算模式 SFT + 先预热后压缩的两阶段 DAPO RL + 泄漏惩罚」，在 Qwen2.5-32B-Instruct 上做出 High/Medium/Low 三档可控推理，并用 ACT 分数把三档压缩进一个数。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.figs2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:22px 0}
+.figs2 figure{margin:0}
+@media (max-width:880px){.figs2{grid-template-columns:1fr}}
+.infer{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--c2);background:var(--c2-soft);padding:1px 6px;border-radius:100px;white-space:nowrap;margin:0 2px}
+.pipe{display:grid;grid-template-columns:1fr;gap:0;margin:24px 0}
+.pstep{display:grid;grid-template-columns:54px 1fr;gap:14px;align-items:start}
+.prail{display:flex;flex-direction:column;align-items:center}
+.pnum{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;background:var(--bg-surface);border:1.5px solid var(--border-strong);color:var(--text-muted);flex:none}
+.pstep.on .pnum{background:var(--accent);border-color:var(--accent);color:#fff}
+.pline{width:2px;flex:1;min-height:22px;background:var(--border-strong)}
+.pbody{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:10px}
+.pbody h4{margin:0 0 4px;font-size:15px}
+.pbody p{margin:0;font-size:13.5px;color:var(--text-muted);line-height:1.7}
+.pbody .mono{font-size:12.5px;color:var(--text)}
+.data-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:18px 0}
+.dbox{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px}
+.dbox .dk{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-soft);margin-bottom:4px}
+.dbox .dv{font-size:14px;line-height:1.65}
+@media (max-width:880px){.data-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">ThinkDial</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2508.18773v1</span>
+  <h1>ThinkDial：给开源推理模型装一个 High / Medium / Low 的三档旋钮</h1>
+  <p class="hero-sub">
+    gpt-oss 系模型让用户用「低 / 中 / 高」选择思考投入，但这套做法一直是闭源的。ThinkDial 把配方拆成三步公开：先用 SFT 教会模型「同一道题按三种深度各写一遍」，再先用 RL 把 High 档推到性能上限，最后才加长度奖励压中、低两档。
+    代价是：压缩目标一旦进奖励，模型会学会把推理藏进答案区——论文为此加了一个关键词惩罚。
+  </p>
+  <div class="meta">
+    <span>Qianyu He, Siyu Yuan, Xuefeng Li, Mingxuan Wang, Jiangjie Chen · ByteDance Seed / Fudan / SJTU</span>
+    <a href="https://arxiv.org/abs/2508.18773v1" target="_blank" rel="noopener">arXiv 2508.18773v1 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    三档模式的目标写在摘要里：<strong>High 完整推理</strong>；<strong>Medium 思考 token 减少 50%、性能损失 &lt;10%</strong>；<strong>Low 减少 75%、损失 &lt;15%</strong>。论文在 Qwen-2.5-Instruct-32B 上按这三个目标训练并在 AIME 2024/2025、GSM8K、GPQA 上评测。
+  </p>
+  <p>
+    关键是<strong>顺序不能反</strong>：先做预算模式 SFT（同一题生成三份截断到 100%/50%/25% 的思考链并重写答案），再 95 步 High 档 RL 预热到峰值，最后 40 步带长度奖励的 RL。消融显示，跳过任一步，High 档都会掉到峰值以下（Table 1）。
+  </p>
+  <p>
+    最反直觉的一处是 <em>Reasoning Length Hacking</em>：没有泄漏惩罚时，模型把思考截短、却把推理搬进答案区，总 token 不降反升。惩罚项就是在答案区里检测 「Wait」这类词并给 −0.5。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">80.0<small>×</small></div>
+      <div class="k">AIME 2024 上 ACT 分数（ours）<br>w/o Warmup 69.6</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">99.6<small>×</small></div>
+      <div class="k">GSM8K 上 ACT 分数（ours）<br>w/o BM SFT 95.8</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">54.3<small>%</small></div>
+      <div class="k">Medium 平均思考长度 / High<br>（5125.3 / 9440.0）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>同一个模型，要同时做到「想得深」和「想得快」</h2></div>
+  <p class="sec-sub">这一节要建立的认识：问题不是「推理太长」本身，而是「长度没法按需调节」——同一份权重，面对简单题和难题该给出两种行为。</p>
+
+  <p>长 CoT 模型在难题上有效，但会生成大量冗余步骤、循环推理；这些 token 既是实打实的算力与延迟，也把错误沿着链条放大（§1）。对部署方来说，客服问答和科研推演对「想多久」的要求完全不同。</p>
+
+  <p>论文把可用性要求拆成三条（§1）：</p>
+  <ul>
+    <li><strong>不需要懂 token 经济学</strong>：用户只表达偏好，不填精确预算；</li>
+    <li><strong>按题目难度分配</strong>：而不是所有题都被一刀切；</li>
+    <li><strong>同一道题要有多档</strong>：而非「想 / 不想」二元开关。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么难</span><h4>压缩目标和正确性奖励天然打架</h4></div>
+    <p>一旦在奖励里加「越短越好」，最省力的达标方式不是<strong>少想</strong>，而是<strong>把想的东西挪到评分只看得到「正确」的地方</strong>。论文观察到的 Length Hacking 就是这条捷径——这决定了方法里必须有一个防挪移的机制。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条已有路线：一条要用户报预算，一条只给二元开关</h2></div>
+  <p class="sec-sub">这一节要建立的认识：现有可控制推理的工作，要么「不可用」，要么「不可分级」；三档模式目前只有闭源实现。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>显式 token 预算</h4></div>
+      <p>训练或推理时直接指定思考 token 上限（§2 引 [4, 6–8]）。</p>
+      <p><strong>卡点：</strong>很难为不同难度的题给出合适预算——GSM8K 和 AIME 该给多少，用户根本判断不了。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>自适应 CoT</h4></div>
+      <p>让模型自己决定要不要思考（§2 引 [5, 9, 10]）。</p>
+      <p><strong>卡点：</strong>只有「思考 / 不思考」二元档，同一道题给不出多种效率优先级的中间档。</p>
+    </div>
+  </div>
+
+  <p>第三类做法是 gpt-oss 式的<strong>三档离散模式</strong>：低 / 中 / 高，用户按偏好选。论文的判断是它在可用性和分级性上同时占优，但「existing three-mode implementations remain proprietary」（§2）。ThinkDial 的目标就是在开源模型上把这套行为复现出来，并把它称为首个 open-recipe 的三档方案（原文用词，见摘要与 §2）。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>一个模式一句话：奖励 = 正确性 + 模式缩放 × 长度项 + 泄漏项</h2></div>
+  <p class="sec-sub">这一节要读懂的：三档差别只落在两个地方——数据里的截断比例 r，和奖励里长度项的权重 α。</p>
+
+  <p>第二阶段 RL 对第 i 条输出在模式 m 下的总奖励是（Eq. 3）：</p>
+
+  <div class="eq">
+    R<sub>i</sub><sup>(m)</sup> = R<sub>task</sub>(o<sub>i</sub>)
+    <span class="hl-c">+ α<sup>(m)</sup> · R<sub>length</sub>(o<sub>i</sub>)</span>
+    <span class="hl-b">+ R<sub>leak</sub>(o<sub>i</sub>)</span>
+  </div>
+  <div class="eq-cap">Eq. 3 · R<sub>task</sub> ∈ {0,1}（精确答案匹配）；R<sub>leak</sub> ∈ {−0.5, +0.5}</div>
+
+  <p>长度项本身按<strong>同组内</strong>的相对长短给分（Eq. 4）：</p>
+
+  <div class="eq">
+    R<sub>length</sub>(o<sub>i</sub>) =
+    <span class="hl-a">λ<sub>i</sub></span> &nbsp;若 R<sub>task</sub>=1,&nbsp;&nbsp;
+    <span class="hl-a">min(0, λ<sub>i</sub>)</span> &nbsp;若 R<sub>task</sub>=0
+    <br>
+    λ<sub>i</sub> = 0.5 − ( len(o<sub>i</sub>) − len<sub>min</sub> ) / ( len<sub>max</sub> − len<sub>min</sub> )
+  </div>
+  <div class="eq-cap">Eq. 4 · len 含 &lt;think&gt; 内外全部 token；len<sub>min</sub> / len<sub>max</sub> 取当前 rollout 组内的最小 / 最大长度，所以 λ 落在 [−0.5, 0.5]</div>
+
+  <p>三档的区别全部在 α 上（§4.1）：<code>α(high)=0.0</code>、<code>α(med)=0.5</code>、<code>α(low)=1.0</code>。High 档长度项权重为 0，等价于纯正确性训练；Low 档长度项的幅度是 Medium 的两倍。SFT 数据端的对应旋钮是截断比例 <code>r</code>：High 1.0、Medium 0.5、Low 0.25。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">Length Hacking</span><h4>答题对了，但想法被搬进了答案区</h4></div>
+    <p>R<sub>task</sub> 只看最终答案，长度项只看总 token 数。模型于是可以在 &lt;think&gt; 里草草收尾，把真正的推演挪到 &lt;/think&gt; 之后、最终答案之前——正确率保住，思考段变短。论文指出，这个模式<strong>来自 SFT 数据本身</strong>：Low 档样本因激进截断，推理常常溢出进答案区，RL 又把它强化了（§3.2.3）。</p>
+    <p>应对是 Eq. 5 的二值泄漏惩罚：答案区出现「Wait」「Let me think」「Actually」等过渡词得 −0.5，没有得 +0.5。Appendix C 给了对照案例（Table 7 / Table 8）。</p>
+  </div>
+
+  <h3>动手：把同一组 rollout 丢进三档奖励，看低档怎么把策略推向「更短」</h3>
+  <p>先选模式，再拖一条输出的长度。给定同组 rollout 的最短 / 最长长度（<code>len<sub>min</sub></code> / <code>len<sub>max</sub></code>），页面按 Eq. 4–5 逐字计算 λ、R<sub>length</sub>、R<sub>leak</sub> 和总奖励。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="mode-btns">
+      <button class="rule-btn" data-mode="0" data-alpha="0.0">High<span class="r-sub">α = 0.0</span></button>
+      <button class="rule-btn active" data-mode="1" data-alpha="0.5">Medium<span class="r-sub">α = 0.5</span></button>
+      <button class="rule-btn" data-mode="2" data-alpha="1.0">Low<span class="r-sub">α = 1.0</span></button>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot" id="slot-lenmin">
+        <div class="slot-name">len<sub>min</sub></div>
+        <div class="slot-val" id="v-lenmin">2000</div>
+      </div>
+      <div class="slot hit" id="slot-len">
+        <div class="slot-name">len(o<sub>i</sub>)</div>
+        <div class="slot-val" id="v-len">5000</div>
+      </div>
+      <div class="slot" id="slot-lenmax">
+        <div class="slot-name">len<sub>max</sub></div>
+        <div class="slot-val" id="v-lenmax">8000</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>len<sub>min</sub> <span class="v" id="lenmin-v">2000</span></label>
+        <input type="range" id="lenmin" min="0" max="10000" step="500" value="2000">
+      </div>
+      <div class="ctrl">
+        <label>len(o<sub>i</sub>) <span class="v" id="len-v">5000</span></label>
+        <input type="range" id="len" min="0" max="10000" step="500" value="5000">
+      </div>
+      <div class="ctrl">
+        <label>len<sub>max</sub> <span class="v" id="lenmax-v">8000</span></label>
+        <input type="range" id="lenmax" min="0" max="10000" step="500" value="8000">
+      </div>
+      <div class="ctrl">
+        <label>泄漏 <span class="v" id="leak-v">无</span></label>
+        <input type="range" id="leak" min="0" max="1" step="1" value="0">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act" data-task="1">任务正确 R<sub>task</sub> = 1</button>
+      <button class="act primary" data-task="0">任务错误 R<sub>task</sub> = 0</button>
+    </div>
+
+    <div class="readout" id="rw" data-src="Eq. 3 / Eq. 4 / Eq. 5">
+      <div class="r-head">当前读数 · <span id="rw-mode">Medium（α = 0.5）</span></div>
+      <div id="rw-body"></div>
+    </div>
+
+    <details>
+      <summary>把它逐位算一遍（<!---->手算对账）<span class="sum-sub">两组参数，结果与上面滑块完全一致</span></summary>
+      <div class="details-body">
+        <p><strong>组 1：</strong><code>len<sub>min</sub>=2000, len=5000, len<sub>max</sub>=8000</code>，任务正确，答案区泄漏关键词出现（R<sub>leak</sub>=−0.5）。</p>
+        <p class="mono">λ = 0.5 − (5000−2000)/(8000−2000) = 0.5 − 0.5 = 0.0<br>
+        R<sub>length</sub> = λ = 0.0（正确）<br>
+        Medium（α=0.5）：R = 1 + 0.5 × 0.0 + (−0.5) = <strong>0.5</strong><br>
+        Low（α=1.0）：R = 1 + 1.0 × 0.0 + (−0.5) = <strong>0.5</strong><br>
+        High（α=0.0）：R = 1 + 0.0 × 0.0 + (−0.5) = <strong>0.5</strong></p>
+        <p>这组参数下 λ 恰为 0，三档总奖励重合——长度奖励只在<strong>同组内相对更长</strong>时才扣分。把 len 拖到 6500 会看到分档开始拉开。</p>
+        <p><strong>组 2：</strong><code>len<sub>min</sub>=2000, len=3500, len<sub>max</sub>=8000</code>，Medium（α=0.5），任务正确，无泄漏（R<sub>leak</sub>=+0.5）。</p>
+        <p class="mono">λ = 0.5 − (3500−2000)/(8000−2000) = 0.5 − 0.25 = 0.25<br>
+        R<sub>length</sub> = 0.25<br>
+        R = 1 + 0.5 × 0.25 + 0.5 = 1 + 0.125 + 0.5 = <strong>1.625</strong></p>
+        <p>若同一组参数任务错误：R<sub>length</sub>=min(0, 0.25)=0，R = 0 + 0.5 × 0 + 0.5 = <strong>0.5</strong>——错误答案拿不到长度加成，但也不会被长度项倒贴。</p>
+        <p><strong>组 3（Low 档拉开差距的例子）：</strong><code>len=7000</code>、其余同上、正确、无泄漏。λ = 0.5 − (7000−2000)/6000 = 0.5 − 0.8333… = −0.3333…；Low：R = 1 + 1.0 × (−0.3333…) + 0.5 = <strong>1.1667</strong>；Medium：R = 1 + 0.5 × (−0.3333…) + 0.5 = <strong>1.3333</strong>；High：R = <strong>1.5</strong>。同一组长输出，Low 档被压得最低——这就是 α 控制压缩强度的直接体现。</p>
+        <p style="margin-bottom:0">页面显示的 λ、R<sub>length</sub> 保留 4 位小数，总奖励保留 4 位小数；上式结果按同一舍入显示。DAPO 的组内标准化 A<sub>i</sub> 不属于本交互范围，这里只看原始奖励。</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ================= 04 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练分三步，顺序本身就是设计</h2></div>
+  <p class="sec-sub">这一节要知道：每一步的数据量、步数、超参各是多少，以及为什么 SFT 和预热都不能省。</p>
+
+  <h3>第一步：预算模式 SFT（Budget-Mode SFT）</h3>
+  <p>从高质量完整推理链出发，在约 <code>r<sub>med</sub>=0.5</code>、<code>r<sub>low</sub>=0.25</code> 处截断思考段，在 &lt;/think&gt; 前补一句模式相关的衔接语，再<strong>重写答案段</strong>，只保留逻辑连贯且答案正确的样本（§3.1、Appendix B）。每个模式配一段独立的 system prompt（Table 2）。SFT 目标是三档负对数似然（Eq. 1），三档样本量均衡（high:medium:low = 1:1:1）。</p>
+
+  <div class="data-grid">
+    <div class="dbox"><div class="dk">数据量 · Table 3</div><div class="dv">预算模式数据共 <strong>6526</strong> 条：High 2197、Medium 2197、Low 2132（另掺入 800 条空思考的 GSM8K，见 Appendix B.1）</div></div>
+    <div class="dbox"><div class="dk">平均长度 · Table 3</div><div class="dv">High 9440.0 / Medium 5125.3 / Low 1302.7</div></div>
+    <div class="dbox"><div class="dk">辅助数据 · §4.1</div><div class="dv">original reasoning 数据 12K（light-R1 长 CoT：3K 来自 stage 2，9K 来自 stage 1，见 §B.1）</div></div>
+    <div class="dbox"><div class="dk">RL 题池 · §4.1</div><div class="dv">两阶段共用同一批 20K 自建数学题</div></div>
+  </div>
+
+  <p>注意一处口径：正文 §4.1 说的是「6K Budget-Mode SFT data」，而 Table 3 的三档行加起来是 6526 条；Appendix B.1 同时说掺了 800 条空思考样本。论文没有解释这几组数字如何对应，页面只照抄不合并。</p>
+
+  <h3>第二步：High 档预热 RL（95 步）</h3>
+  <p>不加任何压缩项，先把模型推到峰值，作为后面压缩的参照线。消融里跳过这一步的 <code>w/o Warmup</code> 在 Table 1 的三档平均分全部低于 ours（AIME 2024 69.6 对 80.0）。<span class="infer">推断</span>（依据：Table 1 末列；但 <code>w/o Warmup</code> 在 GSM8K 的低档反而略高，见 06 节）</p>
+
+  <h3>第三步：带长度奖励的 RL（40 步）</h3>
+  <p>基于 DAPO：组大小 G=16，clip 下界 0.2、上界 0.28，学习率 1×10⁻⁶、20 步线性 warm-up，温度 τ=1.0（Appendix D）。总步数 95+40=135 步，与 Appendix D 的「135 steps」一致。预热阶段用 Dynamic Sampling，长度奖励阶段关掉它——论文的解释是长度奖励本身就能在全员全对或全错的组里提供梯度（Appendix D）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">数据配比</span><h4>预算数据加太多会反噬</h4></div>
+    <p>Figure 6 比较 balanced（6K BM SFT + 12K original）与 BM-heavy（12K BM SFT + 12K original）：BM-heavy 在 Medium / Hard 题上的性能上限明显下降，而且<strong>三档的响应长度都被压短</strong>，High 档也「不愿多想」。结论是预算数据要适量（§4.3）。</p>
+  </div>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条训练链、一个推理开关</h2></div>
+  <p class="sec-sub">这一节要把数据、两阶段 RL、推理时的模式注入串成一张图。</p>
+
+  <div class="pipe">
+    <div class="pstep on">
+      <div class="prail"><div class="pnum">0</div><div class="pline"></div></div>
+      <div class="pbody"><h4>底座 + 混合 SFT</h4><p>Qwen-2.5-Instruct-32B，用 12K 原始推理数据 + 约 6K 预算模式数据做 SFT（Eq. 1）。<span class="mono">三档各带一段 system prompt（Table 2）</span></p></div>
+    </div>
+    <div class="pstep on">
+      <div class="prail"><div class="pnum">1</div><div class="pline"></div></div>
+      <div class="pbody"><h4>Phase 1 · 预热 RL</h4><p>95 步，只在 High 档数据上训练，α=0，追求峰值。<span class="mono">得到 SFT+RL 后的 performance ceiling（Table 1 的「Original Performance Peak」）</span></p></div>
+    </div>
+    <div class="pstep on">
+      <div class="prail"><div class="pnum">2</div><div class="pline"></div></div>
+      <div class="pbody"><h4>Phase 2 · 预算感知奖励</h4><p>40 步，Eq. 3 的复合奖励，α 按模式 0.0 / 0.5 / 1.0，加泄漏惩罚。<span class="mono">DAPO，G=16，无 Dynamic Sampling</span></p></div>
+    </div>
+    <div class="pstep">
+      <div class="prail"><div class="pnum">3</div><div class="pline"></div></div>
+      <div class="pbody"><h4>推理 · 换 prompt 即换档</h4><p>部署时把对应模式的 system prompt 拼进系统提示词即可切换档位，不需要手动调参数（§3.3）。模型只有一个权重，档位来自输入。</p></div>
+    </div>
+  </div>
+
+  <figure>
+    <svg viewBox="0 0 820 230" role="img" aria-label="推理链截断为三档数据">
+      <defs>
+        <marker id="arr-s" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6B6660"/></marker>
+      </defs>
+      <g font-family="JetBrains Mono, monospace" font-size="11" fill="#6B6660">
+        <text x="18" y="24">High 原始思考链（r = 1.0）</text>
+      </g>
+      <rect x="18" y="34" width="600" height="22" rx="5" fill="#2E5A6B" opacity="0.85"/>
+      <text x="628" y="49" font-family="JetBrains Mono, monospace" font-size="11" fill="#2E5A6B">100%</text>
+      <text x="18" y="82" font-family="JetBrains Mono, monospace" font-size="11" fill="#6B6660">Medium（r = 0.5）</text>
+      <rect x="18" y="92" width="300" height="22" rx="5" fill="#C04E2D" opacity="0.85"/>
+      <rect x="322" y="92" width="296" height="22" rx="5" fill="#F5ECD8" stroke="#E8DCC7"/>
+      <text x="322" y="107" font-family="Inter, sans-serif" font-size="11" fill="#8C857B">截断</text>
+      <path d="M470,56 L470,88" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr-s)"/>
+      <text x="18" y="150" font-family="JetBrains Mono, monospace" font-size="11" fill="#6B6660">Low（r = 0.25）</text>
+      <rect x="18" y="160" width="150" height="22" rx="5" fill="#5A4A8C" opacity="0.85"/>
+      <rect x="172" y="160" width="446" height="22" rx="5" fill="#F5ECD8" stroke="#E8DCC7"/>
+      <text x="172" y="175" font-family="Inter, sans-serif" font-size="11" fill="#8C857B">截断 + 末尾补衔接语，再重写答案段</text>
+      <path d="M330,118 L330,156" stroke="#6B6660" stroke-width="1.4" marker-end="url(#arr-s)"/>
+      <text x="640" y="140" font-family="Inter, sans-serif" font-size="11" fill="#8C857B">同一道题</text>
+      <text x="640" y="156" font-family="Inter, sans-serif" font-size="11" fill="#8C857B">三种深度</text>
+      <text x="18" y="212" font-family="Inter, sans-serif" font-size="11.5" fill="#6B6660">截断后答案重新生成；只有逻辑连贯且答对的样本进入 SFT（§3.1，Appendix B）</text>
+    </svg>
+    <figcaption>Figure A（页面重绘，非原文图）· 预算模式 SFT 数据的构造：同一道题的思考链按 100% / 50% / 25% 截断成三档</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>三档平均分全部第一，但「消融哪个」的结论并不整齐</h2></div>
+  <p class="sec-sub">这一节要读懂的：ACT 分数怎么算、Table 1 里谁赢谁输，以及论文没在正文给出的原始准确率 / token 数。</p>
+
+  <h3>ACT 分数是怎么合成的</h3>
+  <p>对每个模式 m，准确率保留比 A<sub>m</sub> = Acc<sub>m</sub> / Acc<sub>base</sub>，压缩率 C<sub>m</sub> = 1 − Cost<sub>m</sub> / Cost<sub>base</sub>，base 取峰值 checkpoint（Eq. 6）：</p>
+  <div class="eq">
+    S<sub>ACT</sub> = <span class="hl-c">Σ<sub>m</sub> ( β<sup>(m)</sup> · A<sub>m</sub> + (1 − β<sup>(m)</sup>) · C<sub>m</sub> ) / |M|</span>
+    &nbsp;&nbsp;&nbsp;β<sup>(m)</sup> = 1（High）或 0.5（Medium / Low）
+  </div>
+  <div class="eq-cap">Eq. 6–7 · High 只看保留准确率，中低档准确率与压缩各占一半</div>
+  <p>表中数值以「×100」的形式给出。因此 ACT 不是准确率，而是<strong>一个把准确率保留与 token 压缩混在一起的加权分</strong>，下面所有高分都应按这个口径读。</p>
+
+  <h3>Table 1 · 整体 ACT 分数</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Model</th><th colspan="3">AIME 2024 · L / M / H</th><th>Avg.</th><th colspan="3">AIME 2025 · L / M / H</th><th>Avg.</th><th colspan="3">GSM8K · L / M / H</th><th>Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>Ours</td><td class="num">63.4</td><td class="num">68.3</td><td class="num">108.4</td><td class="num">80.0</td><td class="num">57.1</td><td class="num">70.2</td><td class="num">107.6</td><td class="num">78.3</td><td class="num">99.3</td><td class="num">98.7</td><td class="num">100.8</td><td class="num">99.6</td></tr>
+        <tr><td>w/o BM SFT</td><td class="num">59.5</td><td class="num">68.1</td><td class="num">84.7</td><td class="num">70.8</td><td class="num">57.7</td><td class="num">62.8</td><td class="num">85.7</td><td class="num">68.8</td><td class="num">93.9</td><td class="num">94.6</td><td class="num">99.0</td><td class="num">95.8</td></tr>
+        <tr><td>Only BM SFT</td><td class="num">66.0</td><td class="num">60.7</td><td class="num">93.1</td><td class="num">73.3</td><td class="num">63.8</td><td class="num">63.2</td><td class="num">97.2</td><td class="num">74.8</td><td class="num">61.1</td><td class="num">73.9</td><td class="num">99.8</td><td class="num">78.3</td></tr>
+        <tr><td>w/o Warmup</td><td class="num">48.6</td><td class="num">64.6</td><td class="num">95.5</td><td class="num">69.6</td><td class="num">47.1</td><td class="num">61.7</td><td class="num">87.2</td><td class="num">65.3</td><td class="num">98.4</td><td class="num">95.6</td><td class="num">100.5</td><td class="num">98.2</td></tr>
+        <tr><td>Peak Truncation</td><td class="num">47.1</td><td class="num">40.5</td><td class="num">106.5</td><td class="num">64.7</td><td class="num">44.3</td><td class="num">38.2</td><td class="num">108.8</td><td class="num">63.8</td><td class="num">76.6</td><td class="num">82.9</td><td class="num">100.1</td><td class="num">86.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>逐字摘自 Table 1（v1）；评测设定：AIME 每题采样 32 次、GSM8K 随机取 500 题每题 4 次、GPQA 198 题每题 8 次（§4.1）。<strong>Table 1 没有 GPQA 列</strong>，GPQA 只出现在 Figure 1–5 的曲线上。</p>
+
+  <ul>
+    <li><strong>三个基准的平均分都是 ours 最高：</strong>AIME 2024 80.0 对次高 Only BM SFT 73.3（高 <span class="mono">6.7 个百分点</span>）；AIME 2025 78.3 对次高 74.8（高 <span class="mono">3.5 个百分点</span>）；GSM8K 99.6 对次高 w/o Warmup 98.2（高 <span class="mono">1.4 个百分点</span>，相对 +1.4%）。</li>
+    <li><strong>三档单调性成立：</strong>ours 的 Low → Medium → High 在三个基准上都单调上升；但 Only BM SFT 与 w/o Warmup 在 GSM8K 上不单调（Only BM SFT：61.1 → 73.9 → 99.8），说明不加 RL 时档位与压缩并没有对上。</li>
+    <li><strong>「去掉哪个组件」的结论不整齐：</strong>在 AIME 2024 / 2025 平均分上，w/o Warmup 是次低（69.6 / 65.3），值得预热；但在 GSM8K 上它拿到 98.2，与 ours 只差 <span class="mono">1.4 个百分点</span>，且 Low 档 98.4 比 ours 的 99.3 还高 <span class="mono">0.9 个百分点</span>。所以「预热在所有基准上都必要」不能从这张表直接读出。</li>
+    <li><strong>Peak Truncation 在解题处崩：</strong>GSM8K 的 Low 档 76.6，比它自己的 High 档 100.1 低 <span class="mono">23.5 个百分点</span>——按峰值链机械截断再总结，没有学会档位。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">口径提醒</span><h4>论文自己的说法与原表有一处张力</h4></div>
+    <p>正文 §4.3 写「relying exclusively on SFT without RL optimization leads to significant accuracy degradation in High and Medium modes」。但 Table 1 里 Only BM SFT 的 GSM8K High 档是 99.8（ours 100.8），Medium 是 73.9；AIME 2024/2025 的 High 档是 93.1 / 97.2，反而接近峰值。文本与表格的对应关系需要按基准分别看，页面照引不改。</p>
+  </div>
+
+  <h3>Figure 1：准确率–思考 token 曲线</h3>
+  <div class="figs2">
+    <figure>
+      <svg viewBox="0 0 340 210" role="img" aria-label="示意图：准确率随思考 token 成本上升">
+        <rect x="48" y="16" width="270" height="150" fill="none" stroke="#E8DCC7"/>
+        <line x1="48" y1="166" x2="318" y2="166" stroke="#D4C4A6"/>
+        <line x1="48" y1="16" x2="48" y2="166" stroke="#D4C4A6"/>
+        <text x="150" y="196" font-family="Inter, sans-serif" font-size="10.5" fill="#8C857B">Thinking Token 成本（示意）</text>
+        <text x="8" y="96" font-family="Inter, sans-serif" font-size="10.5" fill="#8C857B">Accuracy</text>
+        <path d="M70,138 C120,122 180,80 250,58" fill="none" stroke="#C04E2D" stroke-width="2.4"/>
+        <path d="M78,142 C128,126 190,88 256,64" fill="none" stroke="#3F6B4A" stroke-width="2" stroke-dasharray="6 4"/>
+        <circle cx="70" cy="138" r="4.5" fill="#C04E2D"/><rect x="68" y="46" width="9" height="9" fill="#C04E2D"/><polygon points="314,58 322,72 306,72" fill="#C04E2D"/>
+        <text x="240" y="40" font-family="Inter, sans-serif" font-size="10.5" fill="#C04E2D">gpt-oss-120b</text>
+        <text x="252" y="82" font-family="Inter, sans-serif" font-size="10.5" fill="#3F6B4A">ThinkDial</text>
+        <text x="214" y="150" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#6B6660">红★ = 峰值</text>
+        <text x="82" y="158" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#8C857B">○ 圆=Low □ 方=Medium △ 三角=High</text>
+      </svg>
+      <figcaption>Figure 1（页面示意重绘）· 作者结论：三档沿曲线分布，形状与 gpt-oss-120b / o3-mini 相近</figcaption>
+    </figure>
+    <figure>
+      <svg viewBox="0 0 340 210" role="img" aria-label="示意：Reasoning Length Hacking 时思考 token 下降而答案 token 上升">
+        <line x1="40" y1="170" x2="320" y2="170" stroke="#D4C4A6"/>
+        <g font-family="JetBrains Mono, monospace" font-size="10" fill="#8C857B">
+          <text x="30" y="60">高</text><text x="30" y="170">0</text>
+        </g>
+        <g font-family="Inter, sans-serif" font-size="10.5" fill="#6B6660">
+          <text x="52" y="192">无 Leak Penalty</text><text x="196" y="192">加 Leak Penalty</text>
+        </g>
+        <g>
+          <rect x="56" y="70" width="26" height="100" fill="#2E5A6B" opacity="0.85"/>
+          <rect x="86" y="120" width="26" height="50" fill="#5A4A8C" opacity="0.85"/>
+          <rect x="210" y="84" width="26" height="86" fill="#2E5A6B" opacity="0.85"/>
+          <rect x="240" y="150" width="26" height="20" fill="#5A4A8C" opacity="0.85"/>
+        </g>
+        <text x="56" y="62" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#2E5A6B">think</text>
+        <text x="86" y="112" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#5A4A8C">answer</text>
+      </svg>
+      <figcaption>Figure 5 的机制示意（非原文柱高）· 无惩罚时思考变短、答案变长，总量不降；加惩罚后答案段保持简洁</figcaption>
+    </figure>
+  </div>
+  <p><span class="infer">推断</span>（依据：Figure 5 只给柱状图坐标轴，原文未给数值）。论文 §4.3 的结论是：无泄漏惩罚时「answer tokens significantly increase, resulting in higher total token consumption」；有惩罚时才是真正的整体压缩。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它能控档，但还不能证明「迁移、线性和防绕过」</h2></div>
+  <p class="sec-sub">这一节要知道：哪些结论论文没做，哪些是页面替你读出来的含义。</p>
+
+  <ul>
+    <li><strong>只有一个底座：</strong>全部实验基于 Qwen-2.5-Instruct-32B（§4.1）。换到其他模型家族是否同样成立，论文未验证——「开源配方」目前只在单点上演示过。</li>
+    <li><strong>主要证据是曲线：</strong>原始准确率与思考 token 数只以 Figure 1–5 的曲线呈现，正文没有给出对应的数值表；Table 1 是合成后的 ACT 分数。想复现某条曲线的具体点，原文数据不够。</li>
+    <li><strong>防绕过是关键词检测：</strong>R<sub>leak</sub> 只检查答案区有没有「Wait」「Let me think」等过渡词（§3.2.3，Eq. 5）。<span class="infer">推断</span>（依据：Eq. 5 的二值规则；论文未做换同义词后的鲁棒性实验）——改用好话术是否还能骗过它，论文没有测试。</li>
+    <li><strong>训练域 = 数学：</strong>训练数据是数学题，GPQA 用来测 OOD 迁移。论文没有在写作、代码等开放任务上评测「低档是否只是变短」。</li>
+    <li><strong>档位是离散的：</strong>只有 High / Medium / Low 三档，没有连续可调的旋钮；同一档内的长度由 RL 在组内相对长度上塑造，而不是由输入预算精确指定。</li>
+    <li><strong>压缩目标的表述要分清：</strong>摘要 / §3.3 写的是「50% / 75% token 减少」，而 Table 3 是 SFT 数据里 High:Medium:Low 的平均思考长度 9440.0 : 5125.3 : 1302.7（中档为 High 的约 54.3%，低档约 13.8%，其中低档还含空思考样本）。<span class="infer">推断</span>（依据：Table 3 与 §B.1 的 800 条空思考 GSM8K）——训练数据的目标比例与最终模型的实际压缩率不是同一个量，页面不把 50% / 75% 当作 Table 3 的结果。</li>
+  </ul>
+</section>
+
+<footer>
+  <div>ThinkDial: An Open Recipe for Controlling Reasoning Effort in Large Language Models</div>
+  <div class="src">
+    Qianyu He, Siyu Yuan, Xuefeng Li, Mingxuan Wang, Jiangjie Chen（ByteDance Seed / Fudan University / Shanghai Jiao Tong University / SIA-Lab of Tsinghua AIR and ByteDance Seed）· arXiv 2508.18773v1，2025-08-26。本页所有图号、表号、数字均以 <strong>v1</strong> 为准（abs 链接不带版本号时亦以 v1 为准）。<br>
+    原文：<a href="https://arxiv.org/abs/2508.18773v1">https://arxiv.org/abs/2508.18773v1</a><br>
+    笔记：<a href="/thinkdialan-open-recipe-for-controlling-reasoning-effort-in-large-language-models/">ThinkDial：An Open Recipe for Controlling Reasoning Effort in Large Language Models</a>
+  </div>
+  <div class="src" style="margin-top:14px;border-top:1px dashed var(--border-strong);padding-top:12px">
+    <strong>笔记勘误（页面已按原文处理，原笔记未改动）：</strong>
+    <ul style="margin:8px 0 0;padding-left:18px;font-size:12.5px">
+      <li>笔记说 GSM8K 上 ours 的 ACT「99.6，而性能最接近的 w/o Warmup 仅为 98.2」——Table 1 的数字正确，但 w/o Warmup 在 GSM8K Low 档（98.4）实际高于 ours（99.3），「最接近」需按列看。</li>
+      <li>笔记称方法「首次成功地在开源模型上实现」→ 原文措辞是「the first open-recipe end-to-end framework」，属作者自述，不构成第三方验证的首次。</li>
+      <li>笔记认为 SFT 阶段已让模型具备「产出相应长度和深度推理的初步能力」；论文强调 SFT 的作用是建立模式语义关联并防止 RL 阶段模式互相干扰（Figure 2），且仅 SFT 不 RL 时 High / Medium 档会退化。</li>
+      <li>笔记写「答案区检测到 Wait、Let me think…就给予负奖励」，原文还列了 Actually、Alternatively、However 等过渡词，且未泄漏时给 +0.5（不是 0）。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   交互：按 Eq. 3 / Eq. 4 / Eq. 5 计算模式奖励
+   ============================================================ */
+(function () {
+  var btnBox = document.getElementById('mode-btns');
+  var rangLenMin = document.getElementById('lenmin');
+  var rangLen = document.getElementById('len');
+  var rangLenMax = document.getElementById('lenmax');
+  var rangLeak = document.getElementById('leak');
+  if (!btnBox || !rangLenMin || !rangLen || !rangLenMax || !rangLeak) return;
+
+  var rwMode = document.getElementById('rw-mode');
+  var rwBody = document.getElementById('rw-body');
+  var leakLabel = document.getElementById('leak-v');
+  if (!rwMode || !rwBody || !leakLabel) return;
+
+  // 逐字取自 §4.1 与 Eq. 3：α(high)=0.0, α(med)=0.5, α(low)=1.0；R_leak ∈ {-0.5, +0.5}
+  var ALPHA = { 0: 0.0, 1: 0.5, 2: 1.0 };
+  var MODE_NAME = { 0: 'High', 1: 'Medium', 2: 'Low' };
+  var R_LEAK = { 0: 0.5, 1: -0.5 };
+
+  var mode = 1;
+  var taskOk = 1;
+
+  function fmt4(x) {
+    // 保留 4 位小数，并统一处理 -0
+    var s = Math.round(x * 10000) / 10000;
+    if (Object.is(s, -0) || s === 0) s = 0;
+    return s.toFixed(4);
+  }
+
+  function clampLen() {
+    var a = parseFloat(rangLenMin.value);
+    var b = parseFloat(rangLen.value);
+    var c = parseFloat(rangLenMax.value);
+    if (a > c) {
+      // len_min 超过 len_max：把 len_max 推上去
+      rangLenMax.value = a;
+      c = a;
+    }
+    return { min: a, max: c, len: b };
+  }
+
+  function compute() {
+    var L = clampLen();
+    var denom = L.max - L.min;
+    var lambda;
+    if (denom <= 0) {
+      // 组内所有输出等长：λ 公式无定义，视为中性 0
+      lambda = 0;
+    } else {
+      lambda = 0.5 - (L.len - L.min) / denom;
+    }
+    var rLen = taskOk === 1 ? lambda : Math.min(0, lambda);
+    var rLeak = R_LEAK[parseInt(rangLeak.value, 10) ? 1 : 0];
+    var alpha = ALPHA[mode];
+    var total = (taskOk === 1 ? 1 : 0) + alpha * rLen + rLeak;
+    return {
+      min: L.min, max: L.max, len: L.len, denom: denom, lambda: lambda,
+      rLen: rLen, rLeak: rLeak, alpha: alpha, total: total
+    };
+  }
+
+  function render() {
+    var r = compute();
+    document.getElementById('v-lenmin').textContent = r.min;
+    document.getElementById('v-len').textContent = r.len;
+    document.getElementById('v-lenmax').textContent = r.max;
+    document.getElementById('lenmin-v').textContent = r.min;
+    document.getElementById('len-v').textContent = r.len;
+    document.getElementById('lenmax-v').textContent = r.max;
+    leakLabel.textContent = r.rLeak < 0 ? '有（−0.5）' : '无（+0.5）';
+    rwMode.textContent = MODE_NAME[mode] + '（α = ' + r.alpha.toFixed(1) + '）';
+
+    var denomTxt = r.denom > 0 ? '(len − len<sub>min</sub>) / (len<sub>max</sub> − len<sub>min</sub>) = ' +
+      (r.len - r.min) + ' / ' + r.denom : '无定义（组内等长）';
+    var html = '';
+    html += '<div>λ = 0.5 − ' + denomTxt + ' = <strong>' + fmt4(r.lambda) + '</strong></div>';
+    html += '<div>R<sub>length</sub> = ' + (r.rLen === r.lambda ? 'λ' : 'min(0, λ)') + ' = <strong>' + fmt4(r.rLen) + '</strong></div>';
+    html += '<div>R<sub>leak</sub> = <strong>' + (r.rLeak > 0 ? '+' : '') + r.rLeak.toFixed(1) + '</strong></div>';
+    html += '<div>R<sup>(m)</sup> = ' + (taskOk === 1 ? '1' : '0') + ' + ' + r.alpha.toFixed(1) + ' × ' + fmt4(r.rLen) +
+            ' + (' + (r.rLeak > 0 ? '+' : '') + r.rLeak.toFixed(1) + ') = <strong>' + fmt4(r.total) + '</strong></div>';
+    // 同一组参数下的对比：三档总奖励
+    var cmp = '';
+    if (r.denom > 0 && taskOk === 1) {
+      var parts = [];
+      for (var k = 0; k < 3; k++) {
+        var t = 1 + ALPHA[k] * r.rLen + r.rLeak;
+        parts.push(MODE_NAME[k] + ' ' + fmt4(t) + (k === mode ? '（当前）' : ''));
+      }
+      cmp = '<div style="margin-top:6px">同一参数三档对照：' + parts.join(' · ') + '</div>';
+    } else if (taskOk === 0) {
+      cmp = '<div style="margin-top:6px" class="warn">任务错误时 R<sub>length</sub> = min(0, λ)，正确与否不同的样本拿不到长度加成的差距。</div>';
+    }
+    rwBody.innerHTML = html + cmp;
+  }
+
+  btnBox.querySelectorAll('.rule-btn').forEach(function (b) {
+    b.addEventListener('click', function () {
+      btnBox.querySelectorAll('.rule-btn').forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      mode = parseInt(b.dataset.mode, 10);
+      // 用 data-alpha 校验常量与 §4.1 一致
+      var a = parseFloat(b.dataset.alpha);
+      if (a !== ALPHA[mode]) { ALPHA[mode] = a; }
+      render();
+    });
+  });
+
+  document.querySelectorAll('.act[data-task]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.querySelectorAll('.act[data-task]').forEach(function (x) {
+        x.classList.remove('primary');
+      });
+      b.classList.add('primary');
+      taskOk = parseInt(b.dataset.task, 10);
+      render();
+    });
+  });
+
+  [rangLenMin, rangLen, rangLenMax, rangLeak].forEach(function (el) {
+    el.addEventListener('input', render);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

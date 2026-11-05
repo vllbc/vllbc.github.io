@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning When to Plan · 每步都规划反而更差：让智能体自己学会何时规划</title>
+<meta name="description" content="ReAct 式的「每步先规划」在长程任务上既贵又差。论文把「何时规划」写成收益减成本，并用 SFT 启动 + PPO 让 8B 模型学会动态规划：Crafter 得分 0.387 超过 70B 零样本的 0.379。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页微调：只在交互台内调整布局，不复制 base.css */
+.sim .readout{margin-top:14px}
+.ctrl-note{font-size:11.5px;color:var(--text-soft);margin-top:3px;font-family:"JetBrains Mono",monospace}
+.gap-badge{
+  display:inline-block;font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;
+  padding:2px 8px;border-radius:6px;background:var(--accent-soft);color:var(--accent-deep);
+}
+.plan-badge{
+  display:inline-block;font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;
+  padding:2px 8px;border-radius:6px;background:var(--bg-soft);color:var(--text-muted);border:1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Learning When to Plan</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心框架</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent 规划 · arXiv 2025</span>
+  <h1>Learning When to Plan：每步都规划反而更差，让智能体自己学会「何时该想」</h1>
+  <p class="hero-sub">
+    ReAct 把<strong>「动手前先想」</strong>写死在每一轮循环里。论文在 Crafter / POGS 上的实验显示：零样本下每步都规划既不省钱也更差，存在一个中间的最优规划频率。
+    做法是把「何时规划」写成一次<strong>收益减成本的决策</strong>，再用「SFT 启动 + PPO 微调」把这项元认知能力教给 8B 模型。
+    代价是必须依赖教师的示范数据，且只在两个回合制环境里验证过。
+  </p>
+  <div class="meta">
+    <span>Paglieri, Cupiał, Cook, Piterbarg, Tuyls, Grefenstette, Foerster, Parker-Holder, Rocktäschel · UCL / Oxford / NYU / Princeton 等</span>
+    <a href="https://arxiv.org/abs/2509.03581" target="_blank" rel="noopener">原文 arXiv 2509.03581 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    常见的 agent 框架要么<strong>每步都想</strong>（ReAct 式「总是规划」），要么<strong>从来不想</strong>（只输出动作）。论文指出两者都次优：过度重规划会让智能体在子目标之间来回摇摆，论文用 <em>C<sub>noise</sub></em>（不稳定性成本）描述它。
+  </p>
+  <p>
+    零样本实验里，性能随规划频率先升后降，形成一个<em>「金发姑娘区」</em>。在 Crafter 上 70B 模型规划「每 4 步一次」拿到 0.379，比「从不规划」0.343 和「总是规划」0.349 都高。
+  </p>
+  <p>
+    方法只有两步：先用教师模型生成 1,024 条<strong>带 &lt;plan&gt; 的轨迹</strong>做 SFT，再用 PPO 在环境里微调。关键是 SFT 不能省——直接对基座做 RL 并鼓励它规划，得分会<strong>掉到 0.210</strong>，比不规划的 0.274 还低。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">0.387</div>
+      <div class="k">8B SFT+RL 动态规划在 Crafter 的得分<br>超过 70B 零样本峰值 0.379</div>
+    </div>
+    <div class="metric">
+      <div class="v">−85%</div>
+      <div class="k">输出 token 相对 70B 最佳配置<br>1,714 vs 11,510</div>
+    </div>
+    <div class="metric">
+      <div class="v">0.210</div>
+      <div class="k">跳过 SFT、直接 RL 学会员（Base+RL 动态）得分<br>比不规划还低</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>「总是规划」和「从不规划」都不对：存在一个中间的最优频率</h2></div>
+  <p class="sec-sub">读完这节应知道：为什么把规划频率钉死会同时付出「钱」和「性能」两笔账。</p>
+
+  <p>推理模型的经验是「多想一点、答得更好」。但把一个单轮问答换成<strong>长程序贯决策</strong>，这条单调规律就不成立了。智能体每一步都在环境里行动，环境也在变；一个五步前写下的计划，跑到第三步可能已经过期。</p>
+
+  <p>于是有人把规划塞进每一轮循环——这正是 ReAct 的做法：每一步都先写一段自然语言思考，再挑一个动作。论文认为这带来两类代价：</p>
+
+  <ul>
+    <li><strong>钱：</strong>每一步都产出一整段计划文本。在 Crafter 上，「总是规划」的 70B 智能体平均生成 <code>38,836</code> 个 token，而「每 4 步规划一次」只要 <code>11,510</code> 个。</li>
+    <li><strong>性能：</strong>频繁重规划会让计划与计划相互冲突，智能体在子目标之间摇摆、回溯变多。论文把它抽象成<strong>不稳定性成本</strong> <code>C<sub>noise</sub></code>：规划越频繁、计划质量越低，这项隐性成本越大。</li>
+  </ul>
+
+  <p>在 POGS 环境里，论文用「访问了前两步所在节点」的<strong>回溯次数</strong>来量化这种不稳定（Figure 6）：「总是规划」的智能体回溯最多（柱高约 <code>7</code>），成功率也低于每 3–4 步规划一次的智能体；而「从不规划」的回溯同样偏高（约 <code>5.6</code>），只是原因不同——它根本没有方向。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心前提</span><h4>两个极端都差，中间最好</h4></div>
+    <p>问题由此变成一个<strong>时间维度上的算力分配问题</strong>：不是「怎么规划」，而是「在一条长轨迹的第几步、因为什么才值得花 token 去规划」。论文称之为 dynamic planning。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成路线：固定频率的提示词学不会，外部触发又绕开了模型本身</h2></div>
+  <p class="sec-sub">这一节给出对照：为什么「提示模型学会何时规划」行不通，以及论文和已有工作在哪一刀切分。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>固定频率规划</h4></div>
+      <p>不改权重，只改系统提示词：让模型每 k 步（k = 1, 2, 4, 8 …）写一次计划，其余步只输出动作；或干脆从不规划。</p>
+      <p><strong>发现问题：</strong>论文试过直接提示「只在必要时规划」。模型很少能稳定理解这种抽象指令，<strong>总是退化成「总是规划」或「从不规划」</strong>。零样本里因此根本无法给出一个真正的动态规划基线。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>外部中介 / 行为克隆</h4></div>
+      <p>另一类工作用一个独立的「中介策略」决定何时调用外部规划工具，或者用 SFT 去模仿已有的动态规划数据。</p>
+      <p><strong>论文的切分：</strong>这些方案把「何时」交给出模型之外的东西。论文坚持用一个<strong>单体 LLM</strong>，不加任何门控模块，让模型自己在输出里决定要不要写 <code>&lt;plan&gt;</code>。</p>
+    </div>
+  </div>
+
+  <p>这也是为什么论文要先花一节论证「金发姑娘区」：如果提示词能教会模型择时，剩下的就只是调一个提示词；正因为教不会，才必须用「先示范、再强化」来学习这个元认知能力。</p>
+</section>
+
+<!-- ================= 03 核心框架 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把「何时规划」写成一次投资决策：预期收益 &gt; 成本时才出手</h2></div>
+  <p class="sec-sub">全文最核心的一行是下面的不等式；其余的工程要么在估计左边，要么在惩罚右边。</p>
+
+  <h3>规划优势 vs 规划成本</h3>
+  <p>论文把环境建模为 POMDP ⟨S, A, T, R, O, γ⟩。在时刻 t，智能体手里有一份旧计划 <code>p<sub>t−1</sub></code>；<strong>规划优势</strong>定义为：换成一份新计划 <code>p<sub>t</sub></code> 后，预期未来回报的提升。</p>
+
+  <div class="eq">
+    A<sub>plan</sub>(c<sub>t</sub>) = 𝔼<sub>p<sub>t</sub> ~ ψ<sub>θ</sub>(·|c<sub>t</sub>, d<sub>t</sub>=1)</sub> [ V<sup>π<sub>θ</sub></sup>(c<sub>t</sub>, p<sub>t</sub>) − V<sup>π<sub>θ</sub></sup>(c<sub>t</sub>, p<sub>t−1</sub>) ]
+  </div>
+  <div class="eq-cap">左侧只在 d<sub>t</sub>=1（决定规划）时计算：新计划到底让价值提升了多少</div>
+
+  <p>右边的成本被拆成三项：</p>
+
+  <div class="eq">
+    C<sub>plan</sub> = <span class="hl-c">C<sub>tokens</sub></span> + <span class="hl-a">C<sub>latency</sub></span> + <span class="hl-b">C<sub>noise</sub></span>
+    &nbsp;&nbsp;，&nbsp;&nbsp;
+    C<sub>tokens</sub> = k<sub>tokens</sub> · |p<sub>t</sub>|
+  </div>
+  <div class="eq-cap">tokens 成本 = 单价 × 计划长度；延迟成本在回合制环境里约等于 0；不稳定性成本 = k<sub>noise</sub> · f<sub>p</sub> · (1 − Q̄<sub>p</sub>)，即频率 × (1 − 平均计划质量)</div>
+
+  <p>三项里只有 <code>C<sub>tokens</sub></code> 会在训练里被<strong>显式扣掉</strong>。<code>C<sub>noise</sub></code> 从不显式计算，论文的论证是：糟糕的频繁规划会自然拉低任务奖励，于是被 RL 目标隐式惩罚。这个取舍后面会变成一条重要的边界（见 07）。</p>
+
+  <h3>三条策略只是「一个模型的三种读法」</h3>
+  <p>论文把行为拆成决策策略 φ<sub>θ</sub>（要不要规划）、规划策略 ψ<sub>θ</sub>（写什么）、执行策略 π<sub>θ</sub>（做什么动作）。三者<strong>不是三个网络</strong>，而是同一个 LLM 输出的不同片段：</p>
+
+  <div class="eq">
+    p<sub>t</sub> = d<sub>t</sub> · ψ<sub>θ</sub>(p<sub>t</sub> | c<sub>t</sub>, p<sub>t−1</sub>) + (1 − d<sub>t</sub>) · p<sub>t−1</sub>
+  </div>
+  <div class="eq-cap">d<sub>t</sub>=1 就换新计划，d<sub>t</sub>=0 就沿用旧计划；d<sub>t</sub> 在实现中就是「这次输出开头是不是 &lt;plan&gt;」</div>
+
+  <h3>自己动手：在两条成本上找一个甜点区</h3>
+  <p>下面是一个最小时的代价模型，用来单独感受「token 成本」和「不稳定成本」各自如何影响最优频率。横轴是规划频率 f（每 1/f 步规划一次）。模型假设：收益随覆盖度 1 − (1−f)<sup>h</sup> 饱和增长（h 为单份计划的有效视野），token 开销随 f 线性增加，不稳定成本用 f(1−f) 的单峰形近似。拖动滑块改变 α / κ，观察最优频率如何移动。</p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>α 每步规划额外开销 <span class="v" id="alpha-v">0.40</span></label>
+        <input type="range" id="alpha" min="0" max="1" step="0.05" value="0.4">
+        <div class="ctrl-note">α = 每步多花的 token / 每步的游戏进度上限</div>
+      </div>
+      <div class="ctrl">
+        <label>κ 不稳定成本系数 <span class="v" id="kappa-v">0.30</span></label>
+        <input type="range" id="kappa" min="0" max="1" step="0.05" value="0.3">
+        <div class="ctrl-note">κ 放大「频繁 × 计划过期」造成的摇摆损失</div>
+      </div>
+    </div>
+
+    <div class="slots s5" id="freq-slots"></div>
+    <div class="actions">
+      <button class="act primary" id="sim-best" type="button">标出当前最优频率</button>
+      <button class="act ghost" id="sim-reset" type="button">恢复默认</button>
+    </div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前设定</div>
+      <div id="sim-msg">默认 α=0.40、κ=0.30 时，拐点出现在每 2 到每 4 步之间；把 α 调大，过度规划会被迅速压下去。</div>
+    </div>
+  </div>
+
+  <div class="eq">
+    Score(f) = <span class="hl-c">B<sub>max</sub> · (1 − (1−f)<sup>h</sup>)</span> − <span class="hl-a">α · f · B<sub>max</sub></span> − <span class="hl-b">κ · B<sub>max</sub> · 4f(1−f)</span>
+  </div>
+  <div class="eq-cap">三色分别对应收益、token 开销、不稳定成本（用 f(1−f) 的单峰形近似，峰值在 f=0.5）</div>
+
+  <p>取 B<sub>max</sub>=1、h=3，默认 α=0.4、κ=0.3，逐项手算：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>频率 f</th><th style="text-align:right">收益</th><th style="text-align:right">− token 开销</th><th style="text-align:right">− 不稳定成本</th><th style="text-align:right">得分</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0（从不）</td><td class="num">0.000</td><td class="num">0.000</td><td class="num">0.000</td><td class="num">0.000</td></tr>
+        <tr><td>1/16</td><td class="num">0.176</td><td class="num">0.025</td><td class="num">0.070</td><td class="num">0.081</td></tr>
+        <tr><td>1/8</td><td class="num">0.330</td><td class="num">0.050</td><td class="num">0.131</td><td class="num">0.149</td></tr>
+        <tr class="best"><td>1/4</td><td class="num">0.578</td><td class="num">0.100</td><td class="num">0.225</td><td class="num">0.253</td></tr>
+        <tr><td>1/2</td><td class="num">0.875</td><td class="num">0.200</td><td class="num">0.300</td><td class="num">0.375</td></tr>
+        <tr><td>1（每步）</td><td class="num">1.000</td><td class="num">0.400</td><td class="num">0.000</td><td class="num">0.600</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sec-sub" style="margin-top:6px">注意最后一行：在这个最简式里 κ 项在 f=1 处恰好归零，「每步」反而不是最差。这是模型的简化，不代表论文结论——论文里「每步」受的是 C<sub>noise</sub>。拉高 α 会惩罚过度规划，可以把「每步」压下去。</p>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>SFT 负责「会写计划」，PPO 负责「学会挑时机」，缺了前者 PPO 会跑偏</h2></div>
+  <p class="sec-sub">这一节回答工程问题：为什么要先 SFT，以及 RL 的奖励长什么样。</p>
+
+  <h3>第一步：用教师数据做启动</h3>
+  <ul>
+    <li><strong>教师：</strong>Llama-3.3-70B-Instruct，在 Crafter 里生成 <code>1,024</code> 条轨迹。</li>
+    <li><strong>多样性：</strong>每条轨迹的规划频率 K 从 U[2, 12] 里均匀采样，并轮换 <code>16</code> 种不同风格的规划提示（子目标、里程碑、短期序列、高层战略……）。</li>
+    <li><strong>格式：</strong>该规划时输出 <code>&lt;plan&gt;…&lt;/plan&gt; [Action]</code>，不该规划时只输出 <code>[Action]</code>；这就是动态规划的训练目标。</li>
+    <li><strong>学生：</strong>Llama-3.1-8B-Instruct，这一阶段只做动作预测，不做 world modeling——附录 C.1 发现额外建模环境会让 KL 更大、遗忘更多。</li>
+  </ul>
+
+  <h3>第二步：PPO 微调</h3>
+  <p>优化目标把任务奖励和规划 token 成本放在同一条回报里：</p>
+
+  <div class="eq">
+    θ<sup>*</sup> = arg max<sub>θ</sub> 𝔼<sub>τ~θ</sub> [ Σ<sub>t=0</sub><sup>H</sup> γ<sup>t</sup> ( R<sub>task</sub>(s<sub>t</sub>, a<sub>t</sub>) − <span class="hl-c">d<sub>t</sub> · C<sub>tokens,t</sub></span> ) ]
+  </div>
+  <div class="eq-cap">只有真的规划（d<sub>t</sub>=1）才扣 token 成本；延迟与不稳定性不上奖，靠「规划不好 → 奖励低」被隐式惩罚</div>
+
+  <p>工程上：actor 8B + critic 1B（Llama-3.3），RSLoRA 分别挂在 actor 与 critic 上；用 vLLM 托管权重、BALROG 接环境、Ray 做数据收集，每个 epoch 后把权重广播回 vLLM。实验在 <code>8×H100</code> 上跑，其中 6 张训、2 张采样，一个实验通常 <code>24–48</code> 小时。超参：KL 系数 0.05、rollout 长度 16、历史截断到 16 条观测、max output 200 tokens。</p>
+
+  <p>一个反直觉的工程选择：论文<strong>放弃了显式奖励塑形</strong>（比如惩罚无效动作、过长回复、过密规划）。他们发现这些 shaping 往往把智能体逼成「完全不规划」。最终只保留 token 成本一项，让「金发姑娘」频率自己浮现。</p>
+</section>
+
+<!-- ================= 05 流程 / 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>运行时只有一个模型：看它输出开头有没有 &lt;plan&gt; 就知道它决定要不要想</h2></div>
+  <p class="sec-sub">这一节把「决策—规划—执行」三个策略落到一次生成里（对应论文 Figure 2）。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 384" role="img" aria-label="动态规划智能体的单步流程：观测与历史进入单体 LLM，决定是否输出 plan 块，再由 BALROG 解析出动作与环境交互">
+      <defs>
+        <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+
+      <!-- 输入 -->
+      <rect x="10" y="150" width="140" height="96" rx="10" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <foreignObject x="18" y="158" width="124" height="80">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;font-size:12.5px;line-height:1.4;color:#1A1816">
+          <div style="font-family:'JetBrains Mono',monospace;font-weight:600;font-size:12px;margin-bottom:6px">c_t</div>
+          当前观测 o_t<br>
+          历史（最多 16 条）<br>
+          上一份计划 p_(t−1)
+        </div>
+      </foreignObject>
+
+      <!-- 单体 LLM -->
+      <rect x="196" y="120" width="220" height="156" rx="14" fill="#FFFFFF" stroke="#C04E2D" stroke-width="2"></rect>
+      <foreignObject x="204" y="128" width="204" height="140">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;font-size:12.5px;line-height:1.4;color:#1A1816;text-align:center">
+          <div style="font-weight:700;font-size:14px;margin-bottom:4px">单体 LLM（8B）</div>
+          <div style="color:#7A2E16;font-size:11.5px;margin-bottom:8px">一次生成，三种策略</div>
+          <div style="text-align:left;background:#F8EFDC;border-radius:8px;padding:7px 9px">
+            <b>φ</b> 决策：开头写不写 &lt;plan&gt;<br>
+            <b>ψ</b> 规划：写出计划内容<br>
+            <b>π</b> 执行：给出 [Action]
+          </div>
+        </div>
+      </foreignObject>
+
+      <!-- 分支 -->
+      <rect x="470" y="70" width="200" height="88" rx="10" fill="#F4DCD0" stroke="#C04E2D"></rect>
+      <foreignObject x="478" y="78" width="184" height="72">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;font-size:12px;line-height:1.4;color:#1A1816">
+          <div style="font-weight:600;margin-bottom:3px">d_t = 1：规划</div>
+          <code style="font-family:'JetBrains Mono',monospace;font-size:11px">&lt;plan&gt;…&lt;/plan&gt; [Action]</code><br>
+          <span style="color:#7A2E16">扣 d_t·C_tokens</span>
+        </div>
+      </foreignObject>
+
+      <rect x="470" y="238" width="200" height="88" rx="10" fill="#DDE9EE" stroke="#2E5A6B"></rect>
+      <foreignObject x="478" y="246" width="184" height="72">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;font-size:12px;line-height:1.4;color:#1A1816">
+          <div style="font-weight:600;margin-bottom:3px">d_t = 0：沿用</div>
+          <code style="font-family:'JetBrains Mono',monospace;font-size:11px">[Action]</code><br>
+          <span style="color:#2E5A6B">不扣 token，继续用 p_(t−1)</span>
+        </div>
+      </foreignObject>
+
+      <!-- 解析 -->
+      <rect x="704" y="150" width="146" height="96" rx="10" fill="#FFFFFF" stroke="#5A4A8C"></rect>
+      <foreignObject x="712" y="158" width="130" height="80">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Inter,'Noto Sans SC',sans-serif;font-size:12px;line-height:1.4;color:#1A1816;text-align:center">
+          <div style="font-weight:600;color:#5A4A8C;margin-bottom:4px">BALROG</div>
+          解析输出<br>
+          执行 [Action]<br>
+          更新历史 / 计划
+        </div>
+      </foreignObject>
+
+      <!-- 连线 -->
+      <line x1="150" y1="198" x2="192" y2="198" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arr)"></line>
+      <path d="M416,168 L442,168 L442,114 L466,114" fill="none" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arr)"></path>
+      <path d="M416,228 L442,228 L442,282 L466,282" fill="none" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arr)"></path>
+      <path d="M670,114 L688,114 L688,150" fill="none" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arr)"></path>
+      <path d="M670,282 L688,282 L688,250" fill="none" stroke="#8C857B" stroke-width="1.6" marker-end="url(#arr)"></path>
+      <!-- 回环 -->
+      <path d="M777,246 L777,336 L80,336 L80,250" fill="none" stroke="#8C857B" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arr)"></path>
+      <foreignObject x="350" y="322" width="160" height="20">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6B6660;text-align:center;background:#FFFFFF;padding:0 6px">进入下一 timestep</div>
+      </foreignObject>
+    </svg>
+    <figcaption>
+      图 1：动态规划智能体的单步流程（按论文 Figure 2 重绘）。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>没有门控模块。</strong>论文明确说三个策略不是独立架构组件，只是对同一段输出的概念拆分；d<sub>t</sub> 的实现就是「生成是否以 &lt;plan&gt; 开头」。</li>
+          <li><strong>计划进入后续上下文。</strong>一旦输出新计划，它会被 BALROG 放进之后的上下文；没规划时沿用旧计划，直到被替换。</li>
+          <li><strong>历史有上限。</strong>为控制上下文，提供给智能体的历史最多保留 16 条观测。</li>
+          <li><strong>计划会过期。</strong>论文用 plan drift 描述：高层计划更稳但指令性弱，低层计划更锋利但很快失效；环境动荡时旧计划可能瞬间作废。这正是需要「重规划」的来源。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>两阶段训练的 8B 模型，以小博大超过了 70B 零样本</h2></div>
+  <p class="sec-sub">所有数字取自附录 C.7 的 Table 3 与 C.8 的 Table 4（Crafter，100 个评估种子）。</p>
+
+  <h3>同一环境里的对比：奖励与 token</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>规模</th><th>策略</th><th style="text-align:right">奖励 ↑</th><th style="text-align:right">输出 token</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>零样本</td><td>70B</td><td>从不规划</td><td class="num">0.343</td><td class="num">559.6</td></tr>
+        <tr><td>零样本</td><td>70B</td><td>每 4 步</td><td class="num">0.379</td><td class="num">11,510.9</td></tr>
+        <tr><td>零样本</td><td>70B</td><td>总是规划</td><td class="num">0.349</td><td class="num">38,836.2</td></tr>
+        <tr><td>SFT</td><td>8B</td><td>从不规划</td><td class="num">0.286</td><td class="num">991.5</td></tr>
+        <tr><td>SFT</td><td>8B</td><td>动态</td><td class="num">0.343</td><td class="num">1,869.9</td></tr>
+        <tr><td>Base+RL</td><td>8B</td><td>从不规划</td><td class="num">0.274</td><td class="num">505.1</td></tr>
+        <tr><td>Base+RL</td><td>8B</td><td>动态</td><td class="num">0.210</td><td class="num">10,818.7</td></tr>
+        <tr><td>SFT+RL</td><td>8B</td><td>从不规划</td><td class="num">0.298</td><td class="num">878.0</td></tr>
+        <tr class="best"><td>SFT+RL</td><td>8B</td><td>动态</td><td class="num">0.387</td><td class="num">1,714.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>三个反直觉的读法</h3>
+  <ul>
+    <li><strong>跳过 SFT 直接教 RL 规划，比不规划更差。</strong>Base+RL 动态拿到 0.210，低于同配置不规划的 0.274，而且 token 反而飙升到 10,818.7。论文的解释是：没有 SFT 提供的结构化示范，基座模型在 RL 里学不会「计划能帮上忙」，生成计划只是额外开销。</li>
+    <li><strong>动态规划同时更准也更省。</strong>SFT+RL 动态（0.387 / 1,714）相对 SFT 前身（0.343 / 1,870）奖励更高、token 更少；相对 70B 的最佳配置（0.379 / 11,510）token 少 <code>85%</code>。</li>
+    <li><strong>规划质量随 RL 提升。</strong>用 GPT-5 mini 做 LLM-as-a-judge（100 个种子）：SFT+RL 的计划完成率 0.20（SFT 0.16），因环境变化而进行有效重规划的比例 0.41（SFT 0.35）。</li>
+  </ul>
+
+  <details>
+    <summary>为什么「总是规划」的 70B 反而不如「每 4 步」？<span class="sum-sub">对照 C<sub>noise</sub> 与过思考的解释</span></summary>
+    <div class="details-body">
+      <p>论文给了两条互相补充的解释：一是 instability cost（<code>C<sub>noise</sub></code>）——过密的计划互相冲突，智能体反复改主意；POGS 的回溯统计是最直接的证据，「总是规划」回溯最多。二是「过思考」（Sui et al., 2025）与长上下文稀释注意力：每一步都写一段计划，关键信息反而被淹没。</p>
+      <p>这个效应在 Gemini 2.5 Flash 上也复现了，但形态不同：在 POGS 这种对强模型而言太简单的环境里，多加计划甚至不如规划一次。论文由此推断，「金发姑娘区」的位置依赖模型能力与环境难度。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它教的是「何时写计划」，不是「如何推理」：范围窄、依赖教师、两项成本没有真正优化</h2></div>
+  <p class="sec-sub">读完这节应知道：哪些结论论文撑得住，哪些只是隐式假设。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>只在两个回合制环境、两个模型规模上验证</h4></div>
+    <p>POGS 是自定义的合成图搜索，Crafter 是 2D 网格生存游戏；训练用 8B，零样本评测用 70B 与 Gemini 2.5 Flash。论文自己在 limitations 里承认：最优分配策略如何随模型规模变化，以及能否推广到更开放的领域（网页、代码、机器人），都还没测。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>SFT 启动是硬依赖，教师的质量就是上限</h4></div>
+    <p>数据来自一个「固定频率规划」的 70B 教师，教师本身不是动态规划的最优解。没有它，Base+RL 动态掉到 0.210。这意味着方法的起点取决于能否拿到结构良好的 <code>&lt;plan&gt;</code> 示范，换新任务就要重新造数据。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>C<sub>latency</sub> 与 C<sub>noise</sub> 只是概念上的，没有显式优化</h4></div>
+    <p>回合制环境里延迟成本近似为 0；不稳定性成本只通过「奖励变低」间接惩罚，没有任何一项奖励项直接对应它。附录 C.3 还显示，训练足够久后加大 token 惩罚会明显降低显式规划频率，而得分几乎不变——说明部分推理被「内化」进权重，此时显式计划对自主表现并非必需，但论据是「没有显式计划就无法被人引导」。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>自主运行仍不能通关 Crafter</h4></div>
+    <p>论文说：计算约束下，没有任何自主运行的智能体完整通关。挖钻石通关是<strong>人类给出高层计划</strong>之后实现的（论文记录约 20 次尝试）。这既是 steerability 的正面结果，也说明纯自治的上限仍有距离；附录 D 还给了失败案例：计划正确，但没有确认熔炉可达就动手制作。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>这篇论文解决的是「在已会规划的前提下，何时才值得规划」，并把这件事收敛成一个可训练、可被引导的元认知策略；它没有声称解决「怎么规划得更好」，也没有在开放域上证明有效性。</strong></p>
+</section>
+
+<footer>
+  <div>Learning When to Plan: Efficiently Allocating Test-Time Compute for LLM Agents</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.03581" target="_blank" rel="noopener">arXiv:2509.03581</a>（v3，2026-02）· Davide Paglieri 等<br>
+    笔记：<a href="/learning-when-to-planefficiently-allocating-test-time-compute-for-llm-agents/">Learning When to Plan：Efficiently Allocating Test-Time Compute for LLM Agents</a><br>
+    说明：笔记里提到「Crafter 中 always 约 0.33、每 4 步接近 0.37」，但原文图 1 是扣除了规划成本的归一化得分，Table 3 的对应数值为 always 0.349、每 4 步 0.379；以原文为准。笔记未展开的 C<sub>tokens</sub> / C<sub>latency</sub> / C<sub>noise</sub> 三项拆分、Table 3 与 Table 4、KL 敏感性与成本惩罚消融，本页已补上。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 频率—代价模拟器
+   公式：Score(f) = Bmax*(1-(1-f)^h) - alpha*f*Bmax - kappa*Bmax*4f(1-f)
+   手算（默认 alpha=0.4, kappa=0.3, h=3, Bmax=1）：
+     f=0      -> 0
+     f=1/16   -> 0.176 - 0.025 - 0.070 = 0.081
+     f=0.25   -> 0.578 - 0.100 - 0.225 = 0.253
+     f=0.5    -> 0.875 - 0.200 - 0.300 = 0.375
+     f=1      -> 1.000 - 0.400 - 0.000 = 0.600
+   ============================================================ */
+(function () {
+  var FREQS = [0, 1 / 16, 1 / 8, 1 / 4, 1 / 2, 1];
+  var LABELS = ['从不', '每16步', '每8步', '每4步', '每2步', '每步'];
+  var H = 3;
+  var BMAX = 1;
+
+  var alphaEl = document.getElementById('alpha');
+  var kappaEl = document.getElementById('kappa');
+  var alphaV = document.getElementById('alpha-v');
+  var kappaV = document.getElementById('kappa-v');
+  var slots = document.getElementById('freq-slots');
+  var msg = document.getElementById('sim-msg');
+  var bestBtn = document.getElementById('sim-best');
+  var resetBtn = document.getElementById('sim-reset');
+  if (!slots || !msg) return;
+
+  function score(f, a, k) {
+    if (f <= 0) return 0;
+    var benefit = BMAX * (1 - Math.pow(1 - f, H));
+    var cost = a * f * BMAX;
+    var noise = k * BMAX * 4 * f * (1 - f);
+    return benefit - cost - noise;
+  }
+
+  function render() {
+    var a = alphaEl ? parseFloat(alphaEl.value) : 0.4;
+    var k = kappaEl ? parseFloat(kappaEl.value) : 0.3;
+    if (alphaV) alphaV.textContent = a.toFixed(2);
+    if (kappaV) kappaV.textContent = k.toFixed(2);
+
+    var scores = FREQS.map(function (f) { return score(f, a, k); });
+    var bestIdx = 0;
+    for (var i = 1; i < scores.length; i++) {
+      if (scores[i] > scores[bestIdx]) bestIdx = i;
+    }
+
+    slots.innerHTML = '';
+    FREQS.forEach(function (f, idx) {
+      var card = document.createElement('div');
+      card.className = 'slot' + (scores[idx] < 0 ? '' : '');
+
+      var name = document.createElement('div');
+      name.className = 'slot-name';
+      name.textContent = LABELS[idx];
+
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.textContent = scores[idx].toFixed(3);
+
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var fill = document.createElement('i');
+      fill.className = 'b1';
+      var pct = Math.max(0, scores[idx]);
+      fill.style.width = Math.min(100, pct * 100) + '%';
+      bar.appendChild(fill);
+
+      card.appendChild(name);
+      card.appendChild(val);
+      card.appendChild(bar);
+      card.dataset.idx = String(idx);
+      slots.appendChild(card);
+    });
+
+    msg.innerHTML = '当前最优是 <strong>' + LABELS[bestIdx] + '</strong>（得分 ' + scores[bestIdx].toFixed(3) +
+      '）。α=' + a.toFixed(2) + ' 时，每步规划要付 ' + (a * 100).toFixed(0) +
+      '% 的收益上限作为开销；κ=' + k.toFixed(2) + ' 时，频率 0.5 附近的不稳定成本为 ' +
+      (k * 100).toFixed(0) + '%。';
+  }
+
+  if (alphaEl) alphaEl.addEventListener('input', render);
+  if (kappaEl) kappaEl.addEventListener('input', render);
+  if (bestBtn) {
+    bestBtn.addEventListener('click', function () {
+      var a = alphaEl ? parseFloat(alphaEl.value) : 0.4;
+      var k = kappaEl ? parseFloat(kappaEl.value) : 0.3;
+      var bestIdx = 0;
+      var bestScore = -Infinity;
+      FREQS.forEach(function (f, idx) {
+        var s = score(f, a, k);
+        if (s > bestScore) { bestScore = s; bestIdx = idx; }
+      });
+      var items = slots.querySelectorAll('.slot');
+      for (var i = 0; i < items.length; i++) {
+        if (i === bestIdx) items[i].classList.add('hit');
+        else items[i].classList.remove('hit');
+      }
+      msg.innerHTML = '当前设定下，最优频率是 <strong>' + LABELS[bestIdx] + '</strong>（模型得分 ' +
+        bestScore.toFixed(3) + '）。这是本页简化模型的输出，不是论文实测：论文实验里 70B 零样本的甜点区落在每 4 步附近。把 α 调大，最优值会左移。';
+    });
+  }
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      if (alphaEl) alphaEl.value = '0.4';
+      if (kappaEl) kappaEl.value = '0.3';
+      var items = slots.querySelectorAll('.slot');
+      for (var i = 0; i < items.length; i++) items[i].classList.remove('hit');
+      render();
+    });
+  }
+
+  render();
+})();
+
+/* ============================================================
+   2) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCPVerse · 工具越多，强 Agent 反而越准</title>
+<meta name="description" content="MCPVerse 用 65 个 MCP 服务器、552 个真实可执行工具和约 147k token 的工具 schema 构建评测基准，设置 Oracle / Standard / Max-Scale 三种模式，结果导向评分。多数模型工具变多就掉分，但 Claude-4-Sonnet、Qwen3-235B-2507、GLM-4.5 在 Standard 模式反而超过 Oracle。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.mode-sum{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0 14px}
+.mode-sum .slot-val{font-size:12.5px}
+.mini-note{font-size:12.5px;color:var(--text-soft);line-height:1.7}
+.flow-cap{font-size:12.5px;color:var(--text-soft);margin-top:-4px}
+@media (max-width:880px){.mode-sum{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MCPVerse</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#design">三层设计</a>
+      <a href="#modes">三种模式</a>
+      <a href="#pipeline">评测流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Benchmark · arXiv 2508.16260 · SenseTime</span>
+  <h1>MCPVerse：把 552 个真实工具一次性塞给模型，多数人掉分，强 Agent 反而涨</h1>
+  <p class="hero-sub">
+    现有工具调用基准要么用模拟工具、只校验「选对没选对」，要么靠检索器只挂几十个工具。
+    论文用 65 个 MCP 服务器、<strong>552 个真实可执行工具</strong>拼出约 <strong>147k token</strong> 的工具 schema，再用三种挂载模式控制工具规模。
+    结果：12 个模型里只有 3 个在工具更多时反而更准，其余全部下滑——尤其那些被 API 工具数上限逼着改用「提示词式函数调用」的模型。
+  </p>
+  <div class="meta">
+    <span>Fei Lei, Yibo Yang, Wenxiu Sun, Dahua Lin · SenseTime Research</span>
+    <a href="https://arxiv.org/abs/2508.16260" target="_blank" rel="noopener">arXiv 2508.16260 ↗</a>
+    <a href="https://github.com/hailsham/mcpverse" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    工具调用评测长期卡在「<strong>假工具</strong>」和「<strong>小工具箱</strong>」两个问题上：模拟计算器、模拟购物车只校验函数名和参数；就算工具库很大，也得靠检索器缩水到几十个。两者都测不出真实世界里「在几百个真 API 里找路」的能力。
+  </p>
+  <p>
+    论文的做法很直接：把 65 个真实 MCP 服务器、552 个工具全部挂上，schema 合计超过 <em>147k token</em>，并且<strong>刻意不放检索器</strong>；三种模式（Oracle 只给最少工具、Standard 给 32 个 MCP、Max-Scale 全给）作为变量控制。
+  </p>
+  <p>
+    评分只看最终结果：文本答案由 LLM 裁判判定语义一致，文件改动由脚本校验状态；时效性问题用脚本<strong>实时抓 ground truth</strong>。
+  </p>
+  <p>
+    最反直觉的发现：工具变多时 9 个模型下降，但 <strong>Claude-4-Sonnet、Qwen3-235B-2507、GLM-4.5</strong> 在 Standard 模式超过 Oracle——它们会把被卡住的路径换成工具箱里的另一条路。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">552</div>
+      <div class="k">真实可执行工具<br>65 个 MCP，0 个模拟工具（Table 1）</div>
+    </div>
+    <div class="metric">
+      <div class="v">147k</div>
+      <div class="k">工具 schema 总 token<br>超出多数模型的上下文与工具数上限</div>
+    </div>
+    <div class="metric">
+      <div class="v">+8.4</div>
+      <div class="k">Oracle→Standard 最大涨幅<br>Qwen3-235B-2507：44.8 → 53.2（Table 2）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>工具调用评测失真在两个地方：工具是假的，动作空间是小的</h2></div>
+  <p class="sec-sub">读完这节应明白：为什么「函数调用准确率」不等于「Agent 真的会干活」。</p>
+
+  <p>论文在引言里把现有基准的短板归为两类。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">问题一</span><h4>人工合成工具让「背模式」就能过关</h4></div>
+      <p>很多基准模拟计算器、简化版天气服务、假购物车，数据格式和交互方式跟生产系统差得很远。模型只要识别出表面套路就能拿分，而不是真的学会了规划与协调。</p>
+      <p>另一类虽然声称接入真实 API，但因为线上集成麻烦，<strong>并不真正执行</strong>，只校验「选中的工具名和参数对不对」，而不是交互的实际结果。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">问题二</span><h4>上下文限制逼出「检索器 + 几十个工具」</h4></div>
+      <p>就算列出了大量 API，受上下文长度所限，设计者一次只能挂一小部分，常常靠检索模块每次挑几十个相关工具。</p>
+      <p>这保证了 prompt 不爆，但也<strong>绕开了「在庞大复杂的解空间里导航」这个能力</strong>本身。</p>
+    </div>
+  </div>
+
+  <p>这里的核心区分是：<strong>「能在给定 5 个工具里挑对的」和「能在 552 个工具里自己找到路」是两种能力</strong>。前者可以被检索器、迷你工具箱保护住，后者只有在真实规模和真实失败（认证错误、返回格式异常、路由被堵）下才会暴露。MCPVerse 想测的是后者。</p>
+
+  <p>MCP（Model Context Protocol）在 2024 年作为开放标准由 Anthropic 提出，统一了工具接入方式，工业界快速出现大量 MCP 服务器——这给了「挂几百个真实工具」一个工程前提。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>此前最多只敢同时挂几十个工具，且大多不真正执行</h2></div>
+  <p class="sec-sub">这节看论文 Table 1 的横向对照：每个前作都缺了至少一列。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>基准</th>
+          <th>标注方式</th>
+          <th>支持 MCP</th>
+          <th>结果导向评分</th>
+          <th>实时 ground truth</th>
+          <th>可执行工具（总 / 真实 / 模拟）</th>
+          <th>单任务最大挂载工具数</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>MCPVerse</td><td>人工</td><td>✓</td><td>✓</td><td>✓</td><td>552 / 552 / 0</td><td class="num">552</td></tr>
+        <tr><td>BFCL-v3</td><td>人工</td><td>✗</td><td>✓</td><td>✗</td><td>76 / 0 / 76</td><td class="num">37</td></tr>
+        <tr><td>ToolBench</td><td>合成</td><td>✗</td><td>✗</td><td>✗</td><td>0 / 0 / 0</td><td class="num">17</td></tr>
+        <tr><td>τ-bench</td><td>合成</td><td>✗</td><td>✓</td><td>✗</td><td>28 / 0 / 28</td><td class="num">15</td></tr>
+        <tr><td>API-Bank</td><td>人工</td><td>✗</td><td>✓</td><td>✗</td><td>73 / 0 / 73</td><td class="num">8</td></tr>
+        <tr><td>ToolSandBox</td><td>人工</td><td>✗</td><td>✓</td><td>✗</td><td>34 / 0 / 34</td><td class="num">34</td></tr>
+        <tr><td>MCPBench</td><td>人工</td><td>✓</td><td>✓</td><td>✗</td><td>27 / 27 / 0</td><td class="num">10</td></tr>
+        <tr><td>MCP-RADAR</td><td>人工</td><td>✓</td><td>✓</td><td>✗</td><td>42 / 42 / 0</td><td class="num">42</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="mini-note">数据取自论文 Table 1。「真实」列是评估过程中可能被真正执行的工具数，「模拟」列是固定规则或模板返回的工具数。</p>
+
+  <p>可以读出三条：</p>
+  <ul>
+    <li><strong>真实执行的工具数，此前最多 42 个</strong>（MCP-RADAR），MCPVerse 直接是 552，差一个数量级。</li>
+    <li><strong>「实时 ground truth」只有 MCPVerse 有</strong>——航班、股价这类问题的答案每天都在变，静态标注的答案第二天就失效。</li>
+    <li>支持 MCP 的基准（MCPBench、MCP-RADAR）同时挂载的工具上限分别是 10 和 42，规模上与「真实工具生态」相比仍是玩具级别。</li>
+  </ul>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="design">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三层设计：真实工具池、人工任务、结果导向评分</h2></div>
+  <p class="sec-sub">MCPVerse 没有新式子，它的「方法」是三个互相咬合的设计决定。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">第一层</span><h4>工具池：65 MCP / 552 工具</h4></div>
+      <p>从 Smithery、mcp.so、ModelScope 等平台收集，按三条标准筛选：鼓励长期稳定的服务；尽量少依赖 API key；<strong>可自动评估</strong>（Gmail、Notion 这类难以自动判定的，可以只放进池里当干扰项）。</p>
+      <p class="mini-note">论文同时提醒：工具数会随时间波动，提供方可增删工具。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">第二层</span><h4>任务：250 个，2 类型 × 3 难度</h4></div>
+      <p>类型为信息检索（地理、金融、学术、热点新闻）与系统操作（命令行、数据库、文件）；难度 L1 = 1–2 步单工具，L2 ≈ 5 步，L3 &gt; 5 步、需多工具协作。</p>
+      <p class="mini-note">标注者（本科及以上）须保证：存在有效解、答案客观无歧义、贴合真实场景、不调工具解不出来。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">第三层</span><h4>评分：只看结果，分两种对齐</h4></div>
+      <p>不罚「偏离标准路径」。文本答案由 LLM 裁判判断语义等价；文件修改等状态变化由专用脚本校验（附录 D 给出 Q101 的脚本示例）。</p>
+    </div>
+  </div>
+
+  <h3>评分函数：一条二值判定</h3>
+  <div class="eq">
+    Ê&nbsp;=&nbsp;<span class="hl-a">G</span>(Q, D | T)&nbsp;&nbsp;&nbsp;&nbsp;
+    E(Ê, O) ∈ {0, 1}
+  </div>
+  <div class="eq-cap">任务 Q、候选数据文件 D、可用工具池 T；Agent G 产出结果 Ê 或文件状态改动；与 ground truth O 一致记 1</div>
+
+  <p>E(·) 的两种实例化：</p>
+  <ul>
+    <li><strong>文本类</strong>：把问题、参考答案、模型输出一起交给裁判模型，问「语义是否一致」，输出 <code>{"score": 1}</code> 或 <code>{"score": 0}</code>（附录 D 的 prompt 原文）。</li>
+    <li><strong>状态类</strong>：直接跑脚本检查环境。比如 Q101 要求目录里有 <code>alpha.txt</code>（内容 <code>Hello Alpha</code>）和 <code>beta.txt</code>（内容 <code>Hello Beta</code>），任何一项不符返回 False。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">容易被忽略的细节</span><h4>裁判模型是 QwQ-32B，不是 GPT-4o</h4></div>
+    <p>论文主实验用开源 QwQ-32B 做判定，附录 F 用 GPT-4o 复判：具体分数有差异（例如 Standard 模式 Claude-4-Sonnet 为 62.36 vs 61.26），但<strong>12 个模型的名次完全一致</strong>。这条是判断分数可信度的关键证据。</p>
+  </div>
+
+  <h3>评测管线刻意从简</h3>
+  <p>论文没有引入 ReAct、RolePlaying 之类复杂框架，理由是这些框架依赖大量 prompt 工程，会遮蔽模型自身能力。管线就是一个朴素的 agentic loop（见第 05 节），目标是测模型本身，而不是测某个框架。</p>
+</section>
+
+<!-- ================= 04 三种模式 ================= -->
+<section class="block" id="modes">
+  <div class="sec-head"><span class="sec-num">04</span><h2>三种挂载模式是整篇论文的自变量</h2></div>
+  <p class="sec-sub">同一个任务、同一套评分，唯一变化的是工具箱有多大——这就是「广阔动作空间是福是祸」的实验设计。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Oracle Mode</span><h4>只挂最少工具</h4></div>
+      <p>由标注者核实过的、解该题所需的最小工具集合。上下文长度随题而异。相当于传统评测的「喂到嘴边」。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Standard Mode</span><h4>32 MCP / 220+ 工具 / ≈44k token</h4></div>
+      <p>所有题的 Oracle 最小集取并集，目标是适配主流模型 64k 上下文，留约 20k 给提问与回答。</p>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="card" style="grid-column:1 / -1">
+      <div class="card-head"><span class="pill pa">Max-Scale Mode</span><h4>全部 65 MCP / 550+ 工具 / ≈140k token</h4></div>
+      <p>在 Standard 基础上加入全部 MCP。论文报告只有 Claude-4-Sonnet 与 Gemini-2.5-Pro 能完整跑完——但 Table 2 显示 Gemini-2.5-Pro 在 Max-Scale 用的是提示词式函数调用（带 ∗），而且它的 31.4 恰好等于 GPT-4o 在 Max-Scale 列中残留的那个数字，疑似排版错位，见第 06 节脚注。</p>
+    </div>
+  </div>
+
+  <p>还有两个现实约束也必须写进设计：<strong>API 工具数上限</strong>（GPT-4o / GPT-5 为 128，Gemini 为 512）和<strong>上下文长度</strong>（DeepSeek-V3 仅 64k）。工具数超限但上下文够的模型，被迫改用「提示词式函数调用」：把整份工具 schema 塞进 system prompt，让模型以 JSON 列表形式输出调用（附录 E 给出模板，并特别叮嘱「不要伪造函数返回」）。</p>
+
+  <div class="actions">
+    <button class="act primary" id="btn-all" type="button">全部模式</button>
+    <button class="act" id="btn-up" type="button">仅「工具变多反而更准」</button>
+    <button class="act" id="btn-pfc" type="button">仅看 ∗：提示词式调用</button>  </div>
+
+  <div class="sim">
+    <div class="mode-sum">
+      <div class="slot" id="slot-oracle">
+        <div class="slot-name">ORACLE SR</div>
+        <div class="slot-val" id="m-oracle">—</div>
+      </div>
+      <div class="slot" id="slot-standard">
+        <div class="slot-name">STANDARD SR</div>
+        <div class="slot-val" id="m-standard">—</div>
+      </div>
+      <div class="slot" id="slot-max">
+        <div class="slot-name">MAX-SCALE SR</div>
+        <div class="slot-val" id="m-max">—</div>
+      </div>
+    </div>
+    <div class="tabs" id="mode-tabs">
+      <button class="tab active" type="button" data-model="claude">Claude-4-Sonnet</button>
+      <button class="tab" type="button" data-model="glm">GLM-4.5</button>
+      <button class="tab" type="button" data-model="qwen2507">Qwen3-235B-2507</button>
+      <button class="tab" type="button" data-model="r1">DeepSeek-R1-0528</button>
+      <button class="tab" type="button" data-model="gpt5">GPT-5</button>
+      <button class="tab" type="button" data-model="kimi">Kimi-K2-0711</button>
+    </div>
+    <div class="chart" id="mode-chart"></div>
+    <div class="cx" id="mode-x"></div>
+    <div class="readout" id="mode-readout">
+      <div class="r-head">当前模型</div>
+      <div id="mode-msg">点上方模型标签，看它在三种模式下的 SR 变化。</div>
+    </div>
+  </div>
+  <p class="mini-note">数据取自 Table 2；带 ∗ 的分数由提示词式函数调用取得；Max-Scale 的「—」表示受上下文限制无法评测，柱高按 0 绘制，只作占位。</p>
+</section>
+
+<!-- ================= 05 评测流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>评测流程：从 MCP 池到二值得分</h2></div>
+  <p class="sec-sub">论文 Figure 1 的结构，加上附录 B 的循环伪代码；记住「先接工具、再按模式挂载、最后裁判」这三步即可。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 380" role="img" aria-label="MCPVerse 评测流程示意图：任务与工具池汇入三种模式，Agent 循环执行，按时间是否敏感分流到人工标注或实时脚本，最后由评分器给出结果">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+
+      <!-- 左列：输入 -->
+      <rect x="20" y="30" width="170" height="78" rx="10" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <rect x="20" y="22" width="8" height="94" rx="3" fill="#2E5A6B"></rect>
+      <text x="40" y="60" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#1A1816">250 个人工任务</text>
+      <text x="40" y="82" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">元数据：所需 MCP / 难度</text>
+      <text x="40" y="98" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">/ 类型 / 时效性 / 答案</text>
+
+      <rect x="20" y="150" width="170" height="78" rx="10" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <rect x="20" y="142" width="8" height="94" rx="3" fill="#2E5A6B"></rect>
+      <text x="40" y="180" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#1A1816">MCP 池</text>
+      <text x="40" y="202" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">65 个服务器</text>
+      <text x="40" y="218" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">552 个工具 / &gt;147k token</text>
+
+      <!-- 中列：模式 -->
+      <rect x="250" y="22" width="230" height="300" rx="14" fill="#FFFFFF" stroke="#D4C4A6"></rect>
+      <text x="365" y="48" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" letter-spacing="2" fill="#8C857B">MOUNTED TOOLSET</text>
+      <rect x="272" y="66" width="186" height="66" rx="10" fill="#DDE9EE"></rect>
+      <text x="365" y="92" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#2E5A6B">Oracle</text>
+      <text x="365" y="114" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">只挂最少工具</text>
+      <rect x="272" y="146" width="186" height="66" rx="10" fill="#E4E0F0"></rect>
+      <text x="365" y="172" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#5A4A8C">Standard</text>
+      <text x="365" y="194" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">32 MCP · ≈44k token</text>
+      <rect x="272" y="226" width="186" height="66" rx="10" fill="#F4DCD0"></rect>
+      <text x="365" y="252" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#7A2E16">Max-Scale</text>
+      <text x="365" y="274" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">65 MCP · ≈140k token</text>
+
+      <!-- Agent 循环 -->
+      <rect x="545" y="80" width="170" height="170" rx="85" fill="#FFFFFF" stroke="#C04E2D" stroke-width="2"></rect>
+      <text x="630" y="132" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="14" font-weight="700" fill="#1A1816">LLM Agent</text>
+      <text x="630" y="156" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11.5" fill="#6B6660">LLM(history, toolset)</text>
+      <path d="M 600 176 A 30 30 0 1 1 660 176" fill="none" stroke="#C04E2D" stroke-width="1.8" marker-end="url(#arr)"></path>
+      <text x="630" y="205" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#7A2E16">call_tool()</text>
+      <text x="630" y="224" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#7A2E16">无 tool_calls 则结束</text>
+
+      <!-- 右列：评分 -->
+      <rect x="760" y="30" width="100" height="78" rx="10" fill="#FFFFFF" stroke="#D4C4A6"></rect>
+      <text x="810" y="58" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#1A1816">文本答案</text>
+      <text x="810" y="79" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">LLM 裁判</text>
+      <text x="810" y="96" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">语义等价</text>
+
+      <rect x="760" y="150" width="100" height="78" rx="10" fill="#FFFFFF" stroke="#D4C4A6"></rect>
+      <text x="810" y="178" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="#1A1816">文件 / 状态</text>
+      <text x="810" y="199" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">专用脚本</text>
+      <text x="810" y="216" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">校验改动</text>
+
+      <rect x="760" y="270" width="100" height="52" rx="10" fill="#F4DCD0" stroke="#C04E2D"></rect>
+      <text x="810" y="293" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="13" font-weight="700" fill="#7A2E16">评分 E ∈ {0,1}</text>
+      <text x="810" y="311" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#7A2E16">按 L1–L3 平均</text>
+
+      <rect x="250" y="336" width="230" height="34" rx="8" fill="#F5ECD8" stroke="#D4C4A6"></rect>
+      <text x="365" y="358" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#6B6660">时效性问题：脚本实时抓 ground truth</text>
+
+      <!-- 连线 -->
+      <path d="M 190 69 L 246 69" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 190 189 L 210 189 L 210 220 L 246 220" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 480 110 L 520 140" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 480 180 L 540 180" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 480 250 L 520 220" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 715 130 L 738 100 L 756 72" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 715 185 L 756 189" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 478 353 L 660 353 L 660 300 L 730 300 L 756 296" fill="none" stroke="#8C857B" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arr)"></path>
+      <path d="M 810 108 L 810 146" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M 810 228 L 810 266" fill="none" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></path>
+    </svg>
+    <figcaption>
+      Figure 1（据论文 Figure 1 重绘）：任务与 MCP 池汇入三种挂载模式，Agent 在一个「调用工具 → 回填结果」的循环里运行，结束后按答案类型分流评分。
+    </figcaption>
+  </figure>
+
+  <p>附录 B 给出的管线核心就是一个 while 循环，没有额外规划模块：</p>
+  <div class="eq" style="text-align:left;font-size:13.5px;line-height:2.0">
+<pre style="margin:0;font-family:inherit">toolset = [connect_to(mcp).get_tools() for mcp in mcp_list]
+history = [task]
+while True:
+    resp = LLM(history, toolset);  history.append(resp)
+    if not resp.tool_calls: return
+    for call in resp.tool_calls: history.append(call_tool(call))</pre>
+  </div>
+  <div class="eq-cap">附录 B 评测管线的等价伪代码；真实代码中逐 MCP 连接后再进入循环</div>
+
+  <p>这个设计意味着：<strong>MCPVerse 测的是模型在「工具一旦挂上去、上下文一旦满了」时的自主性</strong>，而不是某个 Agent 框架的工程技巧。</p>
+
+  <h3>检索模式补充实验</h3>
+  <p>论文同样检验了「传统做法」：用 <code>text-embedding-3-large</code> 对模型自述的服务器需求做嵌入，余弦相似度取 top-5 服务器挂载。结果（Table 4）在四个模型上<strong>全部低于 Oracle 与 Standard</strong>——检索器在真实工具池上不够精确，反而比直接给全部工具更差。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>12 个模型里只有 3 个吃到「工具更多的红利」</h2></div>
+  <p class="sec-sub">下面整张 Table 2 原文转录；先看整体，再看那条反直觉的分界线。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">模型</th>
+          <th rowspan="2">上下文</th>
+          <th rowspan="2">工具数上限</th>
+          <th colspan="4" style="text-align:center">Oracle</th>
+          <th colspan="4" style="text-align:center">Standard</th>
+          <th colspan="4" style="text-align:center">Max-Scale</th>
+        </tr>
+        <tr>
+          <th class="num">SR</th><th class="num">L1</th><th class="num">L2</th><th class="num">L3</th>
+          <th class="num">SR</th><th class="num">L1</th><th class="num">L2</th><th class="num">L3</th>
+          <th class="num">SR</th><th class="num">L1</th><th class="num">L2</th><th class="num">L3</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>DeepSeek-V3-0324</td><td>64k</td><td class="num">128</td><td class="num">46.8</td><td class="num">62.7</td><td class="num">45.1</td><td class="num">32.7</td><td class="num">32.2</td><td class="num">47.0</td><td class="num">27.7</td><td class="num">22.0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>DeepSeek-V3.1-Terminus</td><td>128k</td><td class="num">128</td><td class="num">56.6</td><td class="num">64.4</td><td class="num">57.3</td><td class="num">48.3</td><td class="num">52.1</td><td class="num">62.0</td><td class="num">49.4</td><td class="num">45.0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>DeepSeek-R1-0528</td><td>64k</td><td class="num">128</td><td class="num">56.4</td><td class="num">70.5</td><td class="num">56.4</td><td class="num">42.4</td><td class="num">49.9</td><td class="num">65.1</td><td class="num">47.4</td><td class="num">37.3</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr class="best"><td>Claude-4-Sonnet</td><td>200k</td><td class="num">—</td><td class="num">62.3</td><td class="num">71.6</td><td class="num">62.7</td><td class="num">52.5</td><td class="num">62.4</td><td class="num">75.9</td><td class="num">60.4</td><td class="num">50.9</td><td class="num">44.2</td><td class="num">45.8</td><td class="num">40.5</td><td class="num">46.2</td></tr>
+        <tr><td>Qwen3-235B-A22B</td><td>128k</td><td class="num">—</td><td class="num">42.1</td><td class="num">61.6</td><td class="num">34.8</td><td class="num">30.0</td><td class="num">37.7</td><td class="num">52.3</td><td class="num">35.9</td><td class="num">25.0</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Qwen3-235B-2507</td><td>1M</td><td class="num">—</td><td class="num">44.8</td><td class="num">62.5</td><td class="num">44.8</td><td class="num">27.1</td><td class="num">53.2</td><td class="num">63.9</td><td class="num">51.8</td><td class="num">43.9</td><td class="num">31.6</td><td class="num">44.3</td><td class="num">23.7</td><td class="num">26.7</td></tr>
+        <tr><td>Qwen3-30B-A3B</td><td>128k</td><td class="num">—</td><td class="num">27.7</td><td class="num">46.5</td><td class="num">18.1</td><td class="num">18.3</td><td class="num">18.9</td><td class="num">27.9</td><td class="num">12.9</td><td class="num">15.8</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Gemini-2.5-Pro</td><td>1M</td><td class="num">512</td><td class="num">48.7</td><td class="num">66.3</td><td class="num">42.6</td><td class="num">37.3</td><td class="num">45.3</td><td class="num">62.4</td><td class="num">41.9</td><td class="num">31.6</td><td class="num">31.4∗</td><td class="num">37.7∗</td><td class="num">35.7∗</td><td class="num">20.8∗</td></tr>
+        <tr><td>GPT-4o-20241120</td><td>128k</td><td class="num">128</td><td class="num">42.1</td><td class="num">59.1</td><td class="num">40.2</td><td class="num">27.1</td><td class="num">31.4∗</td><td class="num">37.7∗</td><td class="num">35.7∗</td><td class="num">20.8∗</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>GPT-5</td><td>400k</td><td class="num">128</td><td class="num">68.1</td><td class="num">80.5</td><td class="num">67.8</td><td class="num">55.9</td><td class="num">23.4∗</td><td class="num">30.6∗</td><td class="num">19.7∗</td><td class="num">20.0∗</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>Kimi-K2-0711</td><td>128k</td><td class="num">128</td><td class="num">59.4</td><td class="num">70.9</td><td class="num">59.8</td><td class="num">47.5</td><td class="num">16.3∗</td><td class="num">24.4∗</td><td class="num">24.4∗</td><td class="num">0.0∗</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>GLM-4.5</td><td>128k</td><td class="num">—</td><td class="num">55.0</td><td class="num">70.9</td><td class="num">58.5</td><td class="num">35.6</td><td class="num">59.1</td><td class="num">67.4</td><td class="num">60.7</td><td class="num">49.2</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="mini-note">
+    ※ 转录说明：原论文 Table 2 中 Gemini-2.5-Pro 的 Max-Scale 一行印在 GPT-4o 行的标题处，且数字 31.4 / 37.7 / 35.7 / 20.8 与 GPT-4o 的 Standard 列完全相同。结合正文「只有 Claude-4-Sonnet 和 Gemini-2.5-Pro 能完成 Max-Scale」以及「Gemini 的 Max-Scale 分数由提示词式函数调用获得」，此处按 Gemini 行理解；标 ∗ 者为提示词式函数调用，Max-Scale 的「—」为上下文不足无法评测。
+  </p>
+
+  <h3>反直觉发现：三条向上，九条向下</h3>
+  <p>从 Oracle 到 Standard，<strong>Claude-4-Sonnet（+4.1）、GLM-4.5（+4.1）、Qwen3-235B-2507（+8.4）</strong>上升；其余全部下降。论文按下降幅度把后九者分成三类：</p>
+  <ul>
+    <li><strong>断崖式下降与 API 工具数上限有关</strong>：GPT-4o、GPT-5、Kimi-K2-0711 都卡在 128 个工具上限，Standard 模式只能用提示词式函数调用。Table 3 直接证明这种替换本身代价极大：Claude-4-Sonnet 在 Oracle 下从 62.28 掉到 35.55，而且它的幻觉率超过 70%（模型会在明确禁止的情况下虚构工具返回）。</li>
+    <li><strong>温和下降反映上下文负担</strong>：剩余模型（如 Gemini-2.5-Pro −3.4、DeepSeek-V3.1-Terminus −4.5）在更大的 schema 下要更难地选工具。</li>
+    <li><strong>Max-Scale 继续下降</strong>：能评的三个模型从 Standard 到 Max-Scale 全部下滑，Claude-4-Sonnet 也从 62.4 → 44.2。</li>
+  </ul>
+
+  <h3>为什么强 Agent 会涨：Figure 4 的案例</h3>
+  <div class="card">
+    <div class="card-head"><span class="pill p1">Oracle 路径</span><span class="pill p2">Standard 路径</span><span class="pill pa">被卡住的接口</span></div>
+    <p>同一个任务，Claude-4-Sonnet 在 Oracle 模式按标注路线调用 <code>dataviewer</code> 的 <code>validate</code> 与 <code>filter</code>，但把 <code>auth_token</code> 从布尔值错填成字符串，触发鉴权错误后<strong>放弃</strong>。</p>
+    <p>在 Standard 模式，它遇到同样的初始失败后，转而调用工具池里的 <code>fetch</code> 绕过被堵的路，<strong>完成任务</strong>。论文称之为 emergent solution path / “hacking” behavior：模型不是学会了某条标准路线，而是学会了在被堵时换路。</p>
+  </div>
+
+  <div class="readout">
+    <div class="r-head">想想看</div>
+    当工具很少时，模型没有「备胎」可用，一次失败就是整体失败；工具多时，备胎也是干扰。MCPVerse 能区分两种模型：<strong>被干扰拖垮的，和被备胎救下来的</strong>。
+  </div>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候 MCPVerse 的分数不可信</h2></div>
+  <p class="sec-sub">论文自己的数据与设计里，至少能读出五条限制。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>实时服务会漂移，可复现性天然打折</h4></div>
+    <p>552 个工具是真实在线 MCP，提供方可随时增删工具（论文自己说明「这个数会波动」）；线上答案也会改变。时效性问题虽用脚本抓实时 ground truth，但依赖外部网络的服务一旦下线，任务就不可复现。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>「大掉分」可能是评测方式而非模型能力的问题</h4></div>
+    <p>GPT-4o、GPT-5、Kimi-K2-0711 的 Standard 分数是通过 <strong>提示词式函数调用</strong>得来的。Table 3 显示：在同一个 Claude-4-Sonnet 上，同一套 prompt 就能让分数砍半。因此它们的断崖式下降与模型能力有多少因果关系，论文没有做完整的解耦；作者自己措辞是 “likely accounts for”。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界三</span><h4>评分依赖 LLM 裁判</h4></div>
+    <p>文本类答案由 QwQ-32B 判语义一致性。附录 F 用 GPT-4o 复判，12 个模型的名次完全一致，说明排名方向稳定；但分数并非「客观真值」，裁判本身也没有逐题人工核验。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界四</span><h4>管线刻意简化，不能代表工程化 Agent</h4></div>
+    <p>论文不跑 ReAct 等框架，理由是测「模型本身」。这意味着 MCPVerse 分数衡量的是裸模型 + 简单循环，不反映带规划、记忆、多 Agent 组装的真实产品表现。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界五</span><h4>工具数会变、Max-Scale 覆盖模型极少</h4></div>
+    <p>Max-Scale 只有 3 个模型有可读分数（其中 Gemini 为 ∗），其余全是「—」。Max-Scale 的排名与结论证据量远小于 Standard。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>MCPVerse 最有说服力的不是绝对分，而是「Oracle → Standard」的增减号</strong>——它在多大工具集里还能稳定选择与换路，这个方向性结论比任何单个百分数都更稳。</p>
+</section>
+
+<footer>
+  <div>MCPVerse: An Expansive, Real-World Benchmark for Agentic Tool Use（Fei Lei, Yibo Yang, Wenxiu Sun, Dahua Lin · SenseTime Research）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.16260" target="_blank" rel="noopener">https://arxiv.org/abs/2508.16260</a><br>
+    代码：<a href="https://github.com/hailsham/mcpverse" target="_blank" rel="noopener">https://github.com/hailsham/mcpverse</a><br>
+    笔记：<a href="/mcpversean-expansive-real-world-benchmark-for-agentic-tool-use/">MCPVerse：An Expansive, Real-World Benchmark for Agentic Tool Use</a><br>
+    说明：博客笔记按 v1 阅读并转述，部分数字与 v2 原文不一致（原文 12 个模型、Claude-4-Sonnet Oracle/Standard SR 为 62.3 / 62.4、GPT-4o 为 42.1 → 31.4、Kimi-K2-0711 为 59.4 → 16.3，笔记写的是 57.81 → 61.01、51.32 → 26.83、55.84 → 16.34；笔记称 Claude 是「唯一」提升者，原文为三人；笔记称 8 个模型、裁判为 GPT-4o-20241120，原文为 12 个模型、裁判 QwQ-32B；Standard 的 32 个 MCP 原文写作 220+ 个工具）。本页以原文为准，未改动笔记原文件。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ---------- 1) 三模式对比图 ---------- */
+  var MODELS = {
+    claude:   { name: 'Claude-4-Sonnet', o: 62.3, s: 62.4, m: 44.2, note: 'Standard 比 Oracle 高 0.1；Max-Scale 是 12 个模型中的最佳（44.2）。' },
+    glm:      { name: 'GLM-4.5',          o: 55.0, s: 59.1, m: null, note: '128k 上下文，无法评测 Max-Scale；Standard 提升 4.1。' },
+    qwen2507: { name: 'Qwen3-235B-2507',  o: 44.8, s: 53.2, m: 31.6, note: '提升最大（+8.4），但到 Max-Scale 又回落到 31.6，L3 只剩 26.7。' },
+    r1:       { name: 'DeepSeek-R1-0528', o: 56.4, s: 49.9, m: null, note: '工具变多后温和下降 6.5，说明上下文负担本身就够重。' },
+    gpt5:     { name: 'GPT-5',            o: 68.1, s: 23.4, m: null, note: 'Oracle 全场最高（68.1），但 128 工具上限迫使 Standard 走提示词式调用，掉到 23.4（∗）。' },
+    kimi:     { name: 'Kimi-K2-0711',     o: 59.4, s: 16.3, m: null, note: '降幅最大（−43.1），Standard 的 L3 为 0.0（∗）。' }
+  };
+  var ORDER = ['claude', 'glm', 'qwen2507', 'r1', 'gpt5', 'kimi'];
+  var current = 'claude';
+
+  function txt(id, s) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = s;
+  }
+
+  function renderModel(key) {
+    var d = MODELS[key];
+    if (!d) return;
+    current = key;
+    txt('m-oracle', d.o.toFixed(1));
+    txt('m-standard', d.s.toFixed(1));
+    txt('m-max', d.m === null ? '—' : d.m.toFixed(1));
+
+    var sO = document.getElementById('slot-oracle');
+    var sS = document.getElementById('slot-standard');
+    var sM = document.getElementById('slot-max');
+    if (sO) sO.classList.toggle('hit', d.s > d.o);
+    if (sS) sS.classList.toggle('hit', d.s > d.o);
+    if (sM) sM.classList.remove('hit');
+
+    var chart = document.getElementById('mode-chart');
+    var xax = document.getElementById('mode-x');
+    if (chart) {
+      chart.innerHTML = '';
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = d.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      var series = [
+        { label: 'Oracle', v: d.o, color: 'var(--c1)' },
+        { label: 'Standard', v: d.s, color: 'var(--accent)' },
+        { label: 'Max-Scale', v: d.m, color: 'var(--c2)' }
+      ];
+      series.forEach(function (s) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = s.color;
+        var val = s.v === null ? 0 : s.v;
+        fill.style.height = (val > 1 ? val : 1) + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = s.v === null ? '—' : s.v.toFixed(1);
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    }
+    if (xax) {
+      xax.innerHTML = '<span>Oracle</span><span>Standard</span><span>Max-Scale</span>';
+    }
+    var msg = document.getElementById('mode-msg');
+    if (msg) {
+      var delta = d.s - d.o;
+      var sign = delta > 0 ? '+' : '';
+      msg.innerHTML = '<strong>' + d.name + '</strong>：Oracle → Standard <strong>' + sign + delta.toFixed(1) + '</strong>。' + d.note;
+    }
+  }
+
+  var tabsEl = document.getElementById('mode-tabs');
+  if (tabsEl) {
+    tabsEl.addEventListener('click', function (e) {
+      var btn = e.target.closest('.tab');
+      if (!btn) return;
+      var all = tabsEl.querySelectorAll('.tab');
+      for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+      btn.classList.add('active');
+      renderModel(btn.getAttribute('data-model'));
+    });
+  }
+  renderModel('claude');
+
+  function focusKeys(keys) {
+    var all = document.querySelectorAll('#mode-tabs .tab');
+    var i;
+    for (i = 0; i < all.length; i++) all[i].classList.remove('active');
+    var first = null;
+    for (i = 0; i < all.length; i++) {
+      var k = all[i].getAttribute('data-model');
+      if (keys.indexOf(k) >= 0) {
+        all[i].classList.add('active');
+        if (!first) first = k;
+      }
+    }
+    if (first) renderModel(first);
+  }
+
+  var bAll = document.getElementById('btn-all');
+  if (bAll) bAll.addEventListener('click', function () { focusKeys(ORDER); });
+
+  var bUp = document.getElementById('btn-up');
+  if (bUp) bUp.addEventListener('click', function () {
+    focusKeys(['claude', 'glm', 'qwen2507']);
+    var msg = document.getElementById('mode-msg');
+    if (msg) msg.innerHTML = '<span class="warn">三个「逆风上涨」的模型</span>都在近四个月内发布、面向 agentic 使用。这是论文「MCPVerse 能灵敏反映 agentic 能力进步」这一论点的直接证据。';
+  });
+
+  var bPfc = document.getElementById('btn-pfc');
+  if (bPfc) bPfc.addEventListener('click', function () {
+    focusKeys(['claude', 'gpt5', 'kimi']);
+    var msg = document.getElementById('mode-msg');
+    if (msg) {
+      msg.innerHTML = '<span class="warn">提示词式函数调用的代价</span>：GPT-5 与 Kimi-K2-0711 的 Standard 分数均为 ∗。Table 3 中 Claude-4-Sonnet 改用同一套提示词，Oracle 下从 62.28 跌到 35.55，幻觉率超过 70%。';
+    }
+  });
+})();
+</script>
+</body>
+</html>

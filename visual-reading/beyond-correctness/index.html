@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beyond Correctness · 把过程分拿来做筛选，而不是拿来做奖励</title>
+<meta name="description" content="PROF 把 ORM 与 PRM 的一致性信号从「奖励混合」转向「数据筛选」：正确组按过程分取 top-k，错误组剔除过程分虚高的样本，并保持正确/错误比例平衡，在 Qwen2.5-Math-7B 上把五基准平均从 GRPO 的 49.9% 提到 51.7%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调，公共样式全部来自 base.css */
+
+/* 候选轨迹行：分组标签 + 列表 */
+.cand{display:flex;align-items:flex-start;gap:10px;margin:8px 0}
+.cand-tag{flex:none;width:64px;padding-top:12px;font-family:"JetBrains Mono",monospace;font-size:11.5px;font-weight:600;color:var(--text-muted);white-space:nowrap}
+.cand-list{flex:1;display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.cand-item{position:relative;border:1.5px solid var(--border);background:var(--bg);border-radius:8px;padding:9px 9px 8px;font-family:"JetBrains Mono",monospace;font-size:11.5px;line-height:1.45;transition:all .25s ease}
+.cand-item .cr{font-weight:600;color:var(--text)}
+.cand-item .cp{color:var(--text-soft)}
+.cand-item .cflag{display:inline-block;margin-top:4px;font-size:10px;font-weight:600;letter-spacing:.03em;color:var(--text-soft)}
+.cand-item.keep{border-color:var(--c1);background:var(--c1-soft)}
+.cand-item.keep .cflag{color:var(--c1)}
+.cand-item.drop{border-style:dashed;border-color:var(--accent);background:var(--accent-soft);opacity:.92}
+.cand-item.drop .cflag{color:var(--accent-deep)}
+.cand-or{flex:none;width:22px;text-align:center;padding-top:14px;color:var(--text-soft);font-size:14px}
+
+/* 一致性饼图旁的说明叠层（用纯文字，不叠在 SVG 上） */
+.pie-note{font-size:12.5px;color:var(--text-muted);text-align:center;margin-top:6px}
+
+/* 效果条形：本文方法用 accent，基线用 c1 */
+.tbl-note{font-size:12px;color:var(--text-soft);margin:-8px 0 18px}
+
+/* 推断徽标：全文统一，写作「推断 · 依据」 */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+
+/* 模拟器：与手算块完全相同的参数 → 结果 */
+.sim-params{margin:12px 0 4px;padding:10px 14px;border-radius:8px;background:var(--bg-soft);font-size:13px;line-height:1.8;color:var(--text-muted)}
+.sim-params strong{color:var(--text)}
+.cap-warn{display:block;margin-top:6px;font-size:12.5px;color:var(--accent-deep)}
+
+@media (max-width:640px){
+  .cand{flex-direction:column;gap:4px}
+  .cand-tag{padding-top:0}
+  .cand-list{grid-template-columns:repeat(2,1fr);width:100%}
+  .cand-or{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Beyond Correctness</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Reasoning · RLVR · arXiv 2509.03403v2（2026-05-15）</span>
+  <h1>Beyond Correctness：过程奖励别拿来算梯度，拿来挑数据</h1>
+  <p class="hero-sub">
+    RLVR 只看最终答案，于是<strong>错得离谱的推理只要碰巧答对，也能拿满分</strong>；PRM 能看每一步，但一旦当奖励用，策略就会学会刷分，熵崩、回答失控。
+    论文的答案是：让 ORM 负责「对错」，让 PRM 只负责「组内排序」，用两者的<strong>一致性</strong>筛选样本，过程分不参与梯度。
+  </p>
+  <div class="meta">
+    <span>Chenlu Ye, Zhou Yu, Ziji Zhang, Hao Chen, Narayanan Sadagopan, Jing Huang, Tong Zhang, Anurag Beniwal</span>
+    <span>Amazon · UIUC</span>
+    <a href="https://arxiv.org/abs/2509.03403v2" target="_blank" rel="noopener">arXiv 2509.03403v2 ↗</a>
+    <a href="https://github.com/amazon-science/PROF-GRPO" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+  <p class="hero-note" style="font-size:12.5px;color:var(--text-muted);margin:10px 0 0">本页全部表号、图号与数字以 arXiv 2509.03403<strong>v2</strong>（2026-05-15 修订）为准；不带版本号的 arXiv 短链请按 v2 打开。</p>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    只看结果的奖励会奖励<em>虚假成功</em>：论文在 Qwen2.5-Math-7B 的 2k 条训练前样本上发现，正确回答中有 <strong>26.28%</strong> 至少一步有缺陷（占全部正确回答，Claude 判定，§3 / Figure 1）；在这部分「有缺陷的正确回答」里，按 PRM 一致性对正确组取 bottom half（后一半）时，PROF 能滤掉 <strong>65.88%</strong>（占缺陷子集，Figure 1）。把 <code>E[r]</code> 拆成 <code>(1−ε)α<sub>π</sub> + ε</code> 就能看出：这种「过程坏、结果对」的样本在给模型错误的梯度。
+  </p>
+  <p>
+    但把 PRM 和 ORM 加权混进奖励函数（Blend）又走向另一个极端：PRM 离线训练，在线遇到没见过的难题分布会判错，策略便学会堆冗长步骤刷过程分，熵迅速塌向 0、回答长度失控，测试准确率甚至低于纯 GRPO。
+  </p>
+  <p>
+    <strong>PROF</strong> 换了个用法：同一提示多采样，正确组按过程一致性 <em>取前 k<sub>+</sub></em>，错误组<em>剔除</em>过程分虚高的样本（取后 k<sub>−</sub> 或随机取），并让 k<sub>+</sub>k<sub>−</sub> 最大以保持正负平衡。PRM 只当排序器，梯度仍来自 ORM，刷分路径被切断。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">51.7<small>%</small></div>
+      <div class="k">Qwen2.5-Math-7B，PROF-BOTH 五基准<br>average@16 平均；GRPO 49.9 / Blend 47.3<br><span class="mono">+1.8 个百分点</span>（51.7 − 49.9，即相对 GRPO +3.6%）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§3 / Figure 1">26.28<small>%</small></div>
+      <div class="k">Qwen2.5-Math-7B 训练前 2k 样本，正确回答中<br><strong>至少一步有缺陷</strong>者占比；分母＝全部正确回答，Claude 判定</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§1">≈2<small>%</small></div>
+      <div class="k">算力对齐（Inference +3× Train + PRM）下<br>PROF 相对 GRPO 的增益；原文 "almost 2%"，未说明单位/口径（相对或绝对）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>只看答案的奖励，会把「蒙对」也当成学会</h2></div>
+  <p class="sec-sub">读完这节你会知道：为什么最终答案的准确率上升，并不等于推理质量上升，以及这在数据里有多普遍。</p>
+
+  <p>RLVR 的奖励是一个二元验证器：<code>r<sub>o</sub>(x, a) ∈ {−1, 1}</code>。它对「怎么得到答案」一无所知。论文 Table 1 给了一个典型例子，一道用天平找假币的题，模型第一步就拿 1g+2g 去对 3g+5g，两边名义重量不一样，后续所有推理都不成立，但最终答案恰好是「2」，于是照样拿满分。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的拆解</span><h4>把期望奖励写成「真实成功率 + 蒙对率」</h4></div>
+    <p>设 <code>z=1</code> 表示过程有效，<code>α<sub>π</sub> = P(z=1|π)</code>；错误过程蒙对答案的概率上界为 <code>ε</code>，即 <code>P(r=1|z=0) ≤ ε</code>。则</p>
+    <div class="eq" style="margin:12px 0;text-align:left">
+      E<sub>π</sub>[r] = (1−ε)·<span class="hl-c">α<sub>π</sub></span> + <span class="hl-b">ε</span>
+    </div>
+    <div class="eq-cap" style="text-align:left;margin:-6px 0 12px">论文第 2 页 §1 的分解式（原文写作 <code>E<sub>π</sub>[r] = Σ<sub>z∈{0,1}</sub> P(r=1|z)P(z|π) ≈ α<sub>π</sub> + ε(1−α<sub>π</sub>) = (1−ε)α<sub>π</sub> + ε</code>）。想最大化的是 <span class="hl-c">α<sub>π</sub></span>（过程有效），但 <span class="hl-b">ε</span> 这一项让「过程坏、结果对」的样本也能带来收益。</div>
+    <p>按论文的写法，<code>E[r]</code> 里多出来的 <code>ε(1−α<sub>π</sub>)</code> 正是来自「<code>z=0</code> 却 <code>r=1</code>」的蒙对样本（注意 <code>r ∈ {−1,1}</code>，这是分析用的近似分解）。训练时，这类样本会给出<strong>方向错误的梯度</strong>，把错误推理路径也强化了。论文把这种失败叫 <em>outcome reward hacking</em>，也就是「过程-结果错配」。</p>
+  </div>
+
+  <p>这不是个例。论文在 Qwen2.5-Math-7B 的 2k 条样本上做了 Claude 审计（§3「False Positives Are Frequent and Filterable」）：<strong>26.28%</strong> 的正确回答<strong>至少一步有缺陷</strong>，分母是<strong>全部正确回答</strong>。口径依据：§3 与 Figure 1 依据的审计问句（附录 Table 5）是 "whether the reasoning process contains <strong>any flaw or error</strong>"，即只要有一处逻辑或算式错误就算，这与 Figure 5 右图的「flawed-reasoning rate」是同一 notion（原文："Figure 5 reports the same notion after training"）。梗概里另写作「anlayze 2k samples from Qwen2.5-Math-7B」，<strong>样本是否预先过滤出正确回答原文未说明</strong><span class="infer">推断</span>（依据：原文只写 "2k samples from Qwen2.5-Math-7B"，未交代抽样方式；分母「全部正确回答」只说明统计时以正确回答为分母）。<strong>2k 与 04 节每迭代 1024 个提示的关系，原文同样未说明</strong>，见 04 节。Figure 1 把缺陷子集按 PROF 的过滤结果一分为二，见下图。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">Figure 1</span><h4>正确答案内部：缺陷子集被 PROF 拆开</h4></div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">正确回答</div><div class="slot-val">100%</div></div>
+      <div class="slot"><div class="slot-name">推理无缺陷</div><div class="slot-val">73.72%</div></div>
+      <div class="slot hit"><div class="slot-name">至少一步有缺陷</div><div class="slot-val">26.28%</div></div>
+    </div>
+    <div class="bar" style="height:26px;border-radius:8px;background:var(--bg-soft)">
+      <i class="b2" style="width:73.72%;border-radius:8px 0 0 8px"></i>
+      <i class="b1" style="width:17.31%"></i>
+      <i class="b3" style="width:8.97%;border-radius:0 8px 8px 0"></i>
+    </div>
+    <div class="legend" style="margin-top:10px;display:block">
+      <div style="margin:3px 0"><i style="background:var(--c1)"></i>推理无缺陷：73.72%（占全部正确回答）</div>
+      <div style="margin:3px 0"><i style="background:var(--accent)"></i>至少一步有缺陷且被 PROF 滤掉：<strong>占缺陷子集 65.88%</strong>，换算成<strong>占全部正确回答 17.31%</strong>（26.28 × 0.6588 = 17.31）</div>
+      <div style="margin:3px 0"><i style="background:var(--c2)"></i>至少一步有缺陷但仍保留：<strong>占缺陷子集 34.12%</strong>，换算成<strong>占全部正确回答 8.97%</strong>（26.28 × 0.3412 = 8.97）</div>
+    </div>
+    <p style="margin:14px 0 0;font-size:14px;color:var(--text-muted)">原图是饼图。这里拉成一条，外层 100% 是「全部正确回答」，与 26.28% 同一分母；内层两个比例的分母是<strong>缺陷子集</strong>（26.28% 那部分），不是全部正确回答。把 65.88% 误当成「全部正确回答的 65.88%」会差 <strong>约 3.8 倍</strong>（65.88 ÷ 17.31 = 3.81；若与全体 100% 直接比则差 1.5 倍），这里按占正确回答的 17.31% 展示。手算核对：26.28 × 0.6588 = 17.31、26.28 × 0.3412 = 8.97，相加正好回到 26.28；73.72 + 17.31 + 8.97 = 100。条件：论文写的是「当 PROF 按 PRM 一致性<strong>对正确组取 bottom half</strong>（后一半）」时的审计（§3），这是对筛选规则的离线审计，不是某一轮训练的实际过滤统计。</p>
+  </div>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两路修法各有硬伤：粗的不看过程，细的会被刷</h2></div>
+  <p class="sec-sub">读完这节你会知道：为什么单纯加 PRM 当奖励不行，以及为什么「加权混合」也不行。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A · 只信 ORM</span><h4>GRPO / RLVR</h4></div>
+      <p>用组内标准化得到优势 <code>A<sub>i</sub> = (r<sub>o</sub> − mean)/std</code>，稳定、高效，但奖励太稀疏太粗：区分不了对的两个答案里哪个推理更可靠，也把「蒙对」和「真会」当成一件事。</p>
+      <p><strong>后果：</strong>中间步骤质量停在原地，这就是 01 里那 26.28% 的来源。<span class="infer">推断</span>（依据：原图审计对象是 Qwen2.5-Math-7B 本身；论文未用 GRPO 前的 base 模型单独做过这项审计）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B · PRM 直接进奖励</span><h4>Blend-PRM-GRPO</h4></div>
+      <p>按步骤平均 PRM 分数，再乘权重 β（论文用 β=0.8）加到结果奖励上（论文未写明该权重具体如何施加到 <code>{−1, 1}</code> 的结果奖励上，这里不复述为「奖励混合」的具体公式）。过程信号细了，但也把 PRM 的噪声直接并进了梯度。</p>
+      <p><strong>后果：</strong>PRM 是离线训练的，在线训练时策略会走到没见过的分布上。Blend 的熵损失很快塌向 0、回答长度不受控地增长，典型的 reward hacking；在 LLaMA-3.2-3B-instruct 上它的平均分甚至低于 GRPO（15.7 vs 23.6，Table 2，average@16）。</p>
+    </div>
+  </div>
+
+  <p>论文还点名了另一类相关做法：把 PRM 和策略联合在线训练（Zha et al. 2025、Cui et al. 2025），但只能以隐式方式训练 PRM，拿不到准确的过程分。于是问题的真正形态是：<strong>如何把一个预训练 PRM 稳健地接进在线训练，而不是去重新训一个 PRM。</strong></p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>PRM 只做排序器，一致性决定谁被留下</h2></div>
+  <p class="sec-sub">读完这节你会知道：PROF 的三步规则、一致性分数怎么算，以及为什么正确组和错误组要用相反方向筛。</p>
+
+  <p>对每个提示生成 <code>n</code> 条 rollout，得到结果奖励 <code>r<sup>o</sup></code> 与每个步骤的 PRM 分 <code>(r<sup>1</sup>, …, r<sup>H</sup>)</code>。轨迹级一致性分数（论文式 (1)）：</p>
+
+  <div class="eq">
+    r<sup>pro</sup> = (1/H) · Σ<sub>h=1</sub><sup>H</sup> r<sup>h</sup>
+    <span class="hl-c">− λ·1(H = 1 或 H ≥ H<sub>λ</sub>) · r<sup>o</sup></span>
+  </div>
+  <div class="eq-cap">λ 是步数正则：既没有分段、又超过 <code>H<sub>λ</sub></code> 步的轨迹会在正确组里被扣分：没有推理步骤、或啰嗦到一定程度的轨迹拿不到「高一致性」</div>
+
+  <p>然后按 ORM 分成正确组 <code>G<sup>+</sup></code> 与错误组 <code>G<sup>−</sup></code>，各自按 <code>r<sup>pro</sup></code> 排序：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">正确组</span><h4>保留 top-k<sub>+</sub></h4></div>
+      <p>答案对 + 过程分高 = 「过程好、结果也好」，是真正该学的正面范例；答案对 + 过程分低 = 蒙对，直接丢掉。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">错误组 · PROF-BOTH</span><h4>保留 bottom-k<sub>−</sub></h4></div>
+      <p>答案错 + 过程分低 = 「差得一致」，是可靠的负面范例；答案错但过程分高 = 过程与结果冲突，多半是 PRM 判错，丢弃。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">错误组 · PROF-POS</span><h4>随机取 k<sub>−</sub></h4></div>
+      <p>PRM 可靠性下降时更稳：不对错误组做细化排序，避开噪声估计，只靠正确组的提纯。</p>
+    </div>
+  </div>
+
+  <p>关键约束是<strong>保持正负平衡</strong>：从 <code>G<sup>+</sup></code> 保留 <code>k<sub>+</sub></code> 条、<code>G<sup>−</sup></code> 保留 <code>k<sub>−</sub></code> 条，约束是 <code>k<sub>+</sub>+k<sub>−</sub>=m</code>（<code>m</code> 为策略更新批大小，<code>k<sub>+</sub>≤n<sub>+</sub></code>、<code>k<sub>−</sub>≤n<sub>−</sub></code>），目标是最大化 <code>k<sub>+</sub>k<sub>−</sub></code>（Algorithm 1 第 4 步）。<code>k<sub>+</sub>+k<sub>−</sub>=m</code> 固定时 <code>k<sub>+</sub>k<sub>−</sub>=k<sub>+</sub>(m−k<sub>+</sub>)</code> 在 <code>k<sub>+</sub></code> 最接近 <code>m/2</code> 时最大；论文接着说「This implies the ratio of correct and incorrect responses should be balanced」。<span class="infer">推断</span>（依据：§3 正文；约束为 k<sub>+</sub>≤n<sub>+</sub>、k<sub>−</sub>≤n<sub>−</sub>，候选不够时会偏离 m/2，例如 m=8、正确组只有 3 条时最优解是 3+5 而不是 4+4）。下表中的计算验证了这一步。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">手算 1</span><h4>怎么分名额（= 下方模拟器默认状态）</h4></div>
+      <p>取下方模拟器的默认参数：<code>n=16</code>、<code>n<sub>+</sub>=5</code>、<code>m=4</code>、<code>p=0.50</code>。</p>
+      <p>档位上限 <code>cap = max(1, floor(5×0.5)) = 2</code>，所以 k<sub>+</sub> ≤ 2；又因 k<sub>−</sub> = 4−k<sub>+</sub> ≤ 11 恒成立，可行区间 k<sub>+</sub> ∈ [0,2]。离 m/2 = 2 最近的是 k<sub>+</sub>=2：2×2=<strong>4</strong>（k<sub>+</sub>=1 → 1×3=3）。</p>
+      <p>所以正确组留 <strong>2</strong> 条、错误组留 <strong>2</strong> 条，即 <strong>k<sub>+</sub>+k<sub>−</sub> = 2+2</strong>、k<sub>+</sub>k<sub>−</sub> = 4，与下方模拟器默认状态（n=16, n<sub>+</sub>=5, m=4, p=0.50）的读数（k₊ 2/5、k₋ 2/11、k₊·k₋ 4）一致。05 节流程图改用 Fig. 5 的 n=8 → 3+5，见右侧「流程图的 3+5」。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">手算 2</span><h4>式 (1) 的排序含义</h4></div>
+      <p>λ=10，H<sub>λ</sub>=30，轨迹 A：H=2，PRM 两个 1.0，答案对。</p>
+      <p>普通平均 = 1.0。带正则：r<sup>pro</sup> = 1.0 − 10×1×1 = <strong>−9</strong>。</p>
+      <p>它会被排到正确组末尾。论文本意是丢掉「没有步数」和「超长」的轨迹，但按现式字面，<code>H=2</code> 的短轨迹同样会被重罚，读到这条正则时值得留意。</p>
+    </div>
+    <div class="card" style="grid-column:1/-1">
+      <div class="card-head"><span class="pill p1">流程图的 3+5</span><h4>n=8 拆成 3+5 时，m 必须设 8</h4></div>
+      <p>05 节的流程图沿用 Figure 5 的设置：<strong>8 条 rollout 里 3 条答对、5 条答错（n=8, n<sub>+</sub>=3）</strong>。要让平衡规则凑满这 8 条，模拟器须设 <code>m=8</code>、<code>p=1.00</code>（此时 cap = max(1, floor(3×1)) = 3）：可行区间 k<sub>+</sub> ∈ [3,3]，只有 3+5 一种解，3×5 = 15。</p>
+      <p>注意：<strong>m=4 时 n=8 拆成 3+5 在模拟里凑不满</strong>：n<sub>+</sub>=3、m=4 的可解分配只有 3+1（3 条正确全留、1 条错误），错误组名额不是 5。所以流程图画的 3+5 只对应 <code>n=8, m=8</code>，不是模拟器默认的 <code>n=16, m=4</code>；三处数字的对应关系：模拟器默认（n=16, n<sub>+</sub>=5, m=4, p=0.50）→ 2+2；手算 1 同参数 → 2+2；流程图（n=8, n<sub>+</sub>=3, m=8）→ 3+5。</p>
+    </div>
+  </div>
+
+  <h3>自己动手：拖动 n、m 和过滤比例，看名额怎么分</h3>
+  <p>下面这台模拟器实现了 Algorithm 1 第 4 步的参数化版本：两个滑块给出一条提示的采样数 <code>n</code> 与其中答对数 <code>n<sub>+</sub></code>，再拖一个「正确组强化档位」p，正确组只保留过程分前 <code>max(1, floor(n<sub>+</sub>×p))</code> 条（对应论文「按一致性取 top-k<sub>+</sub>」）。随后求解 <code>k<sub>+</sub>+k<sub>−</sub>=m</code> 且 <code>k<sub>+</sub>k<sub>−</sub></code> 最大的名额分配，并画出每条候选轨迹的去留。</p>
+
+  <div class="sim">
+    <p class="sim-params">默认状态（= 手算 1）：<code>n=16</code>、<code>n<sub>+</sub>=5</code>、<code>m=4</code>、<code>p=0.50</code> → <strong>k<sub>+</sub>+k<sub>−</sub></strong> 的解见下方读数。流程图（05 节）用的是 Fig. 5 的 <code>n=8</code> 拆成 <code>3+5</code>，在模拟里对应 <code>n=8, n<sub>+</sub>=3, m=8, p=1.00</code>。</p>
+    <div class="slots s3" id="sim-slots" data-src="§3 Algorithm 1 第 4 步"></div>
+    <div class="controls" style="grid-template-columns:repeat(2,1fr)">
+      <div class="ctrl">
+        <label>n 采样数 <span class="v" id="nv">16</span></label>
+        <input type="range" id="n-range" min="2" max="16" step="1" value="16">
+      </div>
+      <div class="ctrl">
+        <label>n<sub>+</sub>（答对数） <span class="v" id="nposv">5</span></label>
+        <input type="range" id="npos-range" min="0" max="16" step="1" value="5">
+      </div>
+      <div class="ctrl">
+        <label>m 更新批大小 <span class="v" id="mv">4</span></label>
+        <input type="range" id="m-range" min="2" max="12" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label>p 正确组强化档位 <span class="v" id="pv">0.50</span></label>
+        <input type="range" id="p-range" min="0.2" max="1" step="0.1" value="0.5">
+      </div>
+    </div>
+    <div class="actions">
+      <button class="act" id="btn-both">切到 PROF-BOTH（错误组取舍则留）</button>
+      <button class="act ghost" id="btn-pos">切到 PROF-POS（错误组随机留）</button>
+    </div>
+
+    <div class="cand" id="row-pos">
+      <div class="cand-tag" id="tag-pos">G⁺ 正确组</div>
+      <div class="cand-list" id="list-pos"></div>
+    </div>
+    <div class="cand" id="row-neg">
+      <div class="cand-tag" id="tag-neg">G⁻ 错误组</div>
+      <div class="cand-list" id="list-neg"></div>
+    </div>
+
+    <div class="readout" id="sim-readout" data-src="§3 Algorithm 1 第 4 步（k₊+k₋=m，k₊k₋ 最大）；附录 A.1">
+      <div class="r-head">名额与去留</div>
+      <div id="sim-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个模拟和使用论文算法时做了什么近似？<span class="sum-sub">点开看与 Algorithm 1 的差异</span></summary>
+    <div class="details-body">
+      <p>论文里的 <code>k<sub>+</sub></code> 是一个自由度：在 <code>k<sub>+</sub>+k<sub>−</sub>=m</code>、<code>k<sub>+</sub>≤n<sub>+</sub></code>、<code>k<sub>−</sub>≤n<sub>−</sub></code> 的约束下最大化 <code>k<sub>+</sub>k<sub>−</sub></code>，解是 <code>k<sub>+</sub></code> 尽量靠近 <code>m/2</code>。模拟器多了一个论文里没有的「正确组强化档位」p：先把 <code>k<sub>+</sub></code> 压到不超过 <code>max(1, floor(n<sub>+</sub>p))</code>，再在可行区间里取最接近 <code>m/2</code> 的值。p=1 时它退化为论文原算法；p&lt;1 相当于手动加大正确组的筛选力度，借以在界面上复现附录 B.2（Figure 9）「n 增大时性能先升后降」的权衡。</p>
+      <p><strong>名额不足时的人为近似。</strong>当 <code>max(1, floor(n<sub>+</sub>p))</code> 把正确组名额压到 <code>floor(m/2)</code> 以下（例如 n=16、n<sub>+</sub>=8、m=4、p=0.20 → 正确组只剩 1 条，得 <strong>1+3</strong>），读数会显示「正负不等」并注明这是 p 压出的名额不足。这是模拟器<strong>额外加入的近似</strong>（p 本身不在论文算法里），不是论文算法想要的结果：论文的约束是 k<sub>+</sub>+k<sub>−</sub>=m 且 k<sub>+</sub>k<sub>−</sub> 最大，只要两边候选足够就会落在 balanced 分配上。真实训练遇到两边凑不满 m 时，该提示会被丢弃或重采样，而不是把 1+3 当成稳定配置。反过来，当正确组候选数本身就少于 m/2（如 n=8、n<sub>+</sub>=3、m=8 → 3+5），读数也会「正负不等」，但那是论文约束 k<sub>+</sub>≤n<sub>+</sub> 下的正常解，不是模拟误差。</p>
+      <p><strong>「无解」是模拟边界，不是论文结论。</strong>读数显示「无解」有两种来源：① <code>n &lt; m</code>（如 n=2、m=4 或 n=8、m=12），两边候选全用上也凑不满 m；② p&lt;1 把正确组压得过低，连 <code>k<sub>+</sub> ≥ m−n<sub>−</sub></code> 都不满足（如 n=8、n<sub>+</sub>=3、m=8、p=0.50）。滑块允许取到这类数值上不可行的组合（m 上限 12 &gt; n 下限 2），所以「无解」只说明这组参数在模拟里没有可行分配；p=1 且 n≥m 时总有解（n<sub>+</sub>=0 也给出 0+m 的退化分配）。论文的 Algorithm 1 对这类提示的做法（丢弃还是重采样）正文没有展开，本页按「重采样」理解<span class="infer">推断</span>（依据：§3 只给出 k₊+k₋=m 且 k₊≤n₊、k₋≤n₋ 的约束，未讨论两边凑不满 m 时的处理）。</p>
+      <p>候选轨迹的 <code>r<sup>pro</sup></code> 是示意值，不代表真实 PRM 输出；真正被展示的是<strong>去留规则</strong>。<code>H=1 或 H≥H<sub>λ</sub></code> 的步数正则也没有在模拟里展开，它等效于把这类轨迹的 <code>r<sup>pro</sup></code> 往下压，你可以在手算 2 里看到它的数量级。</p>
+      <p>PROF-POS 在论文里对错误组随机取样本，这里固定取过程分最低的 <code>k<sub>−</sub></code> 条，让「冲突样本被丢弃」一眼可见；真实实现没有这一步排序。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>在 rollout 之后插一个筛选层，其余训练照旧</h2></div>
+  <p class="sec-sub">读完这节你会知道：PROF 插在 GRPO 的哪个位置、开销花在哪，以及它和 RAFT++ 之类的拒绝采样怎么配合。</p>
+
+  <p>PROF 是<strong>rollout 与策略更新之间</strong>的一层数据处理，不改变 GRPO 的目标函数。实现基于 <code>verl</code>（附录 A.1）：每个迭代采样 1024 个提示，GRPO <code>n=4</code>、PROF <code>n=8</code>（每条提示的 rollout 数），所有算法的策略更新数 <code>m=4</code>；KL 与 entropy 系数各 0.001，温度 1.0、top-p 1.0，每个提示最多生成 4096 token，训练 mini-batch 256，用 8 张 H100。</p>
+  <p style="font-size:13px;color:var(--text-muted)"><strong>与 §3 的 2k 审计样本是什么关系？</strong>原文未说明：§3 的 2k 样本只写 "from Qwen2.5-Math-7B"，附录 A.1 的 1024 是<strong>每迭代</strong>采样的提示数，两处没有交叉引用。本页<strong>不认为</strong> 2k 包含在这 1024 里（也不反过来推断）<span class="infer">推断</span>（依据：§3 与附录 A.1 各自独立表述，全文没有说明两者关系的句子）。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">额外开销在哪</span><h4>多采样 + 每步 PRM 打分</h4></div>
+      <p>GRPO 的 <code>n=4</code> 被提到 <code>n=8</code>，且每条 rollout 都要跑一遍 7B PRM 拿到步骤分。论文的算力对齐比较（Figure 3）把平均成本算作 Inference + 3× Train + PRM（×3 是训练相对前向的粗略 FLOPs 折算），比较 GRPO-n16m16 与 PROF-n16m8。</p>
+      <p>论文 Limitations 也承认：PROF 比 Blend 和 vanilla GRPO 需要更多计算。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">过滤是模型无关的</span><h4>换 RL 目标也能用</h4></div>
+      <p>在 RAFT++（只训练正样本的拒绝采样范式）上套 PROF（Table 4）：<code>PROF-Raft++ (n8m4)</code> 平均 <strong>39.29</strong>，高于 <code>Raft++-n8</code> 的 <strong>37.75</strong>（<span class="mono">+1.54 个百分点</span>，相对 Raft++-n8 +4.1%）和 <code>Raft++-n4</code> 的 <strong>35.27</strong>（<span class="mono">+4.02 个百分点</span>，相对 +11.4%）。</p>
+    </div>
+  </div>
+
+  <p style="margin-top:6px">几个训练层面的数字：</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">λ / H<sub>λ</sub></span></div><p><code>λ=10</code>，<code>H<sub>λ</sub>=30</code>（附录 A.1）：轨迹只有 1 段（H=1）或步数 ≥30 时，<code>r<sup>pro</sup></code> 被扣 λ·r<sup>o</sup>，这类样本在正确组里排到末尾。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p1">clip-higher</span></div><p>1.5B 用 <code>ε<sub>low</sub>=0.2, ε<sub>high</sub>=0.28</code>；其余情形上下限都取 0.2。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p1">训练集</span></div><p>Numina-Math，约 86 万道题；评测 average@16。</p></div>
+  </div>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条提示走完的六步：从 8 条 rollout 到 8 条进入梯度（3+5）</h2></div>
+  <p class="sec-sub">这是论文 Figure 2 / Algorithm 1 的展开。下图按论文 Figure 5 的审计设置画：<strong>8 条 rollout 里 3 条答对、5 条答错</strong>，平衡后 3+5 进入更新（在 03 节模拟器里令 n=8, n<sub>+</sub>=3, m=8, p=1.00 即可复现）；模拟器默认状态是 n=16、n<sub>+</sub>=5、m=4 → 2+2，两者区别只是 n 与 m 的取值不同。</p>
+
+  <figure>
+    <svg viewBox="0 0 784 330" role="img" aria-label="PROF 流程图：采样、打分、分组、排序、平衡选名额、更新">
+      <defs>
+        <marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+      <style>
+        .bx{stroke-width:1.4}
+        .bt{font-family:Inter,'Noto Sans SC',sans-serif;font-size:14px;font-weight:600;fill:var(--text)}
+        .bs{font-family:Inter,'Noto Sans SC',sans-serif;font-size:12px;fill:var(--text-muted)}
+        .fl{stroke:var(--border-strong);stroke-width:1.5;fill:none}
+        .fa{stroke:var(--accent);stroke-width:1.8;fill:none}
+      </style>
+
+      <!-- 第一行：①②③④ -->
+      <rect class="bx" x="4" y="20" width="160" height="92" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong)"></rect>
+      <text class="bt" x="20" y="44">① 采样 n=8</text>
+      <text class="bs" x="20" y="66">策略对同一提示出 8 条</text>
+      <text class="bs" x="20" y="86">rollout，温度 1.0</text>
+
+      <rect class="bx" x="208" y="20" width="160" height="92" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong)"></rect>
+      <text class="bt" x="224" y="44">② 两种打分</text>
+      <text class="bs" x="224" y="66">ORM 给 r∈{−1,1}</text>
+      <text class="bs" x="224" y="86">PRM 给每步 rʰ → rᵖʳᵒ</text>
+
+      <rect class="bx" x="412" y="20" width="160" height="92" rx="10" style="fill:var(--c1-soft);stroke:var(--c1)"></rect>
+      <text class="bt" x="428" y="44">③ 按对错分组</text>
+      <text class="bs" x="428" y="66">G⁺：答对（3 条）</text>
+      <text class="bs" x="428" y="86">G⁻：答错（5 条）</text>
+
+      <rect class="bx" x="616" y="20" width="160" height="92" rx="10" style="fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6"></rect>
+      <text class="bt" x="632" y="44">④ 组内排序</text>
+      <text class="bs" x="632" y="66">按 rᵖʳᵒ 分别排序</text>
+      <text class="bs" x="632" y="86">两组方向相反</text>
+
+      <line class="fl" x1="166" y1="66" x2="204" y2="66" marker-end="url(#ah)"></line>
+      <line class="fl" x1="370" y1="66" x2="408" y2="66" marker-end="url(#ah)"></line>
+      <line class="fl" x1="574" y1="66" x2="612" y2="66" marker-end="url(#ah)"></line>
+
+      <!-- 第二行：⑤ → ⑥ -->
+      <rect class="bx" x="208" y="160" width="160" height="92" rx="10" style="fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6"></rect>
+      <text class="bt" x="224" y="184">⑤ 平衡选名额</text>
+      <text class="bs" x="224" y="206">k₊+k₋=m=8</text>
+      <text class="bs" x="224" y="226">k₊k₋ 最大 → 3+5</text>
+
+      <rect class="bx" x="412" y="160" width="160" height="92" rx="10" style="fill:var(--bg-surface);stroke:var(--border-strong)"></rect>
+      <text class="bt" x="428" y="184">⑥ 策略更新</text>
+      <text class="bs" x="428" y="206">8 条轨迹进 GRPO</text>
+      <text class="bs" x="428" y="226">梯度仍来自 ORM</text>
+
+      <!-- ④ 底部 → 绕到 ⑤ 左侧 → ⑤ -->
+      <polyline class="fa" points="696,112 696,266 396,266 396,206" marker-end="url(#ah)"></polyline>
+      <!-- ⑤ → ⑥ -->
+      <line class="fa" x1="368" y1="206" x2="408" y2="206" marker-end="url(#ah)"></line>
+      <!-- ② 被丢弃的样本 → 丢弃框（虚线） -->
+      <polyline points="412,272 412,295 388,295" style="stroke:var(--border-strong);stroke-width:1.2;fill:none;stroke-dasharray:4 3" marker-end="url(#ah)"></polyline>
+
+      <!-- 被丢弃的冲突样本 -->
+      <rect class="bx" x="412" y="272" width="364" height="46" rx="8" style="fill:var(--bg-soft);stroke:var(--border-strong);stroke-dasharray:5 4;stroke-width:1.2"></rect>
+      <text class="bs" x="428" y="292">被丢弃：答对的低过程分</text>
+      <text class="bs" x="428" y="309">　　　　答错的高过程分（冲突）</text>
+
+      <!-- 左侧标签 -->
+      <text x="4" y="150" style="font-family:JetBrains Mono,monospace;font-size:11px;fill:var(--accent-deep)">PRM 只出现在 ② 和 ④</text>
+      <text x="4" y="167" style="font-family:JetBrains Mono,monospace;font-size:11px;fill:var(--accent-deep)">不进入梯度</text>
+    </svg>
+    <figcaption>流程与 Algorithm 1 一致：PRM 仅用于打分与排序，进入策略更新的仍是 ORM 给出的奖励。<strong>本图取 n=8：3 正 5 负经平衡规则全留（3+5），与论文 Figure 5 训练后审计的设置一致</strong>；候选不足时 k₊ 会停在 n₊ 上（3 条全留），这正是 3+5 而非 4+4 的原因。模拟器默认的 n=16、m=4 → 2+2 是另一组参数。</figcaption>
+  </figure>
+
+  <p>为什么<strong>保持正负平衡</strong>是核心？消融给出了答案：不分离时（<code>w/o separation</code>，全部混排，即便如此也做了批次中心化），Figure 6 右图显示过滤前后奖励差距被描述为「over 2%」（原文未说明是百分点还是相对，也未说明绝对值基准）——论文说这说明负样本被不均衡地删掉了，因为错误回答常包含若干局部正确的步骤，会把平均 PRM 分抬高、模糊过程与结果的一致性。这组比较是 1.5B 还是 7B 初始化，正文没有写明。附录 B.4 的 Table 6 还比较了别的聚合方式：Minimum 50.9%、Sum 50.6%、Ratio（保留原始正负比例）50.6%，都低于 Mean（PROF-BOTH）的 51.7%；绝对差分别为 <span class="mono">0.8 / 1.1 / 1.1 个百分点</span>（相对 Mean 1.5% / 2.1% / 2.1%）。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>准确率小幅上扬，过程质量的提升才是主角</h2></div>
+  <p class="sec-sub">读完这节你会知道：主表数字、算力对齐比较，以及为什么「过程质量」的差距比准确率差距大得多。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>算法</th><th style="text-align:right">Math500</th><th style="text-align:right">Minerva</th><th style="text-align:right">Olympiad</th><th style="text-align:right">AIME24</th><th style="text-align:right">AMC23</th><th style="text-align:right">平均</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="5">Qwen2.5-Math-<br>1.5B-base</td><td>Base</td><td class="num">39.9</td><td class="num">11.4</td><td class="num">19.1</td><td class="num">3.5</td><td class="num">23.6</td><td class="num">19.5</td></tr>
+        <tr><td>GRPO</td><td class="num">70.3</td><td class="num">29.1</td><td class="num">33.0</td><td class="num">9.0</td><td class="num">44.5</td><td class="num">37.2</td></tr>
+        <tr><td>Blend</td><td class="num">67.6</td><td class="num">27.8</td><td class="num">31.1</td><td class="num">7.7</td><td class="num">42.5</td><td class="num">35.3</td></tr>
+        <tr class="best"><td>PROF-POS</td><td class="num">72.6</td><td class="num">31.3</td><td class="num">36.1</td><td class="num">10.6</td><td class="num">50.3</td><td class="num">40.2</td></tr>
+        <tr><td>PROF-BOTH</td><td class="num">73.2</td><td class="num">30.0</td><td class="num">36.1</td><td class="num">9.6</td><td class="num">49.1</td><td class="num">39.6</td></tr>
+        <tr><td rowspan="5">Qwen2.5-Math-<br>7B-base</td><td>Base</td><td class="num">42.0</td><td class="num">12.8</td><td class="num">19.2</td><td class="num">12.9</td><td class="num">30.0</td><td class="num">23.4</td></tr>
+        <tr><td>GRPO</td><td class="num">81.6</td><td class="num">37.2</td><td class="num">45.5</td><td class="num">20.6</td><td class="num">64.4</td><td class="num">49.9</td></tr>
+        <tr><td>Blend</td><td class="num">81.7</td><td class="num">36.7</td><td class="num">45.0</td><td class="num">15.2</td><td class="num">58.0</td><td class="num">47.3</td></tr>
+        <tr class="best"><td>PROF-POS</td><td class="num">81.4</td><td class="num">36.6</td><td class="num">45.0</td><td class="num">24.8</td><td class="num">64.2</td><td class="num">50.6</td></tr>
+        <tr class="best"><td>PROF-BOTH</td><td class="num">83.1</td><td class="num">39.0</td><td class="num">47.8</td><td class="num">17.5</td><td class="num">70.9</td><td class="num">51.7</td></tr>
+        <tr><td rowspan="5">LLaMA-3.2-<br>3B-instruct</td><td>Base</td><td class="num">30.0</td><td class="num">8.8</td><td class="num">6.1</td><td class="num">2.3</td><td class="num">10.6</td><td class="num">11.6</td></tr>
+        <tr><td>GRPO</td><td class="num">50.5</td><td class="num">18.8</td><td class="num">17.9</td><td class="num">5.0</td><td class="num">25.6</td><td class="num">23.6</td></tr>
+        <tr><td>Blend</td><td class="num">37.2</td><td class="num">13.1</td><td class="num">9.9</td><td class="num">1.0</td><td class="num">17.2</td><td class="num">15.7</td></tr>
+        <tr class="best"><td>PROF-POS</td><td class="num">52.4</td><td class="num">19.5</td><td class="num">19.8</td><td class="num">6.7</td><td class="num">28.6</td><td class="num">25.4</td></tr>
+        <tr><td>PROF-BOTH</td><td class="num">49.0</td><td class="num">18.0</td><td class="num">17.3</td><td class="num">5.4</td><td class="num">23.9</td><td class="num">22.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note"><strong>Table 2</strong>（§4.2，第 7 页）的训练方法（GRPO / Blend / PROF）为 average@16、温度 1.0，每种方法取各自最优设置；<strong>Base 行原文未注明口径</strong>（疑为 pass@1），与训练后的 average@16 不同口径，<strong>跨组不可直接相减</strong>。高亮行为该模型下的最优平均分。</p>
+  <p>7B 行之间的差值（同表、同口径，均为 average@16）：PROF-BOTH 51.7 比 GRPO 49.9 高 <span class="mono">+1.8 个百分点</span>（相对 GRPO +3.6%），比 Blend 47.3 高 <span class="mono">+4.4 个百分点</span>（相对 Blend +9.3%）；PROF-POS 50.6 比 GRPO 高 <span class="mono">+0.7 个百分点</span>（相对 +1.4%）。</p>
+
+  <p>值得注意的点：</p>
+  <ul>
+    <li><strong>Blend 会被 PRM 拖垮：</strong>Qwen 1.5B 上 Blend 35.3 比 GRPO 37.2 低 <span class="mono">1.9 个百分点</span>（相对 GRPO −5.1%），LLaMA-3B-instruct 上 15.7 比 23.6 低 <span class="mono">7.9 个百分点</span>（相对 −33.5%），这是一次「信号分布失配」下的双向失败，不只是「不如 PROF」。</li>
+    <li><strong>PROF-BOTH 与 PROF-POS 分工明确：</strong>Qwen 两个规模上 BOTH 与 POS 互有高低（1.5B：BOTH 39.6 比 POS 40.2 低 <span class="mono">0.6 个百分点</span>，相对 POS −1.5%；7B：BOTH 51.7 比 POS 50.6 高 <span class="mono">1.1 个百分点</span>，相对 POS +2.2%），论文称 BOTH 通常收敛更快（§5.3）；LLaMA-3B-instruct 上 POS 25.4 比 BOTH 22.7 高 <span class="mono">2.7 个百分点</span>（相对 BOTH +11.9%），与「PRM 可靠性较弱或分布偏移较大时只筛正确组更稳」的解释一致（§5.3）。<span class="infer">推断</span>（依据：Table 2；论文未对 LLaMA 这组差值单独做统计检验）</li>
+    <li><strong>单基准并不总是单调：</strong>7B（average@16）上 AIME24，PROF-BOTH 17.5 比 GRPO 20.6 低 <span class="mono">3.1 个百分点</span>，而 PROF-POS 24.8 最高。<span class="infer">推断</span>（依据：AIME24 只有 30 题，average@16 的单点波动大，宜看五基准平均；论文未给出置信区间）</li>
+  </ul>
+
+  <h3>过程质量：差距比准确率大一个量级</h3>
+  <p>论文用蒙特卡洛（MC）估计评估每一步的价值：从某个中间步骤出发独立采样 8 条完成（温度 1.0），看最终答对的比率。只在 PROF 与 GRPO 都答对的测试题上比较（两者均从 Qwen2.5-Math-7B-base 初始化），平均 MC 值在五个基准上都更高，<strong>Math500 +9.2%、Minerva Math +37.4%、Olympiad Bench +15.9%、AMC23 +9.2%、AIME24 +11.1%</strong>；论文原文只说这几个数是 improvement gaps，<strong>没有说明是相对还是绝对</strong>，下面按原样引用。论文指出这远大于 Table 2 中的准确率差距。</p>
+
+  <div class="sim" style="padding:20px 22px">
+    <div class="legend" style="margin-bottom:10px">
+      <span><i style="background:var(--accent)"></i>PROF 相对 GRPO 的 MC 步值提升（§4.3，原文称 improvement gaps，未说明相对/绝对）</span>
+      <span><i style="background:var(--c1)"></i>Table 2 中 7B PROF-BOTH 减 GRPO 的平均准确率差（百分点）</span>
+    </div>
+    <div class="chart">
+      <div class="crow"><div class="cname">Math500</div><div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--accent);height:9.2%"></div></div><div class="num">+9.2%</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--c1);height:1.5%"></div></div><div class="num">+1.5</div></div>
+      </div></div>
+      <div class="crow"><div class="cname">Minerva</div><div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--accent);height:37.4%"></div></div><div class="num">+37.4%</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--c1);height:1.8%"></div></div><div class="num">+1.8</div></div>
+      </div></div>
+      <div class="crow"><div class="cname">Olympiad</div><div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--accent);height:15.9%"></div></div><div class="num">+15.9%</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--c1);height:2.3%"></div></div><div class="num">+2.3</div></div>
+      </div></div>
+      <div class="crow"><div class="cname">AMC23</div><div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--accent);height:9.2%"></div></div><div class="num">+9.2%</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--c1);height:6.5%"></div></div><div class="num">+6.5</div></div>
+      </div></div>
+      <div class="crow"><div class="cname">AIME24</div><div class="cbars">
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--accent);height:11.1%"></div></div><div class="num">+11.1%</div></div>
+        <div class="cbar"><div class="track"><div class="fill" style="background:var(--c1);height:3.1%"></div></div><div class="num">−3.1</div></div>
+      </div></div>
+    </div>
+    <p class="legend" style="margin-top:4px;font-size:11.5px">条形高度按数值线性映射（满格约 40 个百分点），只为相对比较。蓝色为 7B 上 PROF-BOTH 与 GRPO 的平均准确率差（Table 2），AIME24 上为负（17.5 − 20.6 = −3.1）；左边橙色是论文给的 MC 步值 improvement gaps（相对或绝对未说明）。</p>
+  </div>
+
+  <p>更直接的 faithfulness 指标：用 Claude Sonnet 4.6 审计测试集中的正确回答，看推理是否有缺陷。<strong>GRPO 的缺陷率 8%，PROF 降到 6%</strong>（Figure 5 右，占各自正确回答，average@16 评测用的测试集）。这与 Figure 1 是两个不同的审计：Figure 1 是<strong>训练前</strong>在 Qwen2.5-Math-7B 的 2k 条训练样本上测基模，结论是正确回答中 26.28% 含缺陷（占全部正确回答），而在这部分缺陷子集里，按 PRM 一致性对正确组取 bottom half 时 PROF 能滤掉 65.88%（占缺陷子集）；Figure 5 右是<strong>训练后</strong>在测试集上测两种方法。两者的数据分布（训练样本 vs 测试集）与审计对象（基模 vs 训练后策略）都不同，论文并未把它们当作同一数量对比，这里也不做相减或换算。</p>
+
+  <p>PRM 变弱时 PROF 仍然稳（均为 Qwen2.5-Math-7B-base、average@16，Table 3）：把 Qwen2.5-Math-PRM-7B 换成 Skywork-PRM-1.5B，Blend 从 47.3 升到 47.5（<span class="mono">+0.2 个百分点</span>）；<code>PROF-POS</code> 仍有 51.0（比 7B PRM 下的 50.6 高 <span class="mono">0.4 个百分点</span>）、<code>PROF-BOTH</code> 50.5（比 51.7 低 <span class="mono">1.2 个百分点</span>，相对 −2.3%）。<span class="infer">推断</span>（依据：Table 3；「并不依赖特别强的 PRM」是对这组差值的解读，论文原文的说法是 PROF 「maintains performance close to」7B PRM 的结果）</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它优化的是「筛选」，不是「验证」</h2></div>
+  <p class="sec-sub">读完这节你会知道：什么时候应避开 PROF，以及论文自己承认的局限。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>更贵</h4></div>
+    <p>要<b>先多采样再过滤</b>，每条 rollout 还要跑 PRM。论文在简介（§1，第 3 页）写的是：在算力对齐（Inference +3× Train + PRM）且 rollout 组大小对齐时，PROF「achieves larger gains by almost 2%」——<strong>≈2% 指增益幅度，原文没说单位是百分点还是相对，也没说是整体平均还是某一难度桶</strong>，这里照原样引用。对应实验是 §4.2 与 Figure 3：7B 上 GRPO-n16m16 对 PROF-n16m8，按 Level 1–4 难度分桶比较（Level 4 在正文，Level 1–3 见附录 Figure 8）。绝对开销高于 Blend 与 vanilla GRPO，Limitations 把「效率与推理质量的平衡」列为后续方向。<span class="infer">推断</span>（依据：§4.2／Figure 3；正文只给曲线未给表，≈2% 对应哪个难度桶无法从文字确定）</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>PRM 的偏差会被放大</h4></div>
+    <p>Broader Impact 一节指出：若 PRM 偏向某种推理模式或语言，PROF 可能把「多样但有效」的解法也筛掉。附录 B.2（Figure 9）也显示 <code>n</code> 从 4 增到 16 时性能先升后降，论文的解释是过程质量与避免 reward hacking 之间存在权衡。</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>只验证了数学，且依赖 LLM 审计</h4></div>
+    <p>实验集中在数学推理（Numina-Math、五个数学基准），代码、网页导航等只作为未来工作提出。推理质量的审计本身由 Claude 完成，论文坦言这只是近似信号，无法替代细粒度的人工判断。</p>
+  </div>
+
+  <p style="margin-top:20px">一句话：<strong>PROF 不制造更好的 PRM，也不扩大验证器的能力；它只是把已有 PRM 的信号从「奖励」挪到「采样后的一道淘汰赛」，换来更少的蒙对样本进入梯度。</strong>如果任务本身没有可靠的验证器或过程信号，这套方法无从谈起。</p>
+</section>
+
+<footer>
+  <div>Beyond Correctness: Harmonizing Process and Outcome Rewards through RL Training</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.03403v2" target="_blank" rel="noopener">arXiv 2509.03403v2</a>（2026-05-15 修订，本页全部表号、图号与数字以此版为准）· Amazon · UIUC<br>
+    代码：<a href="https://github.com/amazon-science/PROF-GRPO" target="_blank" rel="noopener">amazon-science/PROF-GRPO</a><br>
+    笔记：<a href="/beyond-correctnessharmonizing-process-and-outcome-rewards-through-rl-training/">BEYOND CORRECTNESS：HARMONIZING PROCESS AND OUTCOME REWARDS THROUGH RL TRAINING</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    本页数字核对自查（笔记原文不改动）：
+    <ul style="margin:8px 0 0;padding-left:20px">
+      <li>笔记的「Qwen2.5-Math-7B-base」与论文写法「Qwen2.5-Math-7B-base」一致；引用的 Table 2 数值（PROF-GRPO 51.7 = 论文 PROF-BOTH，GRPO 49.9，Blend 47.3）完全一致。</li>
+      <li>笔记写「熵损失和响应长度……（Figure 3）」，论文 v2 中这两条曲线是 <strong>Figure 7</strong>；Figure 3 是算力对齐比较。</li>
+      <li>笔记写「响应长度（Figure 4）」「Figure 4 中使用蒙特卡洛估计」，v2 中 MC 步值是 <strong>Figure 5 左</strong>，Figure 4 是训练动态。</li>
+      <li>笔记与梗概都没写 65.88% 的筛选条件；v2 第 5 页 §3 写明是「PROF filters the <strong>bottom half</strong> of correct responses by PRM consistency」时，在缺陷子集内的比例（26.28 × 0.6588 = 17.31，占全部正确回答）。</li>
+      <li>笔记的「Minerval Math」为笔记内笔误，论文为 Minerva Math。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ============================================================
+     PROF 名额模拟器
+     k_+ 上限由「正确组强化档位 p」给出：cap = max(1, floor(n_+ * p))；
+     约束 k_+ + k_- = m, k_+ <= min(n_+, cap), k_- <= n_-；
+     在可行区间里取最接近 m/2 的 k_+（论文：k_+k_- 最大）。
+     ============================================================ */
+  var ids = ['n-range', 'npos-range', 'm-range', 'p-range'];
+  var missing = ids.some(function (id) { return !document.getElementById(id); });
+  if (missing) return;
+
+  var nEl = document.getElementById('n-range');
+  var nposEl = document.getElementById('npos-range');
+  var mEl = document.getElementById('m-range');
+  var pEl = document.getElementById('p-range');
+  var slotsHost = document.getElementById('sim-slots');
+  var listPos = document.getElementById('list-pos');
+  var listNeg = document.getElementById('list-neg');
+  var msg = document.getElementById('sim-msg');
+  var btnBoth = document.getElementById('btn-both');
+  var btnPos = document.getElementById('btn-pos');
+  var mode = 'both';
+
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function solve(n, npos, m, p) {
+    var nneg = n - npos;
+    var cap = npos > 0 ? Math.max(1, Math.floor(npos * p)) : 0;
+    var kpMax = Math.min(npos, cap);
+    /* k_- = m - k_+ <= nneg  => k_+ >= m - nneg；k_+ <= m */
+    var kpMin = Math.max(0, m - nneg);
+    kpMax = Math.min(kpMax, m, npos);
+    if (kpMin > kpMax) {
+      /* 没有有效分配：多为正确组为空或过少 */
+      return { ok: false, nneg: nneg, cap: cap };
+    }
+    var target = m / 2;
+    var kp = clamp(Math.round(target), kpMin, kpMax);
+    /* 在 [kpMin,kpMax] 内挑离 target 最近的 */
+    var best = kp, bestD = Math.abs(kp - target), c;
+    for (c = kpMin; c <= kpMax; c++) {
+      var d = Math.abs(c - target);
+      if (d < bestD) { best = c; bestD = d; }
+    }
+    kp = best;
+    return { ok: true, nneg: nneg, cap: cap, kp: kp, kn: m - kp, prod: kp * (m - kp) };
+  }
+
+  /* 一个确定性的「伪随机」排序键：只用于让示意分数在变化时看起来稳定 */
+  function scores(count, correct) {
+    var out = [];
+    for (var i = 0; i < count; i++) {
+      var t = i / Math.max(1, count - 1);
+      /* 正确组里「越靠前越高」；错误组里也有一个被 PRM 虚高的尾部 */
+      var v = correct ? 0.9 - 0.5 * t : 0.25 + 0.45 * t;
+      out.push(Math.round(v * 100) / 100);
+    }
+    return out;
+  }
+
+  function renderGroup(host, arr, keepSet, keepFlag, dropFlag) {
+    host.innerHTML = '';
+    arr.forEach(function (s, i) {
+      var keep = keepSet.indexOf(i) !== -1;
+      var item = document.createElement('div');
+      item.className = 'cand-item' + (keep ? ' keep' : ' drop');
+      var r = document.createElement('div');
+      r.className = 'cr';
+      r.textContent = 'r_pro ' + s.toFixed(2);
+      var f = document.createElement('span');
+      f.className = 'cflag';
+      f.textContent = keep ? keepFlag : dropFlag;
+      item.appendChild(r);
+      item.appendChild(f);
+      host.appendChild(item);
+    });
+  }
+
+  function update() {
+    var n = parseInt(nEl.value, 10);
+    var npos = Math.min(parseInt(nposEl.value, 10), n);
+    var m = parseInt(mEl.value, 10);
+    var p = parseFloat(pEl.value);
+    /* 注意：nposEl.value 可能大于新 n，先夹紧再同步滑块显示 */
+    if (parseInt(nposEl.value, 10) > n) nposEl.value = String(n);
+
+    nposEl.max = String(n);
+    if (parseInt(nposEl.value, 10) > n) nposEl.value = String(n);
+    document.getElementById('nv').textContent = n;
+    document.getElementById('nposv').textContent = npos;
+    document.getElementById('mv').textContent = m;
+    document.getElementById('pv').textContent = p.toFixed(2);
+
+    var res = solve(n, npos, m, p);
+    var posScores = scores(npos, true);
+    var negScores = scores(n - npos, false);
+
+    if (!res.ok) {
+      slotsHost.innerHTML = '<div class="slot"><div class="slot-name">名额</div><div class="slot-val">无解</div></div>';
+      listPos.innerHTML = '';
+      listNeg.innerHTML = '';
+      var nShort = m > n;
+      var pStrict = p < 1 && res.cap < m - res.nneg;
+      var why = nShort && pStrict
+        ? 'n=' + n + ' 条凑不满 m=' + m + '，且 p=' + p.toFixed(2) + ' 又把正确组压到 ' + res.cap + ' 条'
+        : nShort
+          ? 'n=' + n + ' 条凑不满 m=' + m + ' 个名额'
+          : 'p=' + p.toFixed(2) + ' 把正确组压到 ' + res.cap + ' 条，而错误组只有 ' + res.nneg + ' 条，k₊+k₋ 凑不满 m';
+      msg.innerHTML = '这一组参数下没有可行的名额分配：<span class="warn">' + why + '</span>。' +
+        '<br><strong>这是模拟的边界，不是论文算法的结论。</strong>滑块允许 m 大于 n、或 p 压得过低这类数值上不可行的组合；真实训练中这类提示会被丢弃或重采样，论文的 Algorithm 1 不会输出「无解」。';
+      return;
+    }
+
+    var capTxt = npos > 0 ? Math.max(1, Math.floor(npos * p)) : 0;
+    var kpMin = Math.max(0, m - res.nneg);
+    var capBound = npos > 0 && Math.min(npos, capTxt) <= Math.floor(m / 2) && res.kp === Math.min(npos, capTxt) && capTxt < npos;
+    var negNote = mode === 'both'
+      ? 'PROF-BOTH：保留过程分最低的 ' + res.kn + ' 条（只留「差得一致」的）'
+      : 'PROF-POS：随机保留 ' + res.kn + ' 条（界面用低分端示意）';
+    var html = '';
+    html += '正确组强化档位 p=' + p.toFixed(2) + ' → 正确组最多留 <strong>' + Math.min(npos, capTxt) + '</strong> 条，' +
+            '在 <code>k₊+k₋=' + m + '</code>、<code>k₊≤' + Math.min(npos, capTxt) + '</code>、<code>k₋≤' + res.nneg + '</code> 下，离 m/2=' + (m / 2) + ' 最近的分配是 ' +
+            '<strong>' + res.kp + ' + ' + res.kn + '</strong>。';
+    html += '<br>' + negNote + '；' + res.nneg + ' 条错误里丢掉 <strong>' + (res.nneg - res.kn) + '</strong> 条。';
+    if (res.kp === res.kn) {
+      html += '<br>正负各半（' + res.kp + ':' + res.kn + '），与论文「保持正确/错误比例平衡」的目标一致。';
+    } else {
+      html += '<br><span class="warn">正负不等（' + res.kp + ':' + res.kn + '）</span>';
+      if (capBound) {
+        html += '：这是 p=' + p.toFixed(2) + ' 把正确组压到 ' + capTxt + ' 条造成的<strong>名额不足时的人为近似</strong>，已偏离论文「保持正负平衡」的核心论点。' +
+          'p=1.00 时 cap 放开，分配会回到 ' + (function () {
+            var r2 = solve(n, npos, m, 1);
+            return r2.ok ? (r2.kp + '+' + r2.kn) : '另一组可行解';
+          })() + '；真实训练中名额不足的提示会被丢弃或重采样。';
+      } else {
+        html += '：正确组只有 ' + npos + ' 条（名额上限 ' + Math.min(npos, capTxt) + ' 条），凑不满更接近 m/2 的分配。论文的约束允许这种偏离（k₊ ≤ n₊ 优先于 m/2），所以这不是模拟误差，而是两边候选数与 m 不匹配时的正常解。';
+      }
+    }
+
+    /* 槽位：k+ / k- / 乘积 */
+    slotsHost.innerHTML = '';
+    var slotDefs = [
+      { name: 'k₊ 正确组', val: res.kp + ' / ' + npos },
+      { name: 'k₋ 错误组', val: res.kn + ' / ' + res.nneg },
+      { name: 'k₊·k₋', val: String(res.prod) }
+    ];
+    slotDefs.forEach(function (s) {
+      var el = document.createElement('div');
+      el.className = 'slot' + (s.name.indexOf('k₊·') === 0 ? ' hit' : '');
+      var a = document.createElement('div');
+      a.className = 'slot-name';
+      a.textContent = s.name;
+      var b = document.createElement('div');
+      b.className = 'slot-val';
+      b.textContent = s.val;
+      el.appendChild(a);
+      el.appendChild(b);
+      slotsHost.appendChild(el);
+    });
+
+    /* 正确组：过程分已按从高到低排（伪随机但单调），保留前 k+ */
+    var posKeep = [];
+    for (var i = 0; i < res.kp; i++) posKeep.push(i);
+    renderGroup(listPos, posScores, posKeep, '保留 · 一致', '丢弃 · 蒙对');
+
+    /* 错误组：negScores 按分数升序，保留升序最前的 k_（两种模式在界面上一致展示） */
+    var negKeep = [];
+    for (var j = 0; j < res.kn; j++) negKeep.push(j);
+    renderGroup(listNeg, negScores, negKeep, '保留 · 一致', '丢弃 · 冲突');
+
+    document.getElementById('tag-pos').textContent = 'G⁺ 正确组 ' + npos;
+    document.getElementById('tag-neg').textContent = 'G⁻ 错误组 ' + res.nneg;
+
+    if (npos === 0) {
+      html += '<br><span class="warn">正确组为空：所有轨迹都错，PROF 退化为「只按错误组排序」。</span>';
+    }
+    msg.innerHTML = html;
+  }
+
+  ['n-range', 'npos-range', 'm-range', 'p-range'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', update);
+  });
+  if (btnBoth) btnBoth.addEventListener('click', function () { mode = 'both'; update(); });
+  if (btnPos) btnPos.addEventListener('click', function () { mode = 'pos'; update(); });
+
+  update();
+})();
+</script>
+</body>
+</html>

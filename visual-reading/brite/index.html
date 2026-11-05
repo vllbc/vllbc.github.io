@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BRiTE · 一次后验采样，改写整个思考过程的训练</title>
+<meta name="description" content="BRiTE 把 LLM 推理写成含潜在思考过程 Z 和评估信号 O 的概率图模型，用 RL 近似真正想要的后验 P(z|y*,x)，再拿它做 SFT 或 DPO。同一套框架可以还原 PPO、STaR、RS 微调，并给出 1/T 收敛保证。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调：只处理 DAG 示意与密度条 */
+.dag-wrap{overflow-x:auto}
+.dag-wrap svg{min-width:520px}
+.dens{display:grid;grid-template-columns:120px 1fr;gap:8px 12px;align-items:center;margin:14px 0 4px;font-family:"JetBrains Mono",monospace;font-size:12px}
+.dens .lb{color:var(--text-muted);line-height:1.4}
+.dens .lb b{display:block;color:var(--text);font-size:12px}
+.dens .strip{display:grid;grid-template-columns:repeat(20,1fr);gap:2px;height:22px}
+.dens .strip span{border-radius:2px;background:var(--c2);opacity:.15}
+.dens .strip span.on{background:var(--accent);opacity:1}
+.dens .meta{grid-column:2;font-size:11.5px;color:var(--text-soft);margin:-4px 0 6px}
+.dens .meta b{color:var(--accent-deep)}
+.mode-chip{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:11px;padding:2px 8px;border-radius:100px;background:var(--accent-soft);color:var(--accent-deep);font-weight:600}
+@media (max-width:560px){.dens{grid-template-columns:84px 1fr;font-size:11px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">BRiTE</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Reasoning · ICML 2025 · arXiv 2501.18858</span>
+  <h1>BRiTE：把「想要的那种思考」写成一个后验分布，用 RL 去逼近它</h1>
+  <p class="hero-sub">
+    论文把 LLM 的生成写成概率图模型 <code>X → Z → Y</code>，再加一个评估信号 <code>O</code>。
+    真正想要的是「已知答案正确时，思考过程长什么样」——一个难算的后验。
+    BRiTE 的 ψ 步用 RL 去近似这个后验，θ 步再拿近似出来的数据做 SFT 或 DPO。
+    代价是每组数据要多跑一遍 RL，好处是同一套推导把 PPO、STaR、拒绝采样微调都收编了。
+  </p>
+  <div class="meta">
+    <span>Han Zhong, Yutong Yin, Shenao Zhang, Xiaojun Xu, Zhaoran Wang 等 · 北大 / 西北 / 字节 / 明大</span>
+    <a href="https://arxiv.org/abs/2501.18858" target="_blank" rel="noopener"> arXiv 2501.18858 ↗</a>
+    <a href="https://proceedings.mlr.press/v267/zhong25e.html" target="_blank" rel="noopener">ICML 2025 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    拒绝采样类方法的 E 步是「采样 → 筛」，本质是用经验分布近似后验 <code>P(z | x, y*, O*)</code>。
+    BRiTE 指出这一步可以<strong>换成 RL</strong>：构造一个 MDP，使它的最优策略正好等于那个后验。
+  </p>
+  <p>
+    关键不是「用 PPO」这三个字，而是 <strong>reward shaping</strong>：把整条序列的总奖励取成
+    <code>log P(z, y, O* | x, θ)</code>，再按自回归拆成逐 token 奖励。β=1 时熵正则最优策略的概率正好正比于总奖励，
+    于是「答案越可能正确的思考」被抽得越多——这是它和普通 outcome-reward RL 的根本分野。
+  </p>
+  <p>
+    理论贡献是同一件事的另一面：BRiTE 就是把 <em>X, Z, Y, O</em> 四个空间取不同子集，就分别还原出 SFT、
+    PPO、latent DPO、STaR 与 ReSTEM，收敛率统一为 <em>1/T</em>。实验上，Qwen2.5-7B 在 MATH500 上从基线的 44.1
+    提到 ψ-update 的 79.1，而同样数据量的拒绝采样只到 54.3。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">79.1<small> vs 54.3</small></div>
+      <div class="k">MATH500（Qwen2.5-7B，40K 混合数据）<br>BRiTE ψ-update vs 拒绝采样</div>
+    </div>
+    <div class="metric">
+      <div class="v">50.5<small> vs 41.5</small></div>
+      <div class="k">Gemma-2-9B-it 上 MATH 准确率<br>BRiTE vs 人工标注推理链 SFT</div>
+    </div>
+    <div class="metric">
+      <div class="v">1/T</div>
+      <div class="k">迭代 T 次后的收敛率<br>与 KL 初态−最优 之差成正比</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>推理链坏掉的地方不在答案，在「怎么想到的」这一步</h2></div>
+  <p class="sec-sub">明白为什么「只看答案对不对」不足以解释推理质量，以及为什么思考过程天然是一个潜变量。</p>
+
+  <p>
+    CoT 提示让模型把题目拆成步骤，确实提升了准确率。但论文指出的问题是：<strong>生成的 rationale 经常缺少逻辑完整性或有效性，质量高度依赖任务特定提示</strong>。同样的提示换个模型，或同一模型换个温度，正确的思考路径就会消失。
+    推理时扩展（test-time scaling）也只是在缓解症状，没有解决「生成高质量推理过程」这个核心。
+  </p>
+
+  <p>
+    BRiTE 的做法是把它形式化成一张概率图：<code>X</code> 是问题，<code>Z</code> 是内部思考过程（潜在变量），<code>Y</code> 是答案，<code>O</code> 是评估信号。
+    令 <code>P(o | x, z, y)</code> 与模型参数 θ 无关——它代表一个真值裁判，比如标准答案或单元测试。于是
+  </p>
+
+  <div class="eq">
+    P(z, y, o | x, θ) = P(z | x, θ) · P(y | x, z, θ) · P(o | x, z, y)
+  </div>
+  <div class="eq-cap">式 (3.1)：引入 Z 把 P(Y | X) 拆成 P(Z | X) 与 P(Y | X, Z)；引入 O 给「正确的思考」提供判别信号</div>
+
+  <p>
+    学习目标是最大化 <code>L(θ) = log P(z ∈ 𝒵, y ∈ 𝒴, o ∈ 𝒪 | x, θ)</code>——生成出来的思考、答案和评估同时落在「想要的那个集合」里的概率。
+    问题在于：这个目标对 z 求和，直接算不可行，必须引入某个辅助分布去近似。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>答案正确 ≠ 推理正确，而「正确推理」是一个不好采样的分布</h4></div>
+    <p>如果一个模型 10 条里有 1 条答对，那这 1 条的推理也未必可信；如果 10 条里都答对，那根据答案筛出来的推理又长得差不多、没有多样性。
+    真正想要的是「给定 (x, y*)，Z 应该如何分布」——这是对思考过程做的条件后验，不能靠暴力枚举得到。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条旧路：人工标推理链烧钱，拒绝采样只会「筛」不会「学」</h2></div>
+  <p class="sec-sub">看清 EM 视角下 E 步的两种实现方式，才知道 BRiTE 的新意落在哪里。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Human SFT</span><h4>人写推理链</h4></div>
+      <p>数据集里给的是 <code>(x, z*, y*)</code>，直接把人类写的 <code>z*</code> 做 SFT。这是公认的金标准。</p>
+      <p><strong>代价：</strong>标注贵、慢、不一致；前沿问题上，人类专家本身也未必有唯一的「标准思考」。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Rejection Sampling</span><h4>生成后筛选</h4></div>
+      <p>每题采 <code>N = 30</code> 条，留下答案正确的那条 <code>z_rs</code> 做 SFT（STaR / RS 微调 / ReSTEM 都属于这一类）。</p>
+      <p><strong>代价：</strong>本质是「采样后的经验分布」近似后验。它<strong>不会主动提高正确推理的生成概率</strong>，只会从已有的生成里挑；样本一多就被稀释。</p>
+    </div>
+  </div>
+
+  <p>
+    从 EM 的视角看，两者都是「E 步估计潜变量后验 → M 步最大化期望对数似然」，只是 E 步的实现分别是「用人工标注当后验」和「用拒绝采样近似后验」。
+    BRiTE 的切入点很明确：<strong>E 步为什么不能直接是一个可优化的策略？</strong>
+  </p>
+
+  <div class="eq">
+    θ<sub>t+1</sub> = argmax<sub>θ</sub> Σ<sub>(z,y)</sub> log P(z, y| x, θ) · P(1 | x, z, y)
+    &nbsp;·&nbsp; P(1 | x, z, y) = <span class="hl-a">1{y 正确}</span>
+  </div>
+  <div class="eq-cap">式 (3.7)：拒绝采样 EM 的形式——权重是 0/1 的硬指示函数，E 步只是在做筛选</div>
+
+  <p>
+    BRiTE 换掉的正是这个 0/1 权重：不再「过就留下、不过就扔掉」，而是让一个 RL 策略去学习<strong>怎样的 z 更可能通向正确</strong>，输出的样本带着概率质量，而不是被硬切一刀。
+  </p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把「E 步」写成 RL：最优策略正比于目标后验，奖励就是逐 token 的对数概率</h2></div>
+  <p class="sec-sub">理解 Lemma 3.1 的变分下界、Reward shaping 的选取方式，以及为什么它和普通的 outcome reward 不同。</p>
+
+  <h3>第一步：变分下界（与 EM / VAE 同一套思想）</h3>
+  <p>
+    引入一个辅助分布 <code>Q(z, y, o | x, ψ)</code>，用 Lemma 3.1（即 KL 非负）把对数边缘似然写成对 Q 的下界最大化：
+  </p>
+
+  <div class="eq">
+    L(θ) = max<sub>Q</sub> Σ<sub>(z,y,o)</sub>
+    <span class="hl-a">log P(z, y, o | x, θ)</span> · Q(z, y, o | x, ψ)
+    − Σ<sub>(z,y,o)</sub> <span class="hl-b">log Q(z, y, o | x, ψ)</span> · Q(z, y, o | x, ψ)
+  </div>
+  <div class="eq-cap">式 (3.3)：Lemma 3.1（KL 非负）给出 log ΣP ≥ E<sub>Q</sub>[log P − log Q]，取 Q = P / ΣP 时等号成立</div>
+
+  <p>最优 Q 有闭式解，正是我们要的后验：</p>
+
+  <div class="eq">
+    Q<sup>*</sup>(z, y, o | x, ψ) = P(z, y, o | x, θ<sub>t</sub>) / Σ P(z′, y′, o′ | x, θ<sub>t</sub>)
+    &nbsp;∝&nbsp; <span class="hl-c">P(z, y, o | x, θ<sub>t</sub>)</span>
+  </div>
+  <div class="eq-cap">式 (3.4) · ψ-update：当 Y = {y*}、O = {1} 时，这就是 P(z | x, y*, 1)——「答案已知正确时，思考该是什么样」</div>
+
+  <p>接下来 θ 的更新是一个加权对数似然，对应 M 步：</p>
+
+  <div class="eq">
+    θ<sub>t+1</sub> = argmax<sub>θ</sub> Σ<sub>(z,y,o)</sub> log P(z, y | x, θ) · Q(z, y, o | x, ψ<sub>t+1</sub>)
+  </div>
+  <div class="eq-cap">式 (3.5) · θ-update：log P(o | x, z, y) 与 θ 无关，在优化中可丢弃</div>
+
+  <h3>第二步：Q 难采样，那就交给 RL——关键是奖励怎么设</h3>
+  <p>
+    当 <code>Y = {y*}</code>、<code>Z = 𝒵</code> 时，Q* 就是后验 P(z | x, y*, 1)。LLM 是自回归的，要「在答案已知为 y* 的条件下」生成 z，天然不可直接采样。
+    论文构造一个确定性熵正则 MDP，用 Proposition 3.7 说明：最优策略满足 <code>π*(a<sub>h</sub>…a<sub>H</sub> | s<sub>h</sub>) ∝ exp(1/β · Σ r)</code>。
+  </p>
+  <p>
+    所以只要令 <strong>β = 1</strong>，并把<strong>整条序列的总奖励</strong>设为 <code>log P(z, y, o | x, θ<sub>t</sub>)</code>，最优策略就恢复成 Q*。又因为生成是自回归的，这条总奖励可以按 token 拆开：
+  </p>
+
+  <div class="eq">
+    r<sub>total</sub>(z, y, o) = Σ<sub>j=1..τ</sub>
+    <span class="hl-c">log P(a<sub>j</sub> | a<sub>1:j−1</sub>, x)</span>
+  </div>
+  <div class="eq-cap">Section 3.4：第 j 个 token 的奖励就是它在参考策略下的对数概率——不是结果奖励，是「这个 token 本来就有多可能出现」</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">与普通 RL 的分野</span><h4>BRiTE 的 reward 不是「答对 +1」，而是「这个回答本来有多大概率」</h4></div>
+    <p>
+      通常的 outcome-reward RL 在所有正确回答上给同样的奖励（0/1）。BRiTE 对每个 token 给它的对数概率：
+      <strong>参考模型本来就更倾向生成的 token，奖励更高；被模型视为「意外」的 token，奖励更低。</strong>
+      加上 β=1 的温和正则，最终学到的策略不是「在所有正确回答上均匀分布」，而是「正确回答的概率像参考模型本身一样被加权」——这正是后验 ∝ 联合概率的形式。
+    </p>
+  </div>
+
+  <p>
+    论文的实现允许两种 reward 形式：
+    <code>(i) log P(z, y* | x)</code>（无外部 verifier，训练集就是正确答案的集合）与
+    <code>(ii) log P(z, y | x) + R(x, z, y)/β</code>（有外部 verifier / 奖励函数）。前者对应「只用正确的题目」，后者对应「用一份额外的打分」。
+  </p>
+
+  <h3>自己动手：看到后验采样和拒绝采样的密度差异</h3>
+  <p>
+    下面是一个高度简化的示意：一个题目的思考过程空间被记为 20 个格子（代表 20 种候选 z），每格颜色深浅是它的「质量」
+    <code>q(z) = p<sub>θ</sub>(y*|x,z) · p<sub>θ</sub>(z|x)</code>。拖动滑块改变采样条数，对比两种方法最终拿去训练的数据分布。
+    参数说明：<code>T = 0.5</code> 是采样温度，<code>β = 1</code> 是 BRiTE 的熵正则系数。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <button class="rule-btn active" data-m="rs" id="mode-rs">Rejection Sampling<span class="r-sub">采样 N 条 → 答对才留下</span></button>
+      <button class="rule-btn" data-m="brite" id="mode-brite">BRiTE ψ 步<span class="r-sub">最优策略 ∝ q(z)</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>采样条数 N <span class="v" id="n-v">30</span></label>
+        <input type="range" id="n-slider" min="2" max="60" step="1" value="30">
+      </div>
+      <div class="ctrl">
+        <label>采样温度 T <span class="v" id="t-v">0.50</span></label>
+        <input type="range" id="t-slider" min="0.3" max="1.5" step="0.05" value="0.5">
+      </div>
+    </div>
+
+    <div class="dens" id="dens-grid"></div>
+    <div class="readout">
+      <div class="r-head">当前判断 <span class="mode-chip" id="mode-chip">RS</span></div>
+      <div id="sim-msg"></div>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-soft);margin-top:12px;margin-bottom:0">
+      表中数字为解析计算的期望，不是随机模拟。
+    </p>
+  </div>
+
+  <details>
+    <summary>这个模拟假设了什么？<span class="sum-sub">点开看与真实算法的对应</span></summary>
+    <div class="details-body">
+      <p>构造：设 q(z) 在 z = 1, 4, 7, 12, 18 这五格上非零，取值的原始权重为 p<sub>θ</sub>(z|x) 与「答对率」，二者相乘并归一化：
+      <code>q = [0.50, 0.20, 0.15, 0.10, 0.05]</code>——一条典型的「少数几类推理容易被采到，其他稀薄」的分布。</p>
+      <p>RS 在温度 T 下的采样分布为 <code>q<sup>1/T</sup></code> 再归一化，被接受的样本（答对）又按「答对率」过滤一次，最终「被保留的比例 ∝ q(z)」。但这里衡量的不是保留数，而是<strong>我们期望能拿到多少条不同的高质量 z</strong>——RS 保留的条数 ≈ N·Σq，其中大部分集中在前几格；BRiTE 的最优策略则正比于 q(z)，每条采样都直接反映质量。</p>
+      <p>真实模型里，思考过程是长文本，q(z) 是高度复杂、无法枚举的分布；这个 20 格示意只保留了「分布很尖、且采样分布与目标分布不一致」这一层因果。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>工程上就是「PPO 求 Q，再接 SFT / DPO」——开销集中在 ψ 步</h2></div>
+  <p class="sec-sub">明白三套实现（BRiTE-SFT、BRiTE-DPO、扩展数据）的超参和算力，以便判断复现成本。</p>
+
+  <p>ψ 步和 θ 步的实现开销差异很大：前者要跑 RL，后者是标准训练，可以接进任何已有的后训练管线。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">ψ-update（RL）</span><h4>贵：要跑 PPO / GRPO</h4></div>
+      <p>论文用 PPO 或 GRPO 优化熵正则 MDP。训练配置（Appendix D）：</p>
+      <ul style="margin-bottom:0">
+        <li>数学（4 个 instruct 模型）：4×H100，PPO，lr 5×10⁻⁷，batch 1</li>
+        <li>扩展实验（Qwen2.5-7B）：8×H100，GRPO/verl，lr 1×10⁻⁶，batch 512×8</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">θ-update（SFT / DPO）</span><h4>便宜：标准训练</h4></div>
+      <p>拿 Q 采出来的数据做常规训练，与已有的后训练管线兼容：</p>
+      <ul style="margin-bottom:0">
+        <li>BRiTE-SFT：用 <code>(x, z_Q, y*)</code> 做 SFT，lr 5×10⁻⁵，batch 2</li>
+        <li>BRiTE-DPO：用 Q 生成 30 条/题，构造 (最优, 最差) 偏好对，跑 3 轮 DPO</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>两组实验都统一采用 LoRA（r = 32，α = 128）。三套实现的差异：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>实现</th><th>ψ 步</th><th>θ 步</th><th>前提</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>BRiTE-SFT</td><td>PPO 求 Q（奖励形式 i 或 ii）</td><td>用 <code>(x, z_Q, y*)</code> 做 SFT</td><td>训练集全部为正确答案，或有 verifier</td></tr>
+        <tr><td>BRiTE-DPO</td><td>每轮用 Q 采 30 条</td><td>按答案正确性构造最佳/最差对，做 DPO（3 轮）</td><td>偏好数据是自动生成的</td></tr>
+        <tr class="best"><td>BRiTE 扩展（Qwen2.5）</td><td>40K 混合数据（STILL-3-Preview + MATH + 历史 AIME），GRPO</td><td>θ 步用 Q 采出的数据做 SFT</td><td>只是「训练数据更多 + 基座更强」</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    论文坦言，与小数据下（Table 1）BRITE 和 RS 的差距只有 1–10 分；扩展到 40K 数据 + 更强的 Qwen2.5-7B 之后，优势才拉开（4.3 节）。也就是说，
+    <strong>ψ 步的 RL 开销换来的是「同样的数据量下更高质量的 z」</strong>，数据量本身也仍是瓶颈。
+  </p>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条主循环：X → Z → Y → O → 更好的 Z</h2></div>
+  <p class="sec-sub">用这张流程图看清 BRiTE 在推理时和训练时各自做了什么，以及它对应 EM 的两步。</p>
+
+  <figure>
+    <div id="fig1-host">
+<svg viewBox="0 0 880 360" role="img" aria-label="BRiTE 流程图">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8C857B"></path>
+    </marker>
+  </defs>
+
+  <!-- 上行：数据流 -->
+  <rect x="30" y="44" width="140" height="64" rx="12" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.5"></rect>
+  <text x="100" y="70" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#1A1816">X · 问题</text>
+  <text x="100" y="90" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">数学题 / 代码题</text>
+
+  <rect x="240" y="44" width="140" height="64" rx="12" fill="#E4E0F0" stroke="#5A4A8C" stroke-width="1.5"></rect>
+  <text x="310" y="70" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#1A1816">Z · 思考</text>
+  <text x="310" y="90" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">由 Q 策略生成</text>
+
+  <rect x="450" y="44" width="140" height="64" rx="12" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1.5"></rect>
+  <text x="520" y="70" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#1A1816">Y · 答案</text>
+  <text x="520" y="90" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">自动生成</text>
+
+  <rect x="660" y="44" width="160" height="64" rx="12" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1.5"></rect>
+  <text x="740" y="70" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#1A1816">O · 评估</text>
+  <text x="740" y="90" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#6B6660">单元测试 / 标准答案</text>
+
+  <line x1="170" y1="76" x2="236" y2="76" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+  <line x1="380" y1="76" x2="446" y2="76" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+  <line x1="590" y1="76" x2="656" y2="76" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+
+  <!-- 下行：训练闭环 -->
+  <rect x="60" y="196" width="360" height="86" rx="12" fill="#F4DCD0" stroke="#C04E2D" stroke-width="1.8"></rect>
+  <text x="240" y="224" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#7A2E16">ψ-update · 等价 EM 的 E 步</text>
+  <text x="240" y="246" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#1A1816">用 PPO / GRPO 求 Q ≈ P(z | x, y*, O*)</text>
+  <text x="240" y="266" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6B6660">逐 token 奖励 = log π_ref(a_j | ·)</text>
+
+  <rect x="490" y="196" width="330" height="86" rx="12" fill="#DDE9EE" stroke="#2E5A6B" stroke-width="1.8"></rect>
+  <text x="655" y="224" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="13" font-weight="700" fill="#1A1816">θ-update · 等价 EM 的 M 步</text>
+  <text x="655" y="246" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="12" fill="#1A1816">用 Q 采的数据做 SFT / DPO</text>
+  <text x="655" y="266" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6B6660">下一次迭代复用更强的基座</text>
+
+  <!-- 回路 -->
+  <path d="M 740 108 L 740 156 L 240 156 L 240 192" fill="none" stroke="#8C857B" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"></path>
+  <text x="490" y="148" text-anchor="middle" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#8C857B">评估信号作为「样本质量」回传</text>
+
+  <line x1="424" y1="239" x2="486" y2="239" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arr)"></line>
+  <path d="M 820 239 L 850 239 L 850 76 L 824 76" fill="none" stroke="#C04E2D" stroke-width="1.8" marker-end="url(#arr)"></path>
+  <text x="856" y="160" text-anchor="end" font-family="Noto Sans SC, sans-serif" font-size="11.5" fill="#7A2E16">更好的 θ 回过头来让 ψ 步更强</text>
+
+  <text x="100" y="330" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#8C857B">实线：单次迭代的数据流</text>
+  <text x="500" y="330" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#8C857B">虚线：评估 / 下一轮</text>
+</svg>
+    </div>
+    <figcaption>
+      图 1（本页自绘，对应论文 Fig. 1 + 3.2 / 3.4 节流程）：BRiTE 的 ψ 步接受含 O 的联合信息，输出采样自后验的思考过程；θ 步把它当作训练数据。
+    </figcaption>
+  </figure>
+
+  <p>
+    这张图解释了为什么作者说「BRiTE 在推理时用到 RL」：<strong>ψ 步本身就是一次推理/生成</strong>——生成 z 时 Q 已经知道自己想要哪种推理，
+    而不是等生成完再回来看答案。反过来说，θ 步可以落到任何标准后训练算法上，所以框架本身并不绑定 PPO。
+  </p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：小数据 + 或强或弱的基座能追平人类标注，大数据 + 强基座拉开 25 分</h2></div>
+  <p class="sec-sub">Table 1、Table 2 与 Figure 2 里的数字，可以直接告诉你它能赢在哪，赢不了在哪。</p>
+
+  <h3>Table 1：四个 instruct 模型，GSM8K / MATH</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>方法</th>
+          <th colspan="2" style="text-align:right">Mistral-7B-v0.2</th>
+          <th colspan="2" style="text-align:right">Gemma-1.1-7B</th>
+          <th colspan="2" style="text-align:right">Gemma-2-9B</th>
+          <th colspan="2" style="text-align:right">Llama-3-8B</th>
+        </tr>
+        <tr>
+          <th></th><th style="text-align:right">GSM8K</th><th style="text-align:right">MATH</th>
+          <th style="text-align:right">GSM8K</th><th style="text-align:right">MATH</th>
+          <th style="text-align:right">GSM8K</th><th style="text-align:right">MATH</th>
+          <th style="text-align:right">GSM8K</th><th style="text-align:right">MATH</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Base</td><td class="num">41.8</td><td class="num">9.8</td><td class="num">49.0</td><td class="num">18.8</td><td class="num">81.3</td><td class="num">37.3</td><td class="num">79.2</td><td class="num">28.3</td></tr>
+        <tr><td>SFT（人工标注）</td><td class="num">52.8</td><td class="num">13.6</td><td class="num">57.5</td><td class="num">19.6</td><td class="num">80.1</td><td class="num">41.5</td><td class="num">72.6</td><td class="num">27.1</td></tr>
+        <tr><td>RS</td><td class="num">47.7</td><td class="num">10.3</td><td class="num">58.4</td><td class="num">18.7</td><td class="num">87.6</td><td class="num">47.5</td><td class="num">79.5</td><td class="num">28.9</td></tr>
+        <tr class="best"><td>BRiTE</td><td class="num">52.2</td><td class="num">11.2</td><td class="num">59.2</td><td class="num">23.7</td><td class="num">89.7</td><td class="num">50.5</td><td class="num">81.0</td><td class="num">30.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>值得注意的三点：</p>
+  <ul>
+    <li><strong>BRiTE 全面优于 RS，但不是每个格子都赢 SFT</strong>：Mistral-7B 的 GSM8K（52.2 vs 52.8）和 MATH（11.2 vs 13.6）都输给人工标注 SFT；Gemma-1.1-7B 的 GSM8K 赢 1.7 分（59.2 vs 57.5），MATH 赢 4.1 分（23.7 vs 19.6）。所以论文的措辞是「可匹敌，部分场景超越」，而不是全面超越。</li>
+    <li><strong>Gemma-1.1-7B 的 MATH 提升最大</strong>：从 18.8（base）到 23.7，而 SFT 只有 19.6；RS 甚至比 base 还低（18.7），说明它在这个模型上筛出来的推理链没有帮上忙。</li>
+    <li><strong>Gemma-2-9B 的 MATH</strong>：BRiTE 50.5，比人工标注 SFT 的 41.5 高 9.0 分，也比 RS 的 47.5 高 3.0 分——这是表里差距最显眼的一格。</li>
+  </ul>
+
+  <h3>Table 2：Qwen2.5-7B + 40K 混合数据</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th style="text-align:right">MATH500</th><th style="text-align:right">Minerva</th><th style="text-align:right">OlympiadBench</th><th style="text-align:right">AIME24</th><th style="text-align:right">AMC23</th><th style="text-align:right">GPQA Diamond</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base</td><td class="num">44.1</td><td class="num">12.9</td><td class="num">16.1</td><td class="num">0.9</td><td class="num">10.1</td><td class="num">25.9</td></tr>
+        <tr><td>RS</td><td class="num">54.3</td><td class="num">21.0</td><td class="num">23.1</td><td class="num">5.6</td><td class="num">31.6</td><td class="num">26.9</td></tr>
+        <tr class="best"><td>BRiTE（ψ-update）</td><td class="num">79.1</td><td class="num">35.0</td><td class="num">35.7</td><td class="num">14.3</td><td class="num">57.7</td><td class="num">28.5</td></tr>
+        <tr><td>BRiTE（θ-update）</td><td class="num">76.9</td><td class="num">40.6</td><td class="num">37.0</td><td class="num">14.4</td><td class="num">57.1</td><td class="num">29.8</td></tr>
+        <tr><td>BRiTE-iter-2（ψ）</td><td class="num">80.6</td><td class="num">41.3</td><td class="num">37.3</td><td class="num">14.3</td><td class="num">57.9</td><td class="num">29.9</td></tr>
+        <tr><td>BRiTE-iter-2（θ）</td><td class="num">78.2</td><td class="num">39.8</td><td class="num">37.9</td><td class="num">15.3</td><td class="num">56.4</td><td class="num">30.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>几个反直觉的发现：</p>
+  <ul>
+    <li><strong>ψ-update 本身就比 θ-update 更好，MATH500 上还高 2.2 分</strong>。这说明「生成高质量思考」本身就是一次能力提升，SFT 只是把它固化下来。</li>
+    <li><strong>迭代几乎停滞</strong>：BRiTE-iter-2 在多数指标上只比第一轮高 1–2 分，作者自己解释是「第一轮就到达平台，限制了进一步收益」。</li>
+    <li><strong>代码任务也不同——但幅度有限</strong>：deepseek-coder-6.7b-instruct 上 HumanEval Basic BRiTE 81.7 vs RS 79.3，BCB Hard 15.5 vs 11.5（Figure 2），但 BCB Full 只 36.3，还被 SFT 的 37.2 压过一头。</li>
+  </ul>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别用 BRiTE：验证器不可靠、基座已经很强、算力紧</h2></div>
+  <p class="sec-sub">从论文自身的实验设置和附录细节里，读出四条明确的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>必须有可信的 O，否则整个 ψ 步就是错的</h4></div>
+    <p>MDP 的最优策略是「按参考分布加权后的正确推理」，如果 O 判错，错误推理也会被大量采出。论文全部实验都在数学（可自动验算）和代码（单元测试）上，<strong>没有覆盖需要人类主观判断的开放域任务</strong>。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>基座本身很强时优势变小</h4></div>
+    <p>Table 1 里 Gemma-2-9B 和 Llama-3-8B 的 base 已经很接近饱和，BRiTE 相对 RS 的改进只有 1-2 分。作者自己指出：instruct 模型已经做过后训练、数据规模有限时，差距不明显；要放大到 40K + Qwen2.5 才拉开。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>RL 的开销不是免费的，而且迭代收益快速衰减</h4></div>
+    <p>ψ 步要跑 PPO / GRPO，数学实验 4×H100，扩展实验 8×H100；而且 second iteration 在 Table 2 上只比第一轮高 1-2 分——这篇文章里看不到「越迭代越强」的长期增长趋势。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>1/T 收敛依赖较强的假设</h4></div>
+    <p>Theorem 3.3 要求目标 L 是凹的、且 logits 落在某个 RKHS 里。论文在附录 C.2 承认，去掉凹性只能得到驻点级别的弱保证。这给「BRiTE 一定收敛」的直觉加了一层需要留意的条件。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>BRiTE 解决的是「在有可靠裁判的前提下，如何更聪明地生产高质量的思考过程」</strong>，而不是「如何判断什么样的思考是好的」。</p>
+</section>
+
+<footer>
+  <div>
+    原文标题：BRiTE: Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning
+  </div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2501.18858" target="_blank" rel="noopener">arXiv 2501.18858</a> · ICML 2025（PMLR 267，pp. 78555–78574）· 北大 / 西北大学 / 字节跳动 / 明尼苏达大学<br>
+    博客笔记：<a href="/britebootstrapping-reinforced-thinking-process-to-enhance-language-model-reasoning/">BRiTE：Bootstrapping Reinforced Thinking Process to Enhance Language Model Reasoning</a><br>
+    <span style="display:inline-block;margin-top:8px;font-size:12.5px">笔记勘误（页面只在此说明，未改动原笔记）：<br>
+    · 笔记称「使用 PPO」——原文数学实验（D.1）确实用 PPO，但 40K 扩展实验（D.3）改用 <strong>GRPO</strong>（verl 代码库）；<br>
+    · 笔记称「4 到 8 块 H100」——正确，数学实验 4×H100、扩展实验 8×H100；<br>
+    · 笔记中 Table 2 只摘了 4 列，原文有 6 列（另含 OlympiadBench、AMC23）。</span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* =========================================================
+     BRiTE vs RS 示意：分布密度对比（解析计算，非随机模拟）
+     构造：q 在 5 个格子上非零，权重 [0.50,0.20,0.15,0.10,0.05]
+     ========================================================= */
+  var Q = [0.50, 0.20, 0.15, 0.10, 0.05];
+  var Z_POS = [1, 4, 7, 12, 18]; // 1-based，对应 20 格中的位置
+  var CELLS = 20;
+  var mode = 'rs';
+
+  var elGrid = document.getElementById('dens-grid');
+  var elN = document.getElementById('n-slider');
+  var elT = document.getElementById('t-slider');
+  var elNV = document.getElementById('n-v');
+  var elTV = document.getElementById('t-v');
+  var elMsg = document.getElementById('sim-msg');
+  var elChip = document.getElementById('mode-chip');
+  if (!elGrid || !elN || !elT || !elNV || !elTV || !elMsg || !elChip) return;
+
+  function fmt(x, d) { return (Math.abs(x) < 5e-5 ? 0 : x).toFixed(d); }
+
+  // 采样分布 ∝ q^(1/T)，归一化
+  function sampleDist(T) {
+    var raw = Q.map(function (v) { return Math.pow(v, 1 / T); });
+    var s = raw.reduce(function (a, b) { return a + b; }, 0);
+    return raw.map(function (v) { return v / s; });
+  }
+
+  function render() {
+    var N = parseInt(elN.value, 10);
+    var T = parseFloat(elT.value);
+    elNV.textContent = N;
+    elTV.textContent = fmt(T, 2);
+
+    var dist, perCell, desc;
+    if (mode === 'rs') {
+      dist = sampleDist(T);
+      // 每个非零格子在 N 次采样中期望出现的次数
+      perCell = dist.map(function (p) { return N * p; });
+      desc = 'N = ' + N + ' 次采样中，每格期望出现次数。可以看见集中在少数几格，其他格子基本为空。';
+    } else {
+      dist = Q.slice();
+      perCell = dist.map(function (p) { return N * p; });
+      desc = 'BRiTE 最优策略正比于 q(z)：每个采样都由策略直接产生，N 越大越贴近期望分布。';
+    }
+
+    // 写 DOM
+    elGrid.innerHTML = '';
+
+    // 第一行：q(z) 条
+    var lab1 = document.createElement('div');
+    lab1.className = 'lb';
+    lab1.innerHTML = '质量 q(z)<b>目标后验</b>';
+    elGrid.appendChild(lab1);
+    var strip1 = document.createElement('div');
+    strip1.className = 'strip';
+    var posMap = {};
+    Z_POS.forEach(function (p, i) { posMap[p] = i; });
+    for (var c = 1; c <= CELLS; c++) {
+      var sp = document.createElement('span');
+      if (posMap[c] !== undefined) {
+        sp.className = 'on';
+        sp.style.opacity = Math.max(0.25, Q[posMap[c]] / Q[0]);
+      }
+      strip1.appendChild(sp);
+    }
+    elGrid.appendChild(strip1);
+
+    // 第二行：采样分布
+    var lab2 = document.createElement('div');
+    lab2.className = 'lb';
+    lab2.innerHTML = '采样分布 p<sub>T</sub>(z)<b>' + (mode === 'rs' ? 'q^(1/T) 归一化' : '= q(z)') + '</b>';
+    elGrid.appendChild(lab2);
+    var strip2 = document.createElement('div');
+    strip2.className = 'strip';
+    for (var c2 = 1; c2 <= CELLS; c2++) {
+      var sp2 = document.createElement('span');
+      if (posMap[c2] !== undefined) {
+        var v = dist[posMap[c2]];
+        sp2.className = 'on';
+        sp2.style.opacity = Math.max(0.15, v / Math.max.apply(null, dist));
+        sp2.style.background = mode === 'rs' ? 'var(--c2)' : 'var(--accent)';
+      }
+      strip2.appendChild(sp2);
+    }
+    elGrid.appendChild(strip2);
+
+    // 第三行：格子表
+    var lab3 = document.createElement('div');
+    lab3.className = 'lb';
+    lab3.innerHTML = '期望出现次数<b>N × p</b>';
+    elGrid.appendChild(lab3);
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    var top5 = Z_POS.map(function (z, i) { return { z: z, c: perCell[i] }; });
+    top5.sort(function (a, b) { return b.c - a.c; });
+    var total = perCell.reduce(function (a, b) { return a + b; }, 0);
+    var part = '<b>' + fmt(total, 1) + '</b> 次落在全部 20 格内（占 ' + fmt(total / Math.max(N, 1) * 100, 0) + '%）<br>';
+    part += '前 3 格：';
+    part += top5.slice(0, 3).map(function (o) { return 'z=' + o.z + ' ' + fmt(o.c, 1); }).join(' · ');
+    meta.innerHTML = part;
+    elGrid.appendChild(meta);
+
+    // 结论
+    var top1 = top5[0];
+    if (mode === 'rs') {
+      var heavy = T < 0.6;
+      elMsg.innerHTML = desc + (heavy
+        ? ' <strong style="color:var(--accent-deep)">T = ' + fmt(T, 2) + ' 偏低，q^(1/T) 更尖：</strong>top-1 格约占 ' + fmt(dist[0] * 100, 1) + '%，其他高质量格几乎采不到——RS 只在「冒头的」那一格里挑。'
+        : ' <strong style="color:var(--accent-deep)">T = ' + fmt(T, 2) + ' 偏高，q^(1/T) 更平：</strong>各格被采到的概率接近，高分格优势被稀释。');
+    } else {
+      elMsg.innerHTML = desc + ' <strong style="color:var(--accent-deep)">无论 N 多少，期望分布都是 q(z)</strong>——把「答案正确」的信号写进了采样概率，而不是事后过滤。';
+    }
+  }
+
+  document.querySelectorAll('.rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.rule-btn').forEach(function (x) { x.classList.remove('active'); });
+      btn.classList.add('active');
+      mode = btn.getAttribute('data-m');
+      elChip.textContent = mode === 'rs' ? 'RS' : 'BRiTE ψ';
+      render();
+    });
+  });
+
+  elN.addEventListener('input', render);
+  elT.addEventListener('input', render);
+
+  render();
+})();
+</script>
+</body>
+</html>

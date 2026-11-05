@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Train Long, Think Short · 让 token 预算随训练一起收紧</title>
+<meta name="description" content="把 GRPO 的长度预算从 256 指数衰减到 87：先探索、后压缩。GSM8K 训练、同一 87 token 终点下，Qwen-2.5-7B 准确率从 82.71% 提到 86.20%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.sim-svg{width:100%;height:auto;display:block}
+.mini-x{display:grid;gap:4px;margin:4px 0 0 0}
+.mini-x span{text-align:center;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft);white-space:nowrap}
+.mini-mark{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--accent);font-weight:600}
+figure figcaption small{display:block;font-size:11.5px;color:var(--text-soft);margin-top:4px}
+@media (max-width:880px){ .mini-x span{font-size:9px} }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Train Long, Think Short</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Reasoning · arXiv 2025 · 2508.08940</span>
+  <h1>Train Long, Think Short：让 token 预算随训练一起收紧</h1>
+  <p class="hero-sub">
+    固定 87 token 预算的 GRPO，让模型从第一步起就只能写短推理，没机会先把题想明白。
+    论文把预算做成<strong>随训练指数衰减的课程</strong>：先给 256 token 自由探索，再逼模型把摸索出的解法压进 87 token。
+    代价是训练期上下文变长、算量略增，结论也只在 7B 模型与数学题上验证过。
+  </p>
+  <div class="meta">
+    <span>Hammoud, Alhamoud, Hammoud, Bou-Zeid, Ghassemi, Ghanem（KAUST · MIT · Princeton）</span>
+    <a href="https://arxiv.org/abs/2508.08940" target="_blank" rel="noopener">arXiv 2508.08940 ↗</a>
+    <a href="https://github.com/hammoudhasan/curriculum_grpo" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    长链推理解决了准确率，却带来「过度思考」；而把长度一刀切成固定预算，等于让模型在<strong>探索之前</strong>就被压缩。论文押注的顺序是：先长后短。
+  </p>
+  <p>
+    改动只有两处：预算 <code>B(t) = max(1, B₀·γ<sup>⌊t/T⌋</sup>)</code> 从 256 指数衰减到 87；长度奖励改成<strong>三角形</strong>——在预算 <code>L</code> 处最高，0 与 2L 处归零，逼模型把预算用满，而不是越短越好。
+  </p>
+  <p>
+    GSM8K 训练、curriculum 与 fixed-budget 同样停在 87 token 终点：准确率 <strong>82.71% → 86.20%</strong>，平均 token 基本不变（88.8 vs 87.0），也高于不微调的 base（83.55%）。
+  </p>
+  <p>
+    但论文自己的表推翻了一部分叙事：对难题，衰减越快准确率越高；把指数换成<em>线性</em>衰减，MATH500 反而从 37.4% 升到 42.8%。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">+3.49 <small>pp</small></div>
+      <div class="k">GSM8K 训练、GSM8K 评测<br>86.20 vs 固定预算 82.71</div>
+    </div>
+    <div class="metric">
+      <div class="v">+4.6 <small>pp</small></div>
+      <div class="k">MATH500 训练、MATH500 评测<br>43.40 vs 38.80，137.1 vs 179.3 token</div>
+    </div>
+    <div class="metric">
+      <div class="v">87<small>/256</small></div>
+      <div class="k">终点 / 起点预算<br>固定基线始终锁在 87</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>「想得越多越准」与「想得越少越省」之间，缺的是一个训练顺序</h2></div>
+  <p class="sec-sub">读完这节要知道：长链推理为什么成了问题，而「训练一开始就把预算压死」为什么不是好的折中。</p>
+
+  <p>长链推理的主流是 test-time scaling：用 RL 训练模型写出更长的推理链，向 OpenAI o1、DeepSeek R1 那样「think more」。准确率上去了，token 用量却变得不可控——简单题也写出一大段，论文称为 overthinking。</p>
+
+  <p>长度控制通常从两头下手：<strong>推理时</strong>截断或跳 token，<strong>训练时</strong>给模型一个 token 上限做 RL。论文关心的是后者，核心问题只有一个：</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">关键观察</span><h4>固定预算，等于剥夺「先学会、再压缩」的机会</h4></div>
+    <p>在 87 token 的固定预算下训练，模型从第一步起只有 87 token 可用，没机会在宽松预算下发现「这题该先列式再算」，只能直接去猜一种能在 87 token 内写完的写法。论文的原话是：这样无法利用<strong>先探索、后压缩</strong>的能力进阶。</p>
+    <p>反过来，不控长的 RL 能学到准确解法，但学到的往往又长又啰嗦，还得另做一步压缩。两者缺的正是<strong>顺序</strong>。</p>
+  </div>
+
+  <p>论文要验证的假设很朴素：<strong>同一个终点预算，训练轨迹不同，最终模型就不同</strong>。若成立，固定预算训练就不是效率最优解，而只是课程学习的退化解。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人要么在推理时卡长度，要么在训练时把长度锁死</h2></div>
+  <p class="sec-sub">两条正交的路子各有一个盲区，论文的定位是把「预算」从常数变成训练变量。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">推理时干预</span><h4>硬约束：截断 / budget forcing / 跳 token</h4></div>
+      <p><strong>s1</strong> 用特殊 token 填充或截断到固定上限；<strong>TokenSkip</strong> 在推理时估计并跳过低价值 token；<strong>Chain of Draft</strong> 用提示让模型写草稿式短推理。</p>
+      <p><strong>盲区：</strong>模型本身没有变短，长度是外部强加的。论文指出突然截断会打乱推理；跳 token 与提示又都需要推理时的额外干预。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">训练时控制</span><h4>把预算写进 prompt / 奖励：LCPO、Thinkless、ConciseRL</h4></div>
+      <p><strong>LCPO（L1）</strong> 让用户在推理时指定目标长度（如 512 / 1024 / 2048 token），用 RL 训练模型同时兼顾正确率与长度贴合；<strong>Thinkless</strong> 决定何时长想、何时短想，<strong>ConciseRL</strong> 在奖励里加入简洁度。</p>
+      <p><strong>盲区：</strong>长度是用户手里的推理时参数或一个固定常数，训练全程不变。多个固定预算要分别训练，每个都拿不到跨预算的进阶。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">本文定位</span><h4>预算不是用户参数，而是训练轨迹上的单调变量</h4></div>
+    <p>与 LCPO 的差别被论文点明：LCPO 训练一个「听用户话」的通用模型；这篇论文训练<strong>一个只会短思考的独立模型</strong>，预算从 256 单调衰减到 87，推理时不需要任何长度提示。论著称它在实践中平均只偏离目标预算约 5%。</p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>一条衰减曲线，一个三角形长度奖励</h2></div>
+  <p class="sec-sub">全部改动就是这两个函数；看懂它们的形状，就明白为什么「越短越好」在这里是错的。</p>
+
+  <h3>预算曲线：指数衰减</h3>
+  <div class="eq">
+    B(t) = <span class="hl-c">max( 1, B<sub>0</sub> · γ<sup>⌊t / T⌋</sup> )</span>
+  </div>
+  <div class="eq-cap">γ ∈ (0,1) 为衰减因子，T 为预算更新间隔（步），B<sub>0</sub> 为初始预算；⌊·⌋ 是向下取整</div>
+  <p>预算只改一个数 <code>L</code>——而 <code>L</code> 正好是长度奖励的峰值位置。于是训练每往前走一格，模型看到的「理想长度」都在左移，奖励曲线越收越窄。</p>
+
+  <h3>长度奖励：三角形，而不是越短越好</h3>
+  <div class="eq" style="text-align:left;font-size:13.5px;line-height:2.3">
+    R<sub>len</sub>(ℓ) =<br>
+    &nbsp;&nbsp;<span class="hl-a">R<sub>max</sub> · ℓ / L</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;当 0 ≤ ℓ ≤ L&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--text-soft)">未用满预算，奖励按比例打折</span><br>
+    &nbsp;&nbsp;<span class="hl-c">R<sub>max</sub> · (1 − (ℓ − L)/L)</span>&nbsp;&nbsp;当 L &lt; ℓ ≤ 2L&nbsp;&nbsp;<span style="color:var(--text-soft)">超出预算，线性收回</span><br>
+    &nbsp;&nbsp;<span class="hl-b">0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;当 ℓ &gt; 2L&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--text-soft)">截断，长度项归零</span>
+  </div>
+  <div class="eq-cap">三个关键点：0 处 0 分，L 处满分，2L 处回到 0</div>
+
+  <p>对照组是常见的<strong>带状（band）奖励</strong>：只要 ℓ ≤ L 就满分。带状奖励在 ℓ 很小时也给满分，模型更愿意「只要做对，写得越短越好」，停在比必要更短的推理上——论文说这叫过早收敛和过度压缩。</p>
+
+  <p>三路奖励加权求和，权重是 <code>λ<sub>c</sub>、λ<sub>ℓ</sub>、λ<sub>f</sub></code>：</p>
+  <div class="eq">
+    r<sub>i</sub> = λ<sub>c</sub>·r<sup>correct</sup><sub>i</sub> + λ<sub>ℓ</sub>·R<sub>len</sub>(ℓ<sub>i</sub>) + λ<sub>f</sub>·R<sub>fmt</sub>(a<sub>i</sub>)
+  </div>
+  <div class="eq-cap">正确性（<code>math-verify</code> 判对）+ 长度贴合 + 格式（<code>&lt;think&gt;</code> / <code>&lt;answer&gt;</code> 标签成对且不重叠）</div>
+
+  <h3>动手：预算一收紧，三角形与带状谁先失去区分度</h3>
+  <p>拖动滑块让目标预算 <code>L</code> 从训练早期的 256 收到 87。三条固定长度（一半预算、预算本身、1.5 倍预算）的奖励实时变化——注意三角形在短侧留下了斜坡，带状没有。</p>
+
+  <div class="sim">
+    <div class="tabs" id="shape-tabs" style="margin-top:0">
+      <button class="tab active" type="button" data-shape="tri">三角形（论文采用）</button>
+      <button class="tab" type="button" data-shape="band">带状（对照）</button>
+    </div>
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>当前目标预算 L <span class="v" id="budget-v">256</span></label>
+        <input type="range" id="budget" min="60" max="256" step="1" value="256">
+      </div>
+    </div>
+    <svg class="sim-svg" id="shape-svg" viewBox="0 0 640 250" role="img" aria-label="长度奖励曲线：三角形与带状"></svg>
+    <div class="slots s3" id="shape-slots"></div>
+    <div class="readout">
+      <div class="r-head">读数</div>
+      <div id="shape-msg"></div>
+    </div>
+  </div>
+
+  <p>把 L 拖到 87 附近，三角形的左侧斜坡变得很陡：90、100、120 token 之间奖励差距被放大，模型必须精确贴近预算；带状曲线在 [0, L] 上始终是满分，所有「比预算短」的长度彼此没有区别。这正是 Table 2 里带状奖励准确率更低的原因——MATH500 上 30.8% vs 37.4%，平均 token 94 vs 135，省下来的 token 换来了更糟的推理。</p>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练细节：组内相对奖励、可复现的配置、要算清的算量</h2></div>
+  <p class="sec-sub">读完这节要知道每一步训练里预算怎么变、奖励怎么归一化，以及这套课程要多付多少算力。</p>
+
+  <h3>GRPO 只换了一个地方：奖励变成三路之和</h3>
+  <p>每个 prompt 采样 <code>G = 8</code> 条回答，组内做 z-score 得到优势，不训练 value 网络：</p>
+  <div class="eq">
+    A<sub>i</sub> = (r<sub>i</sub> − μ) / σ&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;J(θ) = E<sub>s</sub>[ (1/G) Σ<sub>i</sub> min( ρ<sub>i</sub>A<sub>i</sub>, clip(ρ<sub>i</sub>, 1−ε, 1+ε)A<sub>i</sub> ) ] − β·KL(π<sub>θ</sub> ‖ π<sub>ref</sub>)
+  </div>
+  <div class="eq-cap">μ、σ 为组内均值与标准差（含稳定项 ε<sub>stab</sub>）；ρ<sub>i</sub> 为新旧策略概率比；β 控制与参考策略的偏离</div>
+  <p>三路奖励都进同一个 <code>r<sub>i</sub></code>，长度项与正确性项在同一套优势里直接竞争：想拿高奖励，必须判对，同时把长度推到当前 <code>L</code>。</p>
+
+  <h3>模型的输出格式</h3>
+  <div class="eq" style="font-size:14px">
+    &lt;think&gt; …推理过程… &lt;/think&gt;&nbsp;&nbsp;&nbsp;&lt;answer&gt; …最终答案… &lt;/answer&gt;
+  </div>
+  <div class="eq-cap">prompt 要求「使用恰好 {token_budget} 个 token」；格式奖励检查两组标签是否成对、不重叠</div>
+
+  <h3>实验设置一览</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>项目</th><th>设置</th></tr></thead>
+    <tbody>
+      <tr><td>模型</td><td>Qwen-2.5-7B，所有实验同一个模型</td></tr>
+      <tr><td>RL 框架</td><td>GRPO，group size <code>G = 8</code>；基于 <code>torchtune</code>，代码已开源</td></tr>
+      <tr><td>训练数据</td><td>GSM8K 全部 7,473 道（简单）；MATH500（500 道竞赛级难题）</td></tr>
+      <tr class="best"><td>curriculum 预算</td><td>256 → 87 token，指数衰减；主实验为 γ = 0.7、每 150 步更新一次</td></tr>
+      <tr><td>固定预算基线</td><td>全程锁定 87 token，与 curriculum 的终点相同</td></tr>
+      <tr><td>base 基线</td><td>原始 Qwen-2.5-7B，不做任何 RL 微调</td></tr>
+      <tr><td>评测</td><td>zero-shot：GSM8K、SVAMP、GSM+、MATH500、College Math</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>训练的算量账</h3>
+  <p>课程让训练前期的每条 rollout 上限更长（256 而非 87），但上限不等于实际生成长度。把 prompt 长度记作 P，每道题每组的生成算量约为 <code>G × (P + L)</code>：</p>
+
+  <div class="sim">
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>假设 prompt 长度 P（论文未给出，示意值） <span class="v" id="p-v">512</span></label>
+        <input type="range" id="prompt" min="0" max="2048" step="64" value="512">
+      </div>
+    </div>
+    <div class="chart" id="eng-chart"></div>
+    <div style="text-align:center;font-size:11px;color:var(--text-soft);margin-top:2px">8 × (P + L)，单位：token</div>
+    <div class="readout">
+      <div class="r-head">读数</div>
+      <div id="eng-msg"></div>
+    </div>
+  </div>
+  <p>P 越大，预算差异越被 prompt 稀释，课程在算量上就越接近免费；P 接近 0 时，前期 256 的上限让每条 rollout 的生成量接近固定预算的 2.9 倍。另外，按 Table 2 的实测，curriculum 的最终回答平均 135 token，仍高于固定预算终点的 87——差距是在准确率上闭合的，不是把 token 压得更低。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>整条流水线：调度器 → 采样 → 三路奖励 → 组内归一化 → 更新</h2></div>
+  <p class="sec-sub">一个数字看全流程：Figure 1 的示意阶梯是 256 → 179 → 125 → 87 → 61 → 43 → 30。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 470" role="img" aria-label="Train Long Think Short 训练流水线">
+      <defs>
+        <marker id="tlts-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor" style="color:var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect x="20" y="20" width="360" height="150" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="40" y="46" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--accent)" font-weight="600">1 · BUDGET SCHEDULER</text>
+      <text x="40" y="70" font-size="13" fill="var(--text)" font-weight="600">B(t) = max(1, 256 · γ^⌊t/T⌋)</text>
+      <polyline points="50,140 130,140 130,125 210,125 210,110 290,110 290,96 350,96" fill="none" stroke="var(--accent)" stroke-width="2.5"></polyline>
+      <circle cx="50" cy="140" r="4" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="2"></circle>
+      <circle cx="130" cy="125" r="4" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="2"></circle>
+      <circle cx="210" cy="110" r="4" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="2"></circle>
+      <circle cx="290" cy="96" r="4" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="2"></circle>
+      <text x="43" y="160" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--text-soft)">256</text>
+      <text x="123" y="160" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--text-soft)">179</text>
+      <text x="203" y="160" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--text-soft)">125</text>
+      <text x="283" y="160" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--text-soft)">87 …30</text>
+
+      <rect x="480" y="20" width="360" height="150" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="500" y="46" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--c1)" font-weight="600">2 · ROLLOUT × 8</text>
+      <text x="500" y="70" font-size="13" fill="var(--text)" font-weight="600">同一 prompt 采样 G = 8 条回答</text>
+      <rect x="500" y="86" width="90" height="22" rx="5" fill="var(--c1-soft)"></rect>
+      <rect x="598" y="86" width="60" height="22" rx="5" fill="var(--c2-soft)"></rect>
+      <rect x="666" y="86" width="78" height="22" rx="5" fill="var(--accent-soft)"></rect>
+      <rect x="752" y="86" width="70" height="22" rx="5" fill="var(--c1-soft)"></rect>
+      <rect x="500" y="118" width="128" height="22" rx="5" fill="var(--c2-soft)"></rect>
+      <rect x="636" y="118" width="84" height="22" rx="5" fill="var(--accent-soft)"></rect>
+      <rect x="728" y="118" width="94" height="22" rx="5" fill="var(--c3-soft)"></rect>
+      <text x="500" y="160" font-size="11.5" fill="var(--text-soft)">条宽 ≈ 生成长度 ℓ，超过 2L 的长度项记 0</text>
+
+      <rect x="480" y="210" width="360" height="150" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="500" y="236" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--c2)" font-weight="600">3 · REWARD</text>
+      <text x="500" y="260" font-size="13" fill="var(--text)" font-weight="600">r = λc·正确性 + λℓ·长度 + λf·格式</text>
+      <rect x="500" y="280" width="150" height="18" rx="9" fill="var(--c1)"></rect>
+      <rect x="654" y="280" width="100" height="18" rx="9" fill="var(--accent)"></rect>
+      <rect x="758" y="280" width="60" height="18" rx="9" fill="var(--c3)"></rect>
+      <text x="500" y="320" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--c1)">correct</text>
+      <text x="654" y="320" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--accent)">R_len(ℓ)</text>
+      <text x="758" y="320" font-family="JetBrains Mono, monospace" font-size="10.5" fill="var(--c3)">fmt</text>
+      <text x="500" y="344" font-size="11.5" fill="var(--text-soft)">R_len 的峰值位置 = 当前预算 L</text>
+
+      <rect x="20" y="210" width="360" height="150" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="40" y="236" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--c1)" font-weight="600">4 · ADVANTAGE</text>
+      <text x="40" y="260" font-size="13" fill="var(--text)" font-weight="600">Aᵢ = (rᵢ − μ) / σ（组内 z-score）</text>
+      <text x="40" y="292" font-size="12" fill="var(--text-muted)">组内比较，正确性与长度在同一把尺子上竞争</text>
+      <text x="40" y="316" font-size="12" fill="var(--text-muted)">不训练 critic，不评估状态价值</text>
+      <text x="40" y="342" font-size="11.5" fill="var(--text-soft)">μ、σ 只取自这 8 条回答</text>
+
+      <line x1="380" y1="95" x2="474" y2="95" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#tlts-arr)"></line>
+      <line x1="660" y1="172" x2="660" y2="206" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#tlts-arr)"></line>
+      <line x1="478" y1="285" x2="386" y2="285" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#tlts-arr)"></line>
+      <path d="M120 362 L120 372 Q120 382 130 382 L200 382 Q210 382 210 394" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#tlts-arr)"></path>
+
+      <rect x="250" y="396" width="360" height="56" rx="12" fill="var(--bg-tint)" stroke="var(--accent)" stroke-width="1.5"></rect>
+      <text x="270" y="418" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--accent)" font-weight="600">5 · UPDATE</text>
+      <text x="270" y="440" font-size="12.5" fill="var(--text)">clipped surrogate + KL(π ‖ π_ref)，进入下一档预算</text>
+      <path d="M606 398 Q640 398 640 380 L640 176" fill="none" stroke="var(--text-soft)" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#tlts-arr)"></path>
+      <text x="648" y="205" font-size="11" fill="var(--text-soft)">下一轮，L 更小</text>
+    </svg>
+    <figcaption>
+      调度器给出当前预算 L → 8 条回答进入三路奖励（长度项以 L 为峰）→ 组内归一化 → 带 KL 的策略更新。
+      <small>阶梯数字（256 → 179 → 125 → 87 → 61 → 43 → 30，γ = 0.7、T = 100）来自 Figure 1；正文与 4.1 节的主实验是 256 → 87、γ = 0.7、T = 150。</small>
+    </figcaption>
+  </figure>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">训练早期</span><h4>探索：预算宽</h4></div>
+      <p>L = 256，绝大多数 GSM8K 题在 256 token 内能想完，MATH500 里许多题「刚刚够用」。三角形奖励把答案往 256 附近推，模型学会把步骤写全。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">训练后期</span><h4>压缩：预算紧</h4></div>
+      <p>L 降到 87，同一个策略必须在已经找到的解法上删掉冗词、合并步骤。Figure 1 的示例就是同一道题从长篇推理压到更短推理，答案不变。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>同一终点、更高准确率；但「怎么衰减」比「要不要衰减」更关键</h2></div>
+  <p class="sec-sub">前一块是论文正文的精确数字，后面三组消融里，有两组与论文的叙事相抵触。</p>
+
+  <h3>curriculum vs 固定预算（论文正文）</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>训练集</th><th>评测</th><th>指标</th><th>base</th><th>fixed-budget GRPO</th><th>curriculum GRPO</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="4">GSM8K</td><td>GSM8K（ID）</td><td>准确率</td><td class="num">83.55%</td><td class="num">82.71%</td><td class="num">86.20%</td></tr>
+      <tr><td>GSM8K（ID）</td><td>平均 token</td><td class="num">258.4</td><td class="num">87.0</td><td class="num">88.8</td></tr>
+      <tr><td>SVAMP（OOD）</td><td>准确率</td><td class="num">—</td><td class="num">77.67%</td><td class="num">85.00%</td></tr>
+      <tr><td>GSM+（OOD）</td><td>准确率</td><td class="num">—</td><td class="num">62.75%</td><td class="num">67.58%</td></tr>
+      <tr class="best"><td rowspan="2">MATH500</td><td>MATH500</td><td>准确率</td><td class="num">—</td><td class="num">38.80%</td><td class="num">43.40%</td></tr>
+      <tr class="best"><td>MATH500</td><td>平均 token</td><td class="num">—</td><td class="num">179.3</td><td class="num">137.1</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">来源：论文 4.2 节正文（Figure 2 的配套描述）。base 的 SVAMP、GSM+ 与 MATH500 数字正文未给出。</p>
+
+  <h3>Figure 2 的原始曲线：优势集中在 GSM8K 与 SVAMP</h3>
+  <p>论文没有把 Figure 2 列成表。下图是按论文源 PDF 的坐标轴刻度反算得到的读数：实心点 = curriculum 曲线上的训练步，方块 = 图例 «Baselines» 中「Step 150」等训练结束时的固定预算模型。论文原图里 curriculum 是深蓝，此处按本站配色：<strong>陶红 = curriculum，青灰 = 固定预算，紫 = base</strong>。</p>
+
+  <div class="tabs" id="fig-tabs">
+    <button class="tab active" type="button" data-set="gsm">用 GSM8K 训练</button>
+    <button class="tab" type="button" data-set="math">用 MATH500 训练</button>
+  </div>
+  <div class="sim" style="padding:18px 18px 14px">
+    <div class="tabs" id="bench-tabs" style="margin:0 0 14px"></div>
+    <div class="row-labels" id="fig-main"></div>
+    <div class="mini-x" id="fig-steps"></div>
+    <div class="legend" style="margin-top:12px">
+      <span><i style="background:var(--accent)"></i>Curriculum 训练中</span>
+      <span><i style="background:transparent;border:1.5px solid var(--c1)"></i>固定预算 baseline（训练结束）</span>
+      <span><i style="background:transparent;border:1.5px solid var(--c2);border-radius:50%"></i>base model</span>
+    </div>
+    <div class="readout" style="margin-top:14px">
+      <div class="r-head">读数</div>
+      <div id="fig-msg"></div>
+    </div>
+  </div>
+
+  <p>GSM8K 与 SVAMP 两个面板上，curriculum 的曲线端点或中段明显高于固定预算；College Math、MATH500、GSM+ 上基本是一条贴在一起的平线，MATH500 在 GSM8K 训练下甚至一度低于固定预算。与 4.2 节的「all evaluation benchmarks」不完全一致，细节见 <a href="#limits" style="color:var(--accent)">07 边界</a>。</p>
+
+  <h3>消融 1 · 衰减越快，难题越稳（Table 1）</h3>
+  <p>三组设置起点 256、终点 87 不变，只改衰减点数量 n；T = 600 时，n = 1 / 3 / 7 对应间隔 300 / 150 / 75 步（γ = 0.340 / 0.700 / 0.857）。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>数据集</th><th>γ / 间隔</th><th>Avg. token</th><th>准确率 %</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3">GSM8K</td><td>0.340 / 300</td><td class="num">178</td><td class="num">86.8</td></tr>
+      <tr><td>0.700 / 150</td><td class="num">89</td><td class="num">86.2</td></tr>
+      <tr><td>0.857 / 75</td><td class="num">103</td><td class="num">84.7</td></tr>
+      <tr><td rowspan="3">College Math</td><td>0.340 / 300</td><td class="num">357</td><td class="num">10.1</td></tr>
+      <tr><td>0.700 / 150</td><td class="num">187</td><td class="num">13.4</td></tr>
+      <tr><td>0.857 / 75</td><td class="num">119</td><td class="num">15.3</td></tr>
+      <tr><td rowspan="3">GSM+</td><td>0.340 / 300</td><td class="num">204</td><td class="num">67.5</td></tr>
+      <tr><td>0.700 / 150</td><td class="num">110</td><td class="num">67.6</td></tr>
+      <tr><td>0.857 / 75</td><td class="num">124</td><td class="num">66.6</td></tr>
+      <tr><td rowspan="3">SVAMP</td><td>0.340 / 300</td><td class="num">167</td><td class="num">88.0</td></tr>
+      <tr><td>0.700 / 150</td><td class="num">90</td><td class="num">85.0</td></tr>
+      <tr><td>0.857 / 75</td><td class="num">96</td><td class="num">84.3</td></tr>
+      <tr><td rowspan="3">MATH500</td><td>0.340 / 300</td><td class="num">336</td><td class="num">9.8</td></tr>
+      <tr><td>0.700 / 150</td><td class="num">201</td><td class="num">37.4</td></tr>
+      <tr><td>0.857 / 75</td><td class="num">132</td><td class="num">38.4</td></tr>
+      <tr class="best"><td rowspan="3">Average</td><td>0.340 / 300</td><td class="num">248</td><td class="num">52.4</td></tr>
+      <tr class="best"><td>0.700 / 150</td><td class="num">135</td><td class="num">57.9</td></tr>
+      <tr class="best"><td>0.857 / 75</td><td class="num">115</td><td class="num">57.9</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>论文的叙事是「越快衰减 = 更省、难题更稳」，平均值确实如此：最慢一档 52.4%，比另两档低 5.5 个点。但细看并不整齐——<strong>College Math 在最快的 75 步间隔下最高（15.3%）</strong>，与 MATH500 的趋势相反；GSM+ 则是 150 步最好；150 与 75 步的平均准确率打平，后者 token 少 20。</p>
+
+  <h3>消融 2 · 三角 vs 带状（Table 2）</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>数据集</th><th>Triangular token</th><th>Triangular %</th><th>Band token</th><th>Band %</th></tr></thead>
+    <tbody>
+      <tr><td>GSM8K</td><td class="num">89</td><td class="num">86.2</td><td class="num">70</td><td class="num">84.6</td></tr>
+      <tr><td>College Math</td><td class="num">187</td><td class="num">13.4</td><td class="num">132</td><td class="num">13.1</td></tr>
+      <tr><td>GSM+</td><td class="num">110</td><td class="num">67.6</td><td class="num">98</td><td class="num">64.6</td></tr>
+      <tr><td>SVAMP</td><td class="num">90</td><td class="num">85.0</td><td class="num">61</td><td class="num">82.0</td></tr>
+      <tr><td>MATH500</td><td class="num">201</td><td class="num">37.4</td><td class="num">112</td><td class="num">30.8</td></tr>
+      <tr class="best"><td>Average</td><td class="num">135</td><td class="num">57.9</td><td class="num">94</td><td class="num">55.0</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>这条消融支持论文的设计：带状奖励在每个数据集上 token 都更少，准确率却一律更低，差距最大的是 MATH500（−6.6 个点）。论文的解读是——短侧没有斜坡，模型较早停在一个刚够用的短解法上。</p>
+
+  <h3>消融 3 · 指数 vs 线性衰减（Table 3）</h3>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>数据集</th><th>Exponential token</th><th>Exponential %</th><th>Linear token</th><th>Linear %</th></tr></thead>
+    <tbody>
+      <tr><td>GSM8K</td><td class="num">89</td><td class="num">86.2</td><td class="num">107</td><td class="num">86.3</td></tr>
+      <tr><td>College Math</td><td class="num">187</td><td class="num">13.4</td><td class="num">154</td><td class="num">17.2</td></tr>
+      <tr><td>GSM+</td><td class="num">110</td><td class="num">67.6</td><td class="num">143</td><td class="num">66.4</td></tr>
+      <tr><td>SVAMP</td><td class="num">90</td><td class="num">85.0</td><td class="num">97</td><td class="num">87.3</td></tr>
+      <tr><td>MATH500</td><td class="num">201</td><td class="num">37.4</td><td class="num">198</td><td class="num">42.8</td></tr>
+      <tr class="best"><td>Average</td><td class="num">135</td><td class="num">57.9</td><td class="num">140</td><td class="num">60.0</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>这组结果最反直觉：换成<strong>线性</strong>衰减，平均准确率 57.9% → 60.0%，MATH500 提高 5.4 个点，College Math 提高 3.8 个点，代价只有平均 5 个 token（135 → 140）。论文自己也承认，指数衰减「可能过早移除推理能力」。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>只验证了一件事：7B 模型、数学题、预算 ≤ 256</h2></div>
+  <p class="sec-sub">四张卡，最后一张是读这篇论文时最该警惕的地方。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>规模与任务都很单一</h4></div>
+    <p>所有实验都用 Qwen-2.5-7B，预算上限 256 token。论文 Limitations 写明：13B、70B 或 1.3B、3B 上的行为，以及开放式生成任务，都还是开放问题。需要数千 token 的推理题不在覆盖范围内。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>依赖可自动验证的正确性信号</h4></div>
+    <p>正确性奖励来自 <code>math-verify</code> 的自动判题。写作、开放式问答没有这种可靠的判分器，三路奖励里的正确性项失去依据；论文也没有评估数学以外的领域。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>「衰减越快越好」并不普遍成立</h4></div>
+    <p>Table 1 中，最慢衰减在 GSM8K、SVAMP 上最好；Table 3 中，线性衰减在平均与难题上更好。准确的说法是<strong>轨迹形状影响结果</strong>，而不是某个特定 schedule 全面占优。默认的指数衰减是一个未经跨任务优化的选择。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>Figure 2 的「全面一致」只在图上部分成立</h4></div>
+    <p>4.2 节称 curriculum 在「all evaluation benchmarks」上准确率提升；但 Figure 2 的读数显示，College Math、MATH500、GSM+ 上 curriculum 大多贴着基线，MATH500（GSM8K 训练）一度低于固定预算，只有 GSM8K 与 SVAMP 的优势清楚。另外，Table 1–3 中 MATH500 的数字远好于正文 MATH500 训练组（37.4% vs 43.40%），各表训练配置未写明，表间数字不宜直接混用。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>这是一个「先探索、后压缩」有效性的概念验证，不是一套调好的通用配方。</strong>要用于难推理任务，Table 3 的线性衰减比默认指数衰减更值得先试。</p>
+</section>
+
+<footer>
+  <div>Train Long, Think Short: Curriculum Learning for Efficient Reasoning · 精读版</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.08940" target="_blank" rel="noopener">arXiv 2508.08940</a> · Hasan Abed Al Kader Hammoud 等 · KAUST / MIT / Princeton<br>
+    代码：<a href="https://github.com/hammoudhasan/curriculum_grpo" target="_blank" rel="noopener">hammoudhasan/curriculum_grpo</a><br>
+    笔记：<a href="/train-long-think-shortcurriculum-learning-for-efficient-reasoning/">TRAIN LONG, THINK SHORT：CURRICULUM LEARNING FOR EFFICIENT REASONING</a>
+  </div>
+  <details style="margin-top:16px">
+    <summary>与本篇博客笔记的差异<span class="sum-sub">以原文为准</span></summary>
+    <div class="details-body">
+      <ul>
+        <li>笔记称「中速衰减在准确率与效率之间取得最佳平衡」。原文 Table 1 中，150 步与 75 步的平均准确率相同（均为 57.9%），且 75 步的 token 更少（115 vs 135）；「最佳平衡」是笔记的解读，不是原文结论。</li>
+        <li>笔记的 Table 1 节选未收最慢衰减那一档的 Average 行（248 token / 52.4%），读者容易只看 150 步一档就得出「中速最好」。</li>
+        <li>笔记说「对于难题，尽早施加压缩压力有助于找到高效的本质解法」，但原文同时指出 College Math 在最快衰减下最好、GSM+ 在 150 步最好——按数据集看并不一致。</li>
+        <li>笔记没有提到 Table 3（指数 vs 线性）：这是原文中唯一让线性衰减胜出的实验，对判断方法适用边界很重要。</li>
+        <li>笔记中的公式写成 <code>B(t) = max(1, B₀·γ^(t/T))</code>，原文是指数上的向下取整 <code>γ^(⌊t/T⌋)</code>，少了阶梯感。</li>
+        <li>笔记给出一条与原文方向相反的判断：笔记说固定预算「可能因为一开始就限制了模型的探索空间」而损害准确率——这正是原文的观点，但笔记同时又建议「慢速衰减更好」，与 Table 1 平均值（越慢越差）矛盾；原文的结论是快/中速更好、慢速最差。</li>
+      </ul>
+    </div>
+  </details>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  function $(id) { return document.getElementById(id); }
+  function elt(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+  function svgEl(tag, attrs) {
+    var n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, k)) n.setAttribute(k, attrs[k]);
+      }
+    }
+    return n;
+  }
+
+  /* ------------------------------------------------------------
+     1) 长度奖励形状：三角形 vs 带状
+     ------------------------------------------------------------ */
+  (function () {
+    var svg = $('shape-svg');
+    var slider = $('budget');
+    if (!svg || !slider) return;
+
+    var W = 640, H = 250, ML = 46, MR = 16, MT = 14, MB = 34;
+    var CW = W - ML - MR, CH = H - MT - MB;
+    var LMAX = 512;
+    var shape = 'tri';
+    var Lcur = 256;
+
+    function tri(l, L) { return l <= L ? l / L : (l <= 2 * L ? 1 - (l - L) / L : 0); }
+    function band(l, L) { return l <= L ? 1 : (l <= 2 * L ? 1 - (l - L) / L : 0); }
+    function f(l) { return shape === 'tri' ? tri(l, Lcur) : band(l, Lcur); }
+    function sx(l) { return ML + (l / LMAX) * CW; }
+    function sy(r) { return MT + (1 - r) * CH; }
+    function pct(ratio) { return ratio * CH; }
+
+    function text(x, y, s, size, fill, extra) {
+      var t = svgEl('text', { x: x, y: y, 'font-size': size, fill: fill });
+      if (extra) { for (var k in extra) t.setAttribute(k, extra[k]); }
+      t.textContent = s;
+      return t;
+    }
+
+    function poly(fn, color, width, dash) {
+      var pts = [];
+      for (var l = 0; l <= LMAX; l += 4) pts.push(sx(l).toFixed(1) + ',' + sy(fn(l)).toFixed(1));
+      var p = svgEl('polyline', { points: pts.join(' '), fill: 'none', stroke: color, 'stroke-width': width, 'stroke-linejoin': 'round' });
+      if (dash) p.setAttribute('stroke-dasharray', dash);
+      return p;
+    }
+
+    function render(L) {
+      Lcur = L;
+      var bv = $('budget-v');
+      if (bv) bv.textContent = String(L);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (v) {
+        svg.appendChild(svgEl('line', { x1: ML, x2: W - MR, y1: sy(v), y2: sy(v), stroke: 'var(--border)', 'stroke-width': 1 }));
+        svg.appendChild(text(ML - 6, sy(v) + 3.5, v.toFixed(2), 10.5, 'var(--text-soft)', { 'text-anchor': 'end', 'font-family': 'JetBrains Mono, monospace' }));
+      });
+      [0, 100, 200, 300, 400, 500].forEach(function (v) {
+        svg.appendChild(text(sx(v), H - MB + 16, String(v), 10.5, 'var(--text-soft)', { 'text-anchor': 'middle', 'font-family': 'JetBrains Mono, monospace' }));
+      });
+      svg.appendChild(svgEl('line', { x1: ML, x2: W - MR, y1: sy(0), y2: sy(0), stroke: 'var(--border-strong)', 'stroke-width': 1.2 }));
+      svg.appendChild(text(ML + CW / 2, H - 4, '长度 ℓ（token）', 11, 'var(--text-soft)', { 'text-anchor': 'middle' }));
+
+      [[L, 'L = ' + L], [2 * L, '2L = ' + (2 * L)]].forEach(function (g) {
+        svg.appendChild(svgEl('line', { x1: sx(g[0]), x2: sx(g[0]), y1: MT, y2: sy(0), stroke: 'var(--accent)', 'stroke-dasharray': '3 4', 'stroke-width': 1 }));
+        svg.appendChild(text(sx(g[0]) + 4, MT + 12, g[1], 10.5, 'var(--accent)', { 'font-family': 'JetBrains Mono, monospace' }));
+      });
+
+      if (shape === 'tri') {
+        svg.appendChild(poly(function (l) { return band(l, L); }, 'var(--c1)', 1.6, '5 4'));
+        svg.appendChild(text(sx(L * 0.4), sy(1) - 8, '带状（对照）', 11, 'var(--c1)', {}));
+      }
+      svg.appendChild(poly(function (l) { return f(l); }, 'var(--accent)', 2.5));
+
+      var samples = [Math.round(L * 0.5), L, Math.round(L * 1.5)];
+      samples.forEach(function (l) {
+        svg.appendChild(svgEl('circle', { cx: sx(l), cy: sy(f(l)), r: 4.5, fill: 'var(--bg-surface)', stroke: 'var(--accent)', 'stroke-width': 2 }));
+      });
+
+      var host = $('shape-slots');
+      if (host) {
+        host.innerHTML = '';
+        samples.forEach(function (l) {
+          var s = elt('div', 'slot' + (l === L ? ' hit' : ''));
+          s.appendChild(elt('div', 'slot-name', 'ℓ = ' + l));
+          var bar = elt('div', 'bar');
+          var i1 = elt('i', 'b1');
+          i1.style.width = pct(f(l)).toFixed(1) + '%';
+          bar.appendChild(i1);
+          s.appendChild(bar);
+          s.appendChild(elt('div', 'slot-val', 'R = ' + f(l).toFixed(2)));
+          host.appendChild(s);
+        });
+      }
+
+      var msg = $('shape-msg');
+      if (msg) {
+        if (shape === 'tri') {
+          msg.innerHTML = '三角形下，ℓ = ' + samples[0] + '（只用一半预算）只有 <strong>R = ' + f(samples[0]).toFixed(2) +
+            '</strong>，ℓ = ' + samples[2] + '（超出 50%）为 <strong>R = ' + f(samples[2]).toFixed(2) + '</strong>，峰值唯一落在 <strong>ℓ = ' + L + '</strong>。';
+        } else {
+          msg.innerHTML = '带状下，所有 ℓ ≤ ' + L + ' 都是 <strong>R = 1.00</strong>：ℓ = ' + samples[0] + ' 与 ℓ = ' + L +
+            ' <strong>不可区分</strong>，模型没有理由把推理写完整。';
+        }
+      }
+    }
+
+    slider.addEventListener('input', function (e) { render(parseInt(e.target.value, 10)); });
+    var tabs = document.querySelectorAll('#shape-tabs .tab');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].addEventListener('click', function () {
+        for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+        this.classList.add('active');
+        shape = this.getAttribute('data-shape');
+        render(parseInt(slider.value, 10));
+      });
+    }
+    render(256);
+  })();
+
+  /* ------------------------------------------------------------
+     2) 训练算量：G × (P + L)
+     ------------------------------------------------------------ */
+  (function () {
+    var slider = $('prompt');
+    if (!slider) return;
+    var G = 8, FIX = 87, WIDE = 256;
+
+    function render(P) {
+      var pv = $('p-v');
+      if (pv) pv.textContent = String(P);
+      var vals = [
+        { name: '固定 87', v: G * (P + FIX), color: 'var(--c1)' },
+        { name: '前期上限 256', v: G * (P + WIDE), color: 'var(--c2)' },
+        { name: '后期上限 87', v: G * (P + FIX), color: 'var(--accent)' }
+      ];
+      var maxV = Math.max(G * (P + WIDE), 1);
+      var chart = $('eng-chart');
+      if (chart) {
+        chart.innerHTML = '';
+        vals.forEach(function (x) {
+          var row = elt('div', 'crow');
+          row.appendChild(elt('div', 'cname', x.name));
+          var bars = elt('div', 'cbars');
+          var cb = elt('div', 'cbar');
+          var track = elt('div', 'track');
+          var fill = elt('div', 'fill');
+          fill.style.background = x.color;
+          fill.style.height = (x.v / maxV * 100).toFixed(1) + '%';
+          track.appendChild(fill);
+          cb.appendChild(track);
+          cb.appendChild(elt('div', 'num', x.v.toLocaleString('en-US')));
+          bars.appendChild(cb);
+          row.appendChild(bars);
+          chart.appendChild(row);
+        });
+      }
+      var msg = $('eng-msg');
+      if (msg) {
+        var rel = (WIDE + P) / (FIX + P);
+        var gen = WIDE / FIX;
+        msg.innerHTML = 'P = ' + P + '：按 <code>G × (P + L)</code> 计，课程前期每条 rollout 是固定预算的 <strong>' + rel.toFixed(2) + '×</strong>；' +
+          '若只看生成部分而不计 prompt，上限从 87 到 256 是 <strong>' + gen.toFixed(2) + '×</strong>。' +
+          (P >= 1024 ? ' prompt 越长，多出的生成量越被稀释。' : ' prompt 很短时，预算差异就是主要开销。');
+      }
+    }
+    slider.addEventListener('input', function (e) { render(parseInt(e.target.value, 10)); });
+    render(512);
+  })();
+
+  /* ------------------------------------------------------------
+     3) Figure 2 读数（由论文源 PDF 的坐标轴刻度反算，±0.5pp）
+     DATA.rows[bench] = { steps: [...], curr: [...], fixed: 值, base: 值 }
+     ------------------------------------------------------------ */
+  (function () {
+    var host = $('fig-main');
+    if (!host) return;
+
+    /* 每个面板按面板自己的坐标轴刻度反算；steps 为曲线抽样点对应的训练步 */
+    var DATA = {
+      gsm: {
+        label: '用 GSM8K 微调',
+        benches: ['GSM8K', 'SVAMP', 'MATH500', 'GSM+', 'College Math'],
+        rows: {
+          'GSM8K':        { steps: [100, 141, 239, 330, 440], curr: [86.4, 86.7, 86.7, 86.7, 88.8],  fixed: 82.9, base: 83.8,
+                            note: 'curriculum 全程停在 ≈86–87% 的平台，固定预算 82.9%，base 83.8%；与正文 86.20 / 82.71 一致。' },
+          'SVAMP':        { steps: [96, 112, 128, 140], curr: [85.4, 87.1, 85.6, 84.4], fixed: 89.1, base: 85.8,
+                            note: 'curriculum 曲线末点 84.4%，终点方块却是 89.1%——方块高于曲线；正文称 85.00 vs 77.67，与图上两种读数都不吻合。' },
+          'MATH500':      { steps: [217, 440, 660, 880], curr: [38.7, 47.0, 48.5, 49.9], fixed: 40.2, base: 47.1,
+                            note: 'curriculum 起点 38.7% 略低于固定预算 40.2%，随后抬升到 ≈47–50%；base 在图上读到 47.1%。' },
+          'GSM+':         { steps: [121, 137, 152, 183], curr: [67.8, 68.5, 68.5, 69.1], fixed: 63.0, base: 64.1,
+                            note: 'curriculum 曲线 ≈68–69%（正文 67.58），固定预算 63.0%（正文 62.75）；base 64.1%。' },
+          'College Math': { steps: [139, 360, 590, 820], curr: [13.7, 16.2, 16.2, 16.3], fixed: 16.3, base: 8.0,
+                            note: 'curriculum 与固定预算都约 16%，base 8.0%；Table 1 中 College Math 最高 15.3%，与图基本一致。' }
+        }
+      },
+      math: {
+        label: '用 MATH500 微调',
+        benches: ['MATH500', 'GSM8K', 'SVAMP', 'GSM+', 'College Math'],
+        rows: {
+          'MATH500':      { steps: [151, 320, 490, 660], curr: [44.7, 48.5, 48.5, 48.5], fixed: 45.5, base: 37.1,
+                            note: 'curriculum 起点 44.7%（正文 43.40），固定预算 45.5%（正文 38.80），base 37.1%；曲线随后稳在 ≈48.5%。' },
+          'GSM8K':        { steps: [103, 139, 240, 300], curr: [85.5, 86.2, 86.2, 86.2], fixed: 84.2, base: 83.7,
+                            note: 'curriculum 平台 ≈86.2%，固定预算 84.2%，base 83.7%，差值只有 1–2 个点。' },
+          'SVAMP':        { steps: [85, 97, 110, 122], curr: [82.5, 86.9, 86.0, 85.0], fixed: 78.1, base: 78.1,
+                            note: '方块与 base 重合在 78.1%；curriculum 末点约 85%，正文未给该组 OOD 数字。' },
+          'GSM+':         { steps: [128, 183, 239, 294], curr: [65.2, 67.2, 66.9, 66.8], fixed: 65.6, base: 64.1,
+                            note: 'curriculum ≈65–67%，固定预算 65.6%，base 64.1%，三者都在 3 个点内。' },
+          'College Math': { steps: [137, 240, 340, 440], curr: [21.3, 18.9, 18.6, 18.6], fixed: 19.8, base: 8.2,
+                            note: 'curriculum 从 21.3% 降到 ≈18.6%，固定预算 19.8%，base 8.2%。' }
+        }
+      }
+    };
+
+    var curSet = 'gsm';
+    var curBench = 'GSM8K';
+
+    function buildBenchTabs(box, benches, active, onPick) {
+      if (!box) return;
+      box.innerHTML = '';
+      benches.forEach(function (b) {
+        var btn = elt('button', 'tab' + (b === active ? ' active' : ''), b);
+        btn.type = 'button';
+        btn.addEventListener('click', function () { onPick(b); });
+        box.appendChild(btn);
+      });
+    }
+
+    function render() {
+      var cfg = DATA[curSet];
+      var row = cfg.rows[curBench];
+      if (!row) return;
+
+      var all = row.curr.concat([row.fixed, row.base]);
+      var lo = Math.min.apply(null, all) - 4;
+      var hi = Math.max.apply(null, all) + 2;
+      var N = row.curr.length;
+
+      host.innerHTML = '';
+
+      var grid = elt('div', '');
+      grid.style.cssText = 'display:flex;flex-direction:column;gap:10px';
+
+      /* curriculum row: N cells */
+      var r1 = elt('div', '');
+      r1.style.cssText = 'display:grid;grid-template-columns:88px 1fr;gap:10px;align-items:end';
+      r1.appendChild(elt('div', 'cname', 'Curriculum'));
+      var cells1 = elt('div', '');
+      cells1.style.cssText = 'display:grid;grid-template-columns:repeat(' + N + ',1fr);gap:6px';
+      row.curr.forEach(function (v, i) {
+        var cell = elt('div', '');
+        cell.style.cssText = 'display:flex;flex-direction:column;align-items:center';
+        var track = elt('div', '');
+        track.style.cssText = 'width:100%;height:120px;background:var(--bg-soft);border-radius:6px;display:flex;align-items:flex-end';
+        var fill = elt('div', '');
+        var h = Math.max(3, (v - lo) / (hi - lo) * 100);
+        fill.style.cssText = 'width:100%;height:' + h.toFixed(1) + '%;background:var(--accent);border-radius:6px;transition:height .35s ease';
+        fill.title = 'step ' + row.steps[i] + '：' + v.toFixed(1) + '%';
+        track.appendChild(fill);
+        cell.appendChild(track);
+        cell.appendChild(elt('div', 'mini-mark', v.toFixed(1)));
+        cells1.appendChild(cell);
+      });
+      r1.appendChild(cells1);
+      grid.appendChild(r1);
+
+      /* baselines: single column */
+      function baseRow(name, value, color, shapeClass) {
+        var r = elt('div', '');
+        r.style.cssText = 'display:grid;grid-template-columns:88px 1fr;gap:10px;align-items:end';
+        r.appendChild(elt('div', 'cname', name));
+        var cell = elt('div', '');
+        cell.style.cssText = 'display:flex;flex-direction:column;align-items:center;width:' + (100 / N / 2) + '%';
+        var track = elt('div', '');
+        track.style.cssText = 'width:100%;height:' + Math.max(3, (value - lo) / (hi - lo) * 120).toFixed(1) + 'px;background:transparent;border:1.5px solid ' + color + ';border-radius:6px';
+        cell.appendChild(track);
+        cell.appendChild(elt('div', 'mini-mark', value.toFixed(1)));
+        r.appendChild(cell);
+        grid.appendChild(r);
+      }
+      baseRow('Fixed budget', row.fixed, 'var(--c1)');
+      baseRow('Base model', row.base, 'var(--c2)');
+
+      host.appendChild(grid);
+
+      var sx = $('fig-steps');
+      if (sx) {
+        sx.innerHTML = '';
+        sx.style.gridTemplateColumns = '88px repeat(' + N + ',1fr)';
+        var empty = elt('div', '');
+        sx.appendChild(empty);
+        row.steps.forEach(function (s) { sx.appendChild(elt('span', '', String(s))); });
+      }
+
+      var msg = $('fig-msg');
+      if (msg) {
+        var last = row.curr[row.curr.length - 1];
+        var dlt = last - row.fixed;
+        msg.innerHTML = '<strong>' + cfg.label + ' → ' + curBench + '</strong>：curriculum 曲线末点 ' + last.toFixed(1) +
+          ' vs 固定预算 ' + row.fixed.toFixed(1) + '（' + (dlt >= 0 ? '+' : '') + dlt.toFixed(1) + ' pp）。' + row.note;
+      }
+    }
+
+    function rebindBench() {
+      buildBenchTabs($('bench-tabs'), DATA[curSet].benches, curBench, function (b) {
+        curBench = b;
+        rebindBench();
+        render();
+      });
+    }
+    rebindBench();
+
+    var tabs = document.querySelectorAll('#fig-tabs .tab');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].addEventListener('click', function () {
+        for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+        this.classList.add('active');
+        curSet = this.getAttribute('data-set');
+        curBench = DATA[curSet].benches[0];
+        rebindBench();
+        render();
+      });
+    }
+    render();
+  })();
+})();
+</script>
+</body>
+</html>

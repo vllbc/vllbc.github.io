@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LAPO · 先发现该想多长，再让它自己说出来</title>
+<meta name="description" content="LAPO 用两阶段 GRPO 让推理模型自己决定思考长度：先在 rollout 中统计正确解的长度分布，再把中位数写成 &lt;think&gt; 后的自我声明，让模型在推理时不再需要外部预算，token 最多降 40.9% 而准确率不降。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+
+/* ---- 奖励模拟器 ---- */
+.roll-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:18px 0}
+.roll-card{border:1px solid var(--border);background:var(--bg);border-radius:8px;padding:9px 6px 8px;text-align:center;min-width:0;transition:all .2s ease;cursor:pointer;font-family:inherit;color:inherit}
+.roll-card:hover{border-color:var(--border-strong);background:var(--bg-soft)}
+.roll-card.sel{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 3px rgba(192,78,45,.10)}
+.roll-card .rc-id{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--text-soft)}
+.roll-card .rc-len{font-family:"JetBrains Mono",monospace;font-size:17px;font-weight:600;line-height:1.3;color:var(--text)}
+.roll-card .rc-ok{font-size:11px;line-height:1.4;margin-top:2px}
+.rc-ok.yes{color:var(--c3)}
+.rc-ok.no{color:var(--text-soft)}
+.sim-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin-top:2px}
+.sim-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+.vline-wrap{position:relative;height:46px;margin:16px 0 4px}
+.vline-track{position:absolute;left:0;right:0;top:18px;height:4px;background:var(--border);border-radius:100px}
+.vline-mark{position:absolute;top:8px;width:2px;height:24px;border-radius:1px}
+.vline-mark b{position:absolute;top:-11px;left:50%;transform:translateX(-50%);font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:600;white-space:nowrap}
+.vline-fill{position:absolute;top:18px;height:4px;border-radius:100px}
+@media (max-width:520px){
+  .roll-grid{grid-template-columns:repeat(3,1fr);gap:6px}
+  .roll-card .rc-len{font-size:15px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">LAPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">两阶段</a>
+      <a href="#train">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2507.15758</span>
+  <h1>LAPO：先发现该想多长，再让模型自己把这件事说出来</h1>
+  <p class="hero-sub">
+    推理模型对简单题也写上千个 token，这是 overthinking。LAPO 不靠外部截断，也不靠固定长度惩罚，而是先用 GRPO 从<strong>正确解的长度分布</strong>里统计出「这张题大约要想多久」，
+    再把中位数写进 <code>&lt;think&gt;</code> 后的一句自我声明，让模型把预算当成自己的计划，而不是别人下达的指令。
+  </p>
+  <div class="meta">
+    <span>Xingyu Wu 等 · 浙江大学</span>
+    <a href="https://arxiv.org/abs/2507.15758" target="_blank" rel="noopener">arXiv 2507.15758 ↗</a>
+    <a href="https://github.com/zju-real/lapo" target="_blank" rel="noopener">代码 zju-real/lapo ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    「长推理」的浪费不在于想得多，而在于<strong>题难不难都用同样多的字</strong>。论文的观察是：同一道题采样 N 条 rollout，<em>做对的那几条长度天然不同</em>，它们的分布本身就刻画了这道题需要多少思考。
+  </p>
+  <p>
+    第一阶段（Discovery）用 GRPO 加一个<strong>只奖正确解的长度奖励</strong>：正确解落在 [P30, P70] 区间得满分，偏离按线性衰减，错误解的长度奖励恒为 0。同时把正确解长度的<strong>中位数</strong>存成问题到长度的映射 M(q)。
+  </p>
+  <p>
+    第二阶段（Internalization）把 M(q) 写成 <code>&lt;think&gt; I will answer the question with n tokens.</code> 放进 prompt，奖励换成<strong>高斯形的一致度 R₂</strong>：越接近 n 分越高。关键在位置——声明必须在 <code>&lt;think&gt;</code> 之内，模型才会把它当计划，放到外面就变成照抄指令。
+  </p>
+  <p>
+    推理时不需要再喂 n，模型自己写出它。代价是：训练仍是标准 GRPO，两阶段各 3 个 episode，4 张 A800；但实验全部在数学题上，声明一旦被写出，预算也就被自己钉死。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">−38.5<small>%</small></div>
+      <div class="k">DeepScaleR-1.5B 平均 token<br>6229 → 3832，准确率 +2.3 pp</div>
+    </div>
+    <div class="metric">
+      <div class="v">−41.0<small>%</small></div>
+      <div class="k">DeepSeek-R1-1.5B 平均 token<br>8086 → 4775，准确率 +1.2 pp</div>
+    </div>
+    <div class="metric">
+      <div class="v">0.0</div>
+      <div class="k">错误解的长度得分<br>错解无论多短都拿不到长度奖励</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>正确解的长度并不唯一，而模型对每道题都用同一种长度</h2></div>
+  <p class="sec-sub">把「该想多长」当成一个可以观测的统计量，而不是一个要人为设定的超参数。</p>
+
+  <p>
+    经过 RLVR 训练的推理模型（o1、R1 这一类）靠长思维链换来准确率，但采样时的自由度没有被约束：论文引用的数据显示，这类模型的推理轨迹可以达到短 CoT 模型的数倍，简单题上也塞满重复验证与自我怀疑。这就是 overthinking，直接后果是推理成本与延迟。
+  </p>
+
+  <p>
+    LAPO 的前提是一个可以被检验的经验事实：<strong>同一道题，模型做对多次时，每次的长度是分散的</strong>。比如 Table 1 里 DeepScaleR-1.5B 在 MATH-500 上平均 3280 token，在 AIME2024 上平均 9246 token——平均长度本身随题群变化，说明长度里确实编码了难度；而每条 rollout 之间的离散，则给出了「这张题想多长都算做对」的区间。
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">ℒ(q) = { |r<sub>i</sub>| &nbsp;:&nbsp; 𝕀(y<sub>i</sub> = y<sub>gold</sub>) = 1, &nbsp; i ∈ [1, N] }</span>
+  </div>
+  <div class="eq-cap">Eq. 1 · 从 GRPO 同一批 rollout 里直接筛出「做对了的回答」的长度集合</div>
+
+  <p>
+    问题因此从「怎么把长度压到某个数」变成了「怎么让模型自己在解题前知道 ℒ(q) 的大致位置」。前者需要人给每个任务设定预算（L1、ThinkPrune 走这条路），后者如果把 ℒ(q) 直接告诉模型，又会在推理时依赖外部标注。论文要的是<strong>训练阶段知道、部署阶段不需要</strong>。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">为什么不是越短越好</span><h4>长度缩短一旦损害正确性，收益就是负的</h4></div>
+    <p>推理任务的奖励是二值的：答对 1、答错 0。在此之上加的每一分长度奖励，都在和「保住正确性」争梯度。论文把所有长度奖励都乘上正确性指示 <code>𝒞<sub>i</sub></code>，错误解的长度奖励恒为 0——缩短的前提是先做对。</p>
+  </div>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条路各有各的偏：会过短、不会估、只会开或关</h2></div>
+  <p class="sec-sub">论文在 Related Works 与 Introduction 里把已有方法分成三类，每一类的失效方式都不同。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">奖励惩罚 / 外部预算</span><h4>长度目标由人给</h4></div>
+      <p>在奖励里加长度惩罚（如 HAPO 的历史感知奖励），或训练模型服从给定的预算（L1 用 exact / max 预算，ThinkPrune 用截断价位的长度约束）。</p>
+      <p><strong>问题：</strong>惩罚给重了会 over-shortening、准确率下降；预算要逐题逐任务人工指定，且不会随问题复杂度变化。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">提前终止</span><h4>边想边判断要不要停</h4></div>
+      <p>根据置信度或验证信号在推理中途截断（如 s1、Concise 一类方法）。</p>
+      <p><strong>问题：</strong>终止决策发生在「思考过程中」，论文认为这经常把逻辑链截断在半路，让模型无法得出正确结论。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">思考开关</span><h4>只能在两档之间选</h4></div>
+      <p>学习一个 think / no-think 的二值策略（AutoThink、AdaptThink、Thinkless）。</p>
+      <p><strong>问题：</strong>粒度太粗。一道 AIME 题和一道 Level 1 代数题可能都落在「要思考」这一档，长度没有区分。</p>
+    </div>
+  </div>
+
+  <p>
+    论文给出的共同诊断是：这三类方法都把长度控制当成<strong>施加在推理过程之外</strong>的约束。而数学题本身有内在复杂度，模型做对时已经自然收敛到某个长度——这个长度信号就在 rollout 里，没有被用起来。
+  </p>
+
+  <h3>同一张表里，三条路各自漏在哪</h3>
+  <p>下表取自 Table 1 的 DeepScaleR-1.5B-Preview 一栏（平均列）。可以看到 L1-Exact 最短（2278）但准确率掉到 56.2；ThinkPrune-4k 准确率最高（63.5）但 token 仍是 4094；LAPO-I 用 3832 token 拿到 64.8。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>思路</th><th style="text-align:right">平均 Pass@1 ↑</th><th style="text-align:right">平均 #Tok ↓</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>L1-Exact</td><td>外部给定精确预算</td><td class="num">56.2</td><td class="num">2278</td></tr>
+        <tr><td>L1-Max</td><td>外部给定最大预算</td><td class="num">57.5</td><td class="num">2541</td></tr>
+        <tr><td>ThinkPrune-4k</td><td>截断式训练 + 4k 约束</td><td class="num">63.5</td><td class="num">4094</td></tr>
+        <tr><td>AutoThink</td><td>think / no-think 二值策略</td><td class="num">60.4</td><td class="num">4144</td></tr>
+        <tr><td>Acc-Only</td><td>只用准确率奖励的 GRPO</td><td class="num">63.9</td><td class="num">4696</td></tr>
+        <tr><td>Base</td><td>DeepScaleR-1.5B-Preview 原始模型</td><td class="num">62.5</td><td class="num">6229</td></tr>
+        <tr class="best"><td>LAPO-I</td><td>发现 + 内化两阶段</td><td class="num">64.8</td><td class="num">3832</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fine" style="font-size:12.5px;color:var(--text-soft);margin-top:-8px">数据来源：Table 1 · Average 列。表中只保留代表每种思路的一行，完整对照见第 06 节。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>两个阶段、两个奖励：先把长度统计出来，再让模型声明并遵守它</h2></div>
+  <p class="sec-sub">第一阶段学「多长算对」，第二阶段学「说了多长就做多长」，两个奖励都不惩罚错误解的长度。</p>
+
+  <h3>第一阶段 · Discovery：长度奖励只作用于正确解</h3>
+  <p>从正确解集合 ℒ(q) 里取两个百分位作为「合理区间」，取中位数作为「目标长度」：</p>
+  <div class="eq">
+    [L<sub>min</sub>, L<sub>max</sub>] = [Percentile<sub>30</sub>(ℒ(q)), Percentile<sub>70</sub>(ℒ(q))]
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    <span class="hl-b">M(q) = Median(ℒ(q))</span>
+  </div>
+  <div class="eq-cap">Eq. 2 · 区间用来给第一阶段做奖励；Eq. 3 · 中位数用来给第二阶段做声明目标</div>
+
+  <p>对一条正确解，先算它到区间的距离 <code>d<sub>i</sub> = min(||r<sub>i</sub>|−L<sub>min</sub>|, ||r<sub>i</sub>|−L<sub>max</sub>|)</code>，再用线性衰减 <code>f(d) = max(0, 1 − d/100)</code> 打分。奖励是准确率加上长度分：</p>
+
+  <div class="eq">
+    <span class="hl-a">R<sub>D</sub>(r<sub>i</sub>, q) = 𝕀(y<sub>i</sub> = y<sub>gold</sub>) + α · R<sub>1</sub>(r<sub>i</sub>, q)</span>
+    &nbsp;&nbsp;&nbsp;&nbsp; (α = 0.7)
+  </div>
+  <div class="eq">
+    R<sub>1</sub> =
+    <span class="hl-a">1.0</span> &nbsp;if 𝒞<sub>i</sub>=1 ∧ |r<sub>i</sub>| ∈ [L<sub>min</sub>, L<sub>max</sub>] &nbsp;·&nbsp;
+    <span class="hl-b">f(d<sub>i</sub>)</span> &nbsp;if 𝒞<sub>i</sub>=1 ∧ |r<sub>i</sub>| ∉ [L<sub>min</sub>, L<sub>max</sub>] &nbsp;·&nbsp;
+    <span style="color:var(--text-soft)">0</span> &nbsp;if 𝒞<sub>i</sub>=0
+  </div>
+  <div class="eq-cap">Eq. 4–5 · 落在区间内的正确解得满额长度分；偏离 100 token，长度分归零；错误解的长度分恒为 0</div>
+
+  <p>
+    这意味着 α 设成 0.7 时，一条正确但偏长 10 token 的解得 <code>1 + 0.7 × 0.9 = 1.63</code>，而一条正确且落在区间内的解得 1.7；一条错误解最多得 1.0，无论它多短。长度分只在<strong>同样做对</strong>的解之间区分优劣，这正是 GRPO 的组内比较所需要的。
+  </p>
+
+  <h3>第二阶段 · Internalization：把中位数写进 &lt;think&gt; 里，用高斯奖励对齐</h3>
+  <p>进入第二阶段时，每道题的 prompt 后面被追加一句自我声明，n 就是第一阶段算出的 M(q)：</p>
+
+  <div class="eq" style="text-align:left">
+    &lt;think&gt; <span class="hl-c">I will answer the question with n tokens.</span> …
+  </div>
+  <div class="eq-cap">论文 Figure 2 / 3.3 节 · 声明位置紧贴 &lt;think&gt; 之后，被当作推理上下文的一部分，而不是前置的系统指令</div>
+
+  <p>奖励换成以 n 为中心的高斯函数，奖励「说多少做多少」，同样只对正确解生效：</p>
+  <div class="eq">
+    <span class="hl-a">R<sub>I</sub>(r<sub>i</sub>, q′) = 𝕀(y<sub>i</sub> = y<sub>gold</sub>) + β · R<sub>2</sub>(r<sub>i</sub>, n)</span>
+    &nbsp;&nbsp;&nbsp;&nbsp; (β = 0.7)
+  </div>
+  <div class="eq">
+    <span class="hl-b">R<sub>2</sub> = exp( −(|r<sub>i</sub>| − n)<sup>2</sup> / 2σ<sup>2</sup> )</span> &nbsp;if 𝒞<sub>i</sub>=1
+    &nbsp;&nbsp;&nbsp;&nbsp; <span style="color:var(--text-soft)">0</span> &nbsp;if 𝒞<sub>i</sub>=0
+  </div>
+  <div class="eq-cap">Eq. 6–7 · 与 n 完全一致的解得满分长度分，偏离越大分越低；σ 的具体取值论文未在正文给出</div>
+
+  <p>
+    注意和第一阶段的结构差异：Discovery 的奖励是<strong>不对称的</strong>——区间内一律满分，区间外按距离线性扣分；Internalization 的奖励是<strong>单峰对称的</strong>——只认一个点 n。前者给模型一个宽裕的探索带，后者收窄成一个可以复述的目标。
+  </p>
+
+  <p>
+    第一次进入第二阶段时，n 是 Discovery 最后一次算出的 M(q)；之后每个训练步都用新的 rollout 更新 M(q)：之前没做对的题用本轮中位数，已经做对的题取<strong>旧值与新中位数的较小者</strong>（Eq. 8）。这让刚做对的题拿到一个宽松的起点，已做对的题只会越来越短。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么「位置」比「有没有」更关键</span><h4>声明在外面 = 外部指令，声明在里面 = 自己的计划</h4></div>
+    <p>论文的消融（Table 2）把同一套奖励下的四种写法放在一起比：声明精确 vs 区间 vs 无声明，以及声明放在 &lt;think&gt; 前 vs 后。<strong>准确率最好的不是最小值、不是均值，而是精确命中 &lt;think&gt; 之后的中位数</strong>——64.8%，而同样内容放到外面是 63.9%，完全不写是 63.6%。</p>
+  </div>
+
+  <h3>自己动手：在 5 条 rollout 上算一遍两个奖励</h3>
+  <p>
+    下面是一个玩具题目 q，模型采样了 5 条 rollout（N=8 的简化版），其中 3 条做对。切到第一阶段看长度分怎么从正确解里挑出「典型长度」；切到第二阶段看高斯奖励怎么让所有正确解都往中位数靠。n 固定为 Discovery 阶段算出的 M(q)，σ 取 700（论文未给出具体值，此处仅作示意）。
+  </p>
+
+  <div class="sim" id="lapo-sim">
+    <div class="sim-top" id="sim-stages">
+      <button class="rule-btn active" data-stage="d" type="button">Discovery · R₁<span class="r-sub">区间 + 线性衰减</span></button>
+      <button class="rule-btn" data-stage="i" type="button">Internalization · R₂<span class="r-sub">单点 + 高斯</span></button>
+    </div>
+
+    <div class="roll-grid" id="roll-grid" role="list" aria-label="五条 rollout 的长度与正确性"></div>
+
+    <div class="vline-wrap" id="vline-wrap" aria-hidden="true">
+      <div class="vline-track"></div>
+      <div class="vline-fill" id="vline-fill"></div>
+      <div class="vline-mark" id="vline-p30" style="background:var(--c1)"><b style="color:var(--c1)">P30</b></div>
+      <div class="vline-mark" id="vline-p70" style="background:var(--c1)"><b style="color:var(--c1)">P70</b></div>
+      <div class="vline-mark" id="vline-med" style="background:var(--c2)"><b style="color:var(--c2)">Median = n</b></div>
+    </div>
+    <div class="sim-legend">
+      <span><i style="background:var(--c1)"></i>正确解长度的 30 / 70 分位</span>
+      <span><i style="background:var(--c2)"></i>中位数 = 第二阶段声明的 n</span>
+      <span><i style="background:var(--accent)"></i>R₁ 满分区间</span>
+    </div>
+
+    <div class="slots s2" id="sim-slots"></div>
+
+    <div class="readout" id="sim-readout">
+      <div class="r-head">当前选中</div>
+      <div id="sim-calc"></div>
+    </div>
+
+    <p class="fine" style="font-size:12.5px;color:var(--text-soft);margin-top:12px">点击任意 rollout 卡片，可看单条的手算过程。</p>
+  </div>
+
+  <details>
+    <summary>这个模拟简化了什么？<span class="sum-sub">点开看与论文公式的差异</span></summary>
+    <div class="details-body">
+      <p>模拟用 <strong>5 条 rollout、3 条正确</strong>，论文是每步 N=8 条。长度单位取 token，数值是手选的示意值；分位数在 3 个样本上用 <strong>最近秩（nearest-rank）</strong>算：P30 取排序后第 ⌈0.3×3⌉ = 1 个，P70 取第 ⌈0.7×3⌉ = 3 个，所以区间恰好等于最小与最大的正确解。论文没有说明分位数的插值方式，样本量更大时两者差别很小。</p>
+      <p>第二阶段的高斯 σ 在正文和附录里都没有给出具体值，模拟取 <strong>σ = 700</strong> 只是让曲线在 700–3800 的跨度上看得清楚，不代表论文设置。两阶段的 α、β 均按论文取 0.7。</p>
+      <p>论文真实训练时，出错或无正确解的题会触发一些分支（例如无正确解时 M(q) 置为最大长度 4096），模拟只保留「所有 rollout 都可解析、有至少一个正确解」这一最常见情形。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>没有新模型、没有新数据：仍是 GRPO，只是换了两次奖励和一次 prompt</h2></div>
+  <p class="sec-sub">LAPO 是训练流程的改造，不是新算法；开销主要来自两阶段各跑一遍 rollout。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th style="white-space:nowrap">项目</th><th>设置</th><th style="white-space:nowrap">出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>基础模型</td><td>DeepSeek-R1-1.5B（即 DeepSeek-R1-Distill-Qwen-1.5B）与 DeepScaleR-1.5B-Preview</td><td>§4 · 附录 A.1</td></tr>
+        <tr><td>训练数据</td><td>10,000 道数学题：DeepScaleR-Preview 6,000 + MATH 中等级 4,000</td><td>§4 Training Details</td></tr>
+        <tr><td>算法</td><td>GRPO（OpenRLHF 实现），两阶段各 3 个 episode，约 240 步</td><td>§4 · 附录 A.1</td></tr>
+        <tr><td>奖励权重</td><td>α = 0.7（R₁），β = 0.7（R₂）</td><td>§4 · 附录表 5</td></tr>
+        <tr><td>采样</td><td>每问 8 条 rollout，温度 1.0；训练最大长度 4096；KL 系数 0.0001，学习率 1e-6，batch 128</td><td>附录 A.1 表 5</td></tr>
+        <tr><td>评测</td><td>生成长度上限放宽到 32,768；每问采 4 条（MATH-500 / OlympiadBench）或 32 条（AIME / AMC）；温度 0.6、top-p 0.95</td><td>§4 Evaluation Details</td></tr>
+        <tr class="best"><td>硬件</td><td>4 × A800</td><td>附录 A.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>M(q) 在训练中怎么演化</h3>
+  <p>
+    关键的设计在于 M(q) 是一条<strong>随训练自我更新</strong>的曲线，不是静态统计：
+  </p>
+  <ul>
+    <li><strong>Discovery 阶段</strong>：每个 GRPO 步结束后重算 ℒ(q)、重取中位数并覆盖 M(q)。注意奖励本身用的是区间 [P30, P70]，M(q) 只是被记录、不进入奖励——它要到第二阶段才被用到。</li>
+    <li><strong>Internalization 阶段</strong>：声明用的是当时的 M(q)。每步更新规则见 Eq. 8：先前<strong>未做对</strong>的题直接换成新中位数（可能很长，从而允许题目在更长预算下被攻克），先前<strong>已做对</strong>的题取 <code>min(M<sub>old</sub>, 新中位数)</code>——预算只能收紧，不会反弹。</li>
+    <li><strong>无正确解</strong>：Discovery 阶段把 M(q) 置为 4096（最大长度），用于鼓励后续 episode 用足预算去探索。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">结论：为什么「发现」之后还要「内化」</span><h4>只做第一阶段（LAPO-D）只能压掉 1/3，剩下的要让模型自己说出来</h4></div>
+    <p>Table 1 中 DeepScaleR-1.5B：Base 6229 token → LAPO-D 4116（原文表内无百分比；论文章节称 LAPO-D 单独实现 36.0% 的 token 压缩）→ LAPO-I 3832。第二阶段的额外 6.9% 正是来自「声明 + 一致度奖励」——如果把声明去掉（Table 2 的 w/ Implicit），token 退回 4088，准确率也回到 63.6%，和 LAPO-D 相近。</p>
+  </div>
+
+  <h3>训练动态：两段阶梯式回落</h3>
+  <p>
+    附录 A.2 用 MATH-500 验证集的检查点记录了过程：Discovery 把平均长度从 3280 迅速压到约 2365 后稳定，Internalization 再压到 2200 以下；同时准确率从 85.8% 爬到 86.4% 以上并保持，论文称内部化阶段出现一个「短暂的性能高峰」，说明声明不只是限制，也在引导模型更集中地推理。
+  </p>
+
+  <p>
+    工程上最容易低估的是<strong>训练长度上限是 4096</strong>，而评测上限是 32,768。也就是说，模型在训练时从未见过超过 4096 token 的解，但评测时对 AIME 这类最难题的平均长度为 5371（Table 1），明显超出训练窗口——论文把这一点当作泛化的证据（见第 06 节），同时它也是理解「内化的是规律而非模板」的关键。
+  </p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条闭环：采样 → 统计 → 声明 → 对齐 → 收紧</h2></div>
+  <p class="sec-sub">把 03 节的公式放回训练循环，就是下面的数据流；两个阶段之间共享同一张 M(q) 表。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 470" role="img" aria-label="LAPO 训练流程示意：Discovery 阶段用 GRPO 采样 rollout，筛出正确解长度集合，计算分位区间与中位数，长度奖励 R1 更新策略；Internalization 阶段把中位数写成 think 之后的自我声明，用高斯一致度奖励 R2 继续训练，并用双策略更新映射 M">
+      <defs>
+        <marker id="lapo-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L6,3 L0,6 Z" class="pipe-arrow"></path>
+        </marker>
+      </defs>
+
+      <text x="110" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">Discovery · 3 episodes</text>
+      <text x="360" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">长度统计</text>
+      <text x="606" y="22" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">Internalization · 3 episodes</text>
+
+      <!-- Discovery box -->
+      <rect x="8" y="38" width="204" height="300" rx="12" class="pipe-c1"></rect>
+      <text x="110" y="64" text-anchor="middle" class="pipe-t" font-weight="600">GRPO · N = 8</text>
+      <text x="110" y="86" text-anchor="middle" class="pipe-s">问题 q → 8 条 rollout</text>
+      <text x="110" y="104" text-anchor="middle" class="pipe-s">有对有错，长度各异</text>
+
+      <rect x="24" y="124" width="172" height="56" rx="8" class="pipe-box"></rect>
+      <text x="110" y="146" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">ℒ(q)</text>
+      <text x="110" y="166" text-anchor="middle" class="pipe-s">只收正确解的长度</text>
+
+      <rect x="24" y="196" width="172" height="56" rx="8" class="pipe-box"></rect>
+      <text x="110" y="218" text-anchor="middle" class="pipe-t" font-weight="600">区间 [P30, P70]</text>
+      <text x="110" y="238" text-anchor="middle" class="pipe-s">R₁ 的满分带</text>
+
+
+      <rect x="24" y="270" width="172" height="50" rx="8" class="pipe-accent"></rect>
+      <text x="110" y="290" text-anchor="middle" class="pipe-t" font-weight="600">R_1 只加给正确解</text>
+      <text x="110" y="308" text-anchor="middle" class="pipe-s">拍错 100 token 以内有分</text>
+      <path d="M110 252 L110 270" class="pipe-line" marker-end="url(#lapo-arrow)"></path>
+
+      <!-- refresh loop -->
+      <path d="M196 90 L212 90" class="pipe-line" stroke-dasharray="4 4" marker-end="url(#lapo-arrow)"></path>
+      <text x="352" y="322" text-anchor="middle" class="pipe-s">每步重算 ℒ(q)，覆盖 M(q)</text>
+
+      <!-- Middle box -->
+      <rect x="244" y="56" width="232" height="130" rx="12" class="pipe-c2"></rect>
+      <text x="360" y="82" text-anchor="middle" class="pipe-t" font-weight="600">M(q) = Median(ℒ(q))</text>
+      <text x="360" y="106" text-anchor="middle" class="pipe-s">代表这张题的「典型」长度</text>
+      <text x="360" y="128" text-anchor="middle" class="pipe-s">没做对 → 4096（探索上限）</text>
+      <text x="360" y="150" text-anchor="middle" class="pipe-s pipe-m" font-weight="600">持久化：跨阶段共享</text>
+
+      <path d="M232 224 L244 224 L244 160" class="pipe-line" marker-end="url(#lapo-arrow)"></path>
+
+      <!-- second middle box -->
+      <rect x="244" y="206" width="232" height="132" rx="12" class="pipe-box"></rect>
+      <text x="360" y="232" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">&lt;think&gt; … with n tokens.</text>
+      <text x="360" y="256" text-anchor="middle" class="pipe-s">n = M(q)，写进推理上下文</text>
+      <text x="360" y="278" text-anchor="middle" class="pipe-s">位置：紧贴 think 之后</text>
+      <text x="360" y="302" text-anchor="middle" class="pipe-s">推理时只写一次自己的预算</text>
+      <path d="M360 186 L360 206" class="pipe-line" marker-end="url(#lapo-arrow)"></path>
+
+      <!-- Right box -->
+      <rect x="500" y="80" width="212" height="130" rx="12" class="pipe-accent"></rect>
+      <text x="606" y="106" text-anchor="middle" class="pipe-t pipe-m" font-weight="600">R_2 = exp(−(|r|−n)²/2σ²)</text>
+      <text x="606" y="128" text-anchor="middle" class="pipe-s">只对正确解；越接近 n 越高</text>
+      <text x="606" y="150" text-anchor="middle" class="pipe-s">GRPO 组内比较 → 更新 π_θ</text>
+      <text x="606" y="176" text-anchor="middle" class="pipe-s">声明 + 对齐奖励 = 内化</text>
+
+      <path d="M476 320 L490 320 L490 214 L500 214" class="pipe-line" marker-end="url(#lapo-arrow)"></path>
+
+      <!-- dual strategy -->
+      <rect x="500" y="232" width="212" height="110" rx="12" class="pipe-box"></rect>
+      <text x="606" y="256" text-anchor="middle" class="pipe-t" font-weight="600">Eq. 8 · M(q) 更新</text>
+      <text x="606" y="278" text-anchor="middle" class="pipe-s">未做对 → 用新中位数</text>
+      <text x="606" y="298" text-anchor="middle" class="pipe-s">已做对 → min(旧 M, 新中位数)</text>
+      <text x="606" y="320" text-anchor="middle" class="pipe-s">预算只收紧，不反弹</text>
+      <path d="M606 210 L606 232" class="pipe-line" marker-end="url(#lapo-arrow)"></path>
+
+      <!-- bottom result -->
+      <rect x="240" y="378" width="472" height="52" rx="12" class="pipe-box"></rect>
+      <text x="476" y="400" text-anchor="middle" class="pipe-t" font-weight="600">推理时无声明输入 · 长度匹配问题难度</text>
+      <text x="476" y="420" text-anchor="middle" class="pipe-s">Figure 3：复杂度与生成长度近似线性正相关</text>
+      <path d="M606 342 L606 360 L476 360 L476 378" class="pipe-line" marker-end="url(#lapo-arrow)"></path>
+
+      <!-- back to fig 3 labels -->
+      <text x="110" y="396" text-anchor="middle" class="pipe-s">两段各自压一次长度</text>
+      <text x="110" y="414" text-anchor="middle" class="pipe-s">主结果见 06 节</text>
+    </svg>
+    <figcaption>
+      图 1：LAPO 的数据流（依论文 Figure 2 与 Algorithm 1 重绘）。左：Discovery 阶段在 GRPO rollout 上统计长度，用 R₁ 训练；中：中位数被持久化为 M(q)，并写入第二阶段的声明；右：Internalization 用 R₂ 对齐声明与输出，同时用 Eq. 8 更新 M(q)。虚线表示每步都会重算一次 M(q)。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>两个阶段用的是同一批训练题</strong>：没有额外的标注数据，也没有专门的描述长度模型。ℒ(q) 完全来自第一阶段模型自己的采样。</li>
+          <li><strong>M(q) 跨阶段共享是设计的核心</strong>：第二阶段的声明 n 直接是第一阶段算出的数，这意味着如果第一阶段没有学会「做对但更短」，第二阶段的目标也会随之偏长。</li>
+          <li><strong>「声明」既是输入也是输出</strong>：训练时每道题被加上声明，推理时模型自己生成声明。论文的假设是模型学到了「在 think 开头先估一个长度」这套模式，所以不需要外部再喂。</li>
+          <li><strong>奖励的两个阶段完全平行分工</strong>：R₁ 看「长度是否落在合理区间」，R₂ 看「长度是否等于声明的 n」。前者是分布层面的，后者是点层面的。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    图中最值得留意的是「自举」关系：第二阶段的奖励目标 n 来自第一阶段策略的采样结果，而第一阶段的采样又随着训练变短。两阶段各只有 3 个 episode，这个正反馈没有时间走得很远——它既是 LAPO 的简洁之处，也是后面 07 节的边界之一。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>两个基础模型都「更短更准」，难点题的长度反而超出了训练窗口</h2></div>
+  <p class="sec-sub">四个数学基准的平均列是全篇最干净的证据；消融则说明中位数和声明位置都不能随便换。</p>
+
+  <h3>主结果（Table 1，只摘两个基础模型的关键行）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th rowspan="2">方法</th><th colspan="2">MATH-500</th><th colspan="2">AIME2024</th><th colspan="2">AMC-23</th><th colspan="2">OlympiadBench</th><th colspan="2">Average</th></tr>
+        <tr><th style="text-align:right">Pass@1</th><th style="text-align:right">#Tok</th><th style="text-align:right">Pass@1</th><th style="text-align:right">#Tok</th><th style="text-align:right">Pass@1</th><th style="text-align:right">#Tok</th><th style="text-align:right">Pass@1</th><th style="text-align:right">#Tok</th><th style="text-align:right">Pass@1</th><th style="text-align:right">#Tok</th></tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="11" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-soft);background:var(--bg-tint)">基础模型 · DeepSeek-R1-1.5B</td></tr>
+        <tr><td>HAPO</td><td class="num">82.2</td><td class="num">2288</td><td class="num">31.3</td><td class="num">8649</td><td class="num">67.3</td><td class="num">4735</td><td class="num">50.1</td><td class="num">5024</td><td class="num">57.7</td><td class="num">5174</td></tr>
+        <tr><td>Base</td><td class="num">83.1</td><td class="num">4031</td><td class="num">30.3</td><td class="num">12150</td><td class="num">68.3</td><td class="num">7222</td><td class="num">50.0</td><td class="num">8942</td><td class="num">57.9</td><td class="num">8086</td></tr>
+        <tr><td>+ Acc-Only</td><td class="num">83.3</td><td class="num">3061</td><td class="num">31.6</td><td class="num">10628</td><td class="num">70.5</td><td class="num">5307</td><td class="num">50.6</td><td class="num">6402</td><td class="num">59.0</td><td class="num">6349</td></tr>
+        <tr><td>+ LAPO-D</td><td class="num">84.7</td><td class="num">2566</td><td class="num">28.5</td><td class="num">8415</td><td class="num">72.2</td><td class="num">4132</td><td class="num">51.3</td><td class="num">5595</td><td class="num">59.2</td><td class="num">5177</td></tr>
+        <tr class="best"><td>+ LAPO-I</td><td class="num">84.3</td><td class="num">2354</td><td class="num">29.3</td><td class="num">8318</td><td class="num">71.2</td><td class="num">3568</td><td class="num">51.7</td><td class="num">4863</td><td class="num">59.1</td><td class="num">4775</td></tr>
+        <tr><td colspan="11" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-soft);background:var(--bg-tint)">基础模型 · DeepScaleR-1.5B-Preview</td></tr>
+        <tr><td>Base</td><td class="num">85.8</td><td class="num">3280</td><td class="num">35.5</td><td class="num">9246</td><td class="num">74.2</td><td class="num">6416</td><td class="num">54.6</td><td class="num">5974</td><td class="num">62.5</td><td class="num">6229</td></tr>
+        <tr><td>ThinkPrune-4k</td><td class="num">86.6</td><td class="num">2042</td><td class="num">35.5</td><td class="num">6488</td><td class="num">76.3</td><td class="num">3839</td><td class="num">55.7</td><td class="num">4010</td><td class="num">63.5</td><td class="num">4094</td></tr>
+        <tr><td>+ Acc-Only</td><td class="num">85.6</td><td class="num">2510</td><td class="num">36.9</td><td class="num">7319</td><td class="num">77.6</td><td class="num">4244</td><td class="num">55.6</td><td class="num">4712</td><td class="num">63.9</td><td class="num">4696</td></tr>
+        <tr><td>+ LAPO-D</td><td class="num">86.4</td><td class="num">2365</td><td class="num">37.6</td><td class="num">5945</td><td class="num">77.6</td><td class="num">3655</td><td class="num">56.1</td><td class="num">4499</td><td class="num">64.4</td><td class="num">4116</td></tr>
+        <tr class="best"><td>+ LAPO-I</td><td class="num">86.3</td><td class="num">2168</td><td class="num">38.1</td><td class="num">5371</td><td class="num">78.3</td><td class="num">3765</td><td class="num">56.3</td><td class="num">4024</td><td class="num">64.8</td><td class="num">3832</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>几个从表里能直接读出的点：</p>
+  <ul>
+    <li><strong>两个基础模型的提升方向一致。</strong> DeepScaleR：token −38.5%、准确率 +2.3 pp；DeepSeek-R1-1.5B：token −41.0%、准确率 +1.2 pp。后者是摘要里 40.9% 的来源。</li>
+    <li><strong>Acc-Only 也能缩短。</strong> 只奖励准确率时，DeepScaleR 上 token 就降到 4696（−24.6%），准确率还涨了 1.4 pp。LAPO-D 的价值在于在此基础上再缩到 4116 并再涨 0.5 pp。</li>
+    <li><strong>Internalization 在 DeepSeek-R1-1.5B 上并不总涨准确率。</strong> LAPO-D 59.2 → LAPO-I 59.1；AIME 从 28.5 回到 29.3，AMC 从 72.2 回落到 71.2。这一阶段的主要收益是 token（5177 → 4775）。</li>
+    <li><strong>难点题的平均长度会超出训练上限。</strong> LAPO-I 在 AIME 上平均 5371，训练窗口只有 4096，说明更长的解在推理时仍然被生成出来——论文把它视为「学到了长度映射规律而非模板」的证据（见下方 Figure 3）。</li>
+  </ul>
+
+  <h3>反直觉发现：内化的证据是「不听外部指令」</h3>
+  <p>
+    Table 4 是一个对抗性测试：对已经训练好的 LAPO-I 和「声明放在 think 外面」的变体，在推理时<strong>额外</strong>注入彼此矛盾的长度要求（Short = 500，Long = 3500）。如果模型学到的是「服从长度指令」，两者都应该跟着变；如果学到的是「自己的计划」，LAPO-I 应该无视外部要求。
+  </p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>注入约束</th><th style="text-align:right">MATH-500 Pass@1</th><th style="text-align:right">#Tok</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="3">LAPO-I（声明在 think 内）</td><td>无</td><td class="num">86.3</td><td class="num">2168</td></tr>
+        <tr><td>+ Short (500)</td><td class="num">86.0</td><td class="num">2279</td></tr>
+        <tr class="best"><td>+ Long (3500)</td><td class="num">85.9</td><td class="num">2300</td></tr>
+        <tr><td rowspan="3">LAPO-I w/ Outside（声明在 think 外）</td><td>无</td><td class="num">86.2</td><td class="num">2251</td></tr>
+        <tr><td>+ Short (500)</td><td class="num">85.1</td><td class="num">1247</td></tr>
+        <tr><td>+ Long (3500)</td><td class="num">86.1</td><td class="num">2821</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    LAPO-I 在 Short 下长度只从 2168 浮动到 2279、在 Long 下到 2300，基本围着 2200 左右的基线；同一个模型家族把声明放到外面的版本，Short 下 token 直接砍到 1247，Long 下拉到 2821。<strong>「听到就照做」是外部指令，「听到也不改」才是内化的计划</strong>——这是论文对 internalization 一词最直接的操作化。
+  </p>
+
+  <h3>消融：中位数与精确声明分别不可替代</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Table 2 · 声明写法</span><h4>精确 &gt; 区间 &gt; 外面 &gt; 不写</h4></div>
+      <p class="mono" style="font-size:12.5px">w/ Exact 64.8 · 3832<br>w/ Range 64.1 · 3964<br>w/ Outside 63.9 · 4022<br>w/ Implicit 63.6 · 4088</p>
+      <p>精确单点比区间高 0.7 pp、少 132 token；同样的内容挪到 think 外面掉 0.9 pp；完全不写掉 1.2 pp 且 token 回到与 LAPO-D 相近的水平。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Table 3 · 统计量</span><h4>中位数 &gt; 均值 &gt; 最小值</h4></div>
+      <p class="mono" style="font-size:12.5px">w/ Median 64.8 · 3832<br>w/ Mean 64.1 · 4040<br>w/ Minimum 63.5 · 3821</p>
+      <p>均值被少数超长正确解拉高，预算给宽了；最小值压得最狠（3821）却掉 1.3 pp。论文的解释与 03 节一致：中位数才是「典型但不过短」的稳健代表。</p>
+    </div>
+  </div>
+
+  <details>
+    <summary>更多结果：训练动态、数据配比、GPQA 泛化<span class="sum-sub">来自附录 A.2–A.4</span></summary>
+    <div class="details-body">
+      <p><strong>训练动态（Figure 5）</strong>：MATH-500 上平均长度从 3280 两段式下降，先到约 2365（LAPO-D），再降到 2200 以下（LAPO-I）；准确率始终保持或略升。</p>
+      <p><strong>训练数据配比（Table 6）</strong>：仅用 DeepScaleR 数据时 LAPO-I 平均 63.8 / 4088，仅用 MATH 时 63.0 / 4251，混合数据 64.8 / 3832。论文把均衡的难度梯度视为学到准确「复杂度—长度映射」的前提。</p>
+      <p><strong>GPQA 泛化（Table 7）</strong>：在知识密集型、非数学的 GPQA 上，DeepSeek-R1-1.5B 的 LAPO-D 准确率 +2.0 pp、token −26.2%；DeepScaleR-1.5B 的 LAPO-D +2.2 pp、−19.4%。Learning Rate 等其他超参见附录表 5。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它学会的是「说多少做多少」，而声明一旦写出就是硬约束</h2></div>
+  <p class="sec-sub">LAPO 的收益依赖两个前提：题目能判对错、模型能估准。前者让长度分布可统计，后者让声明不至于误导。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>靠二值正确性定义「好长度」</h4></div>
+    <p>ℒ(q) 只由 <code>𝕀(y<sub>i</sub> = y<sub>gold</sub>)</code> 筛出。没有参考答案、无法自动判定的任务（开放式写作、多步 Agent 交互）就没有「正确解长度分布」可统计。附录的 GPQA 实验说明知识题也能泛化，但 GPQA 仍是单轮选择题，与前沿数学一样有标准答案。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>n 算偏了会连带压准准确率</h4></div>
+    <p>第二阶段奖励以 n 为中心。如果某道题在第一阶段的正确解本来就偏短（例如碰巧走了捷径），M(q) 就会偏小，模型被推向这个点。Table 3 中最小值方案准确率跌到 63.5 是对这个风险的直接证据。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>声明是「先写后想」，写错了改不了</h4></div>
+    <p>Artifact 在 &lt;think&gt; 的第一句就出现，之后整段推理跟着它走。论文没有讨论「先声明后发现自己估错」的处理方式，也没有 token 级的动态调整机制。增强型的「边想边改预算」仍然是一个开放问题。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>实验面窄，超参未经充分搜索</h4></div>
+    <p>四个数学基准、两个 1.5B 模型、平均列上的差距多为 1–2 pp；训练只有 3 + 3 个 episode、4 张 A800，不足以支撑更大模型上的结论。作者自己也写明 α、β 是经验选取，「未做大量超参搜索」。</p>
+  </div>
+
+  <h3>什么时候别用：先问三个问题</h3>
+  <ul>
+    <li><strong>有没有可靠的正确性信号？</strong> 没有，就没有长度分布，只能走奖励惩罚或路由那条路。</li>
+    <li><strong>是否需要在推理中途根据题目调整深度？</strong> LAPO 的声明在输出开头，做不到动态加码。</li>
+    <li><strong>基线是否已经对难度做了区分？</strong> 如果基线的长度和难度本来就不相关（DeepScaleR 在 MATH 上 3280、AIME 上 9246，已经相关），LAPO 的收益主要来自「把这道题的长度压回自己的典型值」，而不是建立新的难度感知。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>LAPO 把长度控制从「外部设定」变成「从正确解里统计出来的自我计划」</strong>。它便宜、改造范围小、效果稳定，但内化的前提是问题有标准答案，而声明的代价是思考一旦开头就基本定了长度。
+  </p>
+</section>
+
+<footer>
+  <div>LAPO: Internalizing Reasoning Efficiency via Length-Adaptive Policy Optimization · Xingyu Wu, Yuchen Yan, Shangke Lyu, Linjuan Wu, Yiwen Qiu, Yongliang Shen, Weiming Lu, Jian Shao, Jun Xiao, Yueting Zhuang · Zhejiang University · arXiv 2507.15758v2</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.15758" target="_blank" rel="noopener">arXiv:2507.15758</a><br>
+    代码：<a href="https://github.com/zju-real/lapo" target="_blank" rel="noopener">zju-real/lapo</a><br>
+    笔记：<a href="/lapointernalizing-reasoning-efficiency-via-length-adaptive-policy-optimization/">LAPO：Internalizing Reasoning Efficiency via Length-Adaptive Policy Optimization</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文原文修正，未改动笔记文件）：</strong><br>
+    1. 笔记写「37.8% token reduction」；原文正文是 <strong>38.5%</strong>（6229 → 3832），摘要的 <strong>40.9%</strong> 来自 DeepSeek-R1-1.5B（−41.0%）。该句可能出自早一点的版本，v2 以 Table 1 与 §6.1 为准。<br>
+    2. 笔记说第一阶段「取 30% 到 70% 分位点」，原文的百分位只用于<strong>奖励区间</strong> [P30, P70]；写入 M(q) 的是<strong>中位数</strong>（Eq. 2–3 分别定义）。<br>
+    3. 笔记说第二阶段奖励「越接近 n 越高且答案正确」，原文是正确解再加 <code>β·exp(−(|r|−n)²/2σ²)</code> 的<strong>两项目标</strong>（Eq. 6），不是「正确性与接近程度的加权平均」；权重 β 论文 §4 写 0.7，附录 A.1 正文写 0.8、表 5 写 0.7，原文自相矛盾（页面按 0.7 呈现）。<br>
+    4. 笔记写「表 2 证明精确目标优于范围或完全不提供」——正确；但未提<strong>声明位置</strong>才是与准确率关系更紧的因素（Table 2 的 w/ Outside 63.9 vs w/ Exact 64.8），以及 Table 4 的内化对抗测试。<br>
+    5. 笔记写「Pass@1 从 62.5% 提升至 64.8%」——正确，但这是 DeepScaleR 上；DeepSeek-R1-1.5B 上准确率只从 57.9 → 59.1。<br>
+    6. 笔记提到的「图 3 难度感知、图 4 关键词频率」在 v2 中分别是 Figure 3 与 Figure 4，编号正确；但「表 1/表 2/表 3」编号与论文一致，笔记中的引用无误。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 奖励模拟器：5 条 rollout，Discovery vs Internalization
+   ============================================================ */
+(function () {
+  var ROLLOUTS = [
+    { id: 'r1', len: 1400, ok: true },
+    { id: 'r2', len: 2100, ok: true },
+    { id: 'r3', len: 2600, ok: true },
+    { id: 'r4', len: 3300, ok: false },
+    { id: 'r5', len: 3800, ok: false }
+  ];
+  var ALPHA = 0.7;
+  var BETA = 0.7;
+  var SIGMA = 700;   // 示意值，论文未给出
+  var MINLEN = 400;
+  var MAXLEN = 4000;
+
+  /* nearest-rank 分位数 */
+  function pct(arr, p) {
+    var a = arr.slice().sort(function (x, y) { return x - y; });
+    var k = Math.ceil(p * a.length) - 1;
+    if (k < 0) k = 0;
+    if (k >= a.length) k = a.length - 1;
+    return a[k];
+  }
+
+  var corr = ROLLOUTS.filter(function (r) { return r.ok; }).map(function (r) { return r.len; });
+  var P30 = pct(corr, 0.3);
+  var P70 = pct(corr, 0.7);
+  var MED = pct(corr, 0.5);
+
+  function r1(len, ok) {
+    if (!ok) return 0;
+    if (len >= P30 && len <= P70) return 1;
+    var d = Math.min(Math.abs(len - P30), Math.abs(len - P70));
+    return Math.max(0, 1 - d / 100);
+  }
+  function r2(len, ok) {
+    if (!ok) return 0;
+    var z = (len - MED) / SIGMA;
+    return Math.exp(-0.5 * z * z);
+  }
+
+  var stage = 'd';
+  var selected = 1;
+
+  function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(2); }
+  function f2(x) { return x.toFixed(2); }
+
+  function pctPos(len) {
+    return Math.max(0, Math.min(100, (len - MINLEN) / (MAXLEN - MINLEN) * 100));
+  }
+
+  function renderGrid() {
+    var host = document.getElementById('roll-grid');
+    if (!host) return;
+    host.innerHTML = '';
+    ROLLOUTS.forEach(function (r, i) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'roll-card' + (i === selected ? ' sel' : '');
+      btn.setAttribute('role', 'listitem');
+      var score = stage === 'd' ? r1(r.len, r.ok) : r2(r.len, r.ok);
+      var raw = (r.ok ? 1 : 0) + (stage === 'd' ? ALPHA : BETA) * score;
+      btn.innerHTML =
+        '<div class="rc-id">' + r.id + '</div>' +
+        '<div class="rc-len">' + r.len + '</div>' +
+        '<div class="rc-len" style="font-size:11px;color:var(--text-soft)">token</div>' +
+        '<div class="rc-ok ' + (r.ok ? 'yes' : 'no') + '">' + (r.ok ? '正确' : '错误') + '</div>' +
+        '<div class="rc-len" style="font-size:12.5px;color:' + (r.ok ? 'var(--accent)' : 'var(--text-soft)') + '">R=' + f2(raw) + '</div>';
+      btn.addEventListener('click', function () {
+        selected = i;
+        renderAll();
+      });
+      host.appendChild(btn);
+    });
+  }
+
+  function renderLine() {
+    var f = document.getElementById('vline-fill');
+    if (f) {
+      var a = pctPos(P30);
+      var b = pctPos(P70);
+      f.style.left = a + '%';
+      f.style.width = Math.max(0.5, b - a) + '%';
+    }
+    var p30 = document.getElementById('vline-p30');
+    var p70 = document.getElementById('vline-p70');
+    var med = document.getElementById('vline-med');
+    if (p30) { p30.style.left = 'calc(' + pctPos(P30) + '% - 1px)'; }
+    if (p70) { p70.style.left = 'calc(' + pctPos(P70) + '% - 1px)'; }
+    if (med) { med.style.left = 'calc(' + pctPos(MED) + '% - 1px)'; }
+    var wrap = document.getElementById('vline-wrap');
+    if (wrap) {
+      wrap.style.display = stage === 'd' ? 'block' : 'block';
+    }
+    if (med) med.style.opacity = stage === 'd' ? '0.55' : '1';
+  }
+
+  function renderSlots() {
+    var host = document.getElementById('sim-slots');
+    if (!host) return;
+    var r = ROLLOUTS[selected];
+    var items = stage === 'd'
+      ? [
+          { name: '区间 [P30, P70]', val: '[' + P30 + ', ' + P70 + ']', color: 'var(--c1)' },
+          { name: 'R_1 长度分（' + r.id + '）', val: r.ok ? f2(r1(r.len, r.ok)) : '', color: 'var(--accent)', hit: true }
+        ]
+      : [
+          { name: '声明 n = Median', val: String(MED), color: 'var(--c2)' },
+          { name: 'R_2 一致度（' + r.id + '）', val: r.ok ? f2(r2(r.len, r.ok)) : '', color: 'var(--accent)', hit: true }
+        ];
+    host.innerHTML = items.map(function (it) {
+      return '<div class="slot' + (it.hit ? ' hit' : '') + '">' +
+        '<div class="slot-name">' + it.name + '</div>' +
+        '<div class="slot-val" style="color:' + it.color + '">' + it.val + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  function renderReadout() {
+    var host = document.getElementById('sim-calc');
+    if (!host) return;
+    var r = ROLLOUTS[selected];
+    var html = '';
+    if (stage === 'd') {
+      html += '<p><strong>' + r.id + '</strong>：长度 ' + r.len + '，' + (r.ok ? '答对' : '答错') + '。</p>';
+      if (!r.ok) {
+        html += '<p>长度奖励 <strong>R<sub>1</sub> = 0</strong>——错误解的长度分恒为 0，总奖励 = <span class="mono">0 + 0.7 × 0 = 0.00</span>。这条解无论多短都不会因为「短」拿到分。</p>';
+      } else if (r.len >= P30 && r.len <= P70) {
+        html += '<p>长度落在 [P30, P70] = [' + P30 + ', ' + P70 + '] 内，<strong>R<sub>1</sub> = 1.00</strong>，总奖励 = <span class="mono">1 + 0.7 × 1 = 1.70</span>。</p>';
+      } else {
+        var d = Math.min(Math.abs(r.len - P30), Math.abs(r.len - P70));
+        var sc = Math.max(0, 1 - d / 100);
+        html += '<p>长度落在区间外，最近边界距离 <span class="mono">d = ' + d + '</span>；<span class="mono">f(d) = max(0, 1 − ' + d + '/100) = ' + f2(sc) + '</span>。总奖励 = <span class="mono">1 + 0.7 × ' + f2(sc) + ' = ' + f2(1 + ALPHA * sc) + '</span>。</p>';
+      }
+      html += '<p class="warn" style="margin-bottom:0">M(q) = Median = <strong>' + MED + '</strong> 暂不参与 R₁，留到第二阶段。</p>';
+    } else {
+      html += '<p><strong>' + r.id + '</strong>：长度 ' + r.len + '，' + (r.ok ? '答对' : '答错') + '。</p>';
+      if (!r.ok) {
+        html += '<p>正确性为 0 时 R<sub>2</sub> 也恒为 0，总奖励 = 0.00。</p>';
+      } else {
+        var z = (r.len - MED) / SIGMA;
+        var g = Math.exp(-0.5 * z * z);
+        html += '<p>声明 n = <span class="mono">' + MED + '</span>，偏离 <span class="mono">|r| − n = ' + (r.len - MED) + '</span>，σ 取 ' + SIGMA + '（示意）。</p>';
+        html += '<p><span class="mono">R<sub>2</sub> = exp(−' + (r.len - MED) + '² / (2×' + SIGMA + '²)) = ' + g.toFixed(3) + '</span>，总奖励 = <span class="mono">1 + 0.7 × ' + g.toFixed(3) + ' = ' + (1 + BETA * g).toFixed(2) + '</span>。</p>';
+      }
+      html += '<p class="warn" style="margin-bottom:0">对比第一阶段：区间内三条正确解都拿 1.00 长度分；这里只有恰好等于 ' + MED + ' 的才拿 1.00，其余按距离衰减。</p>';
+    }
+    host.innerHTML = html;
+  }
+
+  function renderAll() {
+    renderGrid();
+    renderLine();
+    renderSlots();
+    renderReadout();
+  }
+
+  var stageBtns = document.querySelectorAll('#sim-stages .rule-btn');
+  stageBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      stageBtns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      stage = btn.getAttribute('data-stage');
+      renderAll();
+    });
+  });
+
+  renderAll();
+})();
+
+/* ============================================================
+   2) 图片说明展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

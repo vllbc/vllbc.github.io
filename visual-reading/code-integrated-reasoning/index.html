@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code-Integrated Reasoning · 让模型边推理边写代码，先得把训练变得稳定</title>
+<meta name="description" content="CIR 论文系统梳理工具增强强化学习在代码集成推理中的三类不稳定，用精确匹配代码块、屏蔽工具反馈、去掉熵奖励、移除 KL、clip-higher 与渐进交互预算六项策略，让 Qwen2.5-Math-7B 在五个数学基准上平均 52.4%，并揭示不可执行代码也能救回答案、长 CoT 用 8 倍 token 只换来更高的准确率。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+
+/* ---- 流程 SVG ---- */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-muted{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:4 3}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-arrow{fill:var(--border-strong)}
+.pipe-arrow-a{fill:var(--accent)}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+.pipe-code{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.masked{opacity:.38}
+.mask-note{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--accent-deep);font-weight:600}
+
+/* ---- 训练动态折线 ---- */
+.series-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0 4px}
+.series-item{border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px 4px;background:var(--bg);cursor:pointer;transition:all .18s ease;font-family:inherit;color:inherit;text-align:left}
+.series-item:hover{border-color:var(--border-strong)}
+.series-item.on{border-color:var(--accent);background:var(--accent-soft)}
+.series-item .si-k{font-size:12px;color:var(--text-muted);display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.series-item .si-k b{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text)}
+.series-item svg{width:100%;height:auto;display:block;margin-top:6px}
+.st-stage{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 6px}
+.st-chip{font-family:"JetBrains Mono",monospace;font-size:11.5px;border:1px solid var(--border-strong);border-radius:100px;padding:3px 11px;color:var(--text-muted);background:var(--bg-surface)}
+.st-chip b{color:var(--text)}
+.st-chip.cur{border-color:var(--accent);color:var(--accent-deep);background:var(--accent-soft)}
+@media (max-width:640px){
+  .series-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">CIR</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">六项策略</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">一轮轨迹</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 / AAAI-26</span>
+  <h1>Code-Integrated Reasoning：让模型边推理边写代码，先得让训练不崩</h1>
+  <p class="hero-sub">
+    让推理模型在中间步骤生成 Python、丢给解释器执行、再把结果接回推理，这条路线的能力已经被 ToRL 等工作证明。
+    论文指出真正卡住的是<strong>训练动力学的不稳定</strong>：交互边界靠 stop token 靠不住、工具返回的格式和模型自己的逻辑对不上、固定交互轮数又会让模型只学一种套路。
+    论文把这些拆成三类故障，逐一配了六项 RL 策略。
+  </p>
+  <div class="meta">
+    <span>Fei Bai, Yingqian Min 等 · 人大高瓴 / BAAI / DataCanvas</span>
+    <a href="https://arxiv.org/abs/2505.24480" target="_blank" rel="noopener">arXiv 2505.24480 ↗</a>
+    <a href="https://github.com/RUCAIBox/CIR" target="_blank" rel="noopener">代码 RUCAIBox/CIR ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    代码集成推理不是「让模型多调一个工具」，而是把<strong>代码本身当成推理步骤的形式化表达</strong>。代价是训练轨迹里混进了非推理 token：解释器返回的 <code>output</code>、报错、空行。论文的依据是经验观察（Section 2.3.1），不是形式化证明——三类不稳定分别是边界、分布、同质化。
+  </p>
+  <p>
+    六项策略的方向并不全是「求稳」：<em>精确匹配代码块、屏蔽工具反馈、熵奖励置零</em>是在削减噪声；<em>去掉 KL 项、clip-higher、交互预算 2→3→4</em>是在主动放大探索空间。它们必须成对使用，单拿出来任何一半，论文都没给对照数据。
+  </p>
+  <p>
+    最有说服力的数据不在主表：全是「可执行」代码的错误回答占 36.0%，而答对的回答里也有 39.4% 出现过执行失败的代码。代码跑通<strong>不代表</strong>逻辑正确，跑失败也<strong>不等于</strong>白写。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v">52.4<small>%</small></div>
+      <div class="k">CIR (Qwen2.5-M7) 五个基准平均<br>最高纯文本基线 OAT-Zero 39.3，工具 RL 基线 ToRL 50.5</div>
+    </div>
+    <div class="metric">
+      <div class="v">1726</div>
+      <div class="k">CIR 平均回答长度（token）<br>DeepSeek-R1-Distill 13831，Qwen3-8B(Think-10K) 9705</div>
+    </div>
+    <div class="metric">
+      <div class="v">39.4<small>%</small></div>
+      <div class="k">正确回答中含不可执行代码的比例<br>错误回答中含全可执行代码的比例为 36.0%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>推理轨迹里插进一段工具输出，就不再是「模型自己想的」</h2></div>
+  <p class="sec-sub">先弄清 CIR 的轨迹形式和它与普通长篇思考的差别，后面三类故障才有统一的坐标系。</p>
+
+  <p>
+    论文把 CIR 形式化成生成与执行的交替。给定问题 <code>q</code>，模型在第 <code>t</code> 步基于当前上下文 <code>h<sub>t</sub></code> 生成代码 <code>c<sub>t</sub></code>，解释器 <code>I</code> 执行得到结果 <code>r<sub>t</sub></code>，结果拼回上下文继续：
+  </p>
+
+  <div class="eq">
+    <span class="hl-c">c<sub>t</sub> = f<sub>θ</sub>(q, h<sub>t</sub>)</span>
+    &nbsp;&nbsp;→&nbsp;&nbsp;
+    <span class="hl-a">r<sub>t</sub> = I(c<sub>t</sub>)</span>
+    &nbsp;&nbsp;→&nbsp;&nbsp;
+    <span class="hl-b">h<sub>t+1</sub> = h<sub>t</sub> ∪ c<sub>t</sub> ∪ r<sub>t</sub></span>
+  </div>
+  <div class="eq-cap">Eq. 1–3 · 论文 §2.1。t 从 0 到 T，最后基于完整轨迹 h<sub>T+1</sub> 输出答案 y</div>
+
+  <p>
+    和「思考 → 搜索 → 读摘要」这类工具用法相比，CIR 的区别在于：<strong>代码是推理步骤本身</strong>，不是取回一段外部知识。模型把「324 cosθ − 432 sinθ 的最大值是 √(324² + 432²)」这种推导写成 <code>sp.sqrt(324**2 + 432**2)</code>，解释器回一个 <code>540</code>。这打通了自然语言推理与形式化推理（§2.1）。
+  </p>
+
+  <p>
+    代价也随之出现。<code>540</code> 这个 token 不是模型采样出来的，它来自一个确定性的外部程序；报错信息则来自 Python 解释器而不是模型的语言习惯。一条轨迹里，<strong>哪些位置该算进策略梯度、哪些位置只是外部噪声</strong>，成了训练时要回答的问题。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">论文的诊断口径</span><h4>三类故障来自经验观察，优先级不对等</h4></div>
+    <p>§2.3.1 列出三个来源：<strong>交互边界扰动</strong>（边界条件靠人工定义，设得不好会拖低整体性能）、<strong>分布偏移</strong>（工具反馈与模型推理风格不一致，工具用得越多累积越重，最终可能训练崩溃）、<strong>响应同质化</strong>（固定交互轮数下模型收敛到少数被奖励的行为，即 mode collapse）。</p>
+    <p>论文没有给出任何一类的量化曲线，三个因素是按「边界 → 分布 → 多样性」的因果链来叙述的：好的边界减少噪声，减少噪声降低分布冲击，才留得住探索。</p>
+  </div>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人已经走到「能训」，本文比的是训得稳不稳、好不好</h2></div>
+  <p class="sec-sub">论文的定位不是提出新范式，而是把 ToRL 一类方法留下的稳定性问题补齐。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A · 推理时临时挂载</span><h4>Qwen2.5-Math-7B-Instruct-TIR</h4></div>
+      <p>直接在 Instruct 模型上加一段提示，让它在推理过程中可选地写代码并执行。</p>
+      <p><strong>表现：</strong>Table 1 平均 40.2。比纯文本版 Instruct（27.3）高 12.9 分，说明提示本身就能把工具用起来。</p>
+      <p><strong>短板：</strong>工具使用没有被训练进策略，什么时候写代码、写多长都靠提示约束。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B · 工具增强 RL</span><h4>ToRL-7B</h4></div>
+      <p>整个训练过程允许模型动态调用代码，用 RL 学「何时、如何」用工具，是本文最主要的直接对手。</p>
+      <p><strong>表现：</strong>Table 1 平均 50.5，已经是同类最强。作者提到前人工作（如 RAGEN、R1-Searcher++）识别并部分处理过不稳定问题，但缺少系统性方案（§1）。</p>
+    </div>
+  </div>
+
+  <h3>ToRL 到 CIR 的差在哪，与纯文本 RL 的差在哪</h3>
+  <p>下面三组对比全部来自 Table 1 同一张表，可以同时看清「换范式」的收益和「同一范式内调稳」的收益：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">纯文本 RL 内部</span><h4>OAT-Zero → CIR</h4></div>
+      <p>MATH500 +7.2（79.2 → 86.4），AIME24 +11.0（31.3 → 42.3），AIME25 +18.8（10.4 → 29.2），OlymMATH +20.3（11.3 → 31.6）。</p>
+      <p>越难的基准差距越大。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">同一范式内</span><h4>ToRL → CIR</h4></div>
+      <p>MATH500 +2.6，AMC23 +1.0，AIME24 +4.4，AIME25 持平（29.2），OlymMATH +3.1。平均 50.5 → 52.4，+1.9。</p>
+      <p>收益稳定但幅度不大。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">只加提示</span><h4>Instruct → Instruct-TIR</h4></div>
+      <p>平均 27.3 → 40.2，AIME25 5.00 → 18.8，OlymMATH 3.38 → 18.4。</p>
+      <p>单靠推理时提示，就能吃掉本文 RL 收益的一大半，这点论文没有展开讨论。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三类故障，六项策略：一半削噪声，一半放探索</h2></div>
+  <p class="sec-sub">§2.3.2 把它们分成 Stability maintenance 与 Exploration enhancement 两组，一一对应。</p>
+
+  <h4 style="margin:20px 0 10px;font-size:15px;font-weight:600">稳定性维护 · 三处削噪声</h4>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">1</span><h4>精确匹配代码块</h4></div>
+      <p>不用 <code>```output</code> 这类 stop token，而是等完整的 <code>```python … ```</code> 出现才执行（Figure 1）。</p>
+      <p><strong>治的是：</strong>边界扰动。模型写了代码却没及时发 stop token，会引入噪声甚至漏掉必要的执行。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">2</span><h4>屏蔽工具反馈</h4></div>
+      <p>算 loss 时把解释器返回的段落在 loss mask 里置 0，不让模型去拟合 <code>44</code>、<code>540</code>、Traceback 这类 token。</p>
+      <p><strong>治的是：</strong>分布偏移。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">3</span><h4>熵奖励置零</h4></div>
+      <p>不额外加 entropy bonus。</p>
+      <p><strong>治的是：</strong>边界与分布噪声被随机性放大。论文的原话是：熵奖励会让策略熵持续上升，在工具环境里提高随机性就是放大反馈噪声。</p>
+    </div>
+  </div>
+
+  <h4 style="margin:26px 0 10px;font-size:15px;font-weight:600">探索增强 · 三处放开</h4>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">4</span><h4>渐进交互预算</h4></div>
+      <p>一轮轨迹允许的工具调用次数从 <code>2</code> 增到 <code>3</code> 再增到 <code>4</code>。</p>
+      <p><strong>治的是：</strong>同质化。早期给宽预算，模型不会过早收敛到「预算内高奖励」的窄行为。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">5</span><h4>移除 KL 项</h4></div>
+      <p>去掉相对 reference policy 的约束。</p>
+      <p><strong>治的是：</strong>早期收敛。交互场景里这个约束会挡住新行为的探索。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">6</span><h4>Clip higher</h4></div>
+      <p>借鉴 DAPO，把 surrogate loss 的裁剪上界调高，形成非对称裁剪。</p>
+      <p><strong>治的是：</strong>同样是为了保住策略熵，让模型敢往高奖励方向走更远。</p>
+    </div>
+  </div>
+
+  <p style="margin-top:20px">
+    论文站在 PPO 的 surrogate 目标上说明改造对象。<strong>RO</strong> 是旧策略采样、带工具交互的运行轨迹；<strong>s<sub>t</sub>(θ)</strong> 是 token <code>o<sub>t</sub></code> 在新旧策略下概率之比。工具增强 RL 改的是采样分布，不是裁剪公式本身：
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">ℒ(θ) = 𝔼<sub>q∼P(Q), o∼π<sub>θold</sub>(O|q)</sub></span> [ (1/|o|) Σ<sub>t</sub> min( s<sub>t</sub>(θ)·A<sub>t</sub>, clip(s<sub>t</sub>(θ), 1−ε, 1+ε)·A<sub>t</sub> ) ]
+  </div>
+  <div class="eq">
+    <span class="hl-b">s<sub>t</sub>(θ) = π<sub>θ</sub>(o<sub>t</sub> | q, o<sub>&lt;t</sub>) / π<sub>θold</sub>(o<sub>t</sub> | q, o<sub>&lt;t</sub>)</span>
+    &nbsp;&nbsp;→&nbsp;&nbsp;
+    <span class="hl-c">s′<sub>t</sub>(θ) = π<sub>θ</sub>(o<sub>t</sub> | q, o<sub>&lt;t</sub>; I) / π<sub>θold</sub>(o<sub>t</sub> | q, o<sub>&lt;t</sub>; I)</span>
+  </div>
+  <div class="eq-cap">Eq. 5–7 · 论文 §2.2。带工具后，条件里多了解释器 I：o&lt;t 里混着模型生成与解释器返回的 token。屏蔽反馈 = 这些 token 位置不参与求和；clip higher = 把 1+ε 抬高；移除 KL = 整个 KL 罚项拿掉</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">规模</span><h4>实现用 REINFORCE++，不是原始 PPO</h4></div>
+    <p>§3.1 写明所有训练在 <strong>veRL</strong> 框架内完成，算法是 <strong>REINFORCE++</strong> 叠加 §2.3.2 的策略。也就是说上面的 PPO 公示只是形式化参照，实际跑的是 REINFORCE++ 的 loss 加上同样的裁剪/熵/KL 开关。论文没有给出这些超参的具体数值。</p>
+  </div>
+
+  <h3>自己动手：给 Figure 1 的轨迹做 loss mask</h3>
+  <p>Figure 1(a) 与 (b) 用一道五进制题对比 stop token 与精确匹配。左边轨迹按原文的格式排好了 tokens：蓝色是模型自己写的推理与代码，橙色是解释器写回的 <code>output</code>。点一下就能切换「不做 mask」和「按反馈屏蔽」两种梯度，看哪些 token 在更新参数。</p>
+
+  <div class="sim" id="mask-sim">
+    <div class="sim-top" id="mask-modes">
+      <button class="rule-btn" data-mode="naive" type="button">不做 mask<span class="r-sub">反馈 token 也算进 loss</span></button>
+      <button class="rule-btn active" data-mode="masked" type="button">反馈屏蔽<span class="r-sub">论文策略 2</span></button>
+    </div>
+
+    <div class="slots s3" id="mask-slots"></div>
+
+    <div class="pipe-text" aria-hidden="true">
+      <p>
+        <span class="tk0">To find the 25th number in a numeric system where the base is five, we can follow these steps: …</span>
+      </p>
+      <p>
+        <span class="tk0">Let's convert the number 25 to its base five representation using Python.</span>
+      </p>
+      <p>
+        <span class="tk0">```python · def decimal_to_base_five(n): · while n &gt; 0: · base_five = str(n % 5) + base_five · n = n // 5 · print(base_five) · ```</span>
+      </p>
+      <p>
+        <span class="tk1">```output</span><br>
+        <span class="tk1">44</span><br>
+        <span class="tk1">```</span>
+      </p>
+      <p>
+        <span class="tk0">The final answer is \boxed{44}.</span>
+      </p>
+    </div>
+
+    <div class="readout" id="mask-readout">
+      <div class="r-head">当前设置</div>
+      <div id="mask-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个示意省略了什么？<span class="sum-sub">点开看与论文真实的差异</span></summary>
+    <div class="details-body">
+      <p>示意把一段长回答压缩成几个片段区，每项都标注是模型 token（蓝色）还是解释器 token（橙色）。真实实现里，反馈段落在拼接轨迹时就做了 loss mask（§2.3.2 原文：mask the feedback from external tools when calculating the training loss）；示意只划分段，不逐 token 计数。</p>
+      <p>Figure 1 的分发点在精确匹配版：解释器把代码输出包成 <code>```output … ```</code> 追加回回答；stop token 版的格式是代码块后直接跟 <code>```output</code> 作为停止信号，然后才执行。两种格式都包含解释器写回的内容，所以屏蔽策略对两者同样适用。</p>
+      <p>论文没有报告 mask 与否的对照实验，收益只来自 §2.3.1 的论证，这也是审稿时最容易被追问的点。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练配置极简：3.8 万题、二值奖励、预算 2→4；开销论文只字未提</h2></div>
+  <p class="sec-sub">§3.1 的 Setting 一节比方法部分还短，列出来的每一项都影响可复现性。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th style="white-space:nowrap">项目</th><th>设置</th><th style="white-space:nowrap">出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>主模型</td><td>Qwen2.5-Math-7B（Qwen2.5-M7）</td><td>§3.1</td></tr>
+        <tr><td>次模型</td><td>Qwen3-8B 非思考模式（Qwen3-NT8），表中灰色显示、仅供参照</td><td>§3.1 · §3.2.1</td></tr>
+        <tr><td>训练数据</td><td>STILL-3 精选的 38,000 条，难度分布均衡</td><td>§3.1</td></tr>
+        <tr><td>算法</td><td>REINFORCE++，veRL 框架 + §2.3.2 六项策略</td><td>§3.1 · §2.3.2</td></tr>
+        <tr class="best"><td>奖励</td><td>二值：答对 +1，否则 −1</td><td>§3.1</td></tr>
+        <tr><td>交互预算</td><td>训练中从 2 逐步增到 4（2 → 3 → 4）</td><td>§3.1 · §3.2.2</td></tr>
+        <tr><td>评测采样</td><td>MATH500 贪心解码；其余四项 AVG@16，temperature = 1.0</td><td>§3.1</td></tr>
+        <tr><td>基准规模</td><td>MATH500 500 题 / AMC23 40 题 / AIME24、25 各 30 题 / OlymMATH 100 题（英文）</td><td>§3.1</td></tr>
+        <tr><td>GPU 数量 / 训练步数 / 学习率</td><td>论文未给出</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    二值奖励 +1/−1 属于稀疏奖励：正确性只在答案层面可见，代码执行得好不好不进入奖励。这在 §4.3 的结论里会形成一个悖论——<strong>可执行但逻辑错的代码同样拿满分</strong>，只要最终答案碰巧对。论文把这类现象定位为「可执行代码可能限制进一步提升」，但没有提出对治方案，只指出代码可执行性不能作为回答质量的可靠信号。
+  </p>
+
+  <h3>预算提高时，回答反而变短、代码通过率反而下降</h3>
+  <p>Figure 2 和 Figure 4 记录了训练中的两条反直觉曲线：(1) 训练早期回答长度显著下降，说明模型从传统文本推理转向更省 token 的工具调用；后期随着预算扩大，长度再回升，主要原因是交互次数变多。(2) 代码通过率在前 100 步上升，之后持续下降，且交互预算越大降得越明显。在下面两张缩略图上点任一张切换大图，图中的 A / B / C 标出了论文 §3.2.2 / §4.3 提到的三个阶段。</p>
+
+  <div class="sim" id="dyn-sim">
+    <div class="sim-top" id="dyn-tabs">
+      <button class="rule-btn active" data-chart="reward" type="button">训练奖励<span class="r-sub">Figure 2(a) 示意走势</span></button>
+      <button class="rule-btn" data-chart="pass" type="button">代码通过率<span class="r-sub">Figure 4(c) 示意走势</span></button>
+    </div>
+
+    <figure style="margin:0;padding:14px;background:var(--bg)">
+      <svg id="dyn-svg" viewBox="0 0 760 300" role="img" aria-label="训练过程中奖励或代码通过率的示意走势">
+        <rect x="0" y="0" width="760" height="300" fill="var(--bg-surface)"></rect>
+        <g id="dyn-grid"></g>
+        <g id="dyn-curve"></g>
+        <g id="dyn-marks"></g>
+      </svg>
+      <figcaption id="dyn-cap" style="margin-top:8px"></figcaption>
+    </figure>
+
+    <div class="series-grid" id="dyn-mini"></div>
+
+    <div class="readout" id="dyn-readout" style="margin-top:14px">
+      <div class="r-head" id="dyn-r-head">阶段</div>
+      <div id="dyn-r-body"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹的形状：推理 → 代码块 → 执行 → 接回，预算封顶</h2></div>
+  <p class="sec-sub">默认画的是 Figure 1(b) 的精确匹配版；切到 stop token 版看边界两种定义方式的差别。</p>
+
+  <figure>
+    <div id="flow-host"></div>
+    <figcaption>
+      图 1：改编自论文 Figure 1 与 §2.1 Eq. 3。蓝色块是模型输出、进入策略梯度；橙色块是解释器返回、在 loss 中被 mask。交互预算 2 → 3 → 4 由 §3.1 给出（不是 Figure 1 原件）。
+      <br><span class="fig-toggle" id="flow-toggle">换一个边界：stop token ▸</span>
+    </figcaption>
+    <div class="figure-detail" id="flow-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>精确匹配（论文采用）</strong>：遇到完整的 <code>```python … ```</code> 就执行，模型先暂停推理。执行结果以 <code>```output … ```</code> 的形式追加。边界由代码围栏唯一确定，减少了「代码完整但没发停止符」造成的漏执行。</li>
+          <li><strong>Stop token（对照）</strong>：模型写完代码后必须再吐一个 <code>```output</code> 作为停止符，检测到才开始执行，执行结果同样追加。论文 Figure 1(a) 指出，模型可能漏发这个停止符，导致噪声或丢掉必要的交互。</li>
+          <li><strong>怎么接回</strong>：解释器结果按 Eq. 3 拼进上下文 <code>h<sub>t+1</sub> = h<sub>t</sub> ∪ c<sub>t</sub> ∪ r<sub>t</sub></code>，模型接着推理，或者直接给出 <code>\boxed{}</code> 最终答案。</li>
+          <li><strong>预算</strong>：一轮回答里最多允许的工具调用次数，训练中从 2 增加到 4。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    这张图也解释了为什么「屏蔽反馈」和「精确匹配」必须配合：精确匹配把进入轨迹的外部 token 限制成结构固定的代码结果块，mask 才有一个稳定的边界可以切；反之，stop token 少了或早到了，轨迹里就会混进半截代码或错位的输出，这时无论 mask 怎么切都会切到模型自己的推理上。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>主表领先 ToRL 1.9 分；真正反直觉的是长度和错误代码</h2></div>
+  <p class="sec-sub">Table 1 看性能，Table 2 看效率，Table 4 看代码失败的价值。</p>
+
+  <h3>Table 1 · 五个基准</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>模型</th><th>代码</th>
+          <th style="text-align:right">MATH500</th><th style="text-align:right">AMC23</th>
+          <th style="text-align:right">AIME24</th><th style="text-align:right">AIME25</th>
+          <th style="text-align:right">OlymMATH</th><th style="text-align:right">Avg ↑</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-Math-7B-Instruct</td><td>✗</td><td class="num">75.0</td><td class="num">45.2</td><td class="num">8.12</td><td class="num">5.00</td><td class="num">3.38</td><td class="num">27.3</td></tr>
+        <tr><td>Qwen2.5-Math-7B-Instruct-TIR</td><td>✓</td><td class="num">78.8</td><td class="num">59.3</td><td class="num">25.8</td><td class="num">18.8</td><td class="num">18.4</td><td class="num">40.2</td></tr>
+        <tr><td>SimpleRL-Zero-7B</td><td>✗</td><td class="num">75.4</td><td class="num">51.1</td><td class="num">18.3</td><td class="num">6.46</td><td class="num">8.75</td><td class="num">32.0</td></tr>
+        <tr><td>Eurus-2-7B-Prime</td><td>✗</td><td class="num">81.2</td><td class="num">62.8</td><td class="num">18.8</td><td class="num">15.4</td><td class="num">9.94</td><td class="num">37.6</td></tr>
+        <tr><td>OAT-Zero-7B</td><td>✗</td><td class="num">79.2</td><td class="num">64.2</td><td class="num">31.3</td><td class="num">10.4</td><td class="num">11.3</td><td class="num">39.3</td></tr>
+        <tr><td>ToRL-7B</td><td>✓</td><td class="num">83.8</td><td class="num">73.2</td><td class="num">37.9</td><td class="num">29.2</td><td class="num">28.5</td><td class="num">50.5</td></tr>
+        <tr class="best"><td>CIR (Qwen2.5-M7)</td><td>✓</td><td class="num">86.4</td><td class="num">74.2</td><td class="num">42.3</td><td class="num">29.2</td><td class="num">31.6</td><td class="num">52.4</td></tr>
+        <tr><td style="color:var(--text-soft)">CIR (Qwen3-NT8) · 灰色参照</td><td style="color:var(--text-soft)">✓</td><td class="num" style="color:var(--text-soft)">93.2</td><td class="num" style="color:var(--text-soft)">91.6</td><td class="num" style="color:var(--text-soft)">61.5</td><td class="num" style="color:var(--text-soft)">46.3</td><td class="num" style="color:var(--text-soft)">38.8</td><td class="num" style="color:var(--text-soft)">66.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-8px">
+    出处：Table 1。Qwen3-NT8 是 8B 模型，论文注明「不宜与其他非思考模型直接比较，灰色显示仅供参照」。AMC23、AIME24、AIME25、OlymMATH 为 AVG@16 采样，MATH500 为贪心。
+  </p>
+
+  <h3>Table 2 · 与长 CoT 的准确率 / 长度对照</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th rowspan="2">模型</th><th rowspan="2">模式</th>
+          <th colspan="2" style="text-align:right">AIME2024</th><th colspan="2" style="text-align:right">AIME2025</th>
+          <th colspan="2" style="text-align:right">OlymMATH</th><th colspan="2" style="text-align:right">Avg</th></tr>
+        <tr><th style="text-align:right">Acc</th><th style="text-align:right">#Tokens</th><th style="text-align:right">Acc</th><th style="text-align:right">#Tokens</th><th style="text-align:right">Acc</th><th style="text-align:right">#Tokens</th><th style="text-align:right">Acc</th><th style="text-align:right">#Tokens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen3-8B (Thinking-10K)</td><td>LCoT</td><td class="num">44.6</td><td class="num">9296</td><td class="num">32.5</td><td class="num">9604</td><td class="num">21.9</td><td class="num">10216</td><td class="num">33.0</td><td class="num">9705</td></tr>
+        <tr><td>Distill-Qwen-7B (R1 蒸馏)</td><td>LCoT</td><td class="num">51.3</td><td class="num">12974</td><td class="num">40.6</td><td class="num">13479</td><td class="num">42.2</td><td class="num">15041</td><td class="num">44.7</td><td class="num">13831</td></tr>
+        <tr class="best"><td>CIR (Qwen2.5-M7)</td><td>CIR</td><td class="num">42.3</td><td class="num">1603</td><td class="num">29.2</td><td class="num">1843</td><td class="num">31.6</td><td class="num">1733</td><td class="num">34.4</td><td class="num">1726</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">效率</span><h4>8.0 倍 token 换来的准确率更高，不是「同等准确」</h4></div>
+      <p>摘要与 §4.2 的措辞是「comparable accuracy」「nearly 80% of…」「matches…」：平均 34.4 vs 44.7 只能算约 77%；对 Qwen3-8B 是超了（34.4 vs 33.0，1.04 倍），对 R1 蒸馏是低了 10.3 分。</p>
+      <p>token 口径上，CIR 分别是两者的 <strong>12.5%</strong> 与 <strong>17.8%</strong>（1726 / 13831、1726 / 9705）。所以准确的说法是：<strong>不到五分之一长度，拿到平均分 77%–104% 的表现</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">对照</span><h4>这张表里只有 CIR 是「从 7B 基座 RL」而来</h4></div>
+      <p>两个长 CoT 都是已经 RL 过的模型，CIR 从 Qwen2.5-Math-7B 直接起步。论文在 §4.2 结尾也承认这一点，并说明在长 CoT 模型上做同类训练成本更高，留给后续工作。所以「代码集成更简洁」这个结论主要针对<strong>从基座出发</strong>的推理模型。</p>
+    </div>
+  </div>
+
+  <h3>Table 4 · 可执行 ≠ 正确，不可执行 ≠ 没用</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>回答类型</th><th style="text-align:right">平均代码块数</th><th style="text-align:right">全部执行成功</th><th style="text-align:right">至少一段执行失败</th><th style="text-align:right">最后一段执行成功</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>正确回答（345）</td><td class="num">1.47</td><td class="num">60.6%</td><td class="num">39.4%</td><td class="num">65.5%</td></tr>
+        <tr><td>错误回答（615）</td><td class="num">2.11</td><td class="num">36.0%</td><td class="num">64.0%</td><td class="num">40.2%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-8px">
+    出处：Table 4，数据来自 AIME2024 + AIME2025 共 60 题、每题 16 条采样。表头里的「一组执行成功」对应论文的 Full Pass Rate，「至少一段失败」对应 Error Rate，「最后一段执行成功」对应 Final Pass Rate。
+  </p>
+
+  <p>三点可以互相印证：</p>
+  <ul>
+    <li><strong>可执行误导模型：</strong>36.0% 的错误回答的代码全都跑通了。程序形式上有输出，模型就误以为「验证过」，提前给出答案。论文的判断是这类代码「限制了进一步提升」。</li>
+    <li><strong>失败是讯号：</strong>39.4% 的正确回答含不可执行代码。解释器报错是模型自己编不出来的信息，它逼模型回头改代码。最终 Pass（65.5%）比 Full Pass（60.6%）高 4.9 个百分点，对应「改完才通过」的那部分回答。</li>
+    <li><strong>训练后段的通过率下降：</strong>Figure 4(c) 里代码通过率后期下滑，论文的解释是交互次数变多、修改代码变多，与 Table 4 中错误回答平均 2.11 段代码、正确回答 1.47 段的方向一致。</li>
+  </ul>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>几何题几乎不涨，只测过数学与代码解释器</h2></div>
+  <p class="sec-sub">论文自己给的两条边界，以及从它没做的实验里能读出的三条。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界一</span><h4>几何题：代码帮不上「先想对图形」</h4></div>
+      <p>§4.4 在 AIME2024 与 OlymMATH 的四类题（代数 / 几何 / 组合 / 数论）上看，代码集成对前三类提升明显，对几何只有边际收益，且 RL 后依然最小。</p>
+      <p>Table 5 给了一个典型失败：四面体内切球半径题。模型把四个面的面积当成 <code>K<sub>ABC</sub> + 3K<sub>ABD</sub></code> 近似，但该式只在三侧面等面积时成立；这种框架级错误照样被写成能运行的 Cayley–Menger 代码，跑出了 <code>2.06039…</code>，模型据此凑出 m + n + p = 20，而正确答案是 14。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界二</span><h4>只有数学 × 代码解释器</h4></div>
+      <p>五个基准全是数学。论文 §5 把「扩展到其他外部工具」列为 future work，没有验证搜索引擎、数据库、API 等场景。</p>
+      <p>验证器是可执行代码这一属性本身也很关键：代码的成败是确定的，API 报错、检索结果缺失这类「软失败」在轨迹里更难区分成噪声还是信号。</p>
+    </div>
+  </div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界三</span><h4>六项策略没有单独消融</h4></div>
+      <p>论文没有报告「去掉 mask 会掉几分」「固定预算 vs 渐进预算」之类的对照，你无法从论文里知道哪一项贡献最大。§2.3.1 的三类故障也只是经验描述。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界四</span><h4>二值奖励让「假执行」拿满分</h4></div>
+      <p>答对 +1、否则 −1，执行质量不进奖励。可执行但逻辑错的代码只要最终答案碰巧对，也会被正向强化。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界五</span><h4>基座与算力门槛没交代</h4></div>
+      <p>主结果全部在数学专精的 Qwen2.5-Math-7B 上；论文承认可能是基座本来就见过大量代码。GPU 数、训练步数、学习率均未给出，复现成本未知。</p>
+    </div>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>这篇的贡献是把「工具增强 RL 怎么训得稳」的工程认知系统化，并给出一个能复现的参照点（52.4%）。</strong>它证明代码集成在数学上有用，但没有证明这些策略在其他工具、其他基座上同样必要。</p>
+</section>
+
+<footer>
+  <div>CIR · Fei Bai, Yingqian Min, Beichen Zhang 等，人大高瓴 / BAAI / DataCanvas。本精读页基于 arXiv 原文 v1 整理。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2505.24480" target="_blank" rel="noopener">arXiv:2505.24480</a>（Technical Report on Slow Thinking with LLMs: Code-Integrated Reasoning）<br>
+    正式发表：Bai, Min, Zhang, Chen, Zhao, Fang, Liu, Wang, Xu. <em>Towards Effective Code-Integrated Reasoning.</em> AAAI-26（Vol. 40, No. 36, pp. 30022–30030）· <a href="https://doi.org/10.1609/aaai.v40i36.40250" target="_blank" rel="noopener">DOI 10.1609/aaai.v40i36.40250</a><br>
+    代码：<a href="https://github.com/RUCAIBox/CIR" target="_blank" rel="noopener">RUCAIBox/CIR</a><br>
+    笔记：<a href="/towards-effective-code-integrated-reasoning/">Towards Effective Code-Integrated Reasoning</a>
+  </div>
+  <div class="src" style="margin-top:14px;padding-top:14px;border-top:1px dashed var(--border-strong);color:var(--text-muted)">
+    <strong>与笔记的差异</strong>：笔记的 Table 1 只保留了三行，且隐含「纯文本 79.2 / ToRL 50.5」的对照关系，让 52.4 显得是对纯文本模型「全面领先」；实际 Table 1 里 EURUS-2 在 MATH500 上是 81.2，纯文本与工具的两组得分口径拉不开那么多。另外笔记写「不到 20% token 达到甚至超越 Long-CoT」，原文是 relative 不弱于 Qwen3-8B、达到 Distill 的约 80%，并非普遍超越。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 反馈屏蔽示意：切换不做 mask / mask
+   ============================================================ */
+(function () {
+  var host = document.getElementById('mask-slots');
+  var msg = document.getElementById('mask-msg');
+  var btns = document.querySelectorAll('#mask-modes .rule-btn');
+  var items = document.querySelectorAll('#mask-sim .tk0, #mask-sim .tk1');
+  if (!host || !msg) return;
+
+  var state = 'masked';
+
+  function render() {
+    var segs = document.querySelectorAll('#mask-sim .tk0, #mask-sim .tk1');
+    segs.forEach(function (s) {
+      var isFb = s.classList.contains('tk1');
+      s.style.color = (state === 'masked' && isFb) ? 'var(--text-soft)' : '';
+      s.style.background = (state === 'masked' && isFb) ? 'transparent' : '';
+      s.style.borderBottom = (state === 'masked' && isFb) ? '1px dashed var(--border-strong)' : '';
+      s.style.textDecoration = (state === 'masked' && isFb) ? 'line-through' : '';
+      s.style.opacity = (state === 'masked' && isFb) ? '0.6' : '1';
+    });
+
+    var maskCount = state === 'masked' ? 0 : 1;
+    var slots = [
+      { name: '模型 token', val: '进入 loss', color: 'var(--c1)' },
+      { name: '解释器 token', val: maskCount ? '进入 loss（含 output、44、```）' : '被 mask，不贡献梯度', color: maskCount ? 'var(--accent)' : 'var(--text-soft)' },
+      { name: '策略梯度来源', val: maskCount ? '推理 + 反馈混合' : '仅模型自己的推理', color: maskCount ? 'var(--accent)' : 'var(--c1)', hit: !maskCount }
+    ];
+    host.innerHTML = slots.map(function (it) {
+      return '<div class="slot' + (it.hit ? ' hit' : '') + '">' +
+        '<div class="slot-name">' + it.name + '</div>' +
+        '<div class="slot-val" style="color:' + it.color + ';font-size:12px">' + it.val + '</div>' +
+        '</div>';
+    }).join('');
+
+    if (state === 'naive') {
+      msg.innerHTML = '<p><strong>不做 mask：</strong>解释器写的 <code>```output</code>、<code>44</code>、<code>```</code> 都算进 token 平均。模型开始被鼓励模仿「短短一行纯数字」的格式，这与它自己 5000 字级别的自然语言推理由是两种分布。§2.3.1 把这种累积效应列为分布偏移的来源。</p><p style="margin-bottom:0">注意：可执行代码全通过并不意味着轨迹被正确学习——Table 4 里 36.0% 的错误回答就是这样产生的。</p>';
+    } else {
+      msg.innerHTML = '<p><strong>反馈屏蔽：</strong>橙色段落在 loss 里被置 0（<code>s<sub>t</sub>(θ)</code> 只在模型 token 位置求和）。模型只从自己的推理与代码里学，解释器只负责注入执行结果。</p><p style="margin-bottom:0">边界由精确匹配的围栏唯一确定，mask 才有稳定位置可切——这是策略 1 和策略 2 必须配套的原因。</p>';
+    }
+  }
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      btns.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      state = b.getAttribute('data-mode');
+      render();
+    });
+  });
+
+  if (items.length) render();
+})();
+
+/* ============================================================
+   2) 训练动态：两张示意折线 + 阶段说明
+   ============================================================ */
+(function () {
+  var svg = document.getElementById('dyn-svg');
+  if (!svg) return;
+  var gridG = document.getElementById('dyn-grid');
+  var curveG = document.getElementById('dyn-curve');
+  var marksG = document.getElementById('dyn-marks');
+  var cap = document.getElementById('dyn-cap');
+  var mini = document.getElementById('dyn-mini');
+  var rHead = document.getElementById('dyn-r-head');
+  var rBody = document.getElementById('dyn-r-body');
+  var tabs = document.querySelectorAll('#dyn-tabs .rule-btn');
+
+  var W = 760, H = 300, PADL = 58, PADR = 22, PADT = 26, PADB = 46;
+  var X0 = PADL, X1 = W - PADR, Y0 = PADT, Y1 = H - PADB;
+
+  /* 示意数据：形状取自论文的定性描述，不是 Figure 2 / 4 的读数 */
+  var CHARTS = {
+    reward: {
+      label: '训练奖励',
+      cap: 'Figure 2(a)：奖励随训练持续上升（§3.2.2）。曲线为示意形状，非原图读数。',
+      ylabel: 'reward',
+      ymin: 0, ymax: 1,
+      yticks: [0, 0.25, 0.5, 0.75, 1],
+      yfmt: function (v) { return v.toFixed(2); },
+      pts: [[0,0.12],[80,0.32],[200,0.48],[360,0.60],[520,0.69],[680,0.76],[840,0.82],[1000,0.87]],
+      marks: [
+        { x: 0,   to: 200, name: 'A', sub: '预算 2' },
+        { x: 200, to: 520, name: 'B', sub: '预算 3' },
+        { x: 520, to: 1000, name: 'C', sub: '预算 4' }
+      ],
+      notes: {
+        A: '预算 2：模型从纯文本推理转过来，回答长度显著下降（Figure 2）。奖励逐步爬升，说明基座能适应较少的交互。',
+        B: '预算 3：交互次数允许增加，奖励继续上升，模型开始学会「多试一次」的收益。',
+        C: '预算 4：后期奖励仍在上升，但边际变小。Figure 2 与 Figure 3 一起说明预算扩大和测试准确率正相关。'
+      }
+    },
+    pass: {
+      label: '代码通过率',
+      cap: 'Figure 4(c)：前 100 步上升，之后持续下滑，预算越大越明显（§3.2.2 / §4.3）。曲线为示意形状。',
+      ylabel: 'pass rate',
+      ymin: 0, ymax: 1,
+      yticks: [0, 0.25, 0.5, 0.75, 1],
+      yfmt: function (v) { return (v * 100).toFixed(0) + '%'; },
+      pts: [[0,0.80],[50,0.86],[100,0.89],[200,0.86],[360,0.80],[520,0.73],[680,0.68],[840,0.64],[1000,0.60]],
+      marks: [
+        { x: 0,   to: 100,  name: 'A', sub: '上升' },
+        { x: 100, to: 520,  name: 'B', sub: '缓降' },
+        { x: 520, to: 1000, name: 'C', sub: '加速下降' }
+      ],
+      notes: {
+        A: '前 100 步：通过率上升。此时模型刚学会写能跑的代码，冗余尝试少。',
+        B: '预算从 2 提到 3：任务是变难的，但通过率已开始下滑——§4.3 把它读成「交互变多 = 修改变多」，模型在做更多 REVISE。',
+        C: '预算 4：下降更明显。论文明确说「更低的通过率不一定意味着更差的表现」，Table 4 的 Final Pass 高于 Full Pass 就是证据。'
+      }
+    }
+  };
+  var cur = 'reward';
+
+  function sx(x) { return X0 + (x / 1000) * (X1 - X0); }
+  function sy(v, cfg) { return Y1 - ((v - cfg.ymin) / (cfg.ymax - cfg.ymin)) * (Y1 - Y0); }
+
+  function pathD(pts, cfg) {
+    return pts.map(function (p, i) {
+      return (i === 0 ? 'M' : 'L') + sx(p[0]).toFixed(1) + ' ' + sy(p[1], cfg).toFixed(1);
+    }).join(' ');
+  }
+
+  function buildStatic(cfg) {
+    var g = '';
+    cfg.yticks.forEach(function (v) {
+      var y = sy(v, cfg).toFixed(1);
+      g += '<line x1="' + X0 + '" y1="' + y + '" x2="' + X1 + '" y2="' + y + '" stroke="var(--border)" stroke-width="1"></line>';
+      g += '<text x="' + (X0 - 8) + '" y="' + y + '" text-anchor="end" dominant-baseline="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="var(--text-soft)">' + cfg.yfmt(v) + '</text>';
+    });
+    [0, 200, 400, 600, 800, 1000].forEach(function (x) {
+      g += '<text x="' + sx(x).toFixed(1) + '" y="' + (Y1 + 18) + '" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="var(--text-soft)">' + x + '</text>';
+    });
+    g += '<text x="' + ((X0 + X1) / 2) + '" y="' + (H - 8) + '" text-anchor="middle" font-family="Noto Sans SC,Inter,sans-serif" font-size="11" fill="var(--text-muted)">训练步数（示意刻度） · 预算切换点由 §3.1「2 → 3 → 4」确定，图中切换位置为示意</text>';
+    g += '<text x="14" y="' + ((Y0 + Y1) / 2) + '" transform="rotate(-90 14 ' + ((Y0 + Y1) / 2) + ')" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="10.5" fill="var(--text-muted)">' + cfg.ylabel + '</text>';
+    gridG.innerHTML = g;
+  }
+
+  function buildMarks(cfg) {
+    var g = '';
+    cfg.marks.forEach(function (m) {
+      var ax = sx(m.x), bx = sx(m.to);
+      var isLast = m.name === 'C';
+      g += '<rect x="' + ax.toFixed(1) + '" y="' + Y0 + '" width="' + Math.max(0, bx - ax).toFixed(1) + '" height="' + (Y1 - Y0) + '" fill="' + (isLast ? 'var(--accent-soft)' : 'var(--bg-soft)') + '" opacity="0.55"></rect>';
+      if (m.x > 0) {
+        g += '<line x1="' + ax.toFixed(1) + '" y1="' + Y0 + '" x2="' + ax.toFixed(1) + '" y2="' + Y1 + '" stroke="var(--border-strong)" stroke-width="1" stroke-dasharray="4 3"></line>';
+      }
+      var cx = (ax + bx) / 2;
+      g += '<text x="' + cx.toFixed(1) + '" y="' + (Y0 - 8) + '" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="12" font-weight="700" fill="var(--text)">' + m.name + '</text>';
+      g += '<text x="' + cx.toFixed(1) + '" y="' + (Y1 + 34) + '" text-anchor="middle" font-family="Noto Sans SC,Inter,sans-serif" font-size="10.5" fill="var(--text-muted)">' + m.sub + '</text>';
+    });
+    marksG.innerHTML = g;
+  }
+
+  function buildLine(cfg) {
+    var d = pathD(cfg.pts, cfg);
+    var area = d + ' L' + sx(1000) + ' ' + Y1 + ' L' + sx(0) + ' ' + Y1 + ' Z';
+    curveG.innerHTML =
+      '<path d="' + area + '" fill="var(--accent-soft)" opacity="0.5"></path>' +
+      '<path d="' + d + '" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"></path>';
+  }
+
+  function miniSvg(cfg, on) {
+    var w = 220, h = 70, x1 = w - 6, y1 = h - 10;
+    var dd = cfg.pts.map(function (p, i) {
+      var x = 4 + (p[0] / 1000) * (x1 - 4);
+      var y = (y1 - 4) - ((p[1] - cfg.ymin) / (cfg.ymax - cfg.ymin)) * (y1 - 12) + 4;
+      return (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+    }).join(' ');
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" aria-hidden="true"><path d="' + dd + '" fill="none" stroke="' + (on ? 'var(--accent)' : 'var(--c1)') + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+  }
+
+  function buildMini() {
+    var html = '';
+    Object.keys(CHARTS).forEach(function (k) {
+      var cfg = CHARTS[k];
+      html += '<button class="series-item' + (k === cur ? ' on' : '') + '" type="button" data-chart="' + k + '">' +
+        '<span class="si-k">' + cfg.label + '<b>Figure ' + (k === 'reward' ? '2(a)' : '4(c)') + '</b></span>' +
+        miniSvg(cfg, k === cur) + '</button>';
+    });
+    mini.innerHTML = html;
+    mini.querySelectorAll('.series-item').forEach(function (b) {
+      b.addEventListener('click', function () {
+        cur = b.getAttribute('data-chart');
+        syncTabs();
+        render();
+      });
+    });
+  }
+
+  function syncTabs() {
+    tabs.forEach(function (t) { t.classList.toggle('active', t.getAttribute('data-chart') === cur); });
+  }
+
+  function render() {
+    var cfg = CHARTS[cur];
+    buildStatic(cfg);
+    buildMarks(cfg);
+    buildLine(cfg);
+    cap.textContent = cfg.cap;
+    buildMini();
+    rHead.textContent = cfg.label + ' · 三个可对照的阶段';
+    rBody.innerHTML = cfg.marks.map(function (m) {
+      return '<p style="margin-bottom:8px"><strong>' + m.name + ' · ' + m.sub + '</strong>：' + cfg.notes[m.name] + '</p>';
+    }).join('');
+  }
+
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      cur = t.getAttribute('data-chart');
+      render();
+    });
+  });
+
+  render();
+})();
+
+/* ============================================================
+   3) 流程图（SVG），两种边界定义可切换
+   ============================================================ */
+(function () {
+  var host = document.getElementById('flow-host');
+  if (!host) return;
+  var toggle = document.getElementById('flow-toggle');
+  var detail = document.getElementById('flow-detail');
+  var mode = 'exact';
+
+  function box(x, y, w, h, cls, fill, stroke) {
+    return '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="8" class="' + cls + '"' +
+      (fill ? ' fill="' + fill + '"' : '') + (stroke ? ' stroke="' + stroke + '"' : '') + '></rect>';
+  }
+  function t(x, y, s, cls, anchor) {
+    return '<text x="' + x + '" y="' + y + '" class="' + (cls || 'pipe-t') + '"' + (anchor ? ' text-anchor="' + anchor + '"' : '') + '>' + s + '</text>';
+  }
+  function arrow(x1, y1, x2, y2, accent) {
+    var col = accent ? 'var(--accent)' : 'var(--border-strong)';
+    var head = accent ? 'pipe-arrow-a' : 'pipe-arrow';
+    var my = y1 === y2 ? '' : '';
+    if (y1 === y2) {
+      return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + (x2 - 8) + '" y2="' + y2 + '" stroke="' + col + '" stroke-width="1.6"></line>' +
+        '<path d="M ' + (x2 - 9) + ' ' + (y2 - 5) + ' L ' + x2 + ' ' + y2 + ' L ' + (x2 - 9) + ' ' + (y2 + 5) + ' Z" class="' + head + '"></path>' + my;
+    }
+    return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + (y2 - 8) + '" stroke="' + col + '" stroke-width="1.6"></line>' +
+      '<path d="M ' + (x2 - 5) + ' ' + (y2 - 9) + ' L ' + x2 + ' ' + y2 + ' L ' + (x2 + 5) + ' ' + (y2 - 9) + ' Z" class="' + head + '"></path>';
+  }
+
+  function build(m) {
+    var W = 900, H = 300;
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="代码集成推理单轮轨迹流程图" style="width:100%;height:auto">';
+    s += '<defs><marker id="arrEnd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--border-strong)"></path></marker>' +
+         '<marker id="arrEndA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path></marker></defs>';
+
+    /* 主行：推理 → 写代码 → 执行 → 接回 → 循环 / 答案 */
+    s += box(10, 20, 150, 64, 'pipe-box');
+    s += t(85, 46, '推理 / 子问题', 'pipe-t', 'middle');
+    s += t(85, 64, '自然语言 + h<sub>t</sub>', 'pipe-s', 'middle');
+    s += arrow(160, 52, 200, 52);
+
+    s += box(200, 20, 170, 64, 'pipe-accent');
+    s += t(285, 46, '生成代码块 c<sub>t</sub>', 'pipe-t', 'middle');
+    s += t(285, 64, '```python … ```', 'pipe-code', 'middle');
+    s += arrow(370, 52, 410, 52);
+
+    s += box(410, 20, 170, 64, 'pipe-c1');
+    s += t(495, 46, '解释器执行 I(c<sub>t</sub>)', 'pipe-t', 'middle');
+    s += t(495, 64, '得到 r<sub>t</sub>（或 Traceback）', 'pipe-s', 'middle');
+    s += arrow(580, 52, 620, 52);
+
+    s += box(620, 20, 170, 64, 'pipe-box', 'var(--bg-soft)', 'var(--accent)');
+    s += t(705, 46, '接回上下文', 'pipe-t', 'middle');
+    s += t(705, 64, 'h<sub>t+1</sub> = h<sub>t</sub> ∪ c<sub>t</sub> ∪ r<sub>t</sub>', 'pipe-s', 'middle');
+    s += arrow(790, 52, 830, 52);
+
+    s += box(830, 20, 60, 64, 'pipe-box');
+    s += t(860, 46, '判断', 'pipe-t', 'middle');
+    s += t(860, 64, '预算余量', 'pipe-s', 'middle');
+
+    /* 回边 */
+    s += '<path d="M 860 84 L 860 118 L 285 118 L 285 84" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#arrEnd)" stroke-dasharray="5 4"></path>';
+    s += t(572, 134, '还有预算 → 继续下一轮（预算 2 → 3 → 4）', 'pipe-s', 'middle');
+
+    /* 答案 */
+    s += '<path d="M 860 84 L 860 160" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrEndA)"></path>';
+    s += box(760, 162, 200, 52, 'pipe-accent');
+    s += t(860, 182, '输出最终答案 y', 'pipe-t', 'middle');
+    s += t(860, 202, '\\boxed{…}', 'pipe-code', 'middle');
+
+    /* 边界条件说明 */
+    if (m === 'exact') {
+      s += box(10, 162, 720, 96, 'pipe-box');
+      s += t(28, 186, '交互边界（精确匹配）：', 'pipe-t');
+      s += t(28, 208, '检测到完整 ```python … ``` → 立即执行；反馈以 ```output … ``` 追加，边界由围栏唯一确定。', 'pipe-s');
+      s += t(28, 230, '防的是：代码写完却没发停止符 → 漏执行 / 噪声。', 'pipe-s');
+    } else {
+      s += box(10, 162, 720, 96, 'pipe-box');
+      s += t(28, 186, '交互边界（stop token）：', 'pipe-t');
+      s += t(28, 208, '写完代码后必须再吐 ```output 作为停止符 → 检测到才执行；漏发或位置错就出问题。', 'pipe-s');
+      s += t(28, 230, '训练噪声 = 停止符早到、迟到、缺失三种。', 'pipe-s');
+    }
+
+    s += t(10, 286, '蓝色 = 模型 token · 橙色 = 解释器 token（loss 中 mask） · 青灰 = 执行环境', 'pipe-s');
+    s += '</svg>';
+    host.innerHTML = s;
+    if (toggle) toggle.textContent = (m === 'exact' ? '换一个边界：stop token ' : '换回：精确匹配 ') + (detail && detail.classList.contains('active') ? '▴' : '▸');
+  }
+
+  build(mode);
+
+  if (toggle) {
+    toggle.addEventListener('click', function () {
+      mode = mode === 'exact' ? 'stop' : 'exact';
+      build(mode);
+    });
+  }
+})();
+</script>
+</body>
+</html>
