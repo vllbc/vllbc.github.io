@@ -1,0 +1,707 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 8.6 | Table 1 | 57.5-48.9 |
+| 17.6 | Table 1 | 8.6/48.9*100 |
+| 15.3 | Table 1 | 57.5-42.2 |
+| 36.3 | Table 1 | 15.3/42.2*100 |
+| 12.8 | Table 1 | (26.7+59.0+80.2+40.2)/4-(16.7+33.7+72.0+32.5)/4 |
+| 38.725 | Table 1 | (16.7+33.7+72.0+32.5)/4 |
+| 51.525 | Table 1 | (26.7+59.0+80.2+40.2)/4 |
+| 33.1 | Table 1 | 12.8/38.725*100 |
+| 0.5 | Table 1 | 57.5-57.0 |
+| 5.1 | Table 2 | 55.3-50.2 |
+| 4.6 | Table 2 | 55.3-50.7 |
+| 5.7 | Table 2 | 61.3-55.6 |
+| 3.7 | Table 2 | 61.3-57.6 |
+| 6.0 | Table 2 | 61.3-55.3 |
+| 3.6 | Table 8 | 80.2-76.6 |
+| 4.8 | Table 8 | 59.0-54.2 |
+| 1.7 | Table 8 | 83.3-81.6 |
+| 0.8 | Table 8 | 80.2-79.4 |
+| 1.2 | Table 8 | 59.0-57.8 |
+| 2.6 | Table 8 | 83.3-80.7 |
+| 16.9 | Table 7 | 24.1-7.2 |
+| 18.0 | Table 7 | 46.6-28.6 |
+| 1.1 | Table 7 | 24.1-23.0 |
+| 2.4 | Table 7 | 46.6-44.2 |
+| 3.3 | Table 9 | 23.3-20.0 |
+| 2.4 | Table 9 | 65.1-62.7 |
+| 1.0 | Table 9 | 86.2-85.2 |
+| 0.6 | Table 9 | 85.2-84.6 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v5">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIRL-S · 把 RL 训练中的奖励函数直接当作搜索时的 PRM</title>
+<meta name="description" content="AIRL-S 用对抗逆向强化学习从正确参考轨迹中学出逐步骤 PRM，再把这个 PRM 同时用于 GRPO 训练和 Best-of-N、Beam Search、MCTS 推理搜索。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.fig-svg{width:100%;height:auto;display:block}
+.fig-svg text{font-family:Inter,"Noto Sans SC",sans-serif;fill:var(--text)}
+.fig-svg .tt{font-size:12.5px;font-weight:600}
+.fig-svg .ts{font-size:10.5px;fill:var(--text-muted)}
+.fig-svg .tp{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.08em;fill:var(--text-soft)}
+.fig-svg .box{stroke-width:1.2}
+.fig-svg .bx-a{fill:var(--accent-soft);stroke:var(--accent)}
+.fig-svg .bx-b{fill:var(--c1-soft);stroke:var(--c1)}
+.fig-svg .bx-c{fill:var(--c2-soft);stroke:var(--c2)}
+.fig-svg .bx-n{fill:var(--bg-soft);stroke:var(--border-strong)}
+.fig-svg .edge{fill:none;stroke:var(--border-strong);stroke-width:1.4}
+.errata{margin-top:18px;border-top:1px solid var(--border);padding-top:14px;font-size:12.5px;line-height:1.75}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:6px}
+.small{font-size:12.5px;color:var(--text-soft)}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.lam-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:14px 0 4px}
+.lam{border:1px solid var(--border);border-radius:8px;padding:9px 6px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:11px;background:var(--bg);color:var(--text-soft);cursor:pointer}
+.lam.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600}
+@media(max-width:620px){.lam-grid{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">AIRL-S</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">计算</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2508.14313v5 · LLM-RL</span>
+  <h1>AIRL-S：把 RL 训练中的奖励函数，直接当作搜索时的 PRM</h1>
+  <p class="hero-sub">
+    只用最终答案的对错做 RL，奖励太稀疏；用静态 PRM 指导搜索，又要昂贵的逐步标注，还会随策略更新产生分布偏移。
+    AIRL-S 用对抗逆向强化学习，从「答对的参考轨迹」里学一个逐步骤判别器；这个判别器既是训练时的稠密奖励，也是推理时 Best-of-N、Beam Search、MCTS 的打分器。
+    但它的「免费」只指免过程标注，对抗训练本身的计算成本论文没有和「监督 PRM + RL」正面比较。
+  </p>
+  <div class="meta">
+    <span>Can Jin, Yang Zhou, Qixin Zhang, Hongwu Peng, Di Zhang, Zihan Dong 等 · Rutgers / NTU / UConn 等</span>
+    <a href="https://arxiv.org/abs/2508.14313v5" target="_blank" rel="noopener">arXiv 2508.14313v5 ↗</a>
+    <a href="/your-reward-function-for-rl-is-your-best-prm-for-searchunifying-rl-and-search-based-tts/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文把两条测试时扩展路线接在一起：RL 路线用结果奖励优化策略，但奖励稀疏；搜索路线用 PRM 给中间步骤打分，但静态 PRM 需要逐步标注，并且会与不断更新的策略错位。
+    AIRL-S 的切口是：<strong>训练中为了优化策略而学到的奖励函数，本身就是最贴近当前策略的 PRM</strong>。
+  </p>
+  <p>
+    具体做法是把正确参考轨迹放进 replay buffer，用一个 AIRL 判别器区分「参考轨迹」和「当前策略轨迹」；判别器的 log-odds 就是逐步骤奖励 <code>r<sub>φ</sub></code>（Eq.1）。
+    策略同时最大化 AIRL 的稠密过程奖励（Eq.3）和 GRPO 的结果奖励（Eq.4），两者按 <code>λ</code> 加权（Eq.6）。
+  </p>
+  <p>
+    推理时不再训练新模型：同一个 <code>r<sub>φ</sub></code> 直接给 Best-of-N、Beam Search、MCTS 的候选步骤打分，再用 PRM-Min-Sum 聚合选答案。
+    论文在 8 个数学、科学、代码基准上报告：7B 策略平均 <span data-src="Table 1">57.5</span>，GPT-4o 为 <span data-src="Table 1">57.0</span>；带 Best-of-N 的 PRM 平均 <span data-src="Table 2">61.3</span>，高于 PRIME 的 <span data-src="Table 2">55.6</span> 和最强静态 PRM 的 <span data-src="Table 2">57.6</span>。
+  </p>
+  <p>
+    读数字时要小心口径：论文写的「9% / 13% / 15%」都没有说明是相对还是百分点；按 Table 1 复算，它们分别接近 <strong>+8.6 / +12.8 / +15.3 个百分点</strong>。
+    「匹配 GPT-4o」也只是 8 项平均，逐项看 GPT-4o 在 5 项上更高。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">57.5</div>
+      <div class="k">Qwen2.5-7B-AIRL-S 八项平均<br>GPT-4o <span data-src="Table 1">57.0</span>；Phi-4-14B <span data-src="Table 1">53.4</span></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">61.3</div>
+      <div class="k">AIRL-S + Best-of-N 三项平均<br>PRIME <span data-src="Table 2">55.6</span>；最强静态 PRM <span data-src="Table 2">57.6</span></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4.2">9<small>%</small></div>
+      <div class="k">论文原文的「平均提升」<br>按 Table 1 复算为 <span data-src="Table 1">+8.6</span> 个百分点</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>结果奖励太稀疏，静态 PRM 太贵且会过期</h2></div>
+  <p class="sec-sub">先建立两条测试时扩展路线的各自代价，才知道 AIRL-S 想统一什么。</p>
+
+  <p>论文把提升 LLM 复杂推理的测试时扩展（TTS）分成两条主路。第一条是<strong>基于 RL 的 TTS</strong>：用结果奖励模型（ORM）或规则奖励判断最终答案，再用 PPO / GRPO 优化策略。DeepSeek-R1 证明只靠结果奖励也能获得很强的推理表现，但结果信号通常很稀疏，训练稳定性和样本效率会受影响（§1）。</p>
+
+  <p>第二条是<strong>基于搜索的 TTS</strong>：用 PRM 给中间推理步骤打分，再让 Best-of-N、Beam Search 或 MCTS 在候选中搜索。PRM 提供稠密的逐步指导，但训练一个好的静态 PRM 需要细粒度监督——人工标注，或用另一个 LLM 生成伪标签，成本都很高（§1）。</p>
+
+  <p>更麻烦的是分布偏移：静态 PRM 训练完之后就不再变化，而策略还在持续更新。固定裁判与不断变化的选手之间的差距，会让策略学会利用 PRM 的漏洞，也就是 reward hacking；这既削弱策略的可靠性，也让 PRM 作为搜索 verifier 的作用变得不可信（§1）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>要稠密信号，还是要有标注的稠密信号？</h4></div>
+    <p>论文的提法是：能不能既保留 PRM 的逐步稠密信号，又不依赖逐步标注，并且让奖励函数跟着策略一起更新？AIRL-S 的答案是把「奖励学习」放回 RL 训练循环里，用参考轨迹与当前策略的对抗来学奖励，而不是先离线训一个固定 PRM（§1、§3.3）。</p>
+  </div>
+
+  <p>这里的「参考轨迹」不是人工写的专家推理，而是从当前策略采样、最终答案正确的 rollout，或已有的高质量轨迹；只有结果奖励为正的轨迹才进入 replay buffer <code>B</code>（§3.2）。因此它免的是<strong>过程标注</strong>，不是参考数据本身。<span class="infer">推断</span>（依据：§3.2 明确写 sample from the current policy or utilize existing high-quality traces，并按最终答案正确性筛选）。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>静态 PRM、隐式 PRM、GRPO：各有一半，但没接成一个循环</h2></div>
+  <p class="sec-sub">三路对照：监督 PRM、PRIME 的隐式奖励、纯 GRPO；AIRL-S 的差别在「逐步骤判别器 + 训练与搜索共用」。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">静态 PRM</span><h4>逐步标注，离线训练</h4></div>
+      <p>Math-Shepherd、Llama3.1-8B-PRM-DeepSeek-Data 等用带步骤标签的数据训练 PRM；EurusPRM-Stage2 从 ORM 派生隐式 PRM。</p>
+      <p><strong>卡点：</strong>过程标注贵；PRM 固定后与策略产生分布偏移，容易被 reward hacking（§1、§4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PRIME</span><h4>从似然比拿 token 级奖励</h4></div>
+      <p>PRIME 用两个模型的 log-likelihood ratio 构造隐式 token 级奖励，不需要过程标签。</p>
+      <p><strong>差别：</strong>论文认为 PRIME 的奖励绑定在计算比率的模型上，而 AIRL-S 训练的是逐步骤判别器，并强调跨生成器、跨搜索算法的迁移（§2、§4.2、Appendix D.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">GRPO</span><h4>组内相对优势，结果奖励</h4></div>
+      <p>GRPO 对同一问题采样一组 CoT，用组内归一化的结果奖励作为优势，不需要 value model。</p>
+      <p><strong>卡点：</strong>只有最终对错，缺少中间步骤的稠密指导；论文的消融显示纯 GRPO 在 MATH500 / AMC 上弱于混合目标（Table 8）。</p>
+    </div>
+  </div>
+
+  <p>AIRL-S 不是把三者简单相加：AIRL 判别器给出逐步骤奖励 <code>r<sub>φ</sub></code>，这个奖励一方面进入 PPO 式的 AIRL 目标，另一方面与 GRPO 的结果目标按 <code>λ</code> 合成；同一个 <code>r<sub>φ</sub></code> 在推理时又作为 PRM 给搜索打分。论文在 Appendix E 以 system-level novelty 讨论这种「训练信号与推理 verifier 是同一个模型」的统一设计（§3）。</p>
+</section>
+
+<!-- ================= 03 方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>判别器的 log-odds 就是逐步奖励，再与结果奖励按 λ 合成</h2></div>
+  <p class="sec-sub">四个部件：参考轨迹池、AIRL 判别器、复合 RL 目标、PRM 引导的搜索。</p>
+
+  <h3>参考轨迹池：只收答对的 rollout</h3>
+  <p>对每个问题 <code>q</code>，论文从当前策略 <code>π<sub>θ</sub></code> 采样多条 CoT，或用已有的高质量轨迹；按最终答案给二值结果奖励，只有正奖励的轨迹进入 replay buffer <code>B</code>。训练过程中会周期性删掉低质量条目，并加入新发现的正确解，以维持参考数据的可靠性与多样性（§3.2）。</p>
+
+  <h3>AIRL 判别器：区分参考轨迹与策略轨迹</h3>
+  <p>判别器的输入是 state-action 对：state 是问题 <code>q</code> 加上前面的推理步骤 <code>{C<sub>1</sub>, …, C<sub>i−1</sub>}</code>，action 是当前步骤 <code>C<sub>i</sub></code>。判别器定义为：</p>
+
+  <div class="eq">
+    D<sub>φ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>) = exp{ f<sub>φ</sub>(q, C<sub>≤i</sub>) } / ( exp{ f<sub>φ</sub>(q, C<sub>≤i</sub>) } + π<sub>θ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>) )
+  </div>
+  <div class="eq-cap">§3.3 · f<sub>φ</sub> 是学习的打分函数；判别器越大，说明当前步骤越像参考轨迹</div>
+
+  <p>逐步奖励取判别器的 log-odds：</p>
+
+  <div class="eq">
+    r<sub>φ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>) = log( D<sub>φ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>) / (1 − D<sub>φ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>)) )
+  </div>
+  <div class="eq-cap">Eq.1 · 判别器的 log-odds 就是 PRM 的逐步奖励</div>
+
+  <p>判别器用交叉熵训练：参考轨迹的步骤要判为真，当前策略的步骤要判为假。对每条 CoT 的所有步骤求和：</p>
+
+  <div class="eq">
+    L<sub>AIRL</sub> = Σ<sub>i=1</sub><sup>|C|</sup> [ −E<sub>C~π<sub>e</sub></sub>[ log D<sub>φ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>) ] − E<sub>C~π<sub>θ</sub></sub>[ log(1 − D<sub>φ</sub>(C<sub>i</sub> | q, C<sub>&lt;i</sub>)) ] ]
+  </div>
+  <div class="eq-cap">Eq.2 · π<sub>e</sub> 是 replay buffer B 的参考分布；更新判别器等价于更新奖励函数 r<sub>φ</sub></div>
+
+  <h3>复合目标：稠密过程奖励 + 稀疏结果奖励</h3>
+  <p>AIRL 目标用 <code>r<sub>φ</sub></code> 导出的优势 <code>A<sub>i</sub></code> 做 PPO 式策略更新：</p>
+
+  <div class="eq">
+    J<sub>AIRL</sub>(θ) = E<sub>q, C~π<sub>θ</sub></sub>[ Σ<sub>i=1</sub><sup>|C|</sup> min( (π<sub>θ</sub>(C<sub>i</sub>|q,C<sub>&lt;i</sub>) / π<sub>old</sub>(C<sub>i</sub>|q,C<sub>&lt;i</sub>)) A<sub>i</sub>, clip(·, 1−ε, 1+ε) A<sub>i</sub> ) ]
+  </div>
+  <div class="eq-cap">Eq.3 · A<sub>i</sub> 用 REINFORCE 风格估计（§3.4）</div>
+
+  <p>GRPO 目标负责最终答案正确性：同一问题采样 <code>G</code> 条 CoT，用组内归一化的结果奖励 <code>A<sup>k</sup></code>，并加 KL 正则：</p>
+
+  <div class="eq">
+    J<sub>GRPO</sub>(θ) = E<sub>q, {C<sup>k</sup>}~π<sub>old</sub></sub>[ (1/G) Σ<sub>k=1</sub><sup>G</sup> ( min( (π<sub>θ</sub>(C<sup>k</sup>|q) / π<sub>old</sub>(C<sup>k</sup>|q)) A<sup>k</sup>, clip(·, 1−ε, 1+ε) A<sup>k</sup> ) − β D<sub>KL</sub>(π<sub>θ</sub> || π<sub>ref</sub>) ) ]
+  </div>
+  <div class="eq-cap">Eq.4 · π<sub>ref</sub> 是冻结的参考模型；β 控制 KL 惩罚；KL 项定义见 Eq.5（本页未展开）</div>
+
+  <p>最终目标是两者的加权和：</p>
+
+  <div class="eq">
+    J(θ) = λ J<sub>AIRL</sub>(θ) + (1 − λ) J<sub>GRPO</sub>(θ)
+  </div>
+  <div class="eq-cap">Eq.6 · λ 平衡过程奖励与结果奖励；论文主实验取 λ = 0.5（§4.1）</div>
+
+  <p>训练在「更新判别器」与「用复合目标更新策略」之间交替（Algorithm 1）。论文在 Appendix D.1 增加了 λ 的消融：λ=0.5 在 MATH500、AMC、MBPP 上综合最好；纯 GRPO（λ=0）和纯 AIRL（λ=1）都更弱（Table 8）。</p>
+
+  <h3>自己切换：λ 如何改变三个基准</h3>
+  <p>下面直接读 Table 8：五个 λ 取值对应的 MATH500、AMC、MBPP 分数。柱高按 0–100 归一化，不是按当前视图最大值。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="lam-grid" id="lam-btns">
+      <button class="lam" data-lam="0">λ=0<br>GRPO only</button>
+      <button class="lam" data-lam="0.25">λ=0.25</button>
+      <button class="lam active" data-lam="0.5">λ=0.5</button>
+      <button class="lam" data-lam="0.75">λ=0.75</button>
+      <button class="lam" data-lam="1">λ=1<br>AIRL only</button>
+    </div>
+
+    <div class="chart" id="lam-chart"></div>
+    <div class="cx"><span>MATH500</span><span>AMC</span><span>MBPP</span></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>当前 λ</span>
+      <span class="small">分数（%，轴 0–100）· 数据来自 Table 8</span>
+    </div>
+
+    <div class="readout" id="lam-readout" data-src="Table 8">
+      <div class="r-head">λ = 0.5 · Table 8</div>
+      MATH500 80.2；AMC 59.0；MBPP 83.3。
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两组 λ → 三个基准差值<span class="sum-sub">与交互读数逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：λ=0.5 vs λ=0（纯 GRPO）。</strong>MATH500：80.2 − 76.6 = 3.6 个百分点；AMC：59.0 − 54.2 = 4.8；MBPP：83.3 − 81.6 = 1.7。</p>
+      <p><strong>组 2：λ=1（纯 AIRL）vs λ=0.5。</strong>MATH500：79.4 − 80.2 = −0.8；AMC：57.8 − 59.0 = −1.2；MBPP：80.7 − 83.3 = −2.6。即纯 AIRL 分别低 0.8 / 1.2 / 2.6 个百分点。</p>
+      <p>口径：差值都是同一张 Table 8 内、同一基准的百分点差；论文没有给这些差值的置信区间或显著性检验。</p>
+    </div>
+  </details>
+
+  <h3>推理：同一个 PRM 给三种搜索打分</h3>
+  <p>推理时，<code>r<sub>φ</sub></code> 直接作为 verifier：Best-of-N 从策略采样 N 条完整解，按 PRM 聚合分数选最高；Beam Search 每步展开 M 个候选、按 <code>r<sub>φ</sub></code> 保留前 N 条；MCTS 用 UCT 在探索与 <code>r<sub>φ</sub></code> 的节点价值之间平衡（§3.5）。</p>
+
+  <p>一条完整解 <code>C<sup>k</sup></code> 的分数取路径上的最小步骤奖励：<code>s(C<sup>k</sup>) = min<sub>i</sub> r<sub>φ</sub>(C<sup>k</sup><sub>i</sub>)</code>。最终答案 <code>a</code> 的分数是把所有通向同一答案的不同链求和：<code>S(a) = Σ<sub>k:A(k)=a</sub> s(C<sup>(k)</sup>)</code>，取 <code>S(a)</code> 最大的答案。这就是 PRM-Min-Sum 聚合（§3.5、Appendix B.1）。</p>
+</section>
+
+<!-- ================= 04 计算 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练账本：160K 题、8 张 A100、两阶段交替</h2></div>
+  <p class="sec-sub">数据、模型、超参数与评测协议；这里能看出「免标注」不等于「免算力」。</p>
+
+  <p>主训练集是 <span data-src="§4.1">160K</span> 个问题，主要来自 NuminaMATH；参考 rollout 由策略自己生成，使用 Appendix C 的 rollout prompt。策略 <code>π<sub>θ</sub></code> 与奖励打分函数 <code>f<sub>φ</sub></code> 都从 <strong>Qwen2.5-7B-Instruct</strong> 初始化，<code>f<sub>φ</sub></code> 的输出头改成标量预测（§4.1）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">§4.1 训练设置（原文没有训练配置表；下表按正文整理）</caption>
+      <thead><tr><th>项目</th><th>设置</th></tr></thead>
+      <tbody>
+        <tr><td>训练问题数</td><td>160K，主要来自 NuminaMATH</td></tr>
+        <tr><td>策略 / 奖励模型初始化</td><td>Qwen2.5-7B-Instruct</td></tr>
+        <tr><td>硬件</td><td>8 × NVIDIA A100，PyTorch FSDP</td></tr>
+        <tr><td>学习率</td><td>奖励模型 2e-6；策略 5e-7</td></tr>
+        <tr><td>最大输出长度</td><td>8,192 tokens</td></tr>
+        <tr><td>全局 batch</td><td>1,024</td></tr>
+        <tr><td>每题采样数</td><td>8 条输出</td></tr>
+        <tr><td>KL 系数 β</td><td>0.001</td></tr>
+        <tr><td>λ</td><td>0.5</td></tr>
+        <tr><td>训练轮数</td><td>2 epochs</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>评测分两种模式。纯策略评测（无搜索）用 temperature 0：数学 / 科学报 zero-shot Accuracy@1，代码报 Pass@1。搜索式 TTS 用 temperature 0.7 促进探索，搜索树宽度 <code>M = 4</code>，报告 PRM 聚合选出的解；同一组 PRM 对比里，生成器、rollout 预算、prompt 和聚合协议都固定，以隔离 verifier 的影响。主结果取 <span data-src="§4.1">3</span> 次独立运行的平均（§4.1）。</p>
+
+  <p>成本方面，论文只给了硬件与超参数，没有给总 GPU 小时、训练墙钟时间，也没有和「监督 PRM + RL」范式做计算成本对照。论文在 Appendix F 把固定 rollout 预算与少量聚合策略列为限制，但没有把对抗训练的开销列为量化项。<span class="infer">推断</span>（依据：§4.1 只有硬件与超参数；Appendix F 的限制只提 rollout budget 与 aggregation strategies）。</p>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一个判别器，两条出口：训练时的稠密奖励与推理时的搜索打分</h2></div>
+  <p class="sec-sub">按 Figure 1 重绘的简化流程；看同一个 r<sub>φ</sub> 如何被复用两次。</p>
+
+  <figure>
+    <svg class="fig-svg" viewBox="0 0 940 560" role="img" aria-label="AIRL-S 框架流程图">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <!-- Top: question and rollouts -->
+      <rect class="box bx-n" x="24" y="30" width="150" height="58" rx="10"></rect>
+      <text class="tt" x="99" y="54" text-anchor="middle">问题 q</text>
+      <text class="ts" x="99" y="73" text-anchor="middle">NuminaMATH 等</text>
+
+      <rect class="box bx-b" x="212" y="30" width="190" height="58" rx="10"></rect>
+      <text class="tt" x="307" y="54" text-anchor="middle">策略 πθ 采样 CoT</text>
+      <text class="ts" x="307" y="73" text-anchor="middle">每题 8 条 rollout</text>
+
+      <rect class="box bx-b" x="440" y="30" width="190" height="58" rx="10"></rect>
+      <text class="tt" x="535" y="54" text-anchor="middle">结果奖励筛选</text>
+      <text class="ts" x="535" y="73" text-anchor="middle">只保留答对的轨迹</text>
+
+      <rect class="box bx-c" x="668" y="30" width="248" height="58" rx="10"></rect>
+      <text class="tt" x="792" y="54" text-anchor="middle">参考池 B</text>
+      <text class="ts" x="792" y="73" text-anchor="middle">周期性剪枝 + 加入新正确解</text>
+
+      <line class="edge" x1="174" y1="59" x2="212" y2="59" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="402" y1="59" x2="440" y2="59" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="630" y1="59" x2="668" y2="59" marker-end="url(#arrow)"></line>
+
+      <!-- Discriminator -->
+      <rect class="box bx-a" x="300" y="150" width="340" height="70" rx="10"></rect>
+      <text class="tt" x="470" y="176" text-anchor="middle">AIRL 判别器 Dφ</text>
+      <text class="ts" x="470" y="195" text-anchor="middle">输入 state = q + 前序步骤；action = 当前步骤 C_i</text>
+      <text class="ts" x="470" y="211" text-anchor="middle">输出 log-odds：rφ = log(D/(1−D))（Eq.1）</text>
+
+      <path class="edge" d="M792 88 L792 120 L470 120 L470 150" marker-end="url(#arrow)"></path>
+      <path class="edge" d="M307 88 L307 120 L470 120" marker-end="url(#arrow)"></path>
+      <text class="ts" x="500" y="114" text-anchor="start">参考轨迹 / 策略轨迹</text>
+
+      <!-- Two exits -->
+      <path class="edge" d="M470 220 L470 250 L220 250 L220 286" marker-end="url(#arrow)"></path>
+      <path class="edge" d="M470 220 L470 250 L720 250 L720 286" marker-end="url(#arrow)"></path>
+
+      <!-- Left: training -->
+      <text class="tp" x="24" y="276">TRAINING · DENSE + SPARSE</text>
+      <rect class="box bx-a" x="24" y="286" width="392" height="64" rx="10"></rect>
+      <text class="tt" x="220" y="310" text-anchor="middle">AIRL 目标 J_AIRL（Eq.3）</text>
+      <text class="ts" x="220" y="329" text-anchor="middle">用 rφ 导出的步骤优势 A_i；稠密过程奖励</text>
+
+      <rect class="box bx-c" x="24" y="374" width="392" height="64" rx="10"></rect>
+      <text class="tt" x="220" y="398" text-anchor="middle">GRPO 目标 J_GRPO（Eq.4）</text>
+      <text class="ts" x="220" y="417" text-anchor="middle">组内归一化结果奖励 A^k；稀疏结果奖励</text>
+
+      <rect class="box bx-a" x="24" y="462" width="392" height="64" rx="10"></rect>
+      <text class="tt" x="220" y="486" text-anchor="middle">复合目标 J = λ J_AIRL + (1−λ) J_GRPO</text>
+      <text class="ts" x="220" y="505" text-anchor="middle">Eq.6；主实验 λ=0.5；Table 8 做 λ 消融</text>
+
+      <path class="edge" d="M416 318 L436 318 L436 478 L416 478" marker-end="url(#arrow)"></path>
+      <line class="edge" x1="220" y1="438" x2="220" y2="462" marker-end="url(#arrow)"></line>
+      <path class="edge" d="M220 526 L220 544 L99 544 L99 88" marker-end="url(#arrow)"></path>
+      <text class="ts" x="110" y="540" text-anchor="start">策略更新 → 下一轮 rollout</text>
+
+      <!-- Right: search -->
+      <text class="tp" x="560" y="276">INFERENCE · SEARCH</text>
+      <rect class="box bx-a" x="524" y="286" width="392" height="64" rx="10"></rect>
+      <text class="tt" x="720" y="310" text-anchor="middle">同一个 rφ 作为 PRM</text>
+      <text class="ts" x="720" y="329" text-anchor="middle">Best-of-N / Beam Search / MCTS</text>
+
+      <rect class="box bx-b" x="524" y="374" width="392" height="64" rx="10"></rect>
+      <text class="tt" x="720" y="398" text-anchor="middle">PRM-Min-Sum 聚合</text>
+      <text class="ts" x="720" y="417" text-anchor="middle">s(C^k)=min_i rφ(C_i^k)；S(a)=Σ_{k:A(k)=a} s(C^k)</text>
+
+      <rect class="box bx-n" x="524" y="462" width="392" height="64" rx="10"></rect>
+      <text class="tt" x="720" y="486" text-anchor="middle">选 S(a) 最大的答案</text>
+      <text class="ts" x="720" y="505" text-anchor="middle">推理阶段不再更新策略或 PRM</text>
+
+      <line class="edge" x1="720" y1="350" x2="720" y2="374" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="720" y1="438" x2="720" y2="462" marker-end="url(#arrow)"></line>
+    </svg>
+    <figcaption>
+      Figure 1 的简化重绘：左侧是训练回路（判别器 → r<sub>φ</sub> → AIRL / GRPO → 策略更新），右侧是推理回路（同一个 r<sub>φ</sub> → 搜索 → 聚合）。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>覆盖：</strong>§3.2 的参考池构建、§3.3 的判别器与 Eq.1、§3.4 的 AIRL / GRPO / 复合目标、§3.5 的三种搜索与 PRM-Min-Sum 聚合。</li>
+          <li><strong>未覆盖：</strong>原图的图标与配色、Algorithm 1 的交替更新细节、BEAM / MCTS 的树展开过程、PRM 聚合的其他变体（Appendix B）、分布式 FSDP 训练细节。</li>
+          <li><strong>因此这是按正文重绘的示意，不是原文 Figure 1 的逐像素还原。</strong>箭头表示概念依赖，不是完整控制流。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均分追平 GPT-4o，但逐项只赢 3/8；PRM 的迁移证据更硬</h2></div>
+  <p class="sec-sub">先看 Table 1 与 Table 2，再拆「9% / 13% / 15%」的口径。</p>
+
+  <p>Table 1 比较 11 个模型在 8 个基准上的表现。Qwen2.5-7B-AIRL-S 的平均分是 <strong><span data-src="Table 1">57.5</span></strong>，高于其他本地开源模型（Phi-4-14B 为 14B，参数量约为 7B 的两倍，<span data-src="Table 1">53.4</span>；Eurus-2-7B-PRIME <span data-src="Table 1">48.2</span>；Qwen2.5-7B-Instruct <span data-src="Table 1">48.9</span>），与 GPT-4o 的 <strong><span data-src="Table 1">57.0</span></strong> 相差 <span data-src="Table 1">0.5</span> 个百分点（Table 1）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">Table 1 完整转录（8 个基准 + Avg；GPQA 为 GPQA-Diamond，LCB-v4 为 LiveCodeBench-v4；粗体为原文类别内最优，页面不额外标注；原文表注还以绿色标出 local models 中的最优，绿色语义未复刻）</caption>
+      <thead>
+        <tr><th>Model</th><th class="num">AIME2024</th><th class="num">AMC</th><th class="num">MATH500</th><th class="num">GPQA</th><th class="num">HumanEval</th><th class="num">Leetcode</th><th class="num">LCB-v4</th><th class="num">MBPP</th><th class="num">Avg</th></tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="10" style="font-size:12px;color:var(--text-soft)">API models</td></tr>
+        <tr><td>DeepSeek-R1</td><td class="num">79.8</td><td class="num">85.5</td><td class="num">96.5</td><td class="num">71.2</td><td class="num">97.6</td><td class="num">90.4</td><td class="num">71.1</td><td class="num">95.8</td><td class="num">86.0</td></tr>
+        <tr><td>DeepSeek-V3</td><td class="num">36.7</td><td class="num">81.9</td><td class="num">90.2</td><td class="num">61.1</td><td class="num">93.3</td><td class="num">88.3</td><td class="num">67.0</td><td class="num">88.9</td><td class="num">75.9</td></tr>
+        <tr><td>GPT-4o</td><td class="num">13.3</td><td class="num">50.6</td><td class="num">65.8</td><td class="num">43.9</td><td class="num">90.2</td><td class="num">60.6</td><td class="num">44.2</td><td class="num">87.3</td><td class="num">57.0</td></tr>
+        <tr><td colspan="10" style="font-size:12px;color:var(--text-soft)">Local models · RL with PRMs</td></tr>
+        <tr><td>Math-Shepherd-Mistral-7B-RL</td><td class="num">0.0</td><td class="num">7.2</td><td class="num">28.6</td><td class="num">9.6</td><td class="num">32.3</td><td class="num">5.6</td><td class="num">3.9</td><td class="num">51.1</td><td class="num">17.3</td></tr>
+        <tr><td>DeepSeekMath-7B-RL</td><td class="num">3.3</td><td class="num">18.1</td><td class="num">48.6</td><td class="num">23.2</td><td class="num">58.5</td><td class="num">11.2</td><td class="num">6.2</td><td class="num">73.1</td><td class="num">30.3</td></tr>
+        <tr><td>Qwen2.5-Math-7B-Instruct</td><td class="num">13.3</td><td class="num">50.6</td><td class="num">79.6</td><td class="num">29.3</td><td class="num">57.9</td><td class="num">11.7</td><td class="num">9.3</td><td class="num">46.0</td><td class="num">37.2</td></tr>
+        <tr><td>Eurus-2-7B-PRIME</td><td class="num">20.0</td><td class="num">56.6</td><td class="num">79.2</td><td class="num">33.8</td><td class="num">70.7</td><td class="num">31.1</td><td class="num">24.3</td><td class="num">70.1</td><td class="num">48.2</td></tr>
+        <tr><td colspan="10" style="font-size:12px;color:var(--text-soft)">Local models · other baselines</td></tr>
+        <tr><td>s1.1-7B</td><td class="num">16.7</td><td class="num">38.6</td><td class="num">72.6</td><td class="num">35.4</td><td class="num">76.8</td><td class="num">11.1</td><td class="num">9.3</td><td class="num">76.7</td><td class="num">42.2</td></tr>
+        <tr><td>Qwen2.5-7B-Instruct</td><td class="num">16.7</td><td class="num">33.7</td><td class="num">72.0</td><td class="num">32.5</td><td class="num">81.7</td><td class="num">47.4</td><td class="num">28.0</td><td class="num">79.4</td><td class="num">48.9</td></tr>
+        <tr><td>Phi-4-14B</td><td class="num">13.3</td><td class="num">44.6</td><td class="num">78.6</td><td class="num">55.6</td><td class="num">84.1</td><td class="num">45.6</td><td class="num">31.2</td><td class="num">74.3</td><td class="num">53.4</td></tr>
+        <tr><td>Qwen2.5-7B-AIRL-S (Ours)</td><td class="num">26.7</td><td class="num">59.0</td><td class="num">80.2</td><td class="num">40.2</td><td class="num">85.1</td><td class="num">54.4</td><td class="num">31.3</td><td class="num">83.3</td><td class="num">57.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>「匹配 GPT-4o」只在平均意义上成立。逐项比较，AIRL-S 在 AIME2024（26.7 vs 13.3）、AMC（59.0 vs 50.6）、MATH500（80.2 vs 65.8）三项更高；GPT-4o 在 GPQA（43.9 vs 40.2）、HumanEval（90.2 vs 85.1）、Leetcode（60.6 vs 54.4）、LCB-v4（44.2 vs 31.3）、MBPP（87.3 vs 83.3）五项更高。平均分接近，能力结构不同（Table 1）。</p>
+
+  <h3>三个百分比都要拆口径</h3>
+  <p>论文在摘要与 §4.2 写了三个「平均提升」：相对基座 <strong><span data-src="§4.2">9%</span></strong>、数学/科学 <strong><span data-src="§4.2">13%</span></strong>、相对 s1.1-7B <strong><span data-src="§4.2">15%</span></strong>。原文没有说明这些是相对提升还是百分点。按 Table 1 的 Avg 列复算：</p>
+  <ul>
+    <li>基座 Qwen2.5-7B-Instruct 48.9 → AIRL-S 57.5：<strong data-src="Table 1">+8.6 个百分点</strong>（57.5−48.9），相对提升 <strong data-src="Table 1">17.6%</strong>（8.6/48.9）。</li>
+    <li>数学/科学四项（AIME、AMC、MATH500、GPQA）均值：<span data-src="Table 1">38.725</span> → <span data-src="Table 1">51.525</span>，<strong data-src="Table 1">+12.8 个百分点</strong>，相对提升 <strong data-src="Table 1">33.1%</strong>。</li>
+    <li>s1.1-7B 42.2 → 57.5：<strong data-src="Table 1">+15.3 个百分点</strong>，相对提升 <strong data-src="Table 1">36.3%</strong>。</li>
+  </ul>
+  <p>也就是说，论文的三个百分比数值上更接近<strong>百分点差</strong>，而不是相对提升；页面不替作者判断口径，只把两种算法并列。<span class="infer">推断</span>（依据：Table 1 的 Avg 与四项均值复算；原文未给分母说明）。</p>
+
+  <h3>PRM 的迁移：Table 2 与 Appendix D</h3>
+  <p>Table 2 把 AIRL-S 与两个静态 PRM、一个隐式 PRM（PRIME）放在同一个 Qwen2.5-7B-Instruct 初始化下比较。无搜索时 AIRL-S 平均 55.3，比 PRIME 的 50.2 高 <span data-src="Table 2">5.1</span> 个百分点，比最强静态 PRM（Llama3.1-8B 的 50.7）高 <span data-src="Table 2">4.6</span> 个百分点；加 Best-of-N 后升到 61.3，比 PRIME 的 55.6 高 <span data-src="Table 2">5.7</span>，比最强静态 PRM 的 57.6 高 <span data-src="Table 2">3.7</span>（Table 2、Appendix D.1）。需要注意 Figure 2 与 Table 2 的对应关系：Table 2 的 <span data-src="Table 2">61.3</span>（AIRL-S w. BoN 行，30.0/67.5/86.4）与 Figure 2 最后一组中 Qwen2.5-7B-AIRL-S 生成器 + AIRL-S PRM 的 <span data-src="Figure 2">61.3</span> 是同一组 AIRL-S 结果，不是两个独立证据；真正不同设置的是 Figure 2 的 <span data-src="Figure 2">59.8</span>（Math-Shepherd PRM 配 AIRL-S 生成器）与 Table 2 的 <span data-src="Table 2">53.3</span>（Math-Shepherd PRM 配 Qwen2.5-7B-Instruct 生成器）。Figure 2 中 59.8 与 61.3 均为 Best-of-N 64、AIME2024/AMC/MATH500 三基准平均。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">Table 2 完整转录（同一 Qwen2.5-7B-Instruct 初始化；BoN = Best-of-N；AIME 为 AIME2024，MATH 为 MATH500）</caption>
+      <thead><tr><th>Method</th><th class="num">AIME</th><th class="num">AMC</th><th class="num">MATH</th><th class="num">Avg.</th></tr></thead>
+      <tbody>
+        <tr><td>Math-Shepherd-Mistral-7B-PRM</td><td class="num">13.3</td><td class="num">50.6</td><td class="num">76.8</td><td class="num">46.9</td></tr>
+        <tr><td>Math-Shepherd-Mistral-7B-PRM w. BoN</td><td class="num">20.0</td><td class="num">57.8</td><td class="num">82.2</td><td class="num">53.3</td></tr>
+        <tr><td>Llama3.1-8B-PRM-DeepSeek-Data</td><td class="num">16.7</td><td class="num">56.6</td><td class="num">78.8</td><td class="num">50.7</td></tr>
+        <tr><td>Llama3.1-8B-PRM-DeepSeek-Data w. BoN</td><td class="num">23.3</td><td class="num">65.1</td><td class="num">84.4</td><td class="num">57.6</td></tr>
+        <tr><td>PRIME</td><td class="num">16.7</td><td class="num">55.4</td><td class="num">78.4</td><td class="num">50.2</td></tr>
+        <tr><td>PRIME w. BoN</td><td class="num">20.0</td><td class="num">62.7</td><td class="num">84.2</td><td class="num">55.6</td></tr>
+        <tr><td>AIRL-S</td><td class="num">26.7</td><td class="num">59.0</td><td class="num">80.2</td><td class="num">55.3</td></tr>
+        <tr class="best"><td>AIRL-S w. BoN</td><td class="num">30.0</td><td class="num">67.5</td><td class="num">86.4</td><td class="num">61.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>自己切换：同一个 PRM，加不加搜索</h3>
+  <p>Table 2 的四种 PRM 在「无搜索」与「Best-of-N」两种模式下对比。切换按钮直接读表；柱高按 0–100 归一化，不是按当前视图最大值。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="tabs" id="prm-tabs">
+      <button class="tab active" data-mode="nosearch">无搜索 · Table 2</button>
+      <button class="tab" data-mode="bon">Best-of-N · Table 2</button>
+    </div>
+    <div class="chart" id="prm-chart"></div>
+    <div class="cx"><span>三项平均（%，轴 0–100）</span></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>Math-Shepherd</span>
+      <span><i style="background:var(--c3)"></i>Llama3.1-8B PRM</span>
+      <span><i style="background:var(--c2)"></i>PRIME</span>
+      <span><i style="background:var(--accent)"></i>AIRL-S</span>
+    </div>
+    <div class="readout" id="prm-readout" data-src="Table 2">
+      <div class="r-head">无搜索 · Table 2</div>
+      Math-Shepherd 46.9；Llama3.1-8B 50.7；PRIME 50.2；AIRL-S 55.3。
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两种模式下的四个平均分<span class="sum-sub">与交互读数逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>无搜索：</strong>Math-Shepherd 46.9；Llama3.1-8B 50.7；PRIME 50.2；AIRL-S 55.3。AIRL-S 比 PRIME 高 5.1 个百分点，比最强静态 PRM 高 4.6 个百分点。</p>
+      <p><strong>Best-of-N：</strong>Math-Shepherd 53.3；Llama3.1-8B 57.6；PRIME 55.6；AIRL-S 61.3。AIRL-S 比 PRIME 高 5.7 个百分点，比最强静态 PRM 高 3.7 个百分点。</p>
+      <p>口径：四项都是 AIME2024 / AMC / MATH500 三项平均；生成器、rollout 预算、prompt 与聚合协议固定，只替换 verifier（Table 2、Appendix D.1）。</p>
+    </div>
+  </details>
+
+  <p>迁移到更弱的生成器也成立。Table 7（Best-of-N 64）用 Math-Shepherd-Mistral-7B-RL（无搜索时 AMC <span data-src="Table 7">7.2</span>、MATH500 <span data-src="Table 7">28.6</span>）做生成器：AIRL-S 的 PRM 把 AMC 提到 <span data-src="Table 7">24.1</span>（+<span data-src="Table 7">16.9</span>）、MATH500 提到 <span data-src="Table 7">46.6</span>（+<span data-src="Table 7">18.0</span>），比表内最强监督 PRM 分别高 <span data-src="Table 7">1.1</span> 和 <span data-src="Table 7">2.4</span> 个百分点（Table 7）。Table 9 在 Phi-4-14B 上做 MCTS：AIRL-S 的 PRM 在 AIME2024 / AMC / MATH500 分别为 <span data-src="Table 9">23.3</span> / <span data-src="Table 9">65.1</span> / <span data-src="Table 9">86.2</span>，比最强基线高 <span data-src="Table 9">3.3</span> / <span data-src="Table 9">2.4</span> / <span data-src="Table 9">1.0</span> 个百分点；Beam Search 下拿到最好的 AMC <span data-src="Table 9">62.7</span>，原文正文称 AIME 与 MATH500 与最强基线持平，但 Table 9 显示 AIME <span data-src="Table 9">20.0</span> 与 Llama3.1 的 <span data-src="Table 9">20.0</span> 持平，MATH500 <span data-src="Table 9">85.2</span> 高于最强基线 <span data-src="Table 9">84.6</span>（高 <span data-src="Table 9">0.6</span> 个百分点）——正文与表格不一致。Table 7/9 未完整转录，只引上述关键行。</p>
+
+  <p>论文还报告了一个消融趋势：MCTS 的增益大于 Beam Search，作者的解释是 MCTS 在 selection、expansion、backpropagation 中反复查询 PRM，更好的步骤估值会沿树累积；Beam Search 的剪枝更窄，后续修正机会更少（Appendix D.1）。这是作者的解释，论文没有做逐节点的误差传播实验。<span class="infer">推断</span>（依据：Appendix D.1 的定性解释，未给节点级测量）。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决「可自动验证的推理任务」，不是开放式生成</h2></div>
+  <p class="sec-sub">论文自己承认的限制，加上从实验设置能看到的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>任务限于有自动验证器的数学、科学、代码</h4></div>
+    <p>训练依赖最终答案的对错来筛选参考轨迹，评测也集中在 AIME2024、AMC、MATH500、GPQA、HumanEval、Leetcode、LCB-v4、MBPP。Appendix F 明确说，扩展到开放式生成可能需要额外的评测协议；创意写作、对话、多轮交互没有实验。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>「免标注」不等于「免算力」</h4></div>
+    <p>参考轨迹由策略自己采样，省掉了过程标注；但 AIRL 判别器与策略要交替训练，还有 8 条 rollout / 题、8 张 A100、2 epochs。论文没有给总 GPU 小时，也没有和「监督 PRM + RL」做训练成本对照，因此无法判断端到端是否更便宜。<span class="infer">推断</span>（依据：§4.1 只有硬件与超参；Appendix F 未给成本对照）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>参考数据的质量与多样性仍是前提</h4></div>
+    <p>replay buffer 只收最终答案正确的轨迹；如果参考轨迹风格单一、步骤有瑕疵或覆盖不足，判别器学到的奖励也会继承这些偏差。论文用周期性剪枝与新正确解来维持多样性，但没有做「参考数据质量下降」的受控实验（§3.2、Appendix F）。<span class="infer">推断</span>（依据：§3.2 只描述筛选与更新机制，未报告数据质量消融）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>搜索预算与聚合策略固定</h4></div>
+    <p>搜索实验使用固定 rollout 预算和少量聚合策略；Appendix F 把 adaptive search budgets 与更高效的 verifier scheduling 列为未来方向。论文也没有报告 PRM 推理延迟、吞吐或不同搜索宽度下的成本曲线（Appendix F）。</p>
+  </div>
+
+  <p>什么时候别用：如果任务没有可靠的最终答案验证器，或者参考轨迹本身难以获得，AIRL-S 的「只用正确轨迹」前提就不成立；如果任务短、搜索预算很小，稠密 PRM 的收益可能覆盖不了判别器与搜索的开销。<span class="infer">推断</span>（依据：论文的收益出现在 8 个可验证推理基准与 Best-of-N / Beam Search / MCTS 设置；未覆盖开放任务与低预算场景）。</p>
+</section>
+
+<footer>
+  <div>AIRL-S: Unifying Reinforcement Learning and Search-Based Test-Time Scaling via Adversarial Inverse Reinforcement Learning · Can Jin, Yang Zhou, Qixin Zhang, Hongwu Peng, Di Zhang, Zihan Dong, Marco Pavone, Ligong Han, Zhang-Wei Hong, Tong Che, Dimitris N. Metaxas</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.14313v5" target="_blank" rel="noopener">arXiv 2508.14313v5</a>（本页以 v5 为准）<br>
+    笔记：<a href="/your-reward-function-for-rl-is-your-best-prm-for-searchunifying-rl-and-search-based-tts/">Your Reward Function for RL is Your Best PRM for Search</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改笔记原文）</strong>
+    <ul>
+      <li>标题与作者：笔记用的是 v1 的标题「Your Reward Function for RL is Your Best PRM for Search: Unifying RL and Search-Based TTS」。v5 标题已改为「AIRL-S: Unifying Reinforcement Learning and Search-Based Test-Time Scaling via Adversarial Inverse Reinforcement Learning」，作者名单也新增了 Zihan Dong；页面按 v5 的标题与作者名单呈现。</li>
+      <li>百分比口径：笔记写「平均性能提升 9%」「媲美 GPT-4o」。论文原文确实写 9%，但没有说明是相对还是百分点；按 Table 1 复算是 +8.6 个百分点（相对 17.6%）。「匹配 GPT-4o」也只是 8 项平均（57.5 vs 57.0），逐项看 GPT-4o 在 5 项上更高。</li>
+      <li>PRM 对比数字：笔记写「Math-Shepherd PRM 只提升到 59.8%」。59.8 可查于 v5 Figure 2（Qwen2.5-7B-AIRL-S 生成器 + Math-Shepherd PRM，Best-of-N 64，三基准平均）；Table 2 的 53.3 是同 Qwen2.5-7B-Instruct 初始化下的另一设置，两者不可直接对比。页面采用 59.8 并注明设置。</li>
+      <li>λ 敏感性：笔记说论文「并未探讨 λ 对最终性能的影响」。v5 的 Appendix D.1 / Table 8 已补 λ=0/0.25/0.5/0.75/1.0 的消融，λ=0.5 综合最好；笔记的这一判断对应旧版本。</li>
+      <li>「显著优于」：笔记写搜索方法「显著优于未使用 PRM 的 Self-Consistency 基线」。论文 §4.2 用了 significantly，但没有报告显著性检验或置信区间；页面没有把 significantly 当作统计结论，也没有复述该对比。</li>
+      <li>「专家轨迹」：笔记把参考轨迹称为「专家轨迹」。v5 §3.2 的来源是当前策略采样或已有高质量轨迹，只保留最终答案正确的 rollout；它不是人工专家逐步标注的推理链。页面统一写「参考轨迹（正确 rollout）」。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ============================================================
+     交互 1：λ 消融（Table 8）
+     ============================================================ */
+  var LAM = {
+    '0':    { label: 'λ=0（纯 GRPO）', math: 76.6, amc: 54.2, mbpp: 81.6 },
+    '0.25': { label: 'λ=0.25',          math: 79.4, amc: 57.8, mbpp: 82.8 },
+    '0.5':  { label: 'λ=0.5',           math: 80.2, amc: 59.0, mbpp: 83.3 },
+    '0.75': { label: 'λ=0.75',          math: 79.8, amc: 59.0, mbpp: 81.8 },
+    '1':    { label: 'λ=1（纯 AIRL）',  math: 79.4, amc: 57.8, mbpp: 80.7 }
+  };
+
+  var lamBtns = document.getElementById('lam-btns');
+  var lamChart = document.getElementById('lam-chart');
+  var lamReadout = document.getElementById('lam-readout');
+
+  function renderLam(key) {
+    var cfg = LAM[key];
+    if (!cfg || !lamChart || !lamReadout) return;
+    lamChart.innerHTML = '';
+    var row = document.createElement('div');
+    row.className = 'crow';
+    var name = document.createElement('div');
+    name.className = 'cname';
+    name.textContent = 'λ=' + key;
+    var bars = document.createElement('div');
+    bars.className = 'cbars';
+    [cfg.math, cfg.amc, cfg.mbpp].forEach(function (val) {
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = 'var(--accent)';
+      fill.style.height = Math.max(2, Math.min(100, val)) + '%';
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = val.toFixed(1);
+      track.appendChild(fill);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+    });
+    row.appendChild(name);
+    row.appendChild(bars);
+    lamChart.appendChild(row);
+
+    lamReadout.setAttribute('data-src', 'Table 8');
+    lamReadout.innerHTML = '<div class="r-head">' + cfg.label + ' · Table 8</div>' +
+      'MATH500 ' + cfg.math.toFixed(1) + '；AMC ' + cfg.amc.toFixed(1) + '；MBPP ' + cfg.mbpp.toFixed(1) + '。';
+  }
+
+  if (lamBtns) {
+    var lamButtons = lamBtns.querySelectorAll('.lam');
+    lamButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        lamButtons.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderLam(btn.getAttribute('data-lam'));
+      });
+    });
+    renderLam('0.5');
+  }
+
+  /* ============================================================
+     交互 2：Table 2 的 PRM 对比（无搜索 / Best-of-N）
+     ============================================================ */
+  var PRM = {
+    nosearch: {
+      label: '无搜索', src: 'Table 2',
+      rows: [
+        { name: 'Math-Shepherd', val: 46.9, color: 'var(--c1)' },
+        { name: 'Llama3.1-8B', val: 50.7, color: 'var(--c3)' },
+        { name: 'PRIME', val: 50.2, color: 'var(--c2)' },
+        { name: 'AIRL-S', val: 55.3, color: 'var(--accent)' }
+      ]
+    },
+    bon: {
+      label: 'Best-of-N', src: 'Table 2',
+      rows: [
+        { name: 'Math-Shepherd', val: 53.3, color: 'var(--c1)' },
+        { name: 'Llama3.1-8B', val: 57.6, color: 'var(--c3)' },
+        { name: 'PRIME', val: 55.6, color: 'var(--c2)' },
+        { name: 'AIRL-S', val: 61.3, color: 'var(--accent)' }
+      ]
+    }
+  };
+
+  var prmTabs = document.getElementById('prm-tabs');
+  var prmChart = document.getElementById('prm-chart');
+  var prmReadout = document.getElementById('prm-readout');
+
+  function renderPrm(key) {
+    var cfg = PRM[key];
+    if (!cfg || !prmChart || !prmReadout) return;
+    prmChart.innerHTML = '';
+    cfg.rows.forEach(function (item) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = item.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = item.color;
+      fill.style.height = Math.max(2, Math.min(100, item.val)) + '%';
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = item.val.toFixed(1);
+      track.appendChild(fill);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+      row.appendChild(name);
+      row.appendChild(bars);
+      prmChart.appendChild(row);
+    });
+    prmReadout.setAttribute('data-src', cfg.src);
+    prmReadout.innerHTML = '<div class="r-head">' + cfg.label + ' · Table 2</div>' +
+      cfg.rows.map(function (r) { return r.name + ' ' + r.val.toFixed(1); }).join('；') + '。';
+  }
+
+  if (prmTabs) {
+    var prmButtons = prmTabs.querySelectorAll('.tab');
+    prmButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        prmButtons.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderPrm(btn.getAttribute('data-mode'));
+      });
+    });
+    renderPrm('nosearch');
+  }
+
+  window.toggleFig = function (el) {
+    var figure = el.closest('figure');
+    if (!figure) return;
+    var detail = figure.querySelector('.figure-detail');
+    if (!detail) return;
+    var open = detail.classList.toggle('active');
+    el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+  };
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,792 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 7.36 | Table 1 | 49.93-42.57 |
+| 5.08 | Table 1 | 53.72-48.64 |
+| 2.68 | Table 1 | 29.32-26.64 |
+| 2.11 | Table 1 | 38.52-36.41 |
+| 4.81 | Table 2 | 31.15-26.34 |
+| 2.52 | Table 2 | 34.50-31.98 |
+| 3.65 | Table 2 | 11.12-7.47 |
+| 11.30 | Table 2 | 23.00-11.70 |
+| 6.50 | Table 1 Base / Table 3 | 49.07-42.57 |
+| 3.31 | Table 3 | 49.07-45.76 |
+| 2.42 | Table 3 | 31.15-28.73 |
+| 1.72 | Table 3 | 49.07-47.35 |
+| 4.46 | Table 3 | 31.15-26.69 |
+| 16.0 | Table 5 | 79.0-63.0 |
+| 12.0 | Table 5 | 59.0-47.0 |
+| 1.06 | Table 6 | 49.12-48.06 |
+| 1.74 | Table 6 | 47.31-45.57 |
+| 2.60 | Table 6 | 49.12-46.52 |
+| 22.2 | Table 6 | 71.0-48.8 |
+| 30.8 | Table 6 | 63.4-32.6 |
+| 3.55 | Table 6 | 49.12-45.57 |
+| 5.51 | §3.2 | 54.69-49.18 |
+| 5.13 | 原文 §3.3（直接引用） | 5.13 |
+| 6.49 | 原文 §Abstract（直接引用） | 6.49 |
+| 7.54 | 原文 §Abstract（直接引用） | 7.54 |
+| 45 | §3.1.1 | 3*15 |
+| 15 | Appendix B.1 | 3*5 |
+| 80000 | §3.1 | 8000*10 |
+| 240000 | §3.1 | 8000*10*3 |
+| 1.00 | §2.2 | 1-2*(0.5-0.5) |
+| 0.60 | §2.2 | 1-2*(0.7-0.5) |
+| 0.40 | §2.2 | 1-2*(0.8-0.5) |
+| 0.35 | §2.2 | (1-2*(0.7-0.5))-0.25 |
+| 0.30 | §2.2 | (1-2*(0.8-0.5))-0.1 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v4">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R-Zero · 没有题库，也没有答案，模型靠出题与解题自己变强</title>
+<meta name="description" content="R-Zero 让同一个基座模型分裂成 Challenger 与 Solver：出题者拿 Solver 的不确定性当奖励，解题者用多数投票伪标签训练。本页按 arXiv 2508.05004v4 精读，逐表核对数字与边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页局部微调：不复制 base.css 的公共样式 */
+.slots.ten{grid-template-columns:repeat(10,1fr)}
+.slots.ten .slot{padding:7px 2px}
+.slots.ten .slot-name{font-size:10px;margin-bottom:3px}
+.slots.ten .slot-val{font-size:12px}
+#iter-chart .track{height:44px}
+.flow-wrap{overflow-x:auto}
+.flow-wrap svg{max-width:620px;margin:0 auto}
+.src-note{font-size:12.5px;color:var(--text-soft);margin-top:-4px;line-height:1.7}
+.tbl-note{font-size:12.5px;color:var(--text-soft);margin:-8px 0 20px;line-height:1.7}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+@media(max-width:880px){
+  .slots.ten{grid-template-columns:repeat(5,1fr)}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">R-Zero</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2508.05004v4 · 2026-02</span>
+  <h1>R-Zero：没有题库，也没有答案，模型靠「出题—解题」自己变强</h1>
+  <p class="hero-sub">
+    同一个基座模型复制成两个角色：<strong>Challenger</strong> 专门出「让当前 Solver 拿不准」的题，<strong>Solver</strong> 用多数投票生成伪标签再学习。
+    全程不提供人类任务与标签，训练信号来自模型自己的采样。代价写在论文自己的表里：题越出越难，伪标签真准确率从 <strong>79.0%</strong> 降到 <strong>63.0%</strong>，到第 60 步性能回落。
+  </p>
+  <div class="meta">
+    <span>Chengsong Huang 等 · Tencent AI Seattle Lab / WashU / UMD / UT Dallas</span>
+    <a href="https://arxiv.org/abs/2508.05004v4" target="_blank" rel="noopener">arXiv 2508.05004v4 ↗</a>
+    <a href="https://github.com/Chengsong-Huang/R-Zero" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    R-Zero 从一个 base LLM 初始化两个<strong>参数独立</strong>的模型：Challenger 负责出题，Solver 负责解题。两者轮流用 GRPO 更新，形成「出题 → 解题 → 变强 → 出更难的题」的闭环（§2.1）。
+  </p>
+  <p>
+    Challenger 的奖励不是「题目难」，而是 Solver 在同一题上 <strong>10 次回答的一致性</strong>：经验正确率 <code>p̂</code> 越接近 0.5，<code>r_unc</code> 越高；再减去 BLEU 聚类的重复惩罚。Solver 的数据集只保留 <strong>10 次里 3–7 次一致</strong>的题，伪标签取多数票（§2.2、§2.3、§3.1）。
+  </p>
+  <p>
+    Qwen3-4B-Base 的数学七基准均分从 <span data-src="Table 1">42.57 升到 49.93（+7.36 个百分点，Table 1）</span>，通用三基准均分从 <span data-src="Table 2">26.34 升到 31.15（+4.81 个百分点，Table 2）</span>。
+    但这不是免费午餐：第 3 轮伪标签真准确率降到 <span data-src="Table 5">63.0%（Table 5）</span>，Step 60 数学均分从 <span data-src="Table 6">49.12 回落到 46.52（Table 6）</span>。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">49.93<small>分</small></div>
+      <div class="k">Qwen3-4B-Base 数学七基准均分<br>Base 为 42.57</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">31.15<small>分</small></div>
+      <div class="k">Qwen3-4B-Base 通用三基准均分<br>Base 为 26.34</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 5">63.0<small>%</small></div>
+      <div class="k">第 3 轮伪标签真准确率<br>第 1 轮为 79.0%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>RLVR 的燃料是题和答案，R-Zero 想把这两样都省掉</h2></div>
+  <p class="sec-sub">先分清「零数据」到底零在哪：零任务、零标签，不等于零先验。</p>
+
+  <p data-src="§1">
+    强化学习可验证奖励（RLVR）需要两样东西：一批可验证的题，以及能判断对错的奖励信号（标签、规则或 verifier）。人工出题与标注不只贵、难扩展；而且任务是预先给定的，不会自动跟着模型当前能力调整。论文把这一点列为继续 scaling 的结构性瓶颈：人类能出的题，受人类能力上限约束（§1）。
+  </p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">瓶颈 A</span><h4>任务</h4></div>
+      <p>题目从哪来？人工写、从题库采、或用模型生成。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">瓶颈 B</span><h4>标签</h4></div>
+      <p>答案谁来判？数学可以规则匹配，开放域往往不止一个正确答案。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">瓶颈 C</span><h4>验证器</h4></div>
+      <p>没有执行器或 oracle 时，模型自己出的题很难验证。</p>
+    </div>
+  </div>
+
+  <p data-src="§1, §2.2">
+    已有方法通常只解决其中一项：label-free RL 去掉了标签，但仍需要一池现成题目；self-challenging 让模型自己出题，但很多方法依赖代码执行器或单元测试来保证题目可解、可验证（§1）。R-Zero 的目标是把任务与标签一起省掉，代价是它把题目生成限定在<strong>数学</strong>这个答案客观、可用多数投票造伪标签的域里（§2.2）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键区分</span><h4>「Zero Data」指的是零任务、零标签</h4></div>
+    <p>论文的「from Zero Data」不是「没有任何人类先验」。Challenger 的 system prompt 仍然是人类写的竞赛数学出题专家提示，明确要求「fewer than 30% of advanced high-school students could solve it」，并规定输出格式（Appendix B.2）。这句话后面会再出现一次，因为它决定了这套方法能迁移到哪。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人各省一半：省标签的仍要题，省题的仍要验证器</h2></div>
+  <p class="sec-sub">R-Zero 的位置：既不依赖种子题集，也不依赖代码执行器；但它换来了「必须能多数投票」的域限制。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Label-free RL</span><h4>去掉标签，保留题目</h4></div>
+      <p>用 confidence、entropy 或答案一致性做奖励，不需要人工标签。但训练仍然从一批预先存在的无标签题目出发。</p>
+      <p><strong>卡点：</strong>题目集本身是外部给定的，不能真正从零扩张。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Self-play / Self-challenging</span><h4>去掉题目，保留验证器</h4></div>
+      <p>让模型自己出题；在代码域，Coder 生成的程序可以由 Tester 的单元测试验证，形成可自洽的闭环。</p>
+      <p><strong>卡点：</strong>开放域推理没有这种执行器或确定性 verifier，题目质量与答案正确性都难保证。</p>
+    </div>
+  </div>
+
+  <p data-src="§5.1">
+    论文在 Related Work 里把差别写得很直接：「While these methods all rely on a pre-existing set of unlabeled problems, R-Zero removes the need for any seed dataset.」省掉种子题集，是 R-Zero 与 label-free RL 的分界线（§5.1）。
+  </p>
+
+  <h3>和主表里的 Absolute Zero 比，R-Zero 不是每个格子都赢</h3>
+  <p data-src="Table 1, Table 2">
+    数学七基准均分上，R-Zero 在四个基座上都高于 Absolute Zero：Qwen3-4B 为 49.93 对 46.42，Qwen3-8B 为 53.72 对 52.68，OctoThinker-3B 为 29.32 对 27.23，OctoThinker-8B 为 38.52 对 36.60（Table 1）。
+    通用三基准均分上并非全胜：OctoThinker-3B 的 Absolute Zero 为 16.03，R-Zero 为 11.12（Table 2）。
+  </p>
+  <p data-src="Table 1, Table 2">
+    这组对照说明论文的主张有边界：它是在「无种子任务、无标签」的设定下取得数学提升，并把一部分能力迁移到通用基准；它不是「所有模型、所有基准都更高」。看 Table 2 时，OctoThinker-3B 这一行必须一起看。
+  </p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>奖励「让 Solver 拿不准」的题，而不是「难」的题</h2></div>
+  <p class="sec-sub">两个公式：不确定性奖励训练出题人；多数投票过滤决定解题人学什么。</p>
+
+  <p data-src="§2.2">
+    Challenger 对每道生成的题 <code>x</code>，让当前 Solver 采 <code>m</code> 个回答。出现次数最多的答案作为伪标签 <code>ỹ(x)</code>，经验正确率 <code>p̂</code> 就是这 <code>m</code> 个回答里与伪标签一致的比例。论文把「好题」定义为让 <code>p̂</code> 靠近 0.5 的题：Solver 一半会、一半不会，既不是白给，也不是完全做不出。
+  </p>
+
+  <div class="eq">
+    p̂(x; S<sub>φ</sub>) = (1/m) Σ<sub>j=1</sub><sup>m</sup> 𝟙{y<sub>j</sub> = ỹ(x)}<br>
+    <span class="hl-c">r<sub>unc</sub>(x; φ) = 1 − 2 |p̂(x; S<sub>φ</sub>) − 1/2|</span><br>
+    r<sub>rep</sub>(x<sub>i</sub>) = λ |C<sub>k</sub>| / B<br>
+    r<sub>i</sub> = max(0, r<sub>unc</sub>(x<sub>i</sub>; φ) − r<sub>rep</sub>(x<sub>i</sub>))
+  </div>
+  <div class="eq-cap">§2.2 · 不确定性奖励、重复惩罚与复合奖励；实验取 λ = 1，B 为 batch size</div>
+
+  <p data-src="§2.2">
+    重复惩罚先用 BLEU 相似度做层次聚类，把相似题放进同一个 cluster <code>C<sub>k</sub></code>；一个 cluster 越大，其中每道题的惩罚越高，<code>r<sub>rep</sub> = λ|C<sub>k</sub>|/B</code>。此外还有一道硬门槛：生成结果必须包在 <code>&lt;question&gt;...&lt;/question&gt;</code> 里，格式不合格的题直接拿 0 分，不再计算后续奖励（§2.2）。
+  </p>
+
+  <p data-src="§2.3, §3.1, §2.4">
+    Solver 的数据集构造是另一套逻辑：Challenger 先采 <code>N = 8,000</code> 道候选题，每题让 Solver 采 <code>m = 10</code> 个回答，保留满足 <code>|p̂ − 1/2| ≤ δ</code> 的题，实验取 <code>δ = 0.25</code>。换成计数就是 10 次里与多数票一致 <strong>3–7 次</strong>，两端都丢掉。留下的题用多数票答案当伪标签，Solver 再用「新答案是否匹配伪标签」的二值奖励做 GRPO（§2.4、§3.1）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">理论动机</span><h4>为什么偏偏是 50%</h4></div>
+    <p data-src="Appendix F">
+      Appendix F 把学习潜力写成当前 Solver 到最优策略的 KL 下界：<code>D<sub>KL</sub>(S<sub>φ</sub> || S*) ≥ p̂(1 − p̂) / (2β²)</code>。右边在 <code>p̂ = 0.5</code> 时最大，所以「让 Solver 最不确定」等价于「让这一步的奖励方差最大」。这是单步动机；<span class="infer">推断</span> 它不证明多轮协同进化一定稳定——论文自己在 §4.2 报告了后面的退化。
+    </p>
+  </div>
+
+  <h3>自己动手：拖 k，看奖励与过滤怎么变</h3>
+  <p>固定 <code>m = 10</code>、<code>δ = 0.25</code>。拖「一致答案数 k」改变 <code>p̂</code>；拖「重复惩罚」改变 <code>r<sub>rep</sub></code>。两种模式分别对应 Challenger 奖励与 Solver 数据过滤——注意 <code>r<sub>rep</sub></code> 只进 Challenger 奖励，不参与 Solver 过滤。</p>
+
+  <div class="sim" id="unc-sim">
+    <div class="sim-top" id="unc-mode">
+      <button class="rule-btn active" data-mode="reward">Challenger 奖励<span class="r-sub">§2.2 · r = max(0, r_unc − r_rep)</span></button>
+      <button class="rule-btn" data-mode="filter">Solver 数据过滤<span class="r-sub">§2.3 · |p̂ − 0.5| ≤ 0.25</span></button>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">k / m</div><div class="slot-val" id="u-k">5 / 10</div></div>
+      <div class="slot"><div class="slot-name">p̂</div><div class="slot-val" id="u-p">0.50</div></div>
+      <div class="slot"><div class="slot-name">r_unc</div><div class="slot-val" id="u-r1">1.00</div></div>
+      <div class="slot"><div class="slot-name">r_rep</div><div class="slot-val" id="u-rrep">0.00</div></div>
+      <div class="slot"><div class="slot-name">r_final</div><div class="slot-val" id="u-rfinal">1.00</div></div>
+      <div class="slot" id="u-filter-slot"><div class="slot-name">过滤</div><div class="slot-val" id="u-filter">保留</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>10 次中与多数票一致 k <span class="v" id="u-k-slider-v">5</span></label>
+        <input type="range" id="u-k-slider" min="0" max="10" step="1" value="5">
+      </div>
+      <div class="ctrl">
+        <label>重复惩罚 r_rep <span class="v" id="u-q-slider-v">0.00</span></label>
+        <input type="range" id="u-q-slider" min="0" max="1" step="0.05" value="0">
+      </div>
+    </div>
+
+    <div class="slots ten" id="u-answers" aria-label="10 个回答的示意"></div>
+    <p class="src-note">示意：前 k 个回答与多数票一致。真实顺序不重要，重要的是计数。</p>
+
+    <div class="actions">
+      <button class="act" data-k="5" data-q="0">k=5，r_rep=0</button>
+      <button class="act" data-k="7" data-q="0.25">k=7，r_rep=0.25</button>
+      <button class="act" data-k="8" data-q="0.10">k=8，r_rep=0.10</button>
+      <button class="act ghost" data-k="5" data-q="0">重置</button>
+    </div>
+
+    <div class="readout" data-src="§2.2 / §2.3" id="u-readout">
+      <div class="r-head">当前读数</div>
+      <div id="u-msg">p̂ = 0.50；r_unc = 1.00；r_rep = 0.00；r = 1.00。|p̂ − 0.5| = 0.00 ≤ 0.25，保留进 Solver 数据集。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：三组参数<span class="sum-sub">与 JS 输出逐位一致；本模拟不使用标准差</span></summary>
+    <div class="details-body">
+      <p><code>m = 10</code>，<code>δ = 0.25</code>，<code>r_unc = 1 − 2|p̂ − 0.5|</code>，<code>r = max(0, r_unc − r_rep)</code>。</p>
+      <ul>
+        <li><strong>k = 5，r_rep = 0：</strong><code>p̂ = 0.50</code>；<code>r_unc = 1 − 2×0 = 1.00</code>；<code>r = 1.00</code>；<code>|0.50 − 0.50| = 0.00 ≤ 0.25</code>，保留。</li>
+        <li><strong>k = 7，r_rep = 0.25：</strong><code>p̂ = 0.70</code>；<code>r_unc = 1 − 2×0.20 = 0.60</code>；<code>r = 0.60 − 0.25 = 0.35</code>；<code>|0.70 − 0.50| = 0.20 ≤ 0.25</code>，保留。</li>
+        <li><strong>k = 8，r_rep = 0.10：</strong><code>p̂ = 0.80</code>；<code>r_unc = 1 − 2×0.30 = 0.40</code>；<code>r = 0.40 − 0.10 = 0.30</code>；<code>|0.80 − 0.50| = 0.30 &gt; 0.25</code>，丢弃。</li>
+      </ul>
+      <p>本模拟覆盖 §2.2 的 uncertainty reward 与 composite reward、§2.3 的 δ 过滤；未覆盖 BLEU 聚类的具体计算（<code>r_rep</code> 由滑块代替）、格式检查的解析逻辑、GRPO 的策略更新。它是简化模拟，不是原文算法的完整实现。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>一轮 = 出题 5 步 + 解题 15 步，重复三轮</h2></div>
+  <p class="sec-sub">工程参数都在附录里；真正贵的是每轮 8,000 道候选题 × 10 次采样。</p>
+
+  <p data-src="§3.1, §3.1.1, §3.2, Appendix B.1">
+    每个 co-evolution 轮次里，Challenger 先训练 <strong>5 步</strong>，然后从它的策略采 <strong>N = 8,000</strong> 道候选题；每题让 Solver 采 <strong>m = 10</strong> 个回答，做过滤与多数投票；最后 Solver 在构造出的数据集上训练 <strong>15 步</strong>。主实验跑 3 轮，Solver 共 45 步，结果在 45 步处报告（§3.1.1）。Table 6 还报告了 Step 60，超出主实验的 45 步，用来看退化。
+  </p>
+
+  <figure>
+    <figcaption>Appendix B.1 与 §3.1 · 一轮迭代的关键参数（转录自原文，未做改动）</figcaption>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>项目</th><th>值</th><th>出处</th></tr></thead>
+        <tbody>
+          <tr><td>候选题目 N</td><td class="num">8,000</td><td>§3.1</td></tr>
+          <tr><td>每题 Solver 采样 m</td><td class="num">10</td><td>§3.1</td></tr>
+          <tr><td>过滤阈值 δ</td><td class="num">0.25（10 次中 3–7 次一致）</td><td>§3.1</td></tr>
+          <tr><td>BLEU 聚类阈值 τ<sub>BLEU</sub></td><td class="num">0.5</td><td>§3.1</td></tr>
+          <tr><td>Solver max steps</td><td class="num">15</td><td>Appendix B.1.1</td></tr>
+          <tr><td>Challenger max steps</td><td class="num">5</td><td>Appendix B.1.2</td></tr>
+          <tr><td>Global batch size</td><td class="num">128</td><td>Appendix B.1</td></tr>
+          <tr><td>Learning rate</td><td class="num">1 × 10<sup>−6</sup></td><td>Appendix B.1</td></tr>
+          <tr><td>KL penalty</td><td class="num">1 × 10<sup>−2</sup></td><td>Appendix B.1</td></tr>
+          <tr><td>Rollout 数（Solver / Challenger）</td><td class="num">5 / 4</td><td>Appendix B.1</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </figure>
+
+  <p data-src="§3.1">
+    只算数据构造：一轮 <code>8,000 × 10 = 80,000</code> 次 Solver 生成；三轮 <code>80,000 × 3 = 240,000</code> 次。这还不含 Challenger 的 rollout、Solver 训练时的 rollout，以及 GPT-4o 评测调用。论文没有报告总 GPU 小时，所以这里只能给出采样次数，不能换算成等量算力。
+  </p>
+
+  <p data-src="Appendix C, Appendix B.3">
+    评测口径也要一起看：AMC 与 AIME 用 <code>mean@32</code>，其余数学基准用 greedy decoding；通用基准报告 greedy 的 Exact Match。数学答案的最终对错由 <code>GPT-4o</code> judge 判定（temperature 0.1，只返回 Yes/No），不是纯字符串匹配（Appendix B.3、Appendix C）。
+  </p>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>同一基座，两份参数，一个闭环</h2></div>
+  <p class="sec-sub">流程图里的每个箭头都对应 §2 的一个步骤；共享参数的 4B 消融在第一轮后就开始退化。</p>
+
+  <figure>
+    <div class="flow-wrap">
+      <svg viewBox="0 0 520 330" role="img" aria-label="R-Zero 两模型协同进化流程图" style="font-family:Inter,'Noto Sans SC',sans-serif">
+        <defs>
+          <marker id="rz-arrow" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--text-soft)"></path>
+          </marker>
+          <marker id="rz-arrow-a" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--accent)"></path>
+          </marker>
+        </defs>
+
+        <rect x="160" y="10" width="200" height="60" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+        <text x="260" y="34" text-anchor="middle" font-size="13" font-weight="700" fill="var(--text)">Base LLM</text>
+        <text x="260" y="53" text-anchor="middle" font-size="11" fill="var(--text-muted)">Qwen3 / OctoThinker</text>
+
+        <rect x="40" y="110" width="180" height="70" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.5"></rect>
+        <text x="130" y="133" text-anchor="middle" font-size="13" font-weight="700" fill="var(--text)">Challenger Qθ</text>
+        <text x="130" y="151" text-anchor="middle" font-size="11" fill="var(--text-muted)">GRPO 出题</text>
+        <text x="130" y="169" text-anchor="middle" font-size="10.5" fill="var(--c1)">r = max(0, r_unc − r_rep)</text>
+
+        <rect x="300" y="110" width="180" height="70" rx="10" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.5"></rect>
+        <text x="390" y="133" text-anchor="middle" font-size="13" font-weight="700" fill="var(--text)">Solver Sφ</text>
+        <text x="390" y="151" text-anchor="middle" font-size="11" fill="var(--text-muted)">GRPO 解题</text>
+        <text x="390" y="169" text-anchor="middle" font-size="10.5" fill="var(--c2)">奖励：匹配伪标签</text>
+
+        <rect x="40" y="220" width="180" height="60" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+        <text x="130" y="245" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--text)">生成 N = 8,000 题</text>
+        <text x="130" y="263" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">从 Challenger 策略采样</text>
+
+        <rect x="300" y="220" width="180" height="60" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+        <text x="390" y="245" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--text)">过滤 + 多数投票</text>
+        <text x="390" y="263" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">10 次中 3–7 次一致</text>
+
+        <path d="M 220 70 L 220 90 L 130 90 L 130 110" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#rz-arrow)"></path>
+        <path d="M 300 70 L 300 90 L 390 90 L 390 110" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#rz-arrow)"></path>
+        <path d="M 130 180 L 130 220" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#rz-arrow)"></path>
+        <path d="M 220 250 L 300 250" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#rz-arrow)"></path>
+        <path d="M 390 220 L 390 180" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#rz-arrow)"></path>
+        <path d="M 300 145 L 220 145" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#rz-arrow-a)"></path>
+
+        <text x="270" y="83" text-anchor="middle" font-size="10" fill="var(--text-soft)">复制参数</text>
+        <text x="140" y="205" font-size="10" fill="var(--text-soft)">题目</text>
+        <text x="260" y="242" text-anchor="middle" font-size="10" fill="var(--text-soft)">候选</text>
+        <text x="398" y="205" font-size="10" fill="var(--text-soft)">训练集</text>
+        <text x="260" y="137" text-anchor="middle" font-size="10.5" fill="var(--accent)">下一轮</text>
+
+        <text x="260" y="315" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">一轮：Challenger 5 步 + Solver 15 步（Appendix B.1）</text>
+      </svg>
+    </div>
+    <figcaption>
+      图 1（本页重绘）· 两模型协同进化流程。按 §2.1 与 Figure 2 重绘；覆盖模型复制、Challenger 训练、题目生成、过滤/多数投票、Solver 训练与下一轮回路，未展开 GRPO 内部更新与 BLEU 聚类细节。
+    </figcaption>
+  </figure>
+
+  <p data-src="§2.1, Appendix D">
+    Challenger 与 Solver 从同一个 base LLM 初始化，但<strong>参数是两份</strong>，各自用 GRPO 优化。Appendix D 把两者合并成一份参数（Single-R-Zero）做对照：Step 15 的伪标签准确率是 63.4%，低于两模型的 71.0%；数学均分 47.31 在第一轮后就走低，Step 45 为 45.57（Table 6）。作者假设原因是「同一模型既出题又解题，会因内部偏差而过度自信」（Appendix D）。
+  </p>
+
+  <p data-src="Appendix B.1, Table 6">
+    Appendix B.1 给的是单轮步数与 batch 配置；两模型相对 Single 的算力倍数，论文未报告。所以「两模型更好」目前是效果结论，不是成本结论。
+  </p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>四个基座都涨；4B 在第三轮见顶，Step 60 回落</h2></div>
+  <p class="sec-sub">先看主表，再看消融与迭代曲线；所有数字都标了表号，冲突口径单独并列。</p>
+
+  <figure>
+    <figcaption>Table 1 · 数学推理七个基准（AMC、Minerva、MATH、GSM8K、Olympiad、AIME25、AIME24）的平均分；差值由本页按表内数字相减。仅列 Base 与 R-Zero；Absolute Zero 与 R-Zero (challenger) 未列入本表</figcaption>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>模型</th><th class="num">Base</th><th class="num">R-Zero</th><th class="num">差值</th></tr></thead>
+        <tbody>
+          <tr class="best"><td>Qwen3-4B-Base</td><td class="num">42.57</td><td class="num">49.93</td><td class="num">+7.36</td></tr>
+          <tr class="best"><td>Qwen3-8B-Base</td><td class="num">48.64</td><td class="num">53.72</td><td class="num">+5.08</td></tr>
+          <tr class="best"><td>OctoThinker-3B</td><td class="num">26.64</td><td class="num">29.32</td><td class="num">+2.68</td></tr>
+          <tr class="best"><td>OctoThinker-8B</td><td class="num">36.41</td><td class="num">38.52</td><td class="num">+2.11</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </figure>
+
+  <figure>
+    <figcaption>Table 2 · 通用推理三个基准（SuperGPQA、MMLU-Pro、BBEH）的平均分；差值由本页按表内数字相减。仅列 Base 与 R-Zero；表格未列 Absolute Zero，其 OctoThinker-3B 为 16.03，高于 R-Zero 的 11.12</figcaption>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>模型</th><th class="num">Base</th><th class="num">R-Zero</th><th class="num">差值</th></tr></thead>
+        <tbody>
+          <tr class="best"><td>Qwen3-4B-Base</td><td class="num">26.34</td><td class="num">31.15</td><td class="num">+4.81</td></tr>
+          <tr class="best"><td>Qwen3-8B-Base</td><td class="num">31.98</td><td class="num">34.50</td><td class="num">+2.52</td></tr>
+          <tr><td>OctoThinker-3B</td><td class="num">7.47</td><td class="num">11.12</td><td class="num">+3.65</td></tr>
+          <tr class="best"><td>OctoThinker-8B</td><td class="num">11.70</td><td class="num">23.00</td><td class="num">+11.30</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </figure>
+
+  <p data-src="Table 1, Table 2">
+    数学四个基座全部上涨，幅度从 +2.11（OctoThinker-8B）到 +7.36（Qwen3-4B）；通用四个也全部上涨，幅度从 +2.52（Qwen3-8B）到 +11.30（OctoThinker-8B）。通用涨幅最大的是 OctoThinker-8B：11.70 → 23.00；最小的是 Qwen3-8B：31.98 → 34.50。
+  </p>
+
+  <p data-src="Table 1">
+    论文还保留了 R-Zero (challenger) 基线：用未经 RL 训练的 Challenger 出题。它的数学均分是 Qwen3-4B 45.01、Qwen3-8B 52.10、OctoThinker-3B 27.51、OctoThinker-8B 36.98，四行都低于训练后的 R-Zero（Table 1）。这组对照支撑「Challenger 的 RL 训练有用」这一论断，但它不是本文与外部方法的比较。
+  </p>
+
+  <h3>消融：重复惩罚与过滤各自值多少</h3>
+  <figure>
+    <figcaption>Table 3 · Qwen3-4B-Base 消融；括号内为相对 R-Zero 行的点差，由本页按表内数字相减</figcaption>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>方法</th><th class="num">Math AVG</th><th class="num">General AVG</th></tr></thead>
+        <tbody>
+          <tr class="best"><td>R-Zero</td><td class="num">49.07</td><td class="num">31.15</td></tr>
+          <tr><td>w/o Rep. Penalty</td><td class="num">45.76（低 3.31）</td><td class="num">28.73（低 2.42）</td></tr>
+          <tr><td>w/o Filtering</td><td class="num">47.35（低 1.72）</td><td class="num">26.69（低 4.46）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </figure>
+  <p class="tbl-note" data-src="Table 1, Table 3">
+    注意：Table 3 的 R-Zero 数学是 49.07，Table 1 的同一模型是 49.93。论文没有说明两处是否为同一 checkpoint；本页按表原样引用，不合并。
+  </p>
+
+  <p data-src="Table 3">
+    去掉重复惩罚，数学降 3.31、通用降 2.42；去掉难度过滤，数学降 1.72、通用降 4.46。正文说 w/o Filtering 的通用下降「falls by over 6 points」，但 Table 3 的 31.15 → 26.69 是 4.46 点。两个口径并列，本页不改正文，也不替表补数。
+  </p>
+
+  <h3>题越难，伪标签越脏</h3>
+  <figure>
+    <figcaption>Table 5 · 三组由 Challenger 生成的题目（每组 200 题）上的答对率与伪标签真准确率（%）；真准确率以 GPT-4o 答案为 ground truth（§4.4）</figcaption>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>题目集</th><th class="num">Base Model</th><th class="num">Solver step 15</th><th class="num">Solver step 30</th><th class="num">Solver step 45</th><th class="num">伪标签真准确率</th></tr></thead>
+        <tbody>
+          <tr><td>D<sub>step 15</sub></td><td class="num">48.0</td><td class="num">59.0</td><td class="num">57.0</td><td class="num">61.0</td><td class="num">79.0</td></tr>
+          <tr><td>D<sub>step 30</sub></td><td class="num">52.5</td><td class="num">53.0</td><td class="num">51.5</td><td class="num">53.5</td><td class="num">69.0</td></tr>
+          <tr><td>D<sub>step 45</sub></td><td class="num">44.0</td><td class="num">47.0</td><td class="num">45.0</td><td class="num">50.5</td><td class="num">63.0</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </figure>
+
+  <p data-src="Table 5">
+    伪标签真准确率从 79.0% 降到 69.0%，再降到 63.0%（下降 16.0 个百分点）。同时，固定在 Step 15 的 Solver 在后续题目集上的答对率从 59.0% 降到 47.0%（下降 12.0 个百分点）——题目确实在变难。两件事同时发生：题目更接近能力边界，但多数票更不可靠。
+  </p>
+
+  <h3>两模型与共享参数：Step 45 差 3.55 分，退化时点也不同</h3>
+  <p data-src="Table 7, Appendix E">
+    Appendix E 进一步说，标签噪声不是退化的全部原因：0.6B 在伪标签准确率还有 70.6% 时就开始掉，4B 能容忍到 48.8%；论文据此认为不存在统一的准确率阈值，模型自身在自生成数据上的退化也在起作用（Appendix E）。需要注意，这里的 70.6% / 48.8% 来自 Appendix E 的 Table 7，表注写明由 Gemini 标注；Table 5 的真准确率用 GPT-4o 标注，两者不是同一个 judge，数字不可直接横比。
+  </p>
+
+  <div class="sim" id="iter-sim">
+    <div class="tabs" id="iter-tabs">
+      <button class="tab active" data-metric="perf">数学平均分</button>
+      <button class="tab" data-metric="pl">伪标签准确率 (%)</button>
+    </div>
+
+    <div class="chart" id="iter-chart"></div>
+    <div class="cx" id="iter-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>R-Zero（两模型）</span>
+      <span><i style="background:var(--c1)"></i>Single-R-Zero（共享参数）</span>
+    </div>
+
+    <div class="readout" data-src="Table 6" id="iter-readout">
+      <div class="r-head">Table 6 · 数学平均分</div>
+      <div id="iter-msg">R-Zero 从 Step 15 的 48.06 升到 Step 45 的 49.12（+1.06），Step 60 回落到 46.52（较峰值低 2.60）。Single-R-Zero 在 Step 15 的 47.31 后降到 45.57（低 1.74）；Step 45 两者差 3.55。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：Table 6 的两组差值<span class="sum-sub">图表直接转录 Table 6，没有拟合或平滑</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>R-Zero 数学：</strong>Step 15 → 45 为 <code>49.12 − 48.06 = 1.06</code> 的上升；Step 45 → 60 为 <code>49.12 − 46.52 = 2.60</code> 的回落。</li>
+        <li><strong>Single-R-Zero 数学：</strong>Step 15 → 45 为 <code>47.31 − 45.57 = 1.74</code> 的下降；Step 60 为 43.89。</li>
+        <li><strong>伪标签准确率：</strong>R-Zero 从 71.0 到 48.8，下降 22.2 个百分点；Single 从 63.4 到 32.6，下降 30.8 个百分点。Step 60 时 Single 为 33.8，仍低于 R-Zero 的 42.2。</li>
+      </ul>
+      <p>图表纵轴从 0 起，避免把 1–3 分的差异画得像几十个百分点。每个柱子的高度按该指标的最大值归一化：数学用 60，伪标签用 100。</p>
+    </div>
+  </details>
+
+  <p data-src="Table 6">
+    两模型在 Step 45 达到 49.12，Step 60 回落到 46.52；Single 在 Step 15 达到 47.31 后降到 45.57（低 1.74），Step 45 两者差 3.55，Step 60 为 43.89。注意 Table 6 的 48.06/49.12 与 Table 1 的 49.93、Table 3 的 49.07 不是同一组数；论文未说明对应关系。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">口径对照</span><h4>摘要、正文、表格给的数并不相同</h4></div>
+    <p>这不是本页的换算问题：同一篇 v4 里，摘要、正文与表格对同一模型给了不同数字。下面逐条并列，不做合并。</p>
+    <details>
+      <summary>展开逐条对照<span class="sum-sub">摘要 / 正文 / 表格各自的数字</span></summary>
+      <div class="details-body">
+        <ul>
+          <li><strong>Qwen3-4B 数学：</strong>摘要写 +6.49；Table 1 的 42.57 → 49.93 为 +7.36；Table 3 的 R-Zero 行是 49.07，与 42.57 相差 +6.50（42.57 + 6.49 = 49.06，与 49.07 在四舍五入上一致，所以 +6.49 与 +6.50 可能只是舍入差，不是两个口径）；Table 6 的 Step 45 是 49.12。论文未说明这些数值是否为同一 checkpoint。</li>
+          <li><strong>Qwen3-4B 通用：</strong>摘要写 +7.54；Table 2 的 26.34 → 31.15 为 +4.81。两个口径并列。</li>
+          <li><strong>Qwen3-8B 数学：</strong>§3.2 正文写 49.18 → 54.69（+5.51）；Table 1 写 48.64 → 53.72（+5.08）。</li>
+          <li><strong>Qwen3-8B 通用：</strong>§3.3 正文写 +5.13；Table 2 写 31.98 → 34.50（+2.52）。</li>
+          <li><strong>消融的通用下降：</strong>§4.1 正文写 w/o Filtering「falls by over 6 points」；Table 3 写 31.15 → 26.69，即 4.46 点。</li>
+        </ul>
+        <p>本页主表按表引用，正文数字单独标来源；差异原因论文未说明。</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>开放域、长轮次、大模型：论文没有覆盖</h2></div>
+  <p class="sec-sub">论文自己列的限制、表格里能看到的代价，以及哪些场景不该用。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">域限制</span><h4>必须有客观正确答案</h4></div>
+      <p data-src="§6">论文在 Limitation 里写得很清楚：R-Zero 的核心机制依赖「correctness can be objectively verified」。创意写作、对话、偏好生成这类开放任务没有明确的对错标准，Challenger–Solver 的反馈就立不住（§6）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">数据退化</span><h4>多数票会跟着题目一起变脏</h4></div>
+      <p data-src="Table 5">伪标签真准确率 79.0% → 69.0% → 63.0%。题越接近能力边界，Solver 的多数票越不可靠；当「共识」本身是「共同犯错」时，Solver 学到的是错误答案<span class="infer">推断</span>（由伪标签真准确率降到 63.0% 推得，§4.4、Table 5）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">长轮次</span><h4>性能会到顶再回落</h4></div>
+      <p data-src="§4.2, Table 6">Figure 3 报告所有模型规模最终都会退化，模型越大退化越晚：0.6B 在第一轮（Step 15）就到峰值，4B 撑到第三轮（Step 45），Step 60 明显回落。Table 6 的 49.12 → 46.52 是同一现象的具体读数（§4.2、Table 6）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">人类先验</span><h4>「零数据」仍有提示词脚手架</h4></div>
+      <p data-src="Appendix B.2, §2.2, Appendix H">主实验的 Challenger 被明确要求出数学题，system prompt 还是人类写的竞赛出题专家提示（Appendix B.2）。Appendix H 去掉数学约束后，8B 变体的<strong>均分</strong>高于原版，但单基准有升有降：MATH 81.6 &lt; 82.0、GSM8K 93.89 &lt; 94.09、AIME25 13.2 &lt; 13.3、AIME24 15.2 &lt; 15.4。这说明域限制是设计选择，不是方法必然。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">评测依赖</span><h4>GPT-4o judge 与「完美 oracle」假设</h4></div>
+      <p data-src="Appendix B.3, §4.4">数学答案由 GPT-4o judge 判定（Appendix B.3）；§4.4 分析伪标签准确率时，直接把 GPT-4o 当作 perfect annotator。换 judge 或换评测口径，数字会变；论文没有报告 judge 的误差范围。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">规模</span><h4>主实验只到 8B</h4></div>
+      <p data-src="§3.1, Figure 3">主表覆盖 Qwen3-4B/8B 与 OctoThinker-3B/8B；0.6B 与 1.7B 只出现在 Figure 3 与 Appendix E 的退化分析里，而且更早回落。把结论外推到 32B、70B 或更大模型，论文没有证据。</p>
+    </div>
+  </div>
+
+  <p data-src="Table 2, §4.2">
+    还有一条容易被忽略的边界：R-Zero 并非所有格子都赢。OctoThinker-3B 的通用均分是 11.12，低于 Absolute Zero 的 16.03（Table 2）；更小的 0.6B/1.7B 也更早退化（Figure 3）。如果场景是「小模型 + 通用推理」，这套方法的收益需要重新验证。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">判断</span><h4>什么时候别用 R-Zero</h4></div>
+    <p>没有客观正确答案的开放任务；需要把结论外推到 8B 以上规模的任务（论文未验证）；以及把「零数据」理解成「零人类先验」的场景。论文的贡献是展示了这条闭环在数学域可行，并把代价（伪标签退化、长轮次崩溃、域限制）一起摆了出来。<span class="infer">推断</span>（本条为应用建议，不是论文结论；论文没有报告 GPU 小时，也未测 &gt;8B）。</p>
+  </div>
+</section>
+
+<footer>
+  <div>R-Zero: Self-Evolving Reasoning LLM from Zero Data · Chengsong Huang, Wenhao Yu, Xiaoyang Wang, Hongming Zhang, Zongxia Li, Ruosen Li, Jiaxin Huang, Haitao Mi, Dong Yu</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.05004v4">https://arxiv.org/abs/2508.05004v4</a>（本页只引 v4，2026-02-13；v1–v3 的图表编号与数字未混用）<br>
+    代码：<a href="https://github.com/Chengsong-Huang/R-Zero">https://github.com/Chengsong-Huang/R-Zero</a><br>
+    笔记：<a href="/r-zeroself-evolving-reasoning-llm-from-zero-data/">R-Zero：Self-Evolving Reasoning LLM from Zero Data</a>
+  </div>
+
+  <details>
+    <summary>博客笔记与 v4 的差异<span class="sum-sub">笔记里的几组数字与 v4 不一致；本页按 v4 引用</span></summary>
+    <div class="details-body">
+      <ul>
+        <li>笔记写 Qwen3-8B-Base 数学 49.18 → 54.69（+5.51），并称来自 Table 1；v4 Table 1 是 48.64 → 53.72（+5.08），49.18 → 54.69 只出现在 §3.2 正文。</li>
+        <li>笔记写 Base Challenger 的 Qwen3-8B 数学为 51.87；v4 Table 1 该行是 52.10。</li>
+        <li>笔记写通用 34.49 → 38.73；v4 Table 2 是 31.98 → 34.50（+2.52），§3.3 正文称 +5.13。</li>
+        <li>笔记写消融 w/o RL-Challenger 48.06 → 44.36；v4 Table 3 没有这一行，只有 w/o Rep. Penalty 与 w/o Filtering。</li>
+        <li>笔记写 w/o Filtering 通用从 30.41 降到 24.26；v4 Table 3 是 31.15 → 26.69（低 4.46）。</li>
+        <li>笔记把伪标签真准确率 79.0% → 63.0% 标为 Table 4；v4 中这是 Table 5，Table 4 是人类数据/混合数据对比。</li>
+        <li>编号与符号：笔记引的「附录 A.2」（出题提示词）在 v4 是 Appendix B.2；「3.5 节」的理论分析在 v4 是 Appendix F；过滤条件原文是 <code>|p̂ − 1/2| ≤ δ</code>，笔记写作 <code>&lt; δ</code>。</li>
+      </ul>
+    </div>
+  </details>
+</footer>
+
+</div>
+
+<script>
+/* 纯原生 JS，IIFE 包裹，每个 getElementById 都判空 */
+(function () {
+  var kEl = document.getElementById('u-k-slider');
+  var qEl = document.getElementById('u-q-slider');
+  if (!kEl || !qEl) return;
+
+  var answersEl = document.getElementById('u-answers');
+  var msgEl = document.getElementById('u-msg');
+  var mode = 'reward';
+  var modeBtns = document.querySelectorAll('#unc-mode .rule-btn');
+  var presetBtns = document.querySelectorAll('#unc-sim .actions .act');
+
+  function fmt2(x) { return x.toFixed(2); }
+
+  function update() {
+    var k = parseInt(kEl.value, 10);
+    var rep = parseFloat(qEl.value);
+    var p = k / 10;
+    var r1 = Math.max(0, 1 - 2 * Math.abs(p - 0.5));
+    var rf = Math.max(0, r1 - rep);
+    var dist = Math.abs(p - 0.5);
+    var keep = dist <= 0.25 + 1e-9;
+
+    var kOut = document.getElementById('u-k');
+    var pOut = document.getElementById('u-p');
+    var r1Out = document.getElementById('u-r1');
+    var repOut = document.getElementById('u-rrep');
+    var rfOut = document.getElementById('u-rfinal');
+    var filterOut = document.getElementById('u-filter');
+    var filterSlot = document.getElementById('u-filter-slot');
+    var kLabel = document.getElementById('u-k-slider-v');
+    var qLabel = document.getElementById('u-q-slider-v');
+
+    if (kOut) kOut.textContent = k + ' / 10';
+    if (pOut) pOut.textContent = fmt2(p);
+    if (r1Out) r1Out.textContent = fmt2(r1);
+    if (repOut) repOut.textContent = fmt2(rep);
+    if (rfOut) rfOut.textContent = fmt2(rf);
+    if (filterOut) filterOut.textContent = keep ? '保留' : '丢弃';
+    if (filterSlot) {
+      if (keep) filterSlot.classList.add('hit');
+      else filterSlot.classList.remove('hit');
+    }
+    if (kLabel) kLabel.textContent = String(k);
+    if (qLabel) qLabel.textContent = fmt2(rep);
+
+    if (answersEl) {
+      answersEl.innerHTML = '';
+      for (var i = 0; i < 10; i++) {
+        var d = document.createElement('div');
+        d.className = 'slot' + (i < k ? ' hit' : '');
+        var n = document.createElement('div');
+        n.className = 'slot-name';
+        n.textContent = String(i + 1);
+        var v = document.createElement('div');
+        v.className = 'slot-val';
+        v.textContent = i < k ? '✓' : '·';
+        d.appendChild(n);
+        d.appendChild(v);
+        answersEl.appendChild(d);
+      }
+    }
+
+    if (msgEl) {
+      if (mode === 'reward') {
+        msgEl.innerHTML = 'p̂ = ' + k + '/10 = ' + fmt2(p) +
+          '；r_unc = 1 − 2|' + fmt2(p) + ' − 0.50| = ' + fmt2(r1) +
+          '；r_rep = ' + fmt2(rep) +
+          '；r = max(0, ' + fmt2(r1) + ' − ' + fmt2(rep) + ') = ' + fmt2(rf) +
+          '。<br>格式检查不通过时，整题奖励直接置 0（§2.2）。';
+      } else {
+        msgEl.innerHTML = '|p̂ − 0.5| = |' + fmt2(p) + ' − 0.50| = ' + fmt2(dist) +
+          '；δ = 0.25；' + (keep ? '<strong>≤ δ，保留进 Solver 数据集</strong>，伪标签取多数票。' : '<strong>&gt; δ，丢弃，不进入 Solver 数据集</strong>。') +
+          '<br>r_rep 只影响 Challenger 奖励，不参与这一步过滤。';
+      }
+    }
+  }
+
+  for (var i = 0; i < modeBtns.length; i++) {
+    modeBtns[i].addEventListener('click', function () {
+      for (var j = 0; j < modeBtns.length; j++) modeBtns[j].classList.remove('active');
+      this.classList.add('active');
+      mode = this.getAttribute('data-mode');
+      update();
+    });
+  }
+
+  for (var m = 0; m < presetBtns.length; m++) {
+    presetBtns[m].addEventListener('click', function () {
+      var k = this.getAttribute('data-k');
+      var q = this.getAttribute('data-q');
+      if (k !== null) kEl.value = k;
+      if (q !== null) qEl.value = q;
+      update();
+    });
+  }
+
+  kEl.addEventListener('input', update);
+  qEl.addEventListener('input', update);
+  update();
+})();
+
+(function () {
+  var host = document.getElementById('iter-chart');
+  if (!host) return;
+
+  var data = {
+    perf: {
+      scale: 60,
+      unit: '',
+      decimals: 2,
+      two: [48.06, 48.44, 49.12, 46.52],
+      single: [47.31, 46.95, 45.57, 43.89]
+    },
+    pl: {
+      scale: 100,
+      unit: '%',
+      decimals: 1,
+      two: [71.0, 56.2, 48.8, 42.2],
+      single: [63.4, 46.6, 32.6, 33.8]
+    }
+  };
+  var metric = 'perf';
+  var tabs = document.querySelectorAll('#iter-tabs .tab');
+
+  function makeBar(value, color, cfg) {
+    var wrap = document.createElement('div');
+    wrap.className = 'cbar';
+    var track = document.createElement('div');
+    track.className = 'track';
+    var fill = document.createElement('div');
+    fill.className = 'fill';
+    fill.style.background = color;
+    fill.style.height = (value / cfg.scale * 100) + '%';
+    track.appendChild(fill);
+    var num = document.createElement('div');
+    num.className = 'num';
+    num.textContent = value.toFixed(cfg.decimals) + cfg.unit;
+    wrap.appendChild(track);
+    wrap.appendChild(num);
+    return wrap;
+  }
+
+  function render() {
+    var cfg = data[metric];
+    host.innerHTML = '';
+    for (var i = 0; i < 4; i++) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = 'Step ' + (15 * (i + 1));
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      bars.appendChild(makeBar(cfg.two[i], 'var(--accent)', cfg));
+      bars.appendChild(makeBar(cfg.single[i], 'var(--c1)', cfg));
+      row.appendChild(name);
+      row.appendChild(bars);
+      host.appendChild(row);
+    }
+    var x = document.getElementById('iter-x');
+    if (x) {
+      x.innerHTML = '<span>R-Zero</span><span>Single</span>';
+    }
+    var msg = document.getElementById('iter-msg');
+    if (msg) {
+      if (metric === 'perf') {
+        msg.innerHTML = 'R-Zero 从 Step 15 的 48.06 升到 Step 45 的 49.12（+1.06），Step 60 回落到 46.52（较峰值低 2.60）。Single-R-Zero 在 Step 15 的 47.31 后降到 45.57（低 1.74），Step 45 两者差 3.55；Step 60 为 43.89。';
+      } else {
+        msg.innerHTML = 'R-Zero 从 71.0% 降到 48.8%（−22.2 个百分点）；Single 从 63.4% 降到 32.6%（−30.8 个百分点）。Step 60 时 Single 为 33.8%，仍低于 R-Zero 的 42.2%。';
+      }
+    }
+  }
+
+  for (var t = 0; t < tabs.length; t++) {
+    tabs[t].addEventListener('click', function () {
+      for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+      this.classList.add('active');
+      metric = this.getAttribute('data-metric');
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

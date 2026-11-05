@@ -1,0 +1,678 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 15.1 | Table 1 | 43.9-28.8 |
+| 4.1 | Table 1 | 41.0-36.9 |
+| 2.9 | Table 1 | 41.0-38.1 |
+| 38.1 | Table 1 | 267.0/7 |
+| 267.0 | Table 1 | 20.0+47.0+73.2+36.4+35.4+28.3+26.7 |
+| 43.76 | Table 1 | 306.3/7 |
+| 306.3 | Table 1 | 26.7+57.8+79.2+38.6+42.1+33.3+28.6 |
+| 0.14 | Table 1 | 43.9-43.76 |
+| 16.7 | Figure 12 | 48.9-32.2 |
+| 2.5 | §4.3 | 1/0.4 |
+| 2.0 | §4.3 | 1/(1.24*0.4) |
+| 28.2 | Table 2 | (680.3/530.7-1)*100 |
+| 149.6 | Table 2 | 680.3-530.7 |
+| 9.2 | Table 3 | 230/2500*100 |
+| 1.8 | Table 4 | 37.8-36.0 |
+| 1.7 | Table 4 | 37.8-36.1 |
+| 3.6 | Table 4 | 39.4-35.8 |
+| 3.1 | Table 7 | 52.0-48.9 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRIME · 只用结果标签，训出 token 级过程奖励</title>
+<meta name="description" content="PRIME 用结果标签在线训练隐式 PRM，以 β log(πφ/πref) 生成 token 级过程奖励；七项基准平均 43.9，比 SFT 高 15.1 个百分点。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.flow-note{font-size:12.5px;color:var(--text-soft);text-align:center;margin-top:-4px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">PRIME</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">隐式奖励</a>
+      <a href="#training">训练</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>论文 · arXiv 2025 · 2502.01456v2</span>
+  <h1>PRIME：只用结果标签，训出 token 级过程奖励</h1>
+  <p class="hero-sub">
+    过程奖励能把信用分配做细，但每一步都要标签，成本高到无法在线更新。
+    PRIME 把奖励模型写成 causal LM，用最终对错做交叉熵训练，推理时取 <code>β log(πφ/πref)</code> 得到每个 token 的隐式奖励；PRM 因此可以和策略一起在线更新。
+    代价是仍然依赖结果验证器，实验只覆盖数学与代码。
+  </p>
+  <div class="meta">
+    <span>Shanghai AI Lab · Tsinghua · UIUC 等</span>
+    <a href="https://arxiv.org/abs/2502.01456v2" target="_blank" rel="noopener">arXiv 2502.01456v2 ↗</a>
+    <a href="https://github.com/PRIME-RL/PRIME" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    结果奖励只在序列末尾给一个信号，所有 token 共享同一个 advantage；过程奖励能细分信用，但人工标注每一步的成本让它无法跟着策略在线更新。
+  </p>
+  <p>
+    <strong>PRIME 的关键替换</strong>：奖励模型 <code>πφ</code> 仍是 causal LM，训练时只用 <code>r_o(y)</code> 做序列级交叉熵；推理时把同一模型在 token 上的 log 概率比拿出来，<code>rφ(y_t)=β log[πφ(y_t|y&lt;t)/πref(y_t|y&lt;t)]</code>。结果标签负责「对错」，语言模型负责「每一步有多像会通向对错的续写」。
+  </p>
+  <p>
+    在线更新是重点：PRM 用策略自己采出的 rollout 更新，分布跟得上策略、缓解漂移（§5.1）；SFT 模型直接当 PRM 初始化，省掉独立 RM 训练阶段。代价是相对 RLOO 每步多一次 PRM 更新（Table 2：150.9 秒），相对传统 ORM 的 token 级奖励不额外收费（§3.1），且必须有一个可靠的结果验证器。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">+15.1<small>pp</small></div>
+      <div class="k">七项平均：43.9 vs SFT 28.8<br>（Table 1，43.9 − 28.8）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4.3">2.5<small>×</small></div>
+      <div class="k">达到相同训练奖励所需步数<br>（1 / 0.40；wall-clock 论文估计约 2×）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">0<small>RM 数据</small></div>
+      <div class="k">对照 Qwen2.5-Math-7B-Instruct<br>用 618K in-house RM 数据</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>答案对了，不代表每一步都对</h2></div>
+  <p class="sec-sub">结果奖励把所有信用压到最后一个 token；这是信用分配问题，不是训练技巧问题。</p>
+
+  <p>策略梯度的通用形式里，advantage 是「从第 <code>t</code> 步开始的折扣回报减去基线」：</p>
+  <div class="eq">A<sub>t</sub> = Σ<sub>s=t</sub><sup>T</sup> γ<sup>s−t</sup> r(y<sub>s</sub>) − b</div>
+  <div class="eq-cap">Eq. 2 · Monte-Carlo advantage；γ 是折扣因子，b 是基线</div>
+
+  <p>如果只有结果奖励，<code>r(y<sub>t</sub>)=0</code>（<code>t&lt;T</code>），只有最后一个 token 拿到 <code>r(y<sub>T</sub>)</code>。Eq. 2 退化成 <code>A = r(y<sub>T</sub>) − b</code>：<strong>一条回复里所有 token 共享同一个 advantage</strong>，模型无法知道哪一步写对了、哪一步写歪了。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">§2.1</span><h4>稀疏奖励的三个直接后果</h4></div>
+    <ul>
+      <li><strong>奖励侥幸：</strong>答案对、过程错也能拿高分，策略可能强化这种「蒙对」的路径。</li>
+      <li><strong>样本效率低：</strong>反馈只在序列末尾出现，中间步骤没有梯度信号。</li>
+      <li><strong>信用分配难：</strong>责任无法落到具体 token 或步骤，长链条推理尤其严重。</li>
+    </ul>
+  </div>
+
+  <p>稠密过程奖励本来是对症药：每个 token 或每一步都给分，advantage 就能按位置拆开。但第一步就卡住了——<strong>过程标签怎么定义？</strong>推理步骤不像 token 那样有天然边界；人工标每一步成本高；而且「这一步错了」不一定等于「对最终答案没有贡献」，有些错误步骤反而通过剪枝搜索空间帮到了最终结果（§2.2 C1）。</p>
+
+  <p>所以真正的问题不是「要不要稠密奖励」，而是<strong>「稠密奖励的标签从哪来，怎么在策略变化时持续更新」</strong>。这引出了 02 的两条现有路线。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现有路线：一条太稀疏，一条太贵</h2></div>
+  <p class="sec-sub">结果奖励便宜但粗；显式 PRM 细但需要步级标签，离线训练还会被策略分布甩开。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>只用结果奖励的 RL</h4></div>
+      <p><strong>做法：</strong>RLOO、GRPO、PPO 等只接一个规则验证器：数学题比对最终答案，代码跑测试用例。</p>
+      <p><strong>优点：</strong>验证器便宜、可扩展，奖励不容易被策略直接 hack。</p>
+      <p><strong>卡点：</strong>信号稀疏。所有 token 共享同一个 outcome advantage，过程质量没有被单独评价；长推理链上，信用分配仍然靠猜（§2.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>显式过程奖励模型（PRM）</h4></div>
+      <p><strong>做法：</strong>给每一步或每个 token 打过程标签，训练一个独立的 PRM，再把它接进 RL。</p>
+      <p><strong>优点：</strong>信号稠密，理论上能更细地分配信用。</p>
+      <p><strong>卡点：</strong>步级标签要么靠人工流水线（Lightman et al. 2023），要么靠估计方法——论文引用后者需要约 <strong>10×</strong> 的 rollout（§1）。离线 PRM 还会因策略分布漂移被 overoptimize，出现 reward hacking（Gao et al. 2022；§5.1）。</p>
+    </div>
+  </div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">C1</span><h4>过程奖励难定义</h4></div>
+      <p>推理步骤没有天然边界；某些「错步」也可能通过剪枝搜索空间贡献最终答案（§2.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">C2</span><h4>在线更新不可扩展</h4></div>
+      <p>要防 reward hacking，PRM 得跟着策略在线更新；但传统 PRM 每轮都要新的步级标注，成本不可行（§2.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">C3</span><h4>显式奖励建模有额外成本</h4></div>
+      <p>独立 RM 需要额外数据与训练。论文的对照 EurusPRM 就用了额外 <strong>500K</strong> 数据（§5.1）。</p>
+    </div>
+  </div>
+
+  <p>PRIME 的选择不是「再训一个更好的 PRM」，而是<strong>换一种奖励参数化</strong>：让 PRM 本身就是一个语言模型，用结果标签训练，却能在推理时输出 token 级奖励。这样 C1 的步级标签、C2 的在线更新、C3 的独立 RM 阶段可以一起绕开。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>过程奖励不必标注：从结果标签里推出来</h2></div>
+  <p class="sec-sub">把 PRM 写成语言模型，序列级奖励是 log 概率比；到 token 级，同一个比值就是过程奖励。</p>
+
+  <p><strong>序列级：</strong>隐式 PRM <code>πφ</code> 和参考模型 <code>πref</code> 都是 causal LM。奖励定义为两个模型对整条回复的 log 概率比：</p>
+  <div class="eq">r<sub>φ</sub>(y) := β · log [ π<sub>φ</sub>(y) / π<sub>ref</sub>(y) ]</div>
+
+  <p><strong>Token 级：</strong>把整条概率拆成逐 token 条件概率，就得到 Eq. 3：</p>
+  <div class="eq">r<sub>φ</sub>(y<sub>t</sub>) := β · log [ <span class="hl-c">π<sub>φ</sub>(y<sub>t</sub> | y<sub>&lt;t</sub>)</span> / <span class="hl-a">π<sub>ref</sub>(y<sub>t</sub> | y<sub>&lt;t</sub>)</span> ]</div>
+  <div class="eq-cap">Eq. 3 · 陶土红是待训练的隐式 PRM，青灰是固定参考模型；β 是奖励缩放</div>
+
+  <p>训练阶段和普通 ORM 一样：只拿最终结果 <code>r<sub>o</sub>(y) ∈ {0,1}</code>，对序列级奖励做交叉熵：</p>
+  <div class="eq" style="font-size:13.5px">L<sub>CE</sub>(φ) = −E<sub>(x,y,r<sub>o</sub>(y))~T</sub> [ r<sub>o</sub>(y) · log σ(r<sub>φ</sub>(y)) + (1 − r<sub>o</sub>(y)) · log(1 − σ(r<sub>φ</sub>(y))) ]</div>
+  <div class="eq-cap">Algorithm 1 第 8 行 · T 是经过准确率过滤后的 rollout 集合</div>
+
+  <p>关键在于：<strong>训练时只用了结果标签，推理时却拿到了 token 级信号</strong>。论文强调同一个 <code>πφ</code> 既用于在线更新，也用于算 token 级奖励，因此相对传统 ORM 不引入额外的奖励建模阶段与过程标注开销（§3.1）。因此 PRM 可以在线更新：每轮用策略新采的 rollout 和结果标签更新 <code>πφ</code>，奖励分布跟得上策略，而不是停在一个离线快照上。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心机制</span><h4>结果标签负责对错，语言模型负责「每一步有多像会通向对错的续写」</h4></div>
+    <p><code>r<sub>φ</sub>(y<sub>t</sub>)</code> 为正，说明 <code>πφ</code> 比 <code>πref</code> 更倾向生成这个 token；为负则相反。它衡量的是「这个 token 在多大程度上把模型推向高结果奖励的分布」，不是对这一步逻辑的绝对正确性判断。</p>
+  </div>
+
+  <p><strong>怎么把稠密奖励接进 RL：</strong>PRIME 把过程回报和结果回报<strong>分开算</strong>，再相加。论文的理由是直接混合两者可能导致数值不稳定（§3.2）。对过程奖励，先用平均隐式奖励算 leave-one-out 基线，再对每个 token 做折扣回报；对结果奖励，直接做 LOO。合起来是 Eq. 5：</p>
+  <div class="eq" style="font-size:13px">A<sub>t</sub><sup>i</sup> = Σ<sub>s=t</sub><sup>|y<sup>i</sup>|</sup> γ<sup>s−t</sup> [ r<sub>φ</sub>(y<sub>s</sub><sup>i</sup>) − (1/(K−1)) Σ<sub>j≠i</sub> r<sub>φ</sub>(y<sup>j</sup>) ] + [ r<sub>o</sub>(y<sup>i</sup>) − (1/(K−1)) Σ<sub>j≠i</sub> r<sub>o</sub>(y<sup>j</sup>) ]</div>
+  <div class="eq-cap">Eq. 5 · 前一项是 implicit process reward 的 RLOO 回报，后一项是 outcome reward 的 RLOO 回报</div>
+
+  <p>策略更新用 PPO clip surrogate loss（Eq. 6），把重要性采样比限制在 <code>[1−ε, 1+ε]</code>。论文默认 <code>K=4</code>、<code>β=0.05</code>、KL 系数 0（§4.1）。</p>
+
+  <h3>自己动手：token 奖励有多大、是正还是负</h3>
+  <p>下面只计算 Eq. 3。拖动 β、<code>πφ</code>、<code>πref</code>，读数会给出该 token 的隐式奖励。默认 β=0.05 来自论文的 PRM 训练设置（§4.1），概率是手动设定的，不是论文里的具体样本。</p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>β 奖励缩放 <span class="v" id="beta-v">0.05</span></label>
+        <input type="range" id="beta" min="0.01" max="0.20" step="0.01" value="0.05">
+      </div>
+      <div class="ctrl">
+        <label>πφ(y_t | y&lt;t) <span class="v" id="pphi-v">0.80</span></label>
+        <input type="range" id="pphi" min="0.05" max="0.95" step="0.05" value="0.80">
+      </div>
+      <div class="ctrl">
+        <label>πref(y_t | y&lt;t) <span class="v" id="pref-v">0.40</span></label>
+        <input type="range" id="pref" min="0.05" max="0.95" step="0.05" value="0.40">
+      </div>
+    </div>
+    <div class="readout" id="ir-readout" data-src="§3.1 Eq.3">
+      <div class="r-head">token 级隐式奖励</div>
+      <div id="ir-msg">拖动滑块，查看 rφ(y_t) 的符号和大小。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算两组参数<span class="sum-sub">核对 Eq. 3 的读数</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组：</strong>β=0.05，πφ=0.80，πref=0.40 → 0.05 × ln(0.80/0.40) = 0.05 × 0.693147 = <code>0.0347</code>。</p>
+      <p><strong>第 2 组：</strong>β=0.05，πφ=0.20，πref=0.80 → 0.05 × ln(0.20/0.80) = 0.05 × (−1.386294) = <code>−0.0693</code>。</p>
+      <p>页面 JS 用同样的 <code>toFixed(4)</code> 输出，四舍五入后与上面逐位一致。这里只计算 Eq. 3 的 log-ratio；没有模拟 πφ 的训练、CE loss 或 advantage。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>CE 损失的最优点带一个偏置，为什么 PRIME 不受影响？<span class="sum-sub">附录 C.2</span></summary>
+    <div class="details-body">
+      <p>因为 <code>πφ</code> 和 <code>πref</code> 都是自归一化的语言模型，CE 的最小损失 0 达不到；最优解满足 <code>β log(πφ*/πref) = r<sub>o</sub> + c</code>，多出一个与 prompt 有关的常数 <code>c</code>（§C.2）。PRIME 用的是相对奖励 <code>r<sub>φ</sub>(y<sup>i</sup>) − LOO</code>，同一个 prompt 内的 <code>c</code> 会被减掉，所以不影响 advantage。论文也用 DPO 损失做了对照：Table 8（96 步）的 Avg 为 32.4（DPO）vs 32.3（CE），两者接近，作者选 CE 是因为更省显存。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训/怎么算 ================= -->
+<section class="block" id="training">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练循环：PRM 与策略同步更新，PRM 更新占 150.9 秒/步</h2></div>
+  <p class="sec-sub">Algorithm 1 的工程版本：采样 K 条、验证、过滤、算隐式奖励、更新 PRM、算 advantage、PPO 更新策略。</p>
+
+  <p>把 Algorithm 1 展开成一轮循环：</p>
+  <ol>
+    <li><strong>初始化：</strong>策略 <code>πθ</code>、旧策略 <code>πθold</code>、隐式 PRM <code>πφ</code>、参考模型 <code>πref</code> 全部从同一个起点 <code>πinit</code> 复制（第 1 行）。</li>
+    <li><strong>采样：</strong>每个 prompt 采 <code>K</code> 条回复，默认 <code>K=4</code>（第 4 行）。</li>
+    <li><strong>结果验证：</strong>数学用 exact match，代码用通过测试用例的比例，得到 <code>r_o(y)</code>（§4.1）。</li>
+    <li><strong>过滤：</strong>只保留准确率落在中间区间的 prompt，平衡难度与数据分布（§3.3；Figure 2）。</li>
+    <li><strong>隐式奖励：</strong>对过滤后的样本前向 <code>πφ</code> 和 <code>πref</code>，用 Eq. 3 算每个 token 的奖励（第 7 行）。</li>
+    <li><strong>更新 PRM：</strong>用 <code>r_o(y)</code> 做 CE 更新 <code>πφ</code>（第 8 行）。</li>
+    <li><strong>算 advantage：</strong>按 Eq. 5 把过程回报和结果回报相加（第 9 行）。</li>
+    <li><strong>更新策略：</strong>用 PPO clip loss 更新 <code>πθ</code>，然后 <code>θold ← θ</code>（第 10–11 行）。</li>
+  </ol>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">实验设置</span><h4>Qwen2.5-Math-7B-Base · 8×A800</h4></div>
+    <p>策略学习率 <code>5×10<sup>−7</sup></code>，PRM 学习率 <code>10<sup>−6</sup></code>，batch size 256，micro batch 8；每个 prompt 采 4 条；<code>β=0.05</code>；KL 系数 0（§4.1）。训练用 veRL。</p>
+  </div>
+
+  <h3>每一步多花多少时间</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2 · PRIME 与 RLOO 的单步耗时（秒，8×A800；v2）</caption>
+      <thead>
+        <tr><th>方法</th><th class="num">Rollout</th><th class="num">Policy update</th><th class="num">PRM update</th><th class="num">Others</th><th class="num">Sum</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PRIME</td><td class="num">281.7</td><td class="num">156.6</td><td class="num">150.9</td><td class="num">91.1</td><td class="num">680.3</td></tr>
+        <tr><td>RLOO</td><td class="num">282.4</td><td class="num">157.9</td><td class="num">0</td><td class="num">90.4</td><td class="num">530.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>PRM 更新本身占 <strong>150.9 秒</strong>；PRIME 的 Sum 是 <strong>680.3 秒</strong>，RLOO 是 <strong>530.7 秒</strong>，总耗时净增 <strong>149.6 秒</strong>（680.3 − 530.7）。论文正文称相对 RLOO 的时间成本高 <strong>24%</strong>；按 Table 2 的 Sum 复算为 <strong>28.2%</strong>（<code>680.3 / 530.7 − 1</code>），两处不一致，原文未说明 24% 是按每步均值还是总时间取数。</p>
+  <p>但 PRIME 达到相同训练奖励只需要 RLOO 的 <strong>40%</strong> 步数，所以按步数算是 <strong>2.5×</strong> 样本效率；论文按训练时间估计仍有约 <strong>2×</strong> 的效率（§4.3）。这两个倍数不是同一个口径：2.5× 是步数，2× 是 wall-clock。</p>
+
+  <h3>资源账：省掉的是 RM 数据，不是 RL 数据</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 3 · Eurus-2-7B-PRIME 与 Qwen2.5-Math-7B-Instruct 的资源对比（v2）</caption>
+      <thead>
+        <tr><th>项目</th><th>Eurus-2-7B-PRIME</th><th>Qwen2.5-Math-7B-Instruct</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base Model</td><td>Qwen2.5-Math-7B</td><td>Qwen2.5-Math-7B</td></tr>
+        <tr><td>SFT Data</td><td>230K（open-source）</td><td>2.5M（open-source &amp; in-house）</td></tr>
+        <tr><td>RM Data</td><td>0</td><td>618K（in-house）</td></tr>
+        <tr><td>RM</td><td>Eurus-2-7B-SFT</td><td>Qwen2.5-Math-RM（72B）</td></tr>
+        <tr><td>RL Data</td><td>150K queries × 4 samples</td><td>66K queries × 32 samples</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>SFT 数据 <strong>230K</strong> vs <strong>2.5M</strong>；按 230/2500 算是 <strong>9.2%</strong>，论文约称 10%。RM 数据是 <strong>0</strong> vs <strong>618K</strong>；RL 数据是 <strong>150K queries × 4 samples</strong> vs <strong>66K queries × 32 samples</strong>。省掉的是独立 RM 训练阶段与 RM 数据，不是 RL rollout。</p>
+
+  <h3>两个实现细节：单次前向与参考模型</h3>
+  <p><strong>单次 vs 双次前向：</strong>默认单次前向，直接用旧 PRM 的过程奖励；双次前向先更新 PRM 再重算奖励，PRM 准确率更高，但训练奖励与单次接近（§B.2；Figure 11）。</p>
+  <p><strong>参考模型：</strong>可以用初始 SFT 模型（SFT ref），也可以用运行策略的旧 logprob（policy ref）；两者训练奖励接近，但只有保留初始 SFT 模型才能算 KL（§B.1；Figure 9–10）。</p>
+  <p><strong>在线 prompt 过滤：</strong>论文用「只接结果奖励的 RLOO」做消融，过滤后训练奖励方差明显下降（§3.3；Figure 2）。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>四条数据流：采样、验证、隐式奖励、策略更新</h2></div>
+  <p class="sec-sub">把 Algorithm 1 画成一张图：四个模型从同一个初始化出发，PRM 在每一轮用结果标签更新。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 430" role="img" aria-label="PRIME 训练循环：初始化、采样、结果验证、隐式奖励、PRM 更新、优势估计、策略更新">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect x="170" y="18" width="715" height="370" rx="16" fill="none" stroke="var(--border-strong)" stroke-width="1.4" stroke-dasharray="7 6"></rect>
+      <text x="184" y="34" font-size="11" fill="var(--text-soft)" font-family="'JetBrains Mono', monospace">for iteration = 1 … N</text>
+
+      <!-- init -->
+      <rect x="15" y="45" width="130" height="125" rx="12" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="80" y="70" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">初始化</text>
+      <text x="80" y="95" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="'JetBrains Mono', monospace">πθ ← πinit</text>
+      <text x="80" y="113" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="'JetBrains Mono', monospace">πθold ← πinit</text>
+      <text x="80" y="131" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="'JetBrains Mono', monospace">πφ ← πinit</text>
+      <text x="80" y="149" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="'JetBrains Mono', monospace">πref ← πinit</text>
+      <text x="80" y="164" text-anchor="middle" font-size="9.5" fill="var(--text-soft)">Algorithm 1 · line 1</text>
+
+      <!-- step 1 -->
+      <rect x="190" y="40" width="180" height="90" rx="12" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="280" y="66" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">① Rollout</text>
+      <text x="280" y="88" text-anchor="middle" font-size="11" fill="var(--text-muted)">每个 prompt 采 K 条</text>
+      <text x="280" y="107" text-anchor="middle" font-size="10.5" fill="var(--text-soft)" font-family="'JetBrains Mono', monospace">默认 K = 4</text>
+
+      <!-- step 2 -->
+      <rect x="410" y="40" width="180" height="90" rx="12" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="500" y="64" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">② 结果验证 + 过滤</text>
+      <text x="500" y="85" text-anchor="middle" font-size="11" fill="var(--text-muted)">数学 exact match</text>
+      <text x="500" y="103" text-anchor="middle" font-size="11" fill="var(--text-muted)">代码 #pass / #tests</text>
+      <text x="500" y="121" text-anchor="middle" font-size="11" fill="var(--text-muted)">按准确率筛 prompt</text>
+
+      <!-- step 3 -->
+      <rect x="630" y="40" width="180" height="90" rx="12" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="1.2"></rect>
+      <text x="720" y="66" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">③ 隐式奖励</text>
+      <text x="720" y="88" text-anchor="middle" font-size="11" fill="var(--text-muted)">πφ、πref 逐 token 前向</text>
+      <text x="720" y="107" text-anchor="middle" font-size="10.5" fill="var(--text-soft)" font-family="'JetBrains Mono', monospace">Eq.3: β log(πφ/πref)</text>
+
+      <!-- step 4 -->
+      <rect x="630" y="240" width="180" height="90" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="720" y="266" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">④ 在线更新 PRM</text>
+      <text x="720" y="288" text-anchor="middle" font-size="11" fill="var(--text-muted)">用 r_o(y) 做 CE</text>
+      <text x="720" y="307" text-anchor="middle" font-size="11" fill="var(--text-muted)">πφ 跟随策略分布</text>
+
+      <!-- step 5 -->
+      <rect x="410" y="240" width="180" height="90" rx="12" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="1.2"></rect>
+      <text x="500" y="266" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">⑤ 优势估计</text>
+      <text x="500" y="288" text-anchor="middle" font-size="11" fill="var(--text-muted)">过程 return</text>
+      <text x="500" y="306" text-anchor="middle" font-size="11" fill="var(--text-muted)">+ 结果 return</text>
+      <text x="500" y="323" text-anchor="middle" font-size="10.5" fill="var(--text-soft)" font-family="'JetBrains Mono', monospace">Eq.5 · 各自 LOO</text>
+
+      <!-- step 6 -->
+      <rect x="190" y="240" width="180" height="90" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="280" y="266" text-anchor="middle" font-size="14" font-weight="700" fill="var(--text)">⑥ 策略更新</text>
+      <text x="280" y="288" text-anchor="middle" font-size="11" fill="var(--text-muted)">PPO clip</text>
+      <text x="280" y="307" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="'JetBrains Mono', monospace">θold ← θ</text>
+
+      <!-- arrows -->
+      <line x1="145" y1="90" x2="190" y2="90" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="370" y1="85" x2="410" y2="85" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="590" y1="85" x2="630" y2="85" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="720" y1="130" x2="720" y2="240" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="630" y1="285" x2="590" y2="285" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="410" y1="285" x2="370" y2="285" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="280" y1="240" x2="280" y2="132" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <text x="290" y="192" font-size="11" fill="var(--text-soft)">下一轮</text>
+
+      <text x="450" y="410" text-anchor="middle" font-size="11" fill="var(--text-soft)">πφ 的更新只依赖结果标签 r_o；token 奖励由 Eq.3 从同一个 πφ 读出。</text>
+    </svg>
+    <figcaption>
+      图 1 · PRIME 的一轮训练循环。按 v2 Figure 1 与 Algorithm 1 重绘；虚线框表示 iteration = 1…N 的循环。
+    </figcaption>
+  </figure>
+
+  <details>
+    <summary>这张图覆盖了什么、没覆盖什么<span class="sum-sub">与 Algorithm 1 的对照</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>Algorithm 1 第 1–11 行的主循环——初始化、采样、结果验证、准确率过滤、Eq.3 隐式奖励、CE 更新 PRM、Eq.5 advantage、PPO 更新、<code>θold ← θ</code>。</p>
+      <p><strong>未覆盖：</strong>准确率过滤的具体阈值（论文只写 “a certain accuracy range”，未给数值）；veRL 的分布式调度与显存 offload 细节；GAE 分支（论文默认 MC + RLOO；§5.3 另有 GRPO、REINFORCE、PPO 变体）。</p>
+      <p>图中把 <code>πφ</code> 和 <code>πref</code> 的前向画成一步；实际实现是两个独立前向，且 PRM 更新与策略更新共享同一批过滤后的 rollout。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>同 240 步平均 41.0：按表内 Avg 高 4.1、按七列复算高 2.9；最终 592 步到 43.9</h2></div>
+  <p class="sec-sub">Table 1 的七项基准；PRIME-240 与 RLOO-240 同步数对比，PRIME-592 是最终模型。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 · 七项推理基准（v2；节选。省略 GPT-4o、Llama-3.1-70B-Instruct、Qwen2.5-Math-7B-Instruct，以及 PRIME 的 80/160/320 步行；PRIME-240 与 RLOO-240 同为 240 步，PRIME-592 为最终模型）</caption>
+      <thead>
+        <tr><th>方法</th><th class="num">Step</th><th class="num">AIME 2024</th><th class="num">AMC</th><th class="num">MATH-500</th><th class="num">MinervaMath</th><th class="num">OlympiadBench</th><th class="num">LeetCode</th><th class="num">LiveCodeBench</th><th class="num">Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Eurus-2-7B-SFT</td><td class="num">0</td><td class="num">3.3</td><td class="num">30.1</td><td class="num">66.2</td><td class="num">32.7</td><td class="num">29.8</td><td class="num">21.7</td><td class="num">17.8</td><td class="num">28.8</td></tr>
+        <tr><td>RLOO w/ OV Only</td><td class="num">240</td><td class="num">20.0</td><td class="num">47.0</td><td class="num">73.2</td><td class="num">36.4</td><td class="num">35.4</td><td class="num">28.3</td><td class="num">26.7</td><td class="num">36.9</td></tr>
+        <tr><td>Eurus-2-7B-PRIME</td><td class="num">240</td><td class="num">20.0</td><td class="num">50.6</td><td class="num">78.2</td><td class="num">39.3</td><td class="num">40.3</td><td class="num">31.1</td><td class="num">27.5</td><td class="num">41.0</td></tr>
+        <tr class="best"><td>Eurus-2-7B-PRIME</td><td class="num">592</td><td class="num">26.7</td><td class="num">57.8</td><td class="num">79.2</td><td class="num">38.6</td><td class="num">42.1</td><td class="num">33.3</td><td class="num">28.6</td><td class="num">43.9</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">表内 Avg 口径：RLOO 行七列为 20.0/47.0/73.2/36.4/35.4/28.3/26.7，和 267.0，算术平均 <strong data-src="Table 1">38.1</strong>（267.0/7），但表内 Avg 写 36.9；PRIME-592 行七列和 306.3，算术平均 <strong data-src="Table 1">43.76</strong>，表内 Avg 写 43.9（差 0.14）。原文未说明 Avg 的取整或加权口径。按表内 Avg，41.0 − 36.9 = 4.1；按七列复算，41.0 − 38.1 = <strong data-src="Table 1">2.9</strong>。</p>
+  <p style="font-size:13px;color:var(--text-soft)">AIME 2024 列在 §4.2 明确为 pass@1；其余列按 Table 1 表内口径。Table 12 另报 avg@16（temperature=0.3）。</p>
+
+  <h3>切换基准：看四个设置在同一项上的位置</h3>
+  <p>PRIME-240 与 RLOO-240 是同步数对照；PRIME-592 是最终模型。切到 Avg. 可以看到表内 Avg 28.8 → 36.9 → 41.0 → 43.9（RLOO 的七列均值为 38.1）。</p>
+
+  <div class="tabs" id="bench-tabs">
+    <button class="tab active" data-bench="Avg.">Avg.</button>
+    <button class="tab" data-bench="AIME 2024">AIME 2024</button>
+    <button class="tab" data-bench="AMC">AMC</button>
+    <button class="tab" data-bench="MATH-500">MATH-500</button>
+    <button class="tab" data-bench="MinervaMath">MinervaMath</button>
+    <button class="tab" data-bench="OlympiadBench">OlympiadBench</button>
+    <button class="tab" data-bench="LeetCode">LeetCode</button>
+    <button class="tab" data-bench="LiveCodeBench">LiveCodeBench</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="chart" id="bench-chart"></div>
+    <div class="cx" id="bench-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>SFT</span>
+      <span><i style="background:var(--c2)"></i>RLOO-240</span>
+      <span><i style="background:var(--c3)"></i>PRIME-240</span>
+      <span><i style="background:var(--accent)"></i>PRIME-592</span>
+    </div>
+    <div class="readout" id="bench-readout" data-src="Table 1">
+      <div class="r-head">Table 1 · Avg.</div>
+      <div>选择上方基准查看四个设置的分数（AIME 列为 pass@1；其余按 Table 1 口径）。</div>
+    </div>
+  </div>
+
+  <h3>同 240 步的差距，比最终分差更能说明问题</h3>
+  <p>在相同 240 步下，PRIME 的七项平均是 <strong data-src="Table 1">41.0</strong>，RLOO 表内 Avg 是 <strong data-src="Table 1">36.9</strong>；按表内 Avg 差 <strong>4.1 个百分点</strong>（41.0 − 36.9，Table 1），按七列复算则差 <strong>2.9</strong>（41.0 − 38.1）。除 AIME 打平外，其余基准 PRIME-240 都更高。最终 592 步的 PRIME 到 <strong data-src="Table 1">43.9</strong>（表内 Avg；七列复算 43.76），相对 SFT 的 <strong data-src="Table 1">28.8</strong> 高 <strong>15.1 个百分点</strong>（43.9 − 28.8）。</p>
+  <p>口径提醒：论文 Abstract 与 §4.2 写的是 “15.1% average improvement”；按 Table 1 的表内 Avg 计算，这是 <strong>15.1 个百分点</strong>，不是相对提升 15.1%。同一篇论文的 §1 又写 “16.7% improvement on average”，Figure 12 图注写 “+16.7%”；Figure 12 的 Average 为 <strong data-src="Figure 12">48.9</strong> vs <strong data-src="Figure 12">32.2</strong>（AIME 2024、AMC、Minerva Math、OlympiadBench、MATH-500 五项数学基准），差 <strong>16.7 个百分点</strong>；图注写 +16.7% 但未写 pp。Table 1 的 15.1 是七项（含 LeetCode/LiveCodeBench）的表内 Avg 差 43.9 − 28.8；两者基准集合不同。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">15.1 的来源</span><h4>Abstract / §4.2</h4></div>
+      <p>“PRIME achieves a 15.1% average improvement across several key reasoning benchmarks over the SFT model.”（Abstract）</p>
+      <p>Table 1 的七项 Avg：43.9 − 28.8 = 15.1 个百分点。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">16.7 的来源</span><h4>§1 / Figure 12 图注</h4></div>
+      <p>§1：“leading to 16.7% improvement on average”；Figure 12 图注：“PRIME brings substantial performance gain (+16.7%) over Eurus-2-7B-SFT.”</p>
+      <p>Figure 12 的 Average 是 48.9 vs 32.2（五项数学基准），差 16.7 个百分点；图注写 +16.7% 但未写 pp。Table 1 的 15.1 是七项的表内 Avg 差。</p>
+    </div>
+  </div>
+
+  <h3>AIME 单项：26.7 的对照位置</h3>
+  <p>PRIME-592 在 AIME 2024 的 pass@1 是 <strong data-src="Table 1">26.7</strong>；同表 GPT-4o 为 <strong data-src="Table 1">9.3</strong>，Llama-3.1-70B-Instruct 为 <strong data-src="Table 1">20.0</strong>，Qwen2.5-Math-7B-Instruct 为 <strong data-src="Table 1">13.3</strong>（Table 1）。这是单项对照，不推出跨基准的普遍结论。</p>
+  <p>与 Qwen2.5-Math-7B-Instruct 的七项平均是 <strong data-src="Table 1">43.9</strong> vs <strong data-src="Table 1">34.6</strong>；单项上 MATH-500 为 <strong data-src="Table 1">79.2</strong> vs <strong data-src="Table 1">79.8</strong>，其余六项 PRIME 更高。论文 Abstract 说 “surpasses ... on seven reasoning benchmarks”，§1 说 “five key mathematical benchmarks”；按 Table 1 的单项，MATH-500 并未更高。</p>
+
+  <h3>样本效率：2.5× 是步数，不是 wall-clock</h3>
+  <p>论文报告 PRIME 用 <strong>40%</strong> 的步数达到与 RLOO 相同的训练奖励，因此是 <strong>2.5×</strong> 的样本效率（§4.3；Figure 3）。但每步更贵：Table 2 的 Sum 是 680.3 vs 530.7，相对 RLOO 复算高 <strong>28.2%</strong>；论文正文写的是 24%。按训练时间估计，论文说仍有约 <strong>2×</strong> 的效率（§4.3）。所以「2.5×」只适用于步数口径，不能直接当成端到端加速。</p>
+  <p>最终训练奖励的提升，论文写作 <strong>6.9%</strong>（按措辞为相对提升；原文未注明相对还是绝对；§4.3：“improves the final rewards by 6.9%”；Figure 3 图注：“6.9% performance improvement”）。</p>
+
+  <h3>换 RL 算法：提升方向一致，幅度不同</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 4 · 不同 RL 算法的 Avg.（240 步；v2）</caption>
+      <thead>
+        <tr><th>算法</th><th class="num">无 PRIME</th><th class="num">w/ PRIME</th><th class="num">差（百分点）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>RLOO</td><td class="num">36.9</td><td class="num">41.0</td><td class="num">+4.1</td></tr>
+        <tr><td>REINFORCE</td><td class="num">36.0</td><td class="num">37.8</td><td class="num">+1.8</td></tr>
+        <tr><td>GRPO</td><td class="num">36.1</td><td class="num">37.8</td><td class="num">+1.7</td></tr>
+        <tr><td>PPO</td><td class="num">35.8</td><td class="num">39.4</td><td class="num">+3.6</td></tr>
+        <tr><td>PRIME as Value Model</td><td class="num">—</td><td class="num">36.6</td><td class="num">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:13px;color:var(--text-soft)">Table 4 的 RLOO 基线 36.9 沿用 Table 1 表内 Avg；按 Table 1 七列复算为 38.1。差列按表内 Avg 计算。</p>
+  <p>四个算法都从 PRIME 受益。按 Table 4 的差列，RLOO +4.1、REINFORCE +1.8、GRPO +1.7、PPO +3.6；按表内 Avg，RLOO 的 +4.1 最大；若按 Table 1 七列复算，RLOO 的增量为 2.9，小于 PPO 的 +3.6。PPO w/ PRIME 的 39.4 仍低于 RLOO w/ PRIME 的 41.0。§B.3 原句称 “the PPO variant of PRIME provides no performance gain, demonstrating that the additional computation cost from the critic model is redundant”；但 Table 4 中 PPO 从 35.8 升到 39.4（+3.6）。若该句指相对 RLOO w/ PRIME 41.0，原文未明说；按表内数值 PPO 仍受益。PRIME as Value Model 只有 36.6，也低于把它当奖励模型用——论文的结论是 PRM 更适合做 reward model，而不是 value model（§5.4）。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 1</span><h4>SFT 初始化胜过 500K 数据的 PRM</h4></div>
+      <p>EurusPRM 用额外 500K 数据训练，Figure 4 里却被直接用 Eurus-2-7B-SFT 初始化的在线 PRM 超过。论文的猜测是：策略与 PRM 同源初始化，减轻了分布漂移；PRM 只在线训练策略自己的 rollout（§5.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 2</span><h4>离线 PRM 的准确率会往下掉</h4></div>
+      <p>离线 PRM 一开始准确率高，但随着策略漂移逐渐被 overoptimize；在线更新的 PRM 则持续上升（Figure 5；§5.1）。这是「必须在线」的直接证据。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 3</span><h4>奖励模型比价值模型更合适</h4></div>
+      <p>同一个隐式 PRM，当 reward model 用（RLOO w/ PRIME）平均 41.0；当 value model 用只有 36.6（Table 4）。论文的解释是 value 形式没有把 token 级奖励直接变成 return（§5.4）。</p>
+    </div>
+  </div>
+
+  <h3>换一个训练设置：DeepScaleR 的 1.5B 模型</h3>
+  <p>在 DeepScaleR 的设置下（1.5B 模型、8k 阶段），PRIME-DeepScaleR-1.5B-Stage1 跑 330 步，平均 <strong data-src="Table 7">52.0</strong>；DeepSeek-R1-Distill-Qwen-1.5B 是 <strong data-src="Table 7">48.9</strong>，差 <strong>3.1 个百分点</strong>（52.0 − 48.9，Table 7）。GPU 时间 446.7 小时，DeepScaleR stage 1 约 600 小时（§B.7）。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它依赖一个可验证的终点</h2></div>
+  <p class="sec-sub">方法把「过程标签」换成了「结果验证器 + 在线更新」；这解决了标注成本，但没有解决所有任务。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界一</span><h4>结果验证器是前提</h4></div>
+      <p>论文的验证器只覆盖数学（exact match）与代码（测试用例通过率）（§4.1）。没有廉价、可靠结果验证器的任务——开放写作、策略规划、主观咨询——这套奖励没有落脚点。<span class="infer">推断</span>（依据：§4.1 只定义 math/code 两类 OV；§4.2 与 Appendix B 的实验也只覆盖数学与代码。）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界二</span><h4>规模只验证到 32B</h4></div>
+      <p>Appendix A 明确写：“we only conducted experiments on models up to 32B”。其他消融还只跑了较少步数；论文说主实验之外的对比在相同步数下进行，但没有给出更大模型的结果。</p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界三</span><h4>PRIME-Zero 会早饱和</h4></div>
+      <p>从 base model 直接 RL 的 “Zero” 设置收敛很快，7B 与 32B 都能在早期超过 instruct 版本；但论文报告约 <strong>50 步</strong>后就快速饱和，作者猜测可能归因于 response diversity 下降（原文 “This is possibly attributed to...”），留作未来工作（§B.4）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界四</span><h4>critic 的额外收益有限</h4></div>
+      <p>PPO w/ PRIME 的 39.4 低于 RLOO w/ PRIME 的 41.0（Table 4）；§B.3 称 critic 的额外计算冗余，但同表 PPO 从 35.8 升到 39.4（+3.6），按表内数值仍受益。奖励模型规模也不是越大越好：固定策略为 Qwen2.5-7B-Base，奖励模型 3B / 7B / 14B 的 Avg 分别为 32.0 / 32.6 / 31.8（Table 5）；论文只测了这三个规模。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">使用建议</span><h4>先问三个问题，再决定是否套 PRIME</h4></div>
+    <ul>
+      <li><strong>终点可验证吗？</strong>数学答案、代码测试可以；开放式任务需要先有可靠的 judge 或人工反馈，否则隐式奖励没有结果标签可学。</li>
+      <li><strong>愿意付每步一次 PRM 更新吗？</strong>Table 2 的 PRM update 是 150.9 秒/步；步数效率 2.5×，但 wall-clock 只有约 2×（§4.3）。如果 rollout 很短、PRM 开销占比更高，收益会被进一步压缩。</li>
+      <li><strong>需要的是 reward 还是 value？</strong>论文的证据支持把隐式 PRM 当 reward model；当 value model 用时，Table 4 的 36.6 明显低于 41.0。</li>
+    </ul>
+  </div>
+
+  <p>还有两点技术边界：CE 损失的最优点带一个 prompt 级偏置，PRIME 靠相对奖励把它消掉（§C.2）；在线更新只是 <strong>mitigate</strong> reward hacking，论文的措辞没有说消除（§5.1）。β 在正文只报了 0.05（§4.1），没有展开敏感性实验。</p>
+
+  <p>一句话：<strong>PRIME 把「过程监督」的成本转嫁给了「结果验证器 + 在线 PRM 更新」。</strong>终点可验证、且愿意付每步一次 PRM 更新时，这套账算得过来；终点本身无法验证时，它没有落脚点。</p>
+</section>
+
+<footer>
+  <div>Process Reinforcement through Implicit Rewards（PRIME）· arXiv:2502.01456v2 · 本页按 v2 整理</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2502.01456v2" target="_blank" rel="noopener">arXiv:2502.01456v2</a><br>
+    代码：<a href="https://github.com/PRIME-RL/PRIME" target="_blank" rel="noopener">PRIME-RL/PRIME</a><br>
+    笔记：<a href="/process-reinforcement-through-implicit-rewards/">PROCESS REINFORCEMENT THROUGH IMPLICIT REWARDS</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（不改笔记原文）：</strong>
+    <ul>
+      <li>笔记的图表编号与本页所据的 v2 不一致，对应关系：笔记图 1→v2 Figure 12，图 4→Figure 3，图 5→Figure 4，图 6→Figure 5，图 10→Figure 7；表 1→Table 3，表 2→Table 1；§5.4→§5.3，§5.6→§B.4。</li>
+      <li>笔记写 PRIME 的 RL 阶段“仅用了 150k 查询”；v2 Table 3 是 <code>150K queries × 4 samples</code>，对照为 <code>66K × 32</code>。</li>
+      <li>笔记写“最终性能上提升了 6.9%”（按措辞为相对提升，原文未注明相对还是绝对）；v2 §4.3 原文是 “improves the final rewards by 6.9%”（指训练奖励），Figure 3 图注写 “6.9% performance improvement”（指性能），两处措辞不同。</li>
+      <li>笔记写“图 1 的最终结果提升了 15.1%”（实为 15.1 个百分点）；v2 Figure 12 图注写 “+16.7%”，而 Abstract/§4.2 写 15.1%；本页在 06 节并列呈现。</li>
+      <li>笔记概述处的 26.7% 未写步数；实验节写的是 592 步。v2 Table 1 中 26.7 为 PRIME-592，PRIME-240 为 20.0。笔记用“远超”；原文 §4.2 用 “surpassing”，未用“远超”，但同句点名了 GPT-4o / Llama-3.1-70B-Instruct / Qwen2.5-Math-7B-Instruct，并非只列数值。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 隐式奖励计算器（Eq.3）
+   ============================================================ */
+(function () {
+  var beta = document.getElementById('beta');
+  var pphi = document.getElementById('pphi');
+  var pref = document.getElementById('pref');
+  var msg = document.getElementById('ir-msg');
+  var bv = document.getElementById('beta-v');
+  var pv = document.getElementById('pphi-v');
+  var qv = document.getElementById('pref-v');
+  if (!beta || !pphi || !pref || !msg || !bv || !pv || !qv) return;
+
+  function update() {
+    var b = parseFloat(beta.value);
+    var p = parseFloat(pphi.value);
+    var q = parseFloat(pref.value);
+    var r = b * Math.log(p / q);
+    var sign = r >= 0 ? '+' : '';
+    bv.textContent = b.toFixed(2);
+    pv.textContent = p.toFixed(2);
+    qv.textContent = q.toFixed(2);
+    msg.innerHTML = 'r<sub>φ</sub>(y<sub>t</sub>) = ' + b.toFixed(2)
+      + ' × ln(' + p.toFixed(2) + ' / ' + q.toFixed(2) + ') = <strong>'
+      + sign + r.toFixed(4) + '</strong>。'
+      + (r > 0 ? 'π<sub>φ</sub> 比 π<sub>ref</sub> 更倾向这个 token，奖励为正。'
+               : (r < 0 ? 'π<sub>φ</sub> 比 π<sub>ref</sub> 更不倾向这个 token，奖励为负。'
+                        : '两个模型的概率相同，奖励为 0。'))
+      + ' 概率比 = ' + (p / q).toFixed(2) + '。';
+  }
+
+  beta.addEventListener('input', update);
+  pphi.addEventListener('input', update);
+  pref.addEventListener('input', update);
+  update();
+})();
+
+/* ============================================================
+   2) Table 1 基准切换
+   ============================================================ */
+(function () {
+  var DATA = {
+    'Avg.':         [28.8, 36.9, 41.0, 43.9],
+    'AIME 2024':    [3.3, 20.0, 20.0, 26.7],
+    'AMC':          [30.1, 47.0, 50.6, 57.8],
+    'MATH-500':     [66.2, 73.2, 78.2, 79.2],
+    'MinervaMath':  [32.7, 36.4, 39.3, 38.6],
+    'OlympiadBench':[29.8, 35.4, 40.3, 42.1],
+    'LeetCode':     [21.7, 28.3, 31.1, 33.3],
+    'LiveCodeBench':[17.8, 26.7, 27.5, 28.6]
+  };
+  var NAMES = ['SFT', 'RLOO-240', 'PRIME-240', 'PRIME-592'];
+  var COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--accent)'];
+  var chart = document.getElementById('bench-chart');
+  var readout = document.getElementById('bench-readout');
+  var xaxis = document.getElementById('bench-x');
+  if (!chart || !readout || !xaxis) return;
+
+  function render(key) {
+    var vals = DATA[key];
+    if (!vals) return;
+    chart.innerHTML = '';
+    for (var i = 0; i < NAMES.length; i++) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = NAMES[i];
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = COLORS[i];
+      fill.style.width = Math.max(2, vals[i]) + '%';
+      fill.style.height = '100%';
+      fill.style.borderRadius = '0 6px 6px 0';
+      fill.style.transition = 'width .45s ease';
+      track.appendChild(fill);
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = vals[i].toFixed(1);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    }
+    xaxis.innerHTML = '<span>' + key + '</span>';
+    readout.innerHTML = '<div class="r-head">' + key + ' · Table 1</div>'
+      + 'SFT <strong>' + vals[0].toFixed(1) + '</strong> · '
+      + 'RLOO-240 <strong>' + vals[1].toFixed(1) + '</strong> · '
+      + 'PRIME-240 <strong>' + vals[2].toFixed(1) + '</strong> · '
+      + 'PRIME-592 <strong>' + vals[3].toFixed(1) + '</strong>';
+  }
+
+  var tabs = document.querySelectorAll('#bench-tabs .tab');
+  for (var t = 0; t < tabs.length; t++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        for (var k = 0; k < tabs.length; k++) tabs[k].classList.remove('active');
+        btn.classList.add('active');
+        render(btn.getAttribute('data-bench'));
+      });
+    })(tabs[t]);
+  }
+  render('Avg.');
+})();
+</script>
+</body>
+</html>

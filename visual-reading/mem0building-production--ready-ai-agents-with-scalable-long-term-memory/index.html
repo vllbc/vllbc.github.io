@@ -1,0 +1,573 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 91.6 | Table 2 | (17.117-1.440)/17.117*100 |
+| 84.9 | Table 2 | (17.117-2.590)/17.117*100 |
+| 93.2 | Table 2 | (26031-1764)/26031*100 |
+| 86.1 | Table 2 | (26031-3616)/26031*100 |
+| 5.91 | Table 2 | 66.88-60.97 |
+| 7.47 | Table 2 | 68.44-60.97 |
+| 6.02 | Table 2 | 72.90-66.88 |
+| 4.46 | Table 2 | 72.90-68.44 |
+| 1.56 | Table 2 | 68.44-66.88 |
+| 2.3 | Table 2 | (68.44-66.88)/66.88*100 |
+| 2.62 | Table 1 | 58.13-55.51 |
+| 3.96 | Table 1 | 51.15-47.19 |
+| 0.89 | Table 1 | 76.60-75.71 |
+| 0.89 | Table 2 | 66.88-65.99 |
+| 2.78 | Table 1 | 75.71-72.93 |
+| 3.67 | Table 1 | 76.60-72.93 |
+| 6.9 | Table 2 + §3.3（per-chunk） | 1764/256 |
+| 512 | §3.3 | 2*256 |
+| 3.4 | Table 2 | 1764/(2*256) |
+| 91.7 | Table 2 | 66.88/72.90*100 |
+| 93.9 | Table 2 | 68.44/72.90*100 |
+| 2.4 | Table 2 | 1.440/60.40*100 |
+| 4.3 | Table 2 | 2.590/60.40*100 |
+| 26.4 | Table 2 | (66.88-52.90)/52.90*100 |
+| 13.98 | Table 2 | 66.88-52.90 |
+| 14.8 | Table 2 | 26031/1764 |
+| 11.9 | Table 2 | 17.117/1.440 |
+| 3.5 | Table 2 | 60.40/17.117 |
+| 2.05 | Table 2 | 3616/1764 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mem0 · 把对话提炼成可维护的记忆，而不是反复塞上下文</title>
+<meta name="description" content="Mem0 用 LLM 从对话中提取事实，再用 ADD/UPDATE/DELETE/NOOP 维护记忆库；图版本把事实存成实体—关系图。LOCOMO 上 overall J 66.88 / 68.44，p95 延迟 1.44 秒，全文上下文是 17.117 秒。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共组件样式来自 base.css */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.flow-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.flow-pa{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.flow-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.tbl-note{font-size:12.5px;color:var(--text-soft);margin:-6px 0 18px;line-height:1.7}
+.mem-chart .track{height:26px}
+.mem-chart .cname{min-width:128px}
+@media (max-width:520px){
+  .mem-chart .cname{min-width:0;font-size:11px}
+  .mem-chart .cbar .num{font-size:9.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Mem0</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#cost">工程</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent Memory · arXiv 2025 · 2504.19413v1</span>
+  <h1>Mem0：把对话提炼成可维护的记忆，而不是反复塞上下文</h1>
+  <p class="hero-sub">
+    长期对话里，用户上周说过“我吃素”，这周模型却在推荐鸡肉。扩大上下文窗口只能推迟遗忘，还会把每次请求变贵；传统 RAG 又把原始对话块整段检索回来，噪声很多。
+    Mem0 的做法是让 LLM 从对话里提取事实，再用 ADD / UPDATE / DELETE / NOOP 维护一个小而一致的记忆库。
+  </p>
+  <div class="meta">
+    <span>Prateek Chhikara, Dev Khant 等 · Mem0</span>
+    <a href="https://arxiv.org/abs/2504.19413" target="_blank" rel="noopener">arXiv 2504.19413v1 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文要解决的是多会话长期记忆：对话跨越几天、几周，内容远超上下文窗口；而真实对话又不是按主题连续的，用户会在一堆无关话题之间跳。直接把整段历史塞进上下文，成本随长度增长；把原始对话切块做 RAG，又会把大量无关文本一起检索回来。
+  </p>
+  <p>
+    Mem0 把记忆做成“提取—更新”循环。提取时，LLM 同时看<strong>整段对话的摘要</strong>和<strong>最近 m=10 条消息</strong>，从新的消息对里提炼候选事实。更新时，先用向量检索出 top s=10 条相似旧记忆，再把候选事实和这些旧记忆一起交给 LLM，由它通过 tool call 选择 ADD / UPDATE / DELETE / NOOP。也就是说，记忆库的一致性由 LLM 自己维护，不另训分类器。
+  </p>
+  <p>
+    Mem0<sup>g</sup> 把事实进一步存成有向图：实体是节点，关系是三元组；新信息进来时先做冲突检测，过时的关系标记为 invalid 而不是物理删除，以保留时间信息。图版本在 LOCOMO 的 temporal 问题上更高，但建图和检索都更贵。
+  </p>
+  <p>
+    在 LOCOMO 上，Mem0 的 overall J 是 <span class="mono" data-src="Table 2">66.88%</span>，Mem0<sup>g</sup> 是 <span class="mono" data-src="Table 2">68.44%</span>；全文上下文仍然最高，<span class="mono" data-src="Table 2">72.90%</span>，但 p95 延迟 <span class="mono" data-src="Table 2">17.117 s</span>、每次约 <span class="mono" data-src="Table 2">26,031</span> token。Mem0 把 p95 压到 <span class="mono" data-src="Table 2">1.440 s</span>，每次查询检索的 token 降到 <span class="mono" data-src="Table 2">1,764</span>；代价是 overall J 低 <span class="mono" data-src="Table 2">6.02</span> 个百分点。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">66.88<small>%</small></div>
+      <div class="k">Mem0 的 overall J<br>LOCOMO 全数据集</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">68.44<small>%</small></div>
+      <div class="k">Mem0<sup>g</sup> 的 overall J<br>比 Mem0 高 1.56 个百分点</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">91.6<small>%</small></div>
+      <div class="k">Mem0 的 p95 延迟降幅<br>17.117 s → 1.440 s</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>上下文窗口放大的是容量，不是记忆</h2></div>
+  <p class="sec-sub">先分清三个问题：忘掉旧信息、每次请求都变贵、检索回来的内容噪声太多。</p>
+
+  <p>论文用“素食者”场景开篇：用户说过自己吃素，几天后模型却推荐了鸡肉菜。这不是模型“没看到”，而是那段对话已经不在当前上下文里。LLM 的参数不会在推理时更新，固定窗口之外的信息等于不存在（§1）。</p>
+
+  <p>把窗口从 128k 扩到 200k/10M 甚至更大，能推迟这个问题，但推不掉。论文给了两个理由：第一，对话历史会持续增长，几周、几个月后总会超过任何有限窗口；第二，真实对话的主题并不连续，用户可能先提饮食偏好，再聊几个小时的编程，偏好信息会被大量无关内容淹没（§1）。即使能把全部历史塞进去，每次请求都要重新读一遍，token 成本和延迟都随长度上涨。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">全文上下文</span><h4>准确率最高，但每次都要重读全部历史</h4></div>
+      <p>Table 2 里 full-context 的 overall J 是 <span class="mono" data-src="Table 2">72.90%</span>，是所有方法里最高的；代价是每次请求约 <span class="mono" data-src="Table 2">26,031</span> token，p95 总延迟 <span class="mono" data-src="Table 2">17.117</span> 秒。对话再长，这两个数字还会涨。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">传统 RAG</span><h4>检索原始文本块，噪声与无关内容一起进来</h4></div>
+      <p>RAG 把对话切成固定长度块，按相似度取 top-k。块里往往混着与问题无关的句子，模型要在噪声里找答案。Table 2 里最好的 RAG 配置 overall J 是 <span class="mono" data-src="Table 2">60.97%</span>，比 Mem0 低 <span class="mono" data-src="Table 2">5.91</span> 个百分点。</p>
+    </div>
+  </div>
+
+  <p>Mem0 的假设是：与其在查询时从原始对话里“再找一遍”，不如在对话发生时就把显著信息提炼出来，维护成一个结构化、去重、可更新的记忆库。查询时只取相关事实，既减少 token，也减少噪声。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>六类基线：有的准但慢，有的快但记不住</h2></div>
+  <p class="sec-sub">论文把对比对象分成六类，问题集中在“质量、延迟、成本”三者不能同时兼顾。</p>
+
+  <p>论文的基线覆盖六类（§3）：已有的 LOCOMO 基准方法（LoCoMo、ReadAgent、MemoryBank、MemGPT、A-Mem）、不同 chunk 大小与 top-k 的 RAG、全文上下文、开源记忆方案 LangMem、OpenAI 的 ChatGPT memory 功能、以及记忆管理平台 Zep。Mem0 的全部 LLM 操作使用 GPT-4o-mini；可配置基线中，§3.3 只明确 LangMem 与 OpenAI 使用 GPT-4o-mini，Zep 未说明模型（§2.1、§3.3）；RAG 与 LangMem 使用 text-embedding-small-3 作 embedding（§3.3）；温度设为 0，除非另有说明（§3.3）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2 摘录 · 各方法的 overall J、总延迟与每次查询检索的 chunk / memory token。延迟单位是秒；RAG 行取 overall J 最高的配置（k=2, chunk 256）。</caption>
+      <thead>
+        <tr><th>方法</th><th>Overall J (%)</th><th>Total p50 (s)</th><th>Total p95 (s)</th><th>Chunk / memory tokens</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Full-context</td><td class="num">72.90</td><td class="num">9.870</td><td class="num">17.117</td><td class="num">26,031</td></tr>
+        <tr><td>RAG (k=2, 256)</td><td class="num">60.97</td><td class="num">0.802</td><td class="num">1.907</td><td class="num">256</td></tr>
+        <tr><td>LangMem</td><td class="num">58.10</td><td class="num">18.53</td><td class="num">60.40</td><td class="num">127</td></tr>
+        <tr><td>Zep</td><td class="num">65.99</td><td class="num">1.292</td><td class="num">2.926</td><td class="num">3,911</td></tr>
+        <tr><td>OpenAI memory</td><td class="num">52.90</td><td class="num">0.466</td><td class="num">0.889</td><td class="num">4,437</td></tr>
+        <tr><td>A-Mem</td><td class="num">48.38</td><td class="num">1.410</td><td class="num">4.374</td><td class="num">2,520</td></tr>
+        <tr class="best"><td>Mem0</td><td class="num">66.88</td><td class="num">0.708</td><td class="num">1.440</td><td class="num">1,764</td></tr>
+        <tr class="best"><td>Mem0<sup>g</sup></td><td class="num">68.44</td><td class="num">1.091</td><td class="num">2.590</td><td class="num">3,616</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">Table 2 原表的 overall J 为 mean ± 1 SD（10 次独立运行，§3.2），例如 Mem0 66.88 ± 0.15%、Mem0<sup>g</sup> 68.44 ± 0.17%；本表只转录均值，± 值未转录。token 列是每次查询检索到的上下文，不是记忆库总大小（§3.2）。RAG 行的 256 是 chunk size；k=2 时每次检索两个块，不是 256 token 的检索上下文。</p>
+
+  <p>这张表里有两组对照最说明问题。第一组是 LangMem：记忆 token 只有 <span class="mono" data-src="Table 2">127</span>，但搜索阶段 p50 就 <span class="mono" data-src="Table 2">17.99</span> 秒、p95 <span class="mono" data-src="Table 2">59.82</span> 秒，总延迟 p95 到 <span class="mono" data-src="Table 2">60.40</span> 秒，交互场景基本不可用。第二组是全文上下文：J 最高，但 token 是 Mem0 的约 <span class="mono" data-src="Table 2">14.8</span> 倍，p95 延迟是 Mem0 的约 <span class="mono" data-src="Table 2">11.9</span> 倍。Mem0 想证明的是中间那条线：质量接近全文上下文；p95 延迟 <span class="mono" data-src="Table 2">1.440 s</span> 低于最好的 RAG 的 <span class="mono" data-src="Table 2">1.907 s</span>，但每次查询检索的 memory token 是 <span class="mono" data-src="Table 2">1,764</span>，约为 RAG 单块 chunk size <span class="mono" data-src="Table 2">256</span> token 的 <span class="mono" data-src="Table 2">6.9 倍</span>；RAG 行是 k=2，实际拼接两个 chunk（最多约 <span class="mono" data-src="§3.3">512</span> token），对应约 <span class="mono" data-src="Table 2">3.4 倍</span>。原文说的 “a fraction of the token and latency cost”（§4.3）是相对 full-context，不是相对 RAG。</p>
+
+  <p>Zep 是最接近的对手：overall J <span class="mono" data-src="Table 2">65.99%</span>，比 Mem0 低 <span class="mono" data-src="Table 2">0.89</span> 个百分点；它的记忆 token <span class="mono" data-src="Table 2">3,911</span>，p95 <span class="mono" data-src="Table 2">2.926</span> 秒。open-domain 上 Zep 的 <span class="mono" data-src="Table 1">76.60%</span> 高于 Mem0 的 <span class="mono" data-src="Table 1">72.93%</span>（差 <span class="mono" data-src="Table 1">3.67</span> 个百分点），也高于 Mem0<sup>g</sup> 的 <span class="mono" data-src="Table 1">75.71%</span>（差 <span class="mono" data-src="Table 1">0.89</span> 个百分点）。</p>
+</section>
+
+<!-- ================= 3. 方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>提取事实，再让 LLM 决定加、改、删还是不动</h2></div>
+  <p class="sec-sub">Mem0 的核心不是向量库，而是“提取 + 更新”这两个 LLM 环节；图版本只是把存储结构换成了实体—关系图。</p>
+
+  <h3>提取：用摘要看全局，用最近消息看细节</h3>
+  <p>每当有一对新消息（通常是用户消息 + 助手回复），系统不会直接存原文，而是构造一个提示：<code>P = (S, {m<sub>t−m</sub>, …, m<sub>t−2</sub>}, m<sub>t−1</sub>, m<sub>t</sub>)</code>。其中 <code>S</code> 是整段对话的摘要，后两项是最近 <code>m</code> 条历史消息和当前消息对。摘要由异步模块定期刷新，不阻塞主流程；论文这样设计的理由是：摘要提供全局主题，最近消息提供可能还没进摘要的细节（§2.1）。实验里 <code>m=10</code>。</p>
+
+  <p>提取函数 <code>φ(P)</code> 的输出是一组候选事实 <code>Ω = {ω<sub>1</sub>, …, ω<sub>n</sub>}</code>。这些事实是简短的自然语言陈述，不是原始对话片段；论文说这样做的目的是提高信噪比，让后续检索和回答都只面对“值得记”的内容。</p>
+
+  <h3>更新：先找相似旧记忆，再让 LLM 选操作</h3>
+  <p>每条候选事实都要和现有记忆库比对。系统先用向量检索取出 top <code>s</code> 条语义最相似的旧记忆（实验里 <code>s=10</code>），把候选事实和这 <code>s</code> 条旧记忆一起交给 LLM；LLM 通过 function-calling 接口从四个操作里选一个（§2.1、Appendix B Algorithm 1）：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">ADD</span><h4>新增</h4></div>
+      <p>没有语义等价的旧记忆，就生成一个新 id，把事实加入记忆库。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">UPDATE</span><h4>替换 / 补充</h4></div>
+      <p>旧记忆包含可补充的信息时，用新事实替换旧条目；论文的伪代码还比较了信息量，只有新事实信息更多才更新。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">DELETE / NOOP</span><h4>删除 / 不动</h4></div>
+      <p>新事实与旧记忆矛盾时删除旧条目；事实已存在或不重要时什么都不做。</p>
+    </div>
+  </div>
+
+  <p>论文强调这里<strong>没有单独训练一个分类器</strong>，而是利用 LLM 的推理能力直接判断候选事实与旧记忆的语义关系。这样做的好处是不用为“该加还是该改”标注数据；代价是每次更新都要调 LLM，记忆写入的成本比纯向量库高。</p>
+
+  <h3>Mem0<sup>g</sup>：把事实存成有向图</h3>
+  <p>图版本的存储是 <code>G = (V, E, L)</code>：节点 <code>V</code> 是实体（如 Alice、San_Francisco），边 <code>E</code> 是关系（如 lives_in），标签 <code>L</code> 给节点一个语义类型（Person、City 等）。每个实体节点带三样东西：实体类型、一个 embedding、创建时间戳；关系存成三元组 <code>(v<sub>s</sub>, r, v<sub>d</sub>)</code>（§2.2）。</p>
+
+  <p>建图分两步：entity extractor 先从文本里识别实体及其类型，relationship generator 再判断实体之间是否存在有意义的关系，并给关系打标签。新信息进图时，conflict detector 找出可能冲突的已有关系，update resolver 判断哪些关系应该过时；过时的关系<strong>标记为 invalid，而不是物理删除</strong>，这样时间性推理仍然能看到“曾经成立、后来失效”的事实（§2.2、Figure 3）。</p>
+
+  <p>检索也分两路：一路是 entity-centric，先从 query 里识别关键实体，用语义相似度定位节点，再沿入边和出边扩展子图；另一路直接对所有关系三元组的文本做相似度检索，返回超过阈值的关系。两路结果一起作为回答上下文。实现上，图数据库用 Neo4j，实体与关系抽取仍由 GPT-4o-mini 完成（§2.2）。</p>
+</section>
+
+<!-- ================= 4. 工程开销 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>写入按事实数调 LLM，查询只读一小段记忆</h2></div>
+  <p class="sec-sub">Mem0 省的是查询时重读历史的开销，付的是写入时提取与更新的事实级 LLM 调用。</p>
+
+  <p>写入路径的调用次数由消息对数量和候选事实数共同决定：每来一对新消息，提取器做一次 LLM 调用；每条候选事实再做一次向量检索和一次 tool-call LLM 调用（§2.1、Appendix B Algorithm 1）。它不需要在每次写入时重读整段历史，但总调用数会随消息对数量增长。Table 2 的延迟只统计查询与回答，论文只在 §4.5 给出“图构建最坏情况一分钟内完成”这一句写入侧时间，没有写入 token、延迟分布或吞吐数据。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">查询侧</span><h4>只把相关记忆拼进上下文</h4></div>
+      <p>Table 2 的 token 列是每次查询检索到的记忆上下文：Mem0 为 <span class="mono" data-src="Table 2">1,764</span> token，Mem0<sup>g</sup> <span class="mono" data-src="Table 2">3,616</span>，Full-context <span class="mono" data-src="Table 2">26,031</span>（§3.2 定义）。Mem0 的 search 延迟 p50 / p95 为 <span class="mono" data-src="Table 2">0.148 / 0.200</span> 秒，总延迟 <span class="mono" data-src="Table 2">0.708 / 1.440</span> 秒。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">存储侧</span><h4>记忆库比单次检索上下文大</h4></div>
+      <p>§4.5 按 conversation 统计记忆库规模：Mem0 平均约 <span class="mono" data-src="§4.5">7k</span> token，Mem0<sup>g</sup> 约 <span class="mono" data-src="§4.5">14k</span>，Zep 超过 <span class="mono" data-src="§4.5">600k</span>；原始对话平均约 <span class="mono" data-src="§4.5">26k</span> token。查询时并不会把整个库塞进上下文。</p>
+    </div>
+  </div>
+
+  <p>图版本的额外开销集中在构建与更新：实体抽取、关系生成与 update resolver 依赖 LLM；冲突检测的具体实现论文未展开。论文称 Mem0<sup>g</sup> 的图构建在最坏情况下也能在一分钟内完成（§4.5），但没有给出节点/边规模、并发度或失败重试的细节。作为对照，§4.5 报告 Zep 写入后立即检索常失败，数小时后重跑同样的检索，结果明显更好；论文推测这与异步 LLM 调用和后台处理有关。</p>
+
+  <p>查询成本不随对话历史线性增长：Mem0 只检索 top s 条相似记忆，Mem0<sup>g</sup> 只扩展相关子图与超过阈值的三元组（§2.1、§2.2）。写入成本随消息对数量和事实数量增长<span class="infer">推断</span>（依据 §2.1：每对消息一次提取调用，每条候选事实一次更新调用）；论文没有报告多用户并发写入下的吞吐或限流策略，这两项是生产部署仍需补测的部分。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>写入时提炼，查询时只取相关事实</h2></div>
+  <p class="sec-sub">上半部分是 Mem0 的写入循环，下半部分是 Mem0<sup>g</sup> 的图构建与检索。</p>
+
+  <figure>
+    <svg viewBox="0 0 960 360" role="img" aria-label="Mem0 流程：消息对结合摘要与最近消息进入提取器，得到候选事实，检索相似旧记忆，由 LLM 选择 ADD/UPDATE/DELETE/NOOP，写入记忆库；查询时检索记忆并生成回答。下方是图记忆的实体、关系、冲突检测与更新解析">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect class="flow-c1" x="10" y="50" width="130" height="76" rx="9"></rect>
+      <text class="flow-t" x="75" y="76" text-anchor="middle">新消息对</text>
+      <text class="flow-s" x="75" y="96" text-anchor="middle">用户 + 助手</text>
+      <text class="flow-s" x="75" y="112" text-anchor="middle">m<tspan baseline-shift="sub" font-size="8">t−1</tspan>, m<tspan baseline-shift="sub" font-size="8">t</tspan></text>
+
+      <rect class="flow-box" x="165" y="38" width="150" height="100" rx="9"></rect>
+      <text class="flow-t" x="240" y="62" text-anchor="middle">上下文</text>
+      <text class="flow-s" x="240" y="82" text-anchor="middle">全局摘要 S</text>
+      <text class="flow-s" x="240" y="98" text-anchor="middle">最近 m=10 条</text>
+      <text class="flow-s" x="240" y="114" text-anchor="middle">异步刷新摘要</text>
+
+      <rect class="flow-c2" x="340" y="50" width="150" height="76" rx="9"></rect>
+      <text class="flow-t" x="415" y="76" text-anchor="middle">提取器 φ(P)</text>
+      <text class="flow-s" x="415" y="96" text-anchor="middle">候选事实 Ω</text>
+      <text class="flow-s" x="415" y="112" text-anchor="middle">自然语言陈述</text>
+
+      <rect class="flow-box" x="515" y="50" width="130" height="76" rx="9"></rect>
+      <text class="flow-t" x="580" y="76" text-anchor="middle">检索旧记忆</text>
+      <text class="flow-s" x="580" y="96" text-anchor="middle">top s=10</text>
+      <text class="flow-s" x="580" y="112" text-anchor="middle">向量相似度</text>
+
+      <rect class="flow-pa" x="670" y="40" width="160" height="96" rx="9"></rect>
+      <text class="flow-t" x="750" y="66" text-anchor="middle">LLM tool call</text>
+      <text class="flow-s" x="750" y="86" text-anchor="middle">ADD / UPDATE</text>
+      <text class="flow-s" x="750" y="102" text-anchor="middle">DELETE / NOOP</text>
+      <text class="flow-s" x="750" y="118" text-anchor="middle">不另训分类器</text>
+
+      <rect class="flow-c1" x="855" y="50" width="95" height="76" rx="9"></rect>
+      <text class="flow-t" x="902" y="76" text-anchor="middle">记忆库 M</text>
+      <text class="flow-s" x="902" y="96" text-anchor="middle">事实 + id</text>
+      <text class="flow-s" x="902" y="112" text-anchor="middle">持续更新</text>
+
+      <path class="flow-line" d="M140 88 L161 88" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M315 88 L336 88" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M490 88 L511 88" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M645 88 L666 88" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M830 88 L851 88" marker-end="url(#arr)"></path>
+
+      <text class="flow-s" x="480" y="170" text-anchor="middle">Mem0<tspan baseline-shift="super" font-size="8">g</tspan>：实体抽取 → 关系三元组 → 冲突检测 → update resolver</text>
+
+      <rect class="flow-box" x="10" y="195" width="190" height="70" rx="9"></rect>
+      <text class="flow-t" x="105" y="220" text-anchor="middle">Entity extractor</text>
+      <text class="flow-s" x="105" y="240" text-anchor="middle">节点 + 实体类型</text>
+      <text class="flow-s" x="105" y="256" text-anchor="middle">Person / City / Event</text>
+
+      <rect class="flow-box" x="225" y="195" width="190" height="70" rx="9"></rect>
+      <text class="flow-t" x="320" y="220" text-anchor="middle">Relationship generator</text>
+      <text class="flow-s" x="320" y="240" text-anchor="middle">(v<tspan baseline-shift="sub" font-size="8">s</tspan>, r, v<tspan baseline-shift="sub" font-size="8">d</tspan>)</text>
+      <text class="flow-s" x="320" y="256" text-anchor="middle">lives_in / prefers</text>
+
+      <rect class="flow-box" x="440" y="195" width="190" height="70" rx="9"></rect>
+      <text class="flow-t" x="535" y="220" text-anchor="middle">Conflict detector</text>
+      <text class="flow-s" x="535" y="240" text-anchor="middle">找出可能冲突的关系</text>
+      <text class="flow-s" x="535" y="256" text-anchor="middle">交给 update resolver</text>
+
+      <rect class="flow-pa" x="655" y="195" width="190" height="70" rx="9"></rect>
+      <text class="flow-t" x="750" y="220" text-anchor="middle">标记 invalid</text>
+      <text class="flow-s" x="750" y="240" text-anchor="middle">不物理删除</text>
+      <text class="flow-s" x="750" y="256" text-anchor="middle">保留时间信息</text>
+
+      <rect class="flow-c2" x="855" y="195" width="95" height="70" rx="9"></rect>
+      <text class="flow-t" x="902" y="220" text-anchor="middle">查询</text>
+      <text class="flow-s" x="902" y="240" text-anchor="middle">实体扩展</text>
+      <text class="flow-s" x="902" y="256" text-anchor="middle">+ 语义检索</text>
+
+      <path class="flow-line" d="M200 230 L221 230" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M415 230 L436 230" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M630 230 L651 230" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M845 230 L851 230" marker-end="url(#arr)"></path>
+
+      <text class="flow-s" x="480" y="315" text-anchor="middle">查询时：记忆库 / 图检索 → 相关事实拼进上下文 → LLM 生成回答</text>
+      <path class="flow-line" d="M902 126 L902 191" marker-end="url(#arr)" stroke-dasharray="5 4"></path>
+      <path class="flow-line" d="M902 265 L902 300 L480 300" marker-end="url(#arr)" stroke-dasharray="5 4"></path>
+    </svg>
+    <figcaption>按 Figure 2、Figure 3 与 Algorithm 1 重绘：覆盖 Mem0 的提取—更新循环、四种操作、Mem0<sup>g</sup> 的实体/关系抽取、冲突检测与 invalid 标记、以及双路检索。未覆盖 prompt 全文、函数调用的具体 schema、图数据库事务与失败重试；页面不做记忆更新模拟。</figcaption>
+  </figure>
+
+  <p>两条流的共同点是“先把信息变少，再交给 LLM”。Mem0 把对话变成事实，Mem0<sup>g</sup> 把事实变成实体和关系；查询时不再是“读全部历史”，而是“读与当前 query 相关的一小部分”。这也解释了为什么它能同时降低 token 和延迟<span class="infer">推断</span>（依据 §2.1 的提取—更新流程：查询侧只读相关事实，写入侧才做提取与更新）：省掉的是每次请求重读历史的开销，增加的是写入时的提取与更新 LLM 调用。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>质量接近全文上下文，延迟降一个数量级</h2></div>
+  <p class="sec-sub">先交代评测设置，再看四类问题的 J、overall 与效率；最后指出图版本不是每个维度都更好。</p>
+
+  <h3>评测设置：一个数据集、一个裁判、十次重复</h3>
+  <p>这些数字的边界由 LOCOMO 的规模和指标决定：10 段多会话日常对话，质量分主要来自 LLM 裁判。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>§3 实验设置 · 数据集、指标与实现参数。</caption>
+      <thead>
+        <tr><th>项目</th><th>设置</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>数据集</td><td>LOCOMO：10 段多会话对话，每段约 600 轮、平均 26,000 token，平均 200 个问题</td><td>§3.1</td></tr>
+        <tr><td>问题类型</td><td>single-hop、multi-hop、open-domain、temporal；原数据集的 adversarial 类因没有标准答案被排除</td><td>§3.1</td></tr>
+        <tr><td>质量指标</td><td>F1、BLEU-1、LLM-as-a-Judge（J）。§3.2 称 J 从事实准确性、相关性、完整性、上下文适配四个维度评估；Appendix A 的 judge prompt 实际只要求输出 CORRECT / WRONG 并附一句理由——两处口径并列</td><td>§3.2、Appendix A</td></tr>
+        <tr><td>效率指标</td><td>search / total 的 p50 与 p95 延迟；chunk 或 memory token 数</td><td>§3.2、Table 2</td></tr>
+        <tr><td>推理引擎</td><td>Mem0 的 LLM 操作使用 GPT-4o-mini；可配置基线中 LangMem 与 OpenAI 明确使用 GPT-4o-mini，Zep 未说明模型；RAG 与 LangMem 的 embedding 用 text-embedding-small-3（§2.1 只说明向量库使用 dense embeddings）</td><td>§2.1、§3.3</td></tr>
+        <tr><td>更新参数</td><td>最近消息 m=10；相似旧记忆 s=10</td><td>§2.1</td></tr>
+        <tr><td>温度</td><td>0，除非另有说明</td><td>§3.3</td></tr>
+        <tr><td>J 的重复</td><td>每个方法在整份数据上独立跑 10 次，报告均值 ±1 SD</td><td>§3.2</td></tr>
+        <tr><td>图存储</td><td>Neo4j</td><td>§2.2</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>这套设置有一个明确的限制：<strong>只有一个数据集，而且只覆盖多会话日常对话</strong>。LOCOMO 的 10 段对话平均 <span class="mono" data-src="§3.1">26k</span> token，大约相当于一段较长对话，不是跨月的真实产品日志。论文用 10 次独立运行的均值来降低 J 的随机性，但没有在第二个数据集上复验。</p>
+
+  <p>另一个细节是 adversarial 问题被排除。这类问题测的是“识别无法回答的问题”，没有标准答案，论文说预期行为是模型应该识别出来；排除它是合理的，但也意味着这套评测没有覆盖“记忆里没有答案时会不会胡编”这一风险。</p>
+
+  <h3>四类问题：Mem0 在 single-hop / multi-hop 最高，Mem0<sup>g</sup> 在 temporal 最高</h3>
+  <p>Table 1 按问题类型拆 J。下表只转录 6 个方法；MemGPT、LoCoMo、ReadAgent、MemoryBank 等行以及 F1 / BLEU-1 列未转录。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 摘录 · LLM-as-a-Judge（J）分数，按 single-hop / multi-hop / open-domain / temporal 四类问题。</caption>
+      <thead>
+        <tr><th>方法</th><th>Single-Hop</th><th>Multi-Hop</th><th>Open-Domain</th><th>Temporal</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A-Mem*</td><td class="num">39.79</td><td class="num">18.85</td><td class="num">54.05</td><td class="num">49.91</td></tr>
+        <tr><td>LangMem</td><td class="num">62.23</td><td class="num">47.92</td><td class="num">71.12</td><td class="num">23.43</td></tr>
+        <tr><td>Zep</td><td class="num">61.70</td><td class="num">41.35</td><td class="num">76.60</td><td class="num">49.31</td></tr>
+        <tr><td>OpenAI</td><td class="num">63.79</td><td class="num">42.92</td><td class="num">62.29</td><td class="num">21.71</td></tr>
+        <tr class="best"><td>Mem0</td><td class="num">67.13</td><td class="num">51.15</td><td class="num">72.93</td><td class="num">55.51</td></tr>
+        <tr class="best"><td>Mem0<sup>g</sup></td><td class="num">65.71</td><td class="num">47.19</td><td class="num">75.71</td><td class="num">58.13</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">Table 1 原表的 J 为 mean ± 1 SD（10 次独立运行，§3.2），例如 Mem0 的 single-hop 是 67.13 ± 0.65；本表只转录均值，± 值未转录。A-Mem* 为作者重跑 A-Mem 的结果，temperature=0，以生成 LLM-as-a-Judge 分数（Table 1 caption）。</p>
+
+  <h3>交互：在质量、p95 延迟、记忆 token 之间切换</h3>
+  <p>下面把 Table 2 的 8 个方法按三种指标重画。切换指标会重画全部柱子；柱高按当前指标的最大值缩放，标签是表格原值，不是归一化后的分数。陶土红是 Mem0，深陶土是 Mem0<sup>g</sup>，灰柱是基线。</p>
+
+  <div class="sim" id="mem-sim">
+    <div class="tabs" id="mem-tabs">
+      <button class="tab active" type="button" data-metric="j">Overall J (%)</button>
+      <button class="tab" type="button" data-metric="p95">Total p95 延迟 (s)</button>
+      <button class="tab" type="button" data-metric="tok">Chunk / memory tokens</button>
+    </div>
+
+    <div class="readout" data-src="Table 2">
+      <div class="r-head">当前读数</div>
+      <div id="mem-msg">Overall J：Full-context 72.90 最高；Mem0 66.88，Mem0<sup>g</sup> 68.44；Zep 65.99；最好的 RAG 60.97</div>
+    </div>
+
+    <div class="chart mem-chart" id="mem-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>Mem0</span>
+      <span><i style="background:var(--accent-deep)"></i>Mem0<sup>g</sup></span>
+      <span><i style="background:var(--c1)"></i>基线</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算：两组读数与差值<span class="sum-sub">与上面的交互同一数据源</span></summary>
+    <div class="details-body">
+      <p><strong>配置 A：质量。</strong>Mem0 的 overall J = <strong>66.88</strong>，最好的 RAG = <strong>60.97</strong>，绝对差 = <code>66.88 − 60.97 = 5.91</code> 个百分点；Full-context = <strong>72.90</strong>，比 Mem0 高 <code>72.90 − 66.88 = 6.02</code> 个百分点。Mem0<sup>g</sup> 比 Mem0 高 <code>68.44 − 66.88 = 1.56</code> 个百分点，相对提升 <code>1.56 / 66.88 = 2.3%</code>。柱高（当前指标最大值是 Full-context 的 72.90）：Mem0 <code>66.88 / 72.90 = 91.7%</code>，Mem0<sup>g</sup> <code>68.44 / 72.90 = 93.9%</code>。</p>
+      <p><strong>配置 B：p95 总延迟。</strong>Full-context = <strong>17.117 s</strong>，Mem0 = <strong>1.440 s</strong>，降幅 <code>(17.117 − 1.440) / 17.117 = 91.6%</code>；Mem0<sup>g</sup> = <strong>2.590 s</strong>，降幅 <code>(17.117 − 2.590) / 17.117 = 84.9%</code>。LangMem 的 p95 是 60.40 s，比 Full-context 还高。柱高（当前指标最大值是 LangMem 的 60.40）：Mem0 <code>1.440 / 60.40 = 2.4%</code>，Mem0<sup>g</sup> <code>2.590 / 60.40 = 4.3%</code>。</p>
+      <p>交互只把表格数值按当前指标的最大值缩放成柱高，不做平均或标准差；表里的 J 是 10 次独立运行的均值（±1 SD 未转录），论文没有说明延迟的重复次数，页面不重新计算。柱高缩放只影响视觉，读数与手算都用表格原值。p95 读数按原表精度显示，60.40 不补成 60.400。</p>
+    </div>
+  </details>
+
+  <h3>反直觉 1：全文上下文仍然最准，Mem0 赢的是成本</h3>
+  <p>Full-context 的 overall J 是 <span class="mono" data-src="Table 2">72.90%</span>，比 Mem0 高 <span class="mono" data-src="Table 2">6.02</span> 个百分点，比 Mem0<sup>g</sup> 高 <span class="mono" data-src="Table 2">4.46</span> 个百分点。也就是说，如果只追求准确率，把全部历史塞进上下文仍然更好。Mem0 的卖点是：用 <span class="mono" data-src="Table 2">91.6%</span> 的 p95 延迟降幅和 <span class="mono" data-src="Table 2">93.2%</span> 的 token 降幅，换 <span class="mono" data-src="Table 2">6.02</span> 个百分点的质量损失。这个交换在实时交互里可能值得，但不是“全面超过全文上下文”。</p>
+
+  <p>token 的口径是“每次查询检索到的记忆上下文”，不是记忆库总大小：Full-context 每次约 <span class="mono" data-src="Table 2">26,031</span> token，Mem0 检索 <span class="mono" data-src="Table 2">1,764</span> token，减少 <span class="mono" data-src="Table 2">93.2%</span>；Mem0<sup>g</sup> 检索 <span class="mono" data-src="Table 2">3,616</span> token，减少 <span class="mono" data-src="Table 2">86.1%</span>（两个降幅都相对 full-context 的 26,031 输入上下文）。记忆库本身按 §4.5 平均为 Mem0 约 <span class="mono" data-src="§4.5">7k</span> tokens/conversation、Mem0<sup>g</sup> 约 <span class="mono" data-src="§4.5">14k</span>。这里的 token 不含每次回答的生成开销，论文也没有把写入阶段的 LLM 调用 token 计入这张表。</p>
+
+  <h3>反直觉 2：图版本不是每个维度都更好</h3>
+  <p>Mem0<sup>g</sup> 的 overall J 比 Mem0 高 <span class="mono" data-src="Table 2">1.56</span> 个百分点（相对 <span class="mono" data-src="Table 2">2.3%</span>），temporal 上高 <span class="mono" data-src="Table 1">2.62</span> 个百分点（<span class="mono" data-src="Table 1">58.13</span> 对 <span class="mono" data-src="Table 1">55.51</span>），open-domain 高 <span class="mono" data-src="Table 1">2.78</span> 个百分点。但在 multi-hop 上，Mem0<sup>g</sup> 的 <span class="mono" data-src="Table 1">47.19%</span> 比 Mem0 的 <span class="mono" data-src="Table 1">51.15%</span> 低 <span class="mono" data-src="Table 1">3.96</span> 个百分点，也低于 LangMem 的 <span class="mono" data-src="Table 1">47.92%</span>。作者在 §4.1 和 §4.2 给出了推测性解释——图结构在复杂整合任务里可能存在 “potential inefficiencies or redundancies” / “potential overhead or redundancy”，但没有做消融；这里按 Table 1 并列，不把推测写成结论。</p>
+
+  <p>成本也更高：Mem0<sup>g</sup> 每次查询检索 <span class="mono" data-src="Table 2">3,616</span> token，约为 Mem0（<span class="mono" data-src="Table 2">1,764</span>）的 <span class="mono" data-src="Table 2">2.05</span> 倍；p95 总延迟 <span class="mono" data-src="Table 2">2.590</span> 秒，比 Mem0 的 <span class="mono" data-src="Table 2">1.440</span> 秒高。图构建本身论文说在 worst case 下也能在一分钟内完成（§4.5），但这属于写入侧开销，Table 2 的延迟只统计查询与回答。</p>
+
+  <h3>反直觉 3：Zep 在开放域更高，LangMem 的延迟最差</h3>
+  <p>Zep 的 overall J <span class="mono" data-src="Table 2">65.99%</span>，比 Mem0 低 <span class="mono" data-src="Table 2">0.89</span> 个百分点，但 open-domain 是 <span class="mono" data-src="Table 1">76.60%</span>，比 Mem0<sup>g</sup> 的 <span class="mono" data-src="Table 1">75.71%</span> 高 <span class="mono" data-src="Table 1">0.89</span> 个百分点，也是 J 列最高。这说明“总榜第一”不等于每个问题类型都第一。LangMem 则是另一个极端：记忆只有 <span class="mono" data-src="Table 2">127</span> token，但 p95 总延迟 <span class="mono" data-src="Table 2">60.40</span> 秒，是全文上下文的约 <span class="mono" data-src="Table 2">3.5</span> 倍。</p>
+
+  <p>论文摘要声称「在四类问题上均领先」，但 Table 1 的 open-domain J 最高是 Zep 的 <span class="mono" data-src="Table 1">76.60%</span>（Mem0<sup>g</sup> <span class="mono" data-src="Table 1">75.71%</span>、Mem0 <span class="mono" data-src="Table 1">72.93%</span>），两处并列，不替原文消解。</p>
+
+  <p>论文摘要说 Mem0 相对 OpenAI 的记忆功能在 J 上有 26% 的相对提升。按 Table 2 的 <span class="mono" data-src="Table 2">66.88</span> 对 <span class="mono" data-src="Table 2">52.90</span> 复算：<code>(66.88 − 52.90) / 52.90</code> = <span class="mono" data-src="Table 2">26.4%</span>，与摘要一致。这里是相对提升，绝对差是 <span class="mono" data-src="Table 2">13.98</span> 个百分点。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决不了：单数据集、裁判偏差、写入成本与对抗问题</h2></div>
+  <p class="sec-sub">这些限制决定了 Mem0 的数字能推广到哪里，以及部署时要额外补什么。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">限制 1</span><h4>只在 LOCOMO 上验证</h4></div>
+      <p>10 段多会话日常对话、平均 <span class="mono" data-src="§3.1">26k</span> token。法律、医疗、企业知识库这类领域没有实验；跨月、跨产品的真实记忆负载也没有覆盖。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">限制 2</span><h4>LLM 裁判不是人类裁判</h4></div>
+      <p>J 由另一个 LLM 打分。§3.2 说它从事实准确性、相关性、完整性、上下文适配四个维度评估；Appendix A 的 judge prompt 却只要求输出 CORRECT / WRONG，并附一句理由。两处口径并列，页面不替原文调和。裁判模型可能偏爱某种风格，论文没有报告与人类评分的相关性。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">限制 3</span><h4>写入阶段要调 LLM</h4></div>
+      <p>每条新事实都要检索旧记忆并做一次 tool call。Table 2 的延迟只统计查询与回答，没有把写入的 LLM 调用算进去；高频写入场景的成本需要单独测。</p>
+    </div>
+  </div>
+
+  <p><strong>对抗问题被排除。</strong>LOCOMO 原有的 adversarial 类问题没有标准答案，论文把它排除在评测之外。这意味着页面上的 J 分数不包含“记忆里没有相关信息时，模型会不会编一个答案”这一维度。对生产系统来说，这个维度至少和准确率同样重要。</p>
+
+  <p><strong>更新操作本身可能出错。</strong>ADD / UPDATE / DELETE / NOOP 由 LLM 判断；如果候选事实抽取错了，或者相似旧记忆检索错了，后续操作会把错误写进记忆库。论文没有给出更新操作的准确率，也没有做对抗性注入实验（例如故意让新消息与旧记忆矛盾）。</p>
+
+  <p><strong>图版本的时间信息是“标记”而非“删除”。</strong>过时关系被标成 invalid，查询时是否、以及如何过滤 invalid 关系，论文在正文只说“enable temporal reasoning”，没有给出过滤策略的消融。invalid 关系长期累积会不会拖慢检索，论文没有报告。</p>
+
+  <p><strong>什么时候别用：</strong>如果任务只需要单轮问答、对话不超过上下文窗口，Mem0 的提取与更新开销是多余的；如果写入频率极高而查询很少，省下的查询 token 可能抵不过写入调用。反过来，在多会话、查询频繁、上下文成本敏感的场景里，它的思路最直接：把“每次重读历史”换成“写入时提炼、查询时取事实”。</p>
+</section>
+
+<footer>
+  <div>Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2504.19413" target="_blank" rel="noopener">arXiv:2504.19413v1</a><br>
+    笔记：<a href="/mem0building-production-ready-ai-agents-with-scalable-long-term-memory/">Mem0：Building Production -Ready AI Agents with Scalable Long-Term Memory</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    <strong>笔记勘误</strong><br>
+    1. 笔记称 Mem0 的 p95 延迟「降低了 92%（从 17.1 秒降至 1.44 秒）」。原文摘要写的是 91% lower p95 latency，§4.3 写的是 92% reduction；按 Table 2 的原值 (17.117 − 1.440) / 17.117 复算是 91.6%。页面把两处原文口径都列出，不替原文统一。<br>
+    2. 笔记称 LLM-as-a-Judge 使用「如 GPT-4」的更强模型。原文只说「a separate, more capable LLM」，正文没有点名裁判模型；「GPT-4」是笔记的举例，不是原文信息。<br>
+    3. 笔记称图结构「极大地增强了多跳推理能力」。按 Table 1，Mem0<sup>g</sup> 的 Multi-Hop J 是 47.19%，低于 Mem0 的 51.15%，也低于 LangMem 的 47.92%；图版本在 Temporal 上更高（58.13 对 55.51），但多跳不是它的优势项。<br>
+    4. 笔记把 J 写成三维（事实准确性、相关性、完整性），原文 §3.2 写的是四维（加上下文适配）；但 Appendix A 的 judge prompt 只要求输出 CORRECT / WRONG 并附一句理由。页面把两处口径并列，不替原文统一。<br>
+    5. 笔记正文把方法写成「Memo」/「Memo G」，页面统一用论文的 Mem0 / Mem0<sup>g</sup>。<br>
+    6. 笔记 front matter 的 title 是「未命名」，页面标题按原文补全。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var ROWS = [
+    ['Full-context', 72.90, 17.117, 26031, false],
+    ['RAG (k=2, 256)', 60.97, 1.907, 256, false],
+    ['LangMem', 58.10, 60.40, 127, false],
+    ['Zep', 65.99, 2.926, 3911, false],
+    ['OpenAI', 52.90, 0.889, 4437, false],
+    ['A-Mem', 48.38, 4.374, 2520, false],
+    ['Mem0', 66.88, 1.440, 1764, 'mem0'],
+    ['Mem0g', 68.44, 2.590, 3616, 'mem0g']
+  ];
+
+  // p95 列按 Table 2 的原始精度逐字显示，避免 toFixed(3) 把 60.40 补成 60.400
+  var P95_LABEL = {
+    'Full-context': '17.117',
+    'RAG (k=2, 256)': '1.907',
+    'LangMem': '60.40',
+    'Zep': '2.926',
+    'OpenAI': '0.889',
+    'A-Mem': '4.374',
+    'Mem0': '1.440',
+    'Mem0g': '2.590'
+  };
+
+  var METRICS = {
+    j: {
+      idx: 1, max: 72.90, digits: 2,
+      msg: 'Overall J：Full-context 72.90 最高；Mem0 66.88，Mem0g 68.44；Zep 65.99；最好的 RAG 60.97'
+    },
+    p95: {
+      idx: 2, max: 60.40,
+      msg: 'Total p95 延迟：Mem0 1.440 s，Mem0g 2.590 s，Full-context 17.117 s，LangMem 60.40 s'
+    },
+    tok: {
+      idx: 3, max: 26031, digits: 0,
+      msg: 'Chunk / memory tokens：Mem0 1,764，Mem0g 3,616，Full-context 26,031，LangMem 127'
+    }
+  };
+
+  var state = { metric: 'j' };
+  var chart = document.getElementById('mem-chart');
+  var msg = document.getElementById('mem-msg');
+  var tabs = document.getElementById('mem-tabs');
+
+  function fmt(v, d) {
+    if (d === 0) return v.toLocaleString('en-US');
+    return v.toFixed(d);
+  }
+
+  function render() {
+    if (!chart) return;
+    var cfg = METRICS[state.metric];
+    chart.innerHTML = ROWS.map(function (r) {
+      var val = r[cfg.idx];
+      var h = Math.max(1, (val / cfg.max) * 100);
+      var color = r[4] === 'mem0' ? 'background:var(--accent)'
+        : r[4] === 'mem0g' ? 'background:var(--accent-deep)'
+        : 'background:var(--c1)';
+      return '<div class="crow"><div class="cname">' + r[0] + '</div>' +
+        '<div class="cbars"><div class="cbar"><div class="track">' +
+        '<div class="fill" style="height:' + h + '%;' + color + '"></div>' +
+        '</div><div class="num">' + (state.metric === 'p95' ? P95_LABEL[r[0]] : fmt(val, cfg.digits)) + '</div></div></div></div>';
+    }).join('');
+    if (msg) msg.textContent = cfg.msg;
+  }
+
+  if (tabs) {
+    tabs.addEventListener('click', function (e) {
+      var b = e.target.closest('.tab');
+      if (!b) return;
+      state.metric = b.getAttribute('data-metric');
+      var btns = tabs.querySelectorAll('.tab');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].getAttribute('data-metric') === state.metric) btns[i].classList.add('active');
+        else btns[i].classList.remove('active');
+      }
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

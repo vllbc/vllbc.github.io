@@ -1,0 +1,749 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 84.6 | Figure 5 | (156400-24047)/156400*100 |
+| 57.0 | Figure 5 | (55957-24047)/55957*100 |
+| 132353 | Figure 5 | 156400-24047 |
+| 31910 | Figure 5 | 55957-24047 |
+| 0.8462468 | Figure 5 | 132353/156400 |
+| 0.5702593 | Figure 5 | 31910/55957 |
+| 84.62468 | Figure 5 | 0.8462468*100 |
+| 57.02593 | Figure 5 | 0.5702593*100 |
+| 10.2 | Figure 5 | 7.4+2.8 |
+| 25.3 | Figure 5 | 2.3+23.0 |
+| 4.8 | Figure 5 | 2.4+2.4 |
+| 5.4 | Figure 5 | 10.2-4.8 |
+| 20.5 | Figure 5 | 25.3-4.8 |
+| 4.8 | Table 7 | 55.3-50.5 |
+| 2.1 | Table 7 | 55.3-53.2 |
+| 3.0 | Table 7 | 58.3-55.3 |
+| 28.8 | Table 11 | 59.8-31.0 |
+| 18.0 | Table 11 | 78.0-60.0 |
+| 21.0 | Table 11 | 78.0-57.0 |
+| 57.0 | Table 11 | (41.0+31.0+82.8+78.9+51.1)/5 |
+| 10.5 | Table 11 | 59.8-49.3 |
+| 10.6 | Table 11 | 59.8-49.2 |
+| 3.6 | Table 11 | 78.0-74.4 |
+| 59939 | Table 9 | 443+2695+10339+1112+45350 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chain-of-Agents · 把多智能体协作压进一次解码</title>
+<meta name="description" content="Chain-of-Agents 让单个 LLM 在同一条解码流里轮流扮演规划、搜索、反思等角色，用 OAgents 轨迹蒸馏做 SFT，再用 DAPO 做 Agentic RL。32B AFM 在 GAIA 得 55.3%，AIME25 avg@16 得 59.8%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调，公共样式全部来自 base.css */
+.slot.masked{opacity:.55;border-style:dashed}
+.infer{font-size:11px;font-weight:600;color:var(--c2);background:var(--c2-soft);padding:1px 6px;border-radius:100px;font-family:"JetBrains Mono",monospace;white-space:nowrap}
+.tbl-cap{font-size:13px;color:var(--text-soft);margin:18px 0 8px;line-height:1.7}
+.tbl-cap strong{color:var(--text)}
+.role-card ul{margin:6px 0 0;padding-left:18px}
+.role-card li{margin-bottom:4px;font-size:14px;line-height:1.65}
+.role-card .en{font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--c1)}
+.role-card .en-a{font-family:"JetBrains Mono",monospace;font-size:12.5px;color:var(--accent-deep)}
+.coa-hint{font-size:13.5px;color:var(--text-muted);margin:0 0 12px}
+.coa-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin-top:10px}
+.coa-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+@media (max-width:880px){.tbl-scroll table{min-width:700px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Chain-of-Agents</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · Agent · arXiv 2025</span>
+  <h1>Chain-of-Agents：把「多智能体协作」压进一次解码</h1>
+  <p class="hero-sub">
+    多智能体系统把规划、搜索、反思拆给多个独立的 LLM，能力强但通信贵、工作流难改、backbone 不参与训练；
+    工具集成推理（TIR）把工具调用压进单模型，却只有一条固定的 ReAct 循环。
+    这篇论文让<strong>同一个模型在同一条生成流里轮流扮演不同角色</strong>，先把 OAgents 的协作轨迹蒸馏成 CoA 序列做 SFT，再用 Agentic RL 优化任务成功率。
+  </p>
+  <div class="meta">
+    <span>Weizhen Li 等 30 位作者 · arXiv 2508.13167v1</span>
+    <a href="https://arxiv.org/abs/2508.13167v1" target="_blank" rel="noopener">原文 v1 ↗</a>
+    <a href="https://github.com/OPPO-PersonalAI/Agent_Foundation_Models" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    MAS 把「谁负责什么」放在模型外面：多个 LLM 实例靠消息传递协作。它强在角色分工和工具编排，但通信、工作流工程和静态 backbone 都是外部成本。
+  </p>
+  <p>
+    TIR 把工具调用放进单模型的 ReAct 循环，端到端可训练，却只支持「think-action-observation」这一种流程，难以表达并行子任务、角色批判和多工具调度。
+  </p>
+  <p>
+    <strong>CoA 的做法是把角色切换也变成 token 流的一部分：</strong>模型按需激活 Thinking / Plan / Reflection / Verification 与 Search / Crawl / Code Generate，工具仍在外部执行，但协作上下文留在同一条流里。再用多智能体蒸馏和 DAPO 把这种能力训进 Qwen2.5 backbone。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 7">55.3<small>%</small></div>
+      <div class="k">GAIA Pass@1（32B AFM-RL）<br>同表 OAgents 58.3</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 11">59.8<small>%</small></div>
+      <div class="k">AIME25 avg@16（32B AFM-RL）<br>ReTool-32B 49.3</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 5">84.6<small>%</small></div>
+      <div class="k">相对 OAgents 的 token 降幅<br>156,400 → 24,047</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>多智能体很强，但它的能力长在模型外面</h2></div>
+  <p class="sec-sub">先看清 MAS、TIR、ReAct 各自把「智能」放在哪，才能理解 CoA 想搬动的是什么。</p>
+
+  <p>
+    复杂 agent 任务通常不是一次问答：要拆解、要查资料、要写代码、要回头检查。论文构造的训练轨迹跨度达到 <strong>5–20 hops</strong>，每个 hop 是一次 agent–tool 交互（§3.2）。这类任务需要的是<strong>多角色、多工具、多轮</strong>的协作，而不是单轮 ReAct 循环。
+  </p>
+
+  <p>
+    现有多智能体系统（Multi-Agent System, MAS）把角色放在模型外：每个 agent 往往是独立的 LLM 实例，靠消息传递协作。它强在角色分工和工具编排，但通信是外部开销，工作流要靠 prompt / workflow engineering 固定，backbone 通常不参与训练。
+  </p>
+
+  <p>
+    TIR 则相反：把工具调用放进单模型的 ReAct 循环，端到端可训练，也少了多实例通信。但一条「think-action-observation」流水线容纳不下多角色协作——它没有原生的机制让模型在同一任务里切换成规划者、检索者、批评者，再把它们的状态汇总起来。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心缺口</span><h4>同时要「多智能体协作」和「端到端可训练」</h4></div>
+    <p>MAS 有协作但不可端到端训练；TIR 可端到端训练但只有单 agent 循环。CoA 的目标是把前者的角色协作搬进后者的单模型训练框架里，而不是再设计一个更复杂的 agent 框架。</p>
+  </div>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成路线，各缺一块</h2></div>
+  <p class="sec-sub">MAS 把协作放在模型外，TIR 把工具调用放进模型内；CoA 想把「协作」也放进去。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">MAS</span><h4>外部多智能体系统</h4></div>
+      <p><strong>代表：</strong>OAgents、OWL、DeepResearch。常见做法是多个 LLM 实例 + 编排器 + 消息传递。</p>
+      <p><strong>强项：</strong>角色分工清楚，工具种类多，复杂任务的上限高；GPT-4.1 这类强 backbone 的单步能力很强。</p>
+      <p><strong>盲区：</strong>通信和工作流是外部开销；backbone 静态，不能从任务结果里做数据驱动的更新；换领域往往要重写 prompt / workflow。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">TIR</span><h4>单模型工具集成推理</h4></div>
+      <p><strong>代表：</strong>Search-R1、ReTool、WebThinker。通过 SFT / RL 让模型在推理中调用搜索、代码执行等工具。</p>
+      <p><strong>强项：</strong>单模型端到端，工具调用策略可训练；相比 MAS，少掉多实例通信，token 开销通常更低。</p>
+      <p><strong>盲区：</strong>基本上是单 agent 的 ReAct 循环；并行子任务、角色批判、多工具之间的动态调度，都没有原生的表达方式。</p>
+    </div>
+  </div>
+
+  <p class="tbl-cap"><strong>Table 1</strong>：论文对四种范式的四项能力对照。原表逐格转录，“✓”表示支持，“✗”表示不支持。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Paradigm</th><th>Tool Integration</th><th>End-to-end Execution</th><th>Multi-agent Collaboration</th><th>Data-centric Optimization</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ReAct</td><td class="num">✓</td><td class="num">✗</td><td class="num">✗</td><td class="num">✗</td></tr>
+        <tr><td>Multi-Agent System</td><td class="num">✓</td><td class="num">✗</td><td class="num">✓</td><td class="num">✗</td></tr>
+        <tr><td>Tool-Integrated Reasoning</td><td class="num">✓</td><td class="num">✓</td><td class="num">✗</td><td class="num">✓</td></tr>
+        <tr><td>Chain-of-Agents</td><td class="num">✓</td><td class="num">✓</td><td class="num">✓</td><td class="num">✓</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表是论文的<strong>范式主张</strong>，不是实验结果。它想说明的缺口很具体：ReAct 能调工具，但靠 prompt 拼装，不是端到端训练出来的策略；MAS 有协作，但协作发生在多个模型实例之间；TIR 把工具调用训练进模型，却没有多角色协作；只有 CoA 同时占了四格。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>CoA：一个模型，一条流，按需切换角色</h2></div>
+  <p class="sec-sub">核心不是新网络结构，而是把「谁在什么时候说话」变成可训练的序列格式。</p>
+
+  <p>
+    论文把 CoA 拆成两类角色。角色型 agent 负责高层推理和协调，工具型 agent 负责具体执行。所有角色共享同一个模型参数，切换只体现在当前生成的内容和标签上。
+  </p>
+
+  <div class="two-col">
+    <div class="card role-card">
+      <div class="card-head"><span class="pill pa">Role-playing Agents</span><h4>谁在协调</h4></div>
+      <ul>
+        <li><span class="en-a">Thinking Agent</span>：编排推理流程，维持解题状态的一致性。</li>
+        <li><span class="en-a">Plan Agent</span>：把 query 拆成结构化的任务序列，例如 <span class="en">⟨search, crawl, …⟩</span>。</li>
+        <li><span class="en-a">Reflection Agent</span>：做自我批评、知识融合，处理证据之间的不一致。</li>
+        <li><span class="en-a">Verification Agent</span>：按形式化正确性标准检查推理完整性。</li>
+      </ul>
+    </div>
+    <div class="card role-card">
+      <div class="card-head"><span class="pill p1">Tool Agents</span><h4>谁在动手</h4></div>
+      <ul>
+        <li><span class="en">Search Agent</span>：改写查询、优先选择来源。</li>
+        <li><span class="en">Crawl Agent</span>：并行抽取页面内容、解析技术细节。</li>
+        <li><span class="en">Code Generate Agent</span>：生成代码，并在 sandbox 里执行。</li>
+      </ul>
+      <p style="font-size:13px;color:var(--text-soft);margin-top:12px">工具仍在模型外执行；CoA 内化的是角色调度和协作上下文，不是把搜索引擎或 Python 解释器塞进参数里。</p>
+    </div>
+  </div>
+
+  <h3>状态转移：下一步激活谁，由当前状态决定</h3>
+  <div class="eq">
+    S<sub>t</sub> = f<sub>θ</sub>(S<sub>t-1</sub>, φ<sub>t-1</sub>, o<sub>t-1</sub>)<br>
+    φ<sub>t</sub> ~ P(φ | S<sub>t</sub>)
+  </div>
+  <div class="eq-cap">Eq. 4 · Thinking Agent 根据上一状态、上一个角色和 observation，决定下一个激活角色 φ<sub>t</sub></div>
+
+  <p>
+    φ<sub>t</sub> 不是另一个模型实例，而是当前 token 流里被激活的角色。模型在同一条上下文里继续写：先产出角色的思考，再产出工具调用，工具返回的 observation 拼回同一条流，然后继续下一个角色。论文把这称为「single decoding (inference) process」。
+  </p>
+
+  <h3>SFT 序列长什么样</h3>
+  <div class="eq" style="text-align:left">
+    <code>&lt;think&gt; C<sub>cot</sub> &lt;/think&gt;&lt;tools&gt; α<sub>m</sub>(α<sub>p</sub>) &lt;/tools&gt;&lt;observation&gt; O<sub>t</sub> &lt;/observation&gt;&lt;reflection&gt; F<sub>t</sub> &lt;/reflection&gt; … &lt;answer&gt; A<sub>t</sub> &lt;/answer&gt;</code>
+  </div>
+  <div class="eq-cap">§3.2 的 SFT 格式 · <code>&lt;think&gt;</code> 是推理，<code>&lt;tools&gt;</code> 是工具动作，<code>&lt;observation&gt;</code> 是环境返回，<code>&lt;reflection&gt;</code> 是反思，<code>&lt;answer&gt;</code> 是最终答案</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">关键细节</span><h4>observation 不进 loss</h4></div>
+    <p>SFT 的目标函数对工具返回的 observation 做 masking（Eq. 7）。模型要学的是「下一步该想什么、该调什么工具」，而不是复述搜索结果或 sandbox 输出。论文给出的理由是防止环境噪声传播（§3.2）。</p>
+  </div>
+
+  <h3>动手看：一条 CoA 轨迹里的五个片段</h3>
+  <p class="coa-hint">点任意片段，或按「下一步」。注意第 3 段：observation 会拼回上下文，但 SFT loss 不算它。</p>
+  <div class="sim" id="coa-sim">
+    <div class="slots s5" id="coa-slots">
+      <button type="button" class="slot hit" aria-label="第 1 段：Plan">
+        <div class="slot-name">01 · Plan</div>
+        <div class="slot-val"><code>&lt;think&gt;</code></div>
+      </button>
+      <button type="button" class="slot" aria-label="第 2 段：Search">
+        <div class="slot-name">02 · Search</div>
+        <div class="slot-val"><code>&lt;tools&gt;</code></div>
+      </button>
+      <button type="button" class="slot masked" aria-label="第 3 段：Observation">
+        <div class="slot-name">03 · Observation</div>
+        <div class="slot-val"><code>&lt;observation&gt;</code></div>
+      </button>
+      <button type="button" class="slot" aria-label="第 4 段：Reflection">
+        <div class="slot-name">04 · Reflection</div>
+        <div class="slot-val"><code>&lt;reflection&gt;</code></div>
+      </button>
+      <button type="button" class="slot" aria-label="第 5 段：Answer">
+        <div class="slot-name">05 · Answer</div>
+        <div class="slot-val"><code>&lt;answer&gt;</code></div>
+      </button>
+    </div>
+    <div class="readout" id="coa-readout" data-src="§3.2">
+      <div class="r-head">当前片段</div>
+      <div id="coa-msg">先点「下一步」，从 Plan 开始走。</div>
+    </div>
+    <div class="actions">
+      <button class="act primary" id="coa-next">下一步</button>
+      <button class="act ghost" id="coa-reset">重置</button>
+    </div>
+    <div class="coa-legend">
+      <span><i style="background:var(--accent)"></i>模型生成，参与 loss</span>
+      <span><i style="background:var(--border-strong)"></i>环境返回，loss 被 mask</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个交互覆盖了什么、没覆盖什么<span class="sum-sub">按 §3.1 / §3.2 拼装</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>角色名（Thinking / Plan / Reflection / Verification 与 Search / Crawl / Code Generate）、SFT 序列标签（<code>&lt;think&gt;</code>、<code>&lt;tools&gt;</code>、<code>&lt;observation&gt;</code>、<code>&lt;reflection&gt;</code>、<code>&lt;answer&gt;</code>）、observation masking 的位置。</p>
+      <p><strong>没覆盖：</strong>真实工具返回内容、具体任务的跳数、多轮错误修正、RL 阶段的 token 级奖励。五个片段的顺序是按论文范式拼出的<strong>示意</strong>，不是附录 C 案例的逐字轨迹。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>先蒸馏，再 RL：把外部协作变成可训练信号</h2></div>
+  <p class="sec-sub">这条流水线的关键不是 SFT / RL 本身，而是「教师轨迹怎么变成学生能学的序列」。</p>
+
+  <h3>第一步：从 OAgents 录一条可学的轨迹</h3>
+  <p>
+    论文用的教师是 OAgents，一个开源多智能体系统（§3.2）。OAgents 执行任务时，作者记录每个 agent 的激活、动手前的推理状态和输出，把「谁在什么状态下做了什么」按顺序抽成一条 CoA 轨迹。这不是词级知识蒸馏，而是<strong>agent 级 / 序列级</strong>的行为蒸馏：学生学的是角色激活顺序和决策模式，不是教师的词概率分布。
+  </p>
+
+  <p>
+    原始轨迹质量参差，所以有四道渐进过滤。注意第 3、4 道不是简单删除，而是<strong>下采样 / 上采样</strong>——它们改变的是数据分布，不只是数据量。
+  </p>
+
+  <p class="tbl-cap"><strong>§3.2</strong>：四阶段渐进过滤（据原文整理，不是原表）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>阶段</th><th>规则</th><th>目的</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>复杂度过滤</td><td>总 agent–tool 交互少于 5 次的轨迹直接丢弃。</td><td>去掉过于简单的任务。</td></tr>
+        <tr><td>质量过滤</td><td>错答案、冗余工具输入、未严格遵循指令的样本移除；QA / search 用 LLM 判，code 看测试是否全过，math 对 golden answer。</td><td>去掉“脏数据”，即使答案碰巧正确。</td></tr>
+        <tr><td>反思增强</td><td>缺少 reflection 的轨迹下采样；math / code 任务直接丢弃无反思的轨迹。</td><td>优先保留带自我批评、自我修正的样本。</td></tr>
+        <tr><td>纠错上采样</td><td>search / QA 中 <code>&lt;double_check&gt;</code> 初判可信度低、但最终答对的轨迹上采样。</td><td>让模型多见“先错后改”的过程。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Web agent 的 SFT 数据共 <strong>16,433</strong> 条：MHQA 8,826 条 + Web Agent 7,607 条；RL 数据为 169,615（MHQA）+ 10,427（Web）（§4.1）。Code agent 的 SFT 数据正文写约 <strong>47k</strong> 条（§4.2），RL 数据 47,560 条（Table 9）。轨迹的平均跳数在 4.35–7.29 之间（Table 2 / Table 3 未转录，只引用 Avg. Hops 列），比常见的 2–3 hop benchmark 长得多。
+  </p>
+
+  <h3>第二步：用 DAPO 把「会模仿」推到「会拿分」</h3>
+  <p>
+    RL 之前先筛题。Web agent 用 Qwen2.5-72B 在<strong>无工具</strong>条件下对每题采样 32 次，算 exact-match pass rate r<sub>q</sub>；r<sub>q</sub> &gt; 0.3 的题被排除（§3.3）。理由很直接：这些题要么不需要工具就能做，要么已经被参数知识污染，训 RL 学不到真正的工具使用。Code agent 则用 7B AFM 每题采样 8 次，8 次全对的题丢弃（§3.3）。
+  </p>
+
+  <p>
+    训练算法是 DAPO。Web RL 每轮 64 个 prompt、每个 prompt 8 条 rollout，单条 rollout 最多 24 steps / 32k tokens；Code RL 每个 prompt 8 条 rollout、最多 8 次 tool call；两者都用 VeRL（§4.1 / §4.2）。
+  </p>
+
+  <div class="eq">
+    R<sub>web</sub> = score<sub>answer</sub><br>
+    R<sub>code</sub> = score<sub>answer</sub> × score<sub>format</sub>
+  </div>
+  <div class="eq-cap">Eq. 10–11 · web 只用二元答案判定；code 还要求 <code>&lt;code&gt;…&lt;/code&gt;</code> 格式正确，且测试全过</div>
+
+  <p>
+    Web 的 <code>score<sub>answer</sub></code> 来自 LLM-as-Judge（Qwen2.5-72B）的二元判断；论文没有给 format reward，理由是高质量 SFT 冷启动已经保证了格式。Code 的 <code>score<sub>format</sub></code> 检查每次调用是否包在 <code>&lt;code&gt;\n```py\n…```\n&lt;/code&gt;</code> 里，数学题则用 Math-Verify 做答案抽取和校验（§3.3）。
+  </p>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>架构：没有新网络，改的是上下文协议</h2></div>
+  <p class="sec-sub">AFM 的 backbone 仍是 Qwen2.5 系列；CoA 的“架构”体现在一条序列怎么组织角色、工具和 observation。</p>
+
+  <p>
+    论文的贡献在训练与推理协议，不在网络结构：32B AFM 直接用 Qwen2.5-32B-Instruct，code agent 用 Qwen2.5-Coder-32B-Instruct（§4.1 / §4.2）。真正的改动集中在三处：system prompt 里的角色与工具说明、SFT 序列的标签格式、以及 loss 对 observation 的 mask。
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 420 560" role="img" aria-label="外部多智能体系统与 Chain-of-Agents 的结构对比">
+      <defs>
+        <marker id="arw" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect x="10" y="10" width="400" height="240" rx="14" fill="var(--bg-soft)" stroke="var(--border)"></rect>
+      <text x="24" y="36" font-size="15" font-weight="700" fill="var(--c1)">外部 MAS：角色在多个模型实例里</text>
+
+      <rect x="140" y="52" width="140" height="40" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="210" y="77" text-anchor="middle" font-size="13" fill="var(--c1)">Orchestrator (LLM)</text>
+
+      <rect x="26" y="140" width="82" height="52" rx="8" fill="var(--bg-surface)" stroke="var(--c1)"></rect>
+      <text x="67" y="162" text-anchor="middle" font-size="12" fill="var(--text)">Plan</text>
+      <text x="67" y="180" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">LLM</text>
+
+      <rect x="120" y="140" width="82" height="52" rx="8" fill="var(--bg-surface)" stroke="var(--c1)"></rect>
+      <text x="161" y="162" text-anchor="middle" font-size="12" fill="var(--text)">Search</text>
+      <text x="161" y="180" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">LLM</text>
+
+      <rect x="214" y="140" width="82" height="52" rx="8" fill="var(--bg-surface)" stroke="var(--c1)"></rect>
+      <text x="255" y="162" text-anchor="middle" font-size="12" fill="var(--text)">Code</text>
+      <text x="255" y="180" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">LLM</text>
+
+      <rect x="308" y="140" width="82" height="52" rx="8" fill="var(--bg-surface)" stroke="var(--c1)"></rect>
+      <text x="349" y="162" text-anchor="middle" font-size="12" fill="var(--text)">Reflect</text>
+      <text x="349" y="180" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">LLM</text>
+
+      <path d="M 180 92 L 67 140" fill="none" stroke="var(--c1)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arw)"></path>
+      <path d="M 195 92 L 161 140" fill="none" stroke="var(--c1)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arw)"></path>
+      <path d="M 225 92 L 255 140" fill="none" stroke="var(--c1)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arw)"></path>
+      <path d="M 240 92 L 349 140" fill="none" stroke="var(--c1)" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arw)"></path>
+      <text x="210" y="222" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">消息传递 · 工作流工程 · 每个 agent 一个模型实例</text>
+
+      <rect x="10" y="270" width="400" height="270" rx="14" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="24" y="296" font-size="15" font-weight="700" fill="var(--accent-deep)">CoA / AFM：角色在同一条解码流里</text>
+
+      <rect x="24" y="312" width="372" height="120" rx="10" fill="var(--bg-surface)" stroke="var(--accent)"></rect>
+      <rect x="36" y="326" width="60" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="66" y="346" text-anchor="middle" font-size="10" fill="var(--accent-deep)">&lt;think&gt;</text>
+      <rect x="102" y="326" width="60" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="132" y="346" text-anchor="middle" font-size="10" fill="var(--accent-deep)">&lt;tools&gt;</text>
+      <rect x="168" y="326" width="86" height="30" rx="6" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"></rect>
+      <text x="211" y="346" text-anchor="middle" font-size="9.5" fill="var(--text-muted)">&lt;observation&gt;</text>
+      <rect x="260" y="326" width="72" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="296" y="346" text-anchor="middle" font-size="9.5" fill="var(--accent-deep)">&lt;reflection&gt;</text>
+      <rect x="338" y="326" width="48" height="30" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="362" y="346" text-anchor="middle" font-size="9.5" fill="var(--accent-deep)">&lt;answer&gt;</text>
+
+      <text x="210" y="378" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">单个 LLM 解码流：角色切换发生在 token 之间</text>
+      <text x="210" y="398" text-anchor="middle" font-size="11" fill="var(--text-soft)">虚线框是环境返回，SFT loss 对它做 mask</text>
+
+      <rect x="36" y="452" width="100" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="86" y="479" text-anchor="middle" font-size="12" fill="var(--c2)">Search</text>
+      <rect x="160" y="452" width="100" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="210" y="479" text-anchor="middle" font-size="12" fill="var(--c2)">Crawl</text>
+      <rect x="284" y="452" width="100" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="334" y="479" text-anchor="middle" font-size="12" fill="var(--c2)">Python</text>
+
+      <path d="M 86 432 L 86 452" fill="none" stroke="var(--c2)" stroke-width="1.3" marker-end="url(#arw)"></path>
+      <path d="M 210 432 L 210 452" fill="none" stroke="var(--c2)" stroke-width="1.3" marker-end="url(#arw)"></path>
+      <path d="M 334 432 L 334 452" fill="none" stroke="var(--c2)" stroke-width="1.3" marker-end="url(#arw)"></path>
+      <text x="210" y="522" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">工具仍在模型外执行；observation 拼回同一条流</text>
+    </svg>
+    <figcaption>
+      图 1：MAS 把角色放在多个模型实例里；CoA 把角色切换放进同一条解码流。工具（Search / Crawl / Python）仍在模型外执行。据 Figure 2 与 §3.1 重绘的示意，不是原文图的像素级复制。
+      <details>
+        <summary>这张图覆盖了什么、没覆盖什么<span class="sum-sub">点开看边界</span></summary>
+        <div class="details-body">
+          <p><strong>覆盖：</strong>MAS 的多实例/消息传递、CoA 的单模型 token 流、角色标签与工具调用的关系、observation 的 mask 位置。</p>
+          <p><strong>没覆盖：</strong>OAgents 的具体 agent 数量与消息协议、Figure 3 的轨迹转换细节、Figure 4 的 SFT/RL 训练框架。图中把工具画成 Search / Crawl / Python 是为了对应 §3.1 的角色表，不代表每个任务都会同时调用这三种工具。</p>
+        </div>
+      </details>
+    </figcaption>
+  </figure>
+
+  <p>
+    一个容易误解的点：<strong>CoA 不是“只调用一次工具的模型”</strong>。它仍会多次调用外部工具，也会把每次 observation 拼回上下文；它省掉的是多个 LLM 实例之间的消息传递，以及这部分通信带来的 token 开销（§3.1）。Figure 5 的效率对比也是在这个意义上成立的（§5.1）。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：32B 三线能打，但每组数字都有条件</h2></div>
+  <p class="sec-sub">先看原表，再看两个反直觉点：RL 的增益在数学上最大；效率优势取决于你拿谁当基线。</p>
+
+  <h3>Web agent：同规模领先，跨 backbone 要分开看</h3>
+  <p class="tbl-cap"><strong>Table 7</strong>：web agent 基准，Pass@1；节选 32B 对照行（完整表未转录）。OAgents 是 GPT-4.1 backbone；DeepResearch 的 Backbone 列原文写「-」，未报告；AFM 是 Qwen2.5-32B-Instruct；GAIA 用 103 条 text-only 子集，BrowseComp 1,266 条，HLE 用 500 条 text-only 子集（§4.1）；表中“-”为原文未报告。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>Backbone</th><th style="text-align:right">GAIA Avg</th><th style="text-align:right">WebWalker</th><th style="text-align:right">BrowseComp</th><th style="text-align:right">HLE</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-32B-Instruct</td><td>—</td><td class="num">6.8</td><td class="num">3.1</td><td class="num">0.6</td><td class="num">5.4</td></tr>
+        <tr><td>OAgents</td><td>GPT-4.1</td><td class="num">58.3</td><td class="num">-</td><td class="num">13.7</td><td class="num">20.2</td></tr>
+        <tr><td>DeepResearch</td><td>—</td><td class="num">67.4</td><td class="num">-</td><td class="num">51.5</td><td class="num">26.6</td></tr>
+        <tr><td>WebDancer</td><td>QwQ-32B</td><td class="num">51.5</td><td class="num">47.9</td><td class="num">3.8</td><td class="num">7.2</td></tr>
+        <tr><td>WebSailor</td><td>Qwen2.5-32B</td><td class="num">53.2</td><td class="num">-</td><td class="num">10.5</td><td class="num">-</td></tr>
+        <tr><td>AFM-SFT</td><td>Qwen2.5-32B</td><td class="num">50.5</td><td class="num">61.5</td><td class="num">10.0</td><td class="num">16.3</td></tr>
+        <tr><td><strong>AFM-RL</strong></td><td>Qwen2.5-32B</td><td class="num">55.3</td><td class="num">63.0</td><td class="num">11.1</td><td class="num">18.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    同 32B 参数规模内（backbone 不同），AFM-RL 的 GAIA 55.3 高于 WebSailor 53.2（<strong>+2.1 个百分点</strong>，55.3 − 53.2）和 WebDancer 51.5。但把其他 agent 框架放进来，OAgents 58.3（GPT-4.1 backbone）、DeepResearch 67.4（backbone 原文未报告）都在 AFM 之上；BrowseComp 上 OAgents 13.7、DeepResearch 51.5 也高于 AFM 的 11.1。<strong>这不是同 backbone 的比较</strong>，不能直接读成“单模型打败多智能体”。
+  </p>
+
+  <h3>数学：AIME25 的 RL 增益最大</h3>
+  <p class="tbl-cap"><strong>Table 11</strong>：数学基准，32B 节选（完整表未转录）。AIME24 / AIME25 / AMC23 报 avg@16；MATH500 / OlympiadBench 报 Pass@1；“Avg.” 是五列平均，混合了两种口径。注意 AFM-SFT 行的 Avg. 栏写 60.0，但五列复算为 (41.0+31.0+82.8+78.9+51.1)/5 = 57.0；同表其余各行的 Avg. 都与五列简单平均一致（AFM-RL 78.0、ReTool 74.4、SimpleTIR 71.5、Qwen2.5-Coder 36.6）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th style="text-align:right">AIME24</th><th style="text-align:right">AIME25</th><th style="text-align:right">MATH500</th><th style="text-align:right">AMC23</th><th style="text-align:right">OlympiadBench</th><th style="text-align:right">Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-Coder-32B</td><td class="num">13.3</td><td class="num">10.0</td><td class="num">73.0</td><td class="num">50.6</td><td class="num">35.9</td><td class="num">36.6</td></tr>
+        <tr><td>ReTool-32B</td><td class="num">67.0</td><td class="num">49.3</td><td class="num">93.2</td><td class="num">96.1</td><td class="num">66.4</td><td class="num">74.4</td></tr>
+        <tr><td>SimpleTIR-32B-Multi</td><td class="num">59.9</td><td class="num">49.2</td><td class="num">92.9</td><td class="num">91.6</td><td class="num">63.7</td><td class="num">71.5</td></tr>
+        <tr><td>AFM-SFT</td><td class="num">41.0</td><td class="num">31.0</td><td class="num">82.8</td><td class="num">78.9</td><td class="num">51.1</td><td class="num">60.0</td></tr>
+        <tr><td><strong>AFM-RL</strong></td><td class="num">66.7</td><td class="num">59.8</td><td class="num">94.6</td><td class="num">96.6</td><td class="num">72.1</td><td class="num">78.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    AFM-RL 的 AIME25 59.8 比 ReTool-32B 的 49.3 高 <strong>10.5 个百分点</strong>（59.8 − 49.3），比 SimpleTIR-32B-Multi 的 49.2 高 <strong>10.6 个百分点</strong>（59.8 − 49.2）；五列平均 78.0 比 ReTool 的 74.4 高 <strong>3.6 个百分点</strong>（78.0 − 74.4）。AIME24 上 ReTool 的 67.0 仍高于 AFM-RL 的 66.7——不是每一列都翻过去。另外，AFM-SFT 的 Avg. 栏 60.0 与五列复算 57.0 不一致：按表内 Avg. 栏，SFT→RL 的平均增益是 <strong>+18.0</strong>（78.0 − 60.0）；按五列复算则是 <strong>+21.0</strong>（78.0 − 57.0）。两处并列，本页不替原文选择。
+  </p>
+
+  <h3>代码：32B 的 LiveCodeBench v5 与 CodeContests</h3>
+  <p class="tbl-cap"><strong>Table 12</strong>：代码生成基准，Pass@1；节选 32B 对照行（完整表未转录）。表中两组 AFM 行没有标参数量；正文的 47.9 / 32.7 对应 32B <span class="infer">推断</span>（依据：§4.2 的 32B 设置与 Table 12 最后一行的数值对应）。表头把这两组未标参数的 AFM 行也归入「TIR Methods From Qwen-2.5-32B Family Models」，但 §4.2.2 给出的增益 15.3 − 6.8 = 8.5、24.7 − 11.5 = 13.2 说明它们是 7B 行，表头与正文不一致。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th style="text-align:right">LiveCodeBench v4</th><th style="text-align:right">LiveCodeBench v5</th><th style="text-align:right">CodeContests</th><th style="text-align:right">Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-Coder-32B</td><td class="num">28.7</td><td class="num">28.1</td><td class="num">0.6</td><td class="num">11.5</td></tr>
+        <tr><td>Retool</td><td class="num">19.0</td><td class="num">23.4</td><td class="num">10.3</td><td class="num">10.5</td></tr>
+        <tr><td>AFM-SFT</td><td class="num">37.0</td><td class="num">43.1</td><td class="num">22.4</td><td class="num">20.5</td></tr>
+        <tr><td><strong>AFM-RL</strong></td><td class="num">43.0</td><td class="num">47.9</td><td class="num">32.7</td><td class="num">24.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    32B AFM-RL 在 LiveCodeBench v5 上 47.9、CodeContests 32.7，均高于 Retool 的 23.4 / 10.3；这两列也是正文点名引用的数字（§1 Introduction / §4.2）。Table 12 还有两组未标参数的 AFM 行：AFM-SFT 为 v4 28.0 / v5 26.3 / CodeContests 13.3（Avg. 13.5），AFM-RL 为 29.0 / 28.7 / 18.8（Avg. 15.3）。按 §4.2.2 的 8.5（15.3 − 6.8）与 13.2（24.7 − 11.5）两组增益，这两行是 7B 结果，不要和 32B 行混在一起读。
+  </p>
+
+  <h3>效率：84.6% 与 57.0% 是两个基线上的相对降幅</h3>
+  <p>
+    Figure 5 比较的是 10 个随机 GAIA 样本上的「每成功任务」开销。切换基线，AFM 的相对降幅会变——这就是为什么效率数字必须带对照，而不能只写一个孤立的 84.6%。
+  </p>
+
+  <div class="tabs" id="eff-tabs">
+    <button class="tab active" data-base="oagents">基线：OAgents（MAS）</button>
+    <button class="tab" data-base="webthinker">基线：WebThinker（TIR）</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="chart" id="eff-chart"></div>
+    <div class="readout" id="eff-readout" data-src="Figure 5">
+      <div class="r-head">相对降幅</div>
+      <div id="eff-msg">切换上方基线，查看 AFM 的相对 token 降幅。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算块：两组参数 → 结果<span class="sum-sub">与 JS 输出逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1（OAgents → AFM）：</strong>AFM 24,047 tokens，OAgents 156,400 tokens。相对降幅 = (156,400 − 24,047) / 156,400 = 132,353 / 156,400 = 0.8462468 = 84.62468% → 显示为 <code>84.6%</code>。</p>
+      <p><strong>组 2（WebThinker → AFM）：</strong>AFM 24,047 tokens，WebThinker 55,957 tokens。相对降幅 = (55,957 − 24,047) / 55,957 = 31,910 / 55,957 = 0.5702593 = 57.02593% → 显示为 <code>57.0%</code>。</p>
+      <p><strong>工具调用合计（Search + Crawl/Visit）：</strong>OAgents 7.4 + 2.8 = <code>10.2</code>；WebThinker 2.3 + 23.0 = <code>25.3</code>；AFM 2.4 + 2.4 = <code>4.8</code>。AFM 比 OAgents 少 10.2 − 4.8 = <code>5.4</code> 次，比 WebThinker 少 25.3 − 4.8 = <code>20.5</code> 次。</p>
+      <p>这里没有分布，只有三个方法的单点汇总值，因此<strong>不适用总体标准差（÷N）</strong>；JS 与手算都保留一位小数。</p>
+    </div>
+  </details>
+
+  <h3>三个反直觉的读法</h3>
+  <ul>
+    <li><strong>RL 的增益在数学上最大：</strong>GAIA 32B 从 SFT 50.5 到 RL 55.3（<strong>+4.8 个百分点</strong>）；AIME25 从 31.0 到 59.8（<strong>+28.8 个百分点</strong>）；数学 Avg. 栏从 60.0 到 78.0（<strong>+18.0</strong>），按五列复算则是 57.0 到 78.0（<strong>+21.0</strong>）（Table 7 / Table 11）。SFT 给的是格式和角色行为，RL 才把难题的通过率抬起来。<span class="infer">推断</span>（依据：§5.2 指出 SFT 模型在未见工具上已有格式迁移，但难题增益主要出现在 RL 后；论文没有做逐项归因消融）。</li>
+    <li><strong>效率优势不是“模型小”三个字：</strong>AFM 24,047 tokens，OAgents 156,400（相对降低 <strong>84.6%</strong>），WebThinker 55,957（相对降低 <strong>57.0%</strong>）；工具调用合计 4.8，对 OAgents 10.2、WebThinker 25.3（Figure 5）。作者把这归因于数据构造时过滤掉了无关内容，减少了冗余 token 累积（§5.1）。</li>
+    <li><strong>论文的最优主张有 backbone 限定：</strong>AFM 55.3 高于同 32B 的 WebSailor 53.2（<strong>+2.1 个百分点</strong>），但低于 GPT-4.1 的 OAgents 58.3（<strong>−3.0 个百分点</strong>）和 DeepResearch 67.4。论文 §4.1.2 的限定是「among the same model size」「among 32B models」，引言里的说法更宽。</li>
+  </ul>
+
+  <details>
+    <summary>原文里对不上的三处<span class="sum-sub">并列记录，不合并</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>BrowseComp 11.1 vs 11.0：</strong>Table 7 的 AFM-RL 写 11.1；Table 13 的 AFM 行写 11.0。两处并列。</li>
+        <li><strong>SmolAgents 的分数：</strong>§5.3 正文写 SmolAgents 66.7、SmolAgents-Pass@3 73.9；Table 13 的 SmolAgents 行为 52.1、63.6，66.7 / 73.9 在 OAgent 行。两处并列。</li>
+        <li><strong>Code SFT 规模：</strong>§4.2 正文写约 47k 条；Table 9 的 SFT 合计栏写 59,929，逐行相加为 59,939（443 + 2,695 + 10,339 + 1,112 + 45,350）。三处并列。</li>
+      </ul>
+      <p>以上只引用相关单元格；Table 9 / Table 13 均未完整转录。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：它内化的是协作，不是能力上限</h2></div>
+  <p class="sec-sub">论文的数据和设定本身给出四条边界；它们不推翻结果，但决定了这套方法适合什么场景。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>教师的上限会传给学生</h4></div>
+    <p>CoA 的 SFT 数据来自 OAgents 的成功轨迹（§3.2）。从 §3.2 与实验设置看，论文只用了 OAgents 作为教师，没有报告其他教师或教师质量消融；按这个训练流程，学生能学到的协作模式首先受教师覆盖范围限制。<span class="infer">推断</span>（依据：§3.2 只使用 OAgents，未报告教师消融）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>工具仍在模型外，效率结论有样本条件</h4></div>
+    <p>AFM 仍要调用外部 Search / Crawl / Python；Figure 5 的 token 统计是 10 个随机 GAIA 样本、每成功任务的平均值（§5.1）。它证明的是「同样的任务成功能少花 token」，不是「所有场景都更快」。<span class="infer">推断</span>（依据：§5.1 的 10 样本设定；§5.1 未给端到端延迟分解）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>未见工具泛化是“不对称”的</h4></div>
+    <p>§5.2 的反向验证很具体：只在代码/数学上训练的 code-agent 模型，能零样本调用没见过的 web 工具（先搜索、再用 Python 计算）；反过来，web-agent 模型虽然会在正确时机发起 Python executor / Visual inspector 调用，却常因格式细节（三反引号、完整 JSON 字段）解析失败。所谓“未见工具泛化”，取决于工具对格式的严格程度，不是普遍能力。<span class="infer">推断</span>（依据：§5.2 的反向验证只覆盖 web 与 code/math 两类工具，未测更多工具类型）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界四</span><h4>工具预算和奖励信号都有上限</h4></div>
+    <p>推理时 AFM 最多 12 次 tool call（§4.2.1，原文指的是 code agent）；web agent 的 RL 预算是 24 steps / 32k tokens，code agent 8 次 tool call（§4.1 / §4.2）。更长的工具链会被预算截断。另外，web RL 的奖励是 Qwen2.5-72B 的二元判断（§3.3），§3.3 只描述二元 judge，未报告 judge 偏差或换 judge 的敏感性——对开放式答案，这层判定本身是一个未消融的变量。<span class="infer">推断</span>（依据：§3.3 只描述二元 judge，未给 judge 消融）。</p>
+  </div>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>CoA 把“多智能体怎么协作”内化成了一条可训练的 token 流，但没有把工具能力、世界知识或教师的盲区一起内化。</strong>如果任务需要无法用 role prompt 表达的外部工作流、教师 MAS 本身不可用、或工具链远超 12 次调用，这套蒸馏路线就不划算；如果奖励只能靠一个未校准的 LLM judge，RL 阶段也会把这个偏差放大。
+  </p>
+</section>
+
+<footer>
+  <div>Chain-of-Agents: End-to-End Agent Foundation Models via Multi-Agent Distillation and Agentic RL</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.13167v1" target="_blank" rel="noopener">arXiv 2508.13167v1</a> · 2025 · 以 v1 为准<br>
+    代码：<a href="https://github.com/OPPO-PersonalAI/Agent_Foundation_Models" target="_blank" rel="noopener">OPPO-PersonalAI/Agent_Foundation_Models</a><br>
+    笔记：<a href="/chain-of-agentsend-to-end-agent-foundation-models-via-multi-agent-distillation-and-agentic-rl/">Chain-of-Agents：End-to-End Agent Foundation Models via Multi-Agent Distillation and Agentic RL</a>
+  </div>
+  <details>
+    <summary>笔记勘误（不改原笔记）<span class="sum-sub">六处需要降级或补条件（非穷尽）</span></summary>
+    <div class="details-body">
+      <ul>
+        <li>笔记把 SFT 序列标签写成 <code>&lt;plan&gt;</code>、<code>&lt;think&gt;</code>、<code>&lt;tools&gt;</code>、<code>&lt;reflection&gt;</code>；原文 §3.2 的格式是 <code>&lt;think&gt;</code> / <code>&lt;tools&gt;</code> / <code>&lt;observation&gt;</code> / <code>&lt;reflection&gt;</code> / <code>&lt;answer&gt;</code>。<code>&lt;plan&gt;</code> 不是原文给出的序列标签，Plan 是角色名。</li>
+        <li>笔记称“整个协作过程是端到端可微的（differentiable）”；原文只说可以用 SFT 和 RL 直接优化。SFT 是梯度更新，RL 通过环境奖励优化策略，不是“整条协作轨迹可微”。</li>
+        <li>笔记的“显著超过 WebSailor 53.2”对应 55.3 − 53.2 = 2.1 个百分点；原文用了“significant”，但 Table 7 只给点估计、没有给显著性检验，页面按点数呈现，不替它加“显著”。</li>
+        <li>笔记的 AIME25 59.8% 少了口径：原文是 <strong>avg@16</strong>（16 次采样平均），不是单次 pass@1；同样，BrowseComp 的 11.1 在 Table 13 写作 11.0，笔记只取了其中一个。</li>
+        <li>笔记用了 <code>&lt;reflect&gt;</code> / <code>&lt;search&gt;</code> 这类标签名；原文序列标签是 <code>&lt;reflection&gt;</code> / <code>&lt;tools&gt;</code>，<code>&lt;search&gt;</code> 是角色名与工具动作，不是序列标签。</li>
+        <li>笔记称 AFM 在 HLE 上「显著高于」对比方法；原文对应段落只用了 “outperforming”，未给显著性检验，也没有在表里标注置信区间。</li>
+        <li>笔记有两处「SOTA」没有带限定；论文 §4.1.2 的原话把最优主张限定在「among the same model size」「among 32B models」内，Table 7 中 OAgents 58.3、DeepResearch 67.4 的 GAIA 都高于 AFM 的 55.3。</li>
+      </ul>
+    </div>
+  </details>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) CoA 轨迹片段模拟
+   ============================================================ */
+(function () {
+  var steps = [
+    { name: 'Plan', tag: '&lt;think&gt;', role: 'Plan Agent', text: '把 query 拆成检索子任务；这段由模型生成，参与 SFT loss。', masked: false },
+    { name: 'Search', tag: '&lt;tools&gt;', role: 'Search Agent', text: '发出搜索 / 抓取调用；工具在模型外执行，动作本身由模型生成。', masked: false },
+    { name: 'Observation', tag: '&lt;observation&gt;', role: '环境返回', text: '工具结果拼回同一条上下文；这段不参与 SFT loss，模型不需要学会“预测”它。', masked: true },
+    { name: 'Reflection', tag: '&lt;reflection&gt;', role: 'Reflection Agent', text: '检查证据冲突，决定是否重试或换工具；这段由模型生成。', masked: false },
+    { name: 'Answer', tag: '&lt;answer&gt;', role: 'Thinking Agent', text: '汇总当前状态并输出最终答案；这段由模型生成，参与 loss。', masked: false }
+  ];
+  var current = 0;
+  var slotsHost = document.getElementById('coa-slots');
+  var msgEl = document.getElementById('coa-msg');
+  var readout = document.getElementById('coa-readout');
+
+  function renderStep(i) {
+    current = i;
+    if (!slotsHost) return;
+    var nodes = slotsHost.querySelectorAll('.slot');
+    for (var k = 0; k < nodes.length; k++) {
+      nodes[k].classList.toggle('hit', k === i);
+    }
+    if (msgEl) {
+      var s = steps[i];
+      msgEl.innerHTML = '<strong>' + s.role + '</strong>：' + s.text;
+    }
+    if (readout) {
+      readout.setAttribute('data-step', String(i));
+    }
+  }
+
+  function initSlots() {
+    if (!slotsHost) return;
+    var nodes = slotsHost.querySelectorAll('.slot');
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].addEventListener('click', (function (idx) {
+        return function () { renderStep(idx); };
+      })(i));
+    }
+  }
+
+  var nextBtn = document.getElementById('coa-next');
+  var resetBtn = document.getElementById('coa-reset');
+  if (nextBtn) {
+    nextBtn.addEventListener('click', function () {
+      renderStep((current + 1) % steps.length);
+    });
+  }
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      renderStep(0);
+    });
+  }
+
+  initSlots();
+  renderStep(0);
+})();
+
+/* ============================================================
+   2) 效率基线切换
+   ============================================================ */
+(function () {
+  var data = {
+    oagents: { label: 'OAgents', tokens: 156400, search: 7.4, crawl: 2.8 },
+    webthinker: { label: 'WebThinker', tokens: 55957, search: 2.3, crawl: 23.0 },
+    afm: { label: 'AFM', tokens: 24047, search: 2.4, crawl: 2.4 }
+  };
+  var maxTokens = 156400;
+  var chart = document.getElementById('eff-chart');
+  var msg = document.getElementById('eff-msg');
+
+  function fmt(n) {
+    return n.toLocaleString('en-US');
+  }
+
+  function totalCalls(d) {
+    return d.search + d.crawl;
+  }
+
+  function row(label, value, color, max) {
+    var r = document.createElement('div');
+    r.className = 'crow';
+
+    var name = document.createElement('div');
+    name.className = 'cname';
+    name.textContent = label;
+
+    var bars = document.createElement('div');
+    bars.className = 'cbars';
+
+    var bar = document.createElement('div');
+    bar.className = 'cbar';
+
+    var track = document.createElement('div');
+    track.className = 'track';
+
+    var fill = document.createElement('div');
+    fill.className = 'fill';
+    fill.style.background = color;
+    fill.style.height = Math.max(2, (value / max) * 100) + '%';
+    track.appendChild(fill);
+
+    var num = document.createElement('div');
+    num.className = 'num';
+    num.textContent = fmt(value);
+
+    bar.appendChild(track);
+    bar.appendChild(num);
+    bars.appendChild(bar);
+
+    r.appendChild(name);
+    r.appendChild(bars);
+    return r;
+  }
+
+  function render(baseKey) {
+    if (!chart || !msg) return;
+    var base = data[baseKey];
+    if (!base) return;
+    chart.innerHTML = '';
+    chart.appendChild(row(base.label + ' tokens', base.tokens, 'var(--c1)', maxTokens));
+    chart.appendChild(row('AFM tokens', data.afm.tokens, 'var(--accent)', maxTokens));
+
+    var pct = ((base.tokens - data.afm.tokens) / base.tokens * 100).toFixed(1);
+    var baseTotal = totalCalls(base).toFixed(1);
+    var afmTotal = totalCalls(data.afm).toFixed(1);
+    var diff = (totalCalls(base) - totalCalls(data.afm)).toFixed(1);
+    msg.innerHTML = base.label + ' ' + fmt(base.tokens) + ' → AFM ' + fmt(data.afm.tokens) +
+      '；相对降低 <strong>' + pct + '%</strong>（' +
+      '(' + fmt(base.tokens) + ' − ' + fmt(data.afm.tokens) + ') / ' + fmt(base.tokens) + '）。' +
+      '工具调用合计从 ' + baseTotal + ' 降到 ' + afmTotal + '，少 <strong>' + diff + '</strong> 次。';
+  }
+
+  var tabs = document.querySelectorAll('#eff-tabs .tab');
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener('click', function () {
+      for (var j = 0; j < tabs.length; j++) {
+        tabs[j].classList.remove('active');
+      }
+      this.classList.add('active');
+      render(this.getAttribute('data-base'));
+    });
+  }
+
+  render('oagents');
+})();
+</script>
+</body>
+</html>

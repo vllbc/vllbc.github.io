@@ -1,0 +1,433 @@
+<!-- LEDGER
+| 5.00 | Table 1 | 87.90-82.90 |
+| 11.20 | Table 1 | 89.60-78.40 |
+| 2.25 | Table 1 | 83.16-80.91 |
+| 7.69 | Table 1 | 85.15-77.46 |
+| 9.50 | Table 1 | 97.00-87.50 |
+| 6.33 | Table 1 | 88.16-81.83 |
+| 57.98 | Table 1 | (61.40+53.70+56.70+59.62+58.50)/5 |
+| 8.60 | Table 3 | 90.00-81.40 |
+| 2.90 | Table 3 | 91.00-88.10 |
+| 12.37 | Table 3 | 78.35-65.98 |
+| 18.01 | Table 3 | 78.20-60.19 |
+| 3.00 | Table 3 | 97.50-94.50 |
+| 9.76 | Table 3 | 87.81-78.05 |
+| 78.03 | Table 3 | (81.40+88.10+65.98+60.19+94.50)/5 |
+| 35.72 | Table 2 | 80.60-44.88 |
+| 4.64 | Table 2 | 85.24-80.60 |
+| 2.92 | Table 2 | 88.16-85.24 |
+| 9.20 | Table 2 | 87.10-77.90 |
+| 8.50 | Table 2 | 95.50-87.00 |
+| 1.50 | Table 2 | 97.00-95.50 |
+| 1.50 | Table 2 | 83.60-82.10 |
+| 6.00 | Table 2 | 89.60-83.60 |
+| 1.89 | Table 2 | 79.62-77.73 |
+| 5.53 | Table 2 | 85.15-79.62 |
+| 7.42 | Table 4 | 85.15-77.73 |
+| 13.23 | Table 4 | 83.16-69.93 |
+| 20.72 | Table 4 | 85.15-64.43 |
+| 26.46 | Table 5 | 83.16-56.70 |
+| 5.54 | Table 5 | 620/112 |
+| 6.81 | Table 5 | 763/112 |
+| 14.68 | Table 5 | 112/763*100 |
+| 81.26 | Table 5 | 620/763*100 |
+| 100.00 | Table 5 | 763/763*100 |
+| 83.16 | Table 5 | 83.16/100*100 |
+| 56.70 | Table 5 | 56.70/100*100 |
+| 57.45 | Table 5 | 57.45/100*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BPO · 把稀疏奖励当数据过滤器，而不是梯度信号</title>
+<meta name="description" content="BPO 用规划四元组、课程合成和奖励门控的拒绝采样，把稀疏奖励从梯度信号改成数据过滤器。Llama-3.1-8B 在 ALFWorld/ScienceWorld/WebShop 上的平均成功率为 88.16%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共组件样式来自 base.css */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.flow-pa{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.flow-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.flow-dash{stroke-dasharray:5 4}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.eff-chart .track{height:26px}
+.eff-chart .crow{grid-template-columns:190px 1fr}
+.eff-chart .cname{min-width:150px}
+.sim-note{font-size:12px;color:var(--text-muted);line-height:1.7;margin:8px 0 0}
+@media (max-width:520px){
+  .eff-chart .crow{grid-template-columns:1fr}
+  .eff-chart .cname{min-width:0;font-size:11px}
+  .eff-chart .cbar .num{font-size:9.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">BPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent 规划 · arXiv:2508.03018v2 · 2026-05</span>
+  <h1>BPO：把稀疏奖励当数据过滤器，而不是梯度信号</h1>
+  <p class="hero-sub">
+    长时程、稀疏奖励的规划任务里，最终的成功/失败信号太晚、太弱，直接做 RL 的信用分配很难。BPO 换了一个用法：只保留成功的轨迹，用它们做监督微调，再让模型生成下一轮数据。三个阶段的飞轮把 8B 模型在 ALFWorld、ScienceWorld、WebShop 上推到平均 88.16%。
+  </p>
+  <div class="meta">
+    <span>Yutong Wang 等</span>
+    <a href="https://arxiv.org/abs/2508.03018v2" target="_blank" rel="noopener">原文 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>传统 RL 把稀疏的成功信号当成梯度指令，但在长时程任务里，这个信号无法告诉模型“哪一步关键”。BPO 把它降级成一个二分类过滤器：这条轨迹成功吗？成功就留下，失败就丢掉。</p>
+  <p>三个阶段：先用规划四元组 <code>(o,e,p,a)</code> 和长短链融合做冷启动；再用教师模型合成更难的 task skeleton，按轨迹长度做课程；最后用奖励门控的拒绝采样迭代微调。全程不做 policy gradient。</p>
+  <p>Llama-3.1-8B 上，BPO 的平均成功率 88.16%，比最强的微调基线 MPO 高 6.33 个百分点；ALFWorld unseen 高 11.20 个百分点，ScienceWorld unseen 高 7.69 个百分点。Qwen2.5-7B 上平均 87.81%，比 MPO 高 9.76 个百分点。</p>
+  <p>边界：三个基准都是文本/模拟环境；BPO 在这些环境上做了微调，而 Table 1 里的 o3-mini、DeepSeek-R1 是 zero-shot，不能把“8B 超过 671B”读成同条件对比。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">88.16<small>%</small></div><div class="k">Llama-3.1-8B 的平均成功率</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">89.60<small>%</small></div><div class="k">ALFWorld unseen</div></div>
+    <div class="metric"><div class="v" data-src="Table 5">112</div><div class="k">ScienceWorld 推理 token（# Tokens）</div></div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>稀疏奖励的难点不是信号少，而是信号无法落到每一步</h2></div>
+  <p class="sec-sub">这一节建立问题：长时程规划里，为什么“最后成功了”不能直接告诉模型哪一步做对了。</p>
+
+  <p>在 ALFWorld、ScienceWorld、WebShop 这类环境里，智能体要执行一长串动作，环境只在最后给一个成功/失败的二元信号。论文把这类任务写成部分可观测马尔可夫决策过程（POMDP），并把难点归为两个：credit assignment（信用分配）和 context length（上下文长度）。前者是“100 步里哪几步关键”，后者是“长轨迹的推理历史会把上下文撑爆”。</p>
+
+  <p>如果直接用 RL，成功信号提供的梯度非常稀疏；一条轨迹只有最终一个标量，无法区分中间动作的贡献。论文在 ScienceWorld 上做了对照（Table 4）：SFT 的 seen/unseen 成功率是 76.29/77.73；在 SFT 上继续做 DPO 变成 73.71/73.46，做 GRPO 变成 69.93/64.43。两个 RL 方法都比 SFT 更差。作者用这个结果支持自己的判断：在这个设定里，直接把稀疏奖励当梯度信号不稳定。</p>
+
+  <p>BPO 的选择是把奖励的用途换掉：不拿它算梯度，拿它做数据准入。成功轨迹留下，失败轨迹丢掉；模型只在成功经验上做监督微调。这样，稀疏奖励仍然是“稀疏”的，但它不再需要承担信用分配的工作。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三类基线：zero-shot 推理模型、SFT/ETO/MPO、以及直接 RL</h2></div>
+  <p class="sec-sub">看懂 Table 1 的分组，才知道 BPO 的 88.16% 是和谁比、在什么条件下比。</p>
+
+  <p><strong>Zero-shot 推理模型。</strong>o3-mini、DeepSeek-R1、Qwen-3-8B-Thinking 都没有在这些环境上微调；它们靠推理能力直接做题。Table 1 里 DeepSeek-R1 的平均是 58.86，o3-mini 是 61.57。这个分组和下面的 fine-tuned 方法不是同一条件。</p>
+
+  <p><strong>Fine-tuned 方法。</strong>SFT 用成功轨迹做监督学习；ETO 做轨迹级偏好优化；MPO 是论文里最强的微调基线，Llama 上平均 81.83，Qwen 上平均 78.05。BPO 要超过的是这一组，而不是 zero-shot 组。</p>
+
+  <p><strong>直接 RL。</strong>DPO/GRPO 在稀疏奖励下表现不稳（Table 4）。论文的解释是：二元成功信号对梯度来说信息量太低，但对“这条轨迹是否值得学”这个分类问题来说，噪声很低。BPO 把奖励从优化目标变成过滤器，正是基于这个区分。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 数值完整转录 · Llama-3.1-8B 及 zero-shot / fine-tuned 基线在 ALFWorld（Seen/Unseen）、ScienceWorld（Seen/Unseen）、WebShop 上的成功率（%）。Average 是原文最后一列。原文自身不一致：DeepSeek-R1 行五列均值 <span class="mono" data-src="Table 1">57.98</span>，Average 列写 58.86；页面照录 Average。</caption>
+      <thead>
+        <tr><th>方法</th><th>类型</th><th>ALFWorld Seen</th><th>ALFWorld Unseen</th><th>ScienceWorld Seen</th><th>ScienceWorld Unseen</th><th>WebShop</th><th>Average</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Llama-3.1-8B-Instruct</td><td>System-1</td><td class="num">32.90</td><td class="num">40.30</td><td class="num">42.27</td><td class="num">46.92</td><td class="num">60.00</td><td class="num">44.88</td></tr>
+        <tr><td>Qwen-2.5-7B-Instruct</td><td>System-1</td><td class="num">72.10</td><td class="num">76.10</td><td class="num">28.35</td><td class="num">33.18</td><td class="num">91.50</td><td class="num">60.65</td></tr>
+        <tr><td>o3-mini</td><td>System-2 · zero-shot</td><td class="num">58.90</td><td class="num">62.70</td><td class="num">56.28</td><td class="num">55.45</td><td class="num">76.50</td><td class="num">61.57</td></tr>
+        <tr><td>DeepSeek-R1</td><td>System-2 · zero-shot</td><td class="num">61.40</td><td class="num">53.70</td><td class="num">56.70</td><td class="num">59.62</td><td class="num">58.50</td><td class="num">58.86</td></tr>
+        <tr><td>Qwen-3-8B-Thinking</td><td>System-2 · zero-shot</td><td class="num">49.30</td><td class="num">67.20</td><td class="num">57.45</td><td class="num">50.27</td><td class="num">71.50</td><td class="num">59.14</td></tr>
+        <tr><td>SFT</td><td>fine-tuned</td><td class="num">80.00</td><td class="num">71.60</td><td class="num">68.04</td><td class="num">72.04</td><td class="num">88.00</td><td class="num">75.94</td></tr>
+        <tr><td>ETO</td><td>fine-tuned</td><td class="num">78.60</td><td class="num">71.60</td><td class="num">76.29</td><td class="num">77.25</td><td class="num">90.00</td><td class="num">78.75</td></tr>
+        <tr><td>MPO</td><td>fine-tuned</td><td class="num">82.90</td><td class="num">78.40</td><td class="num">80.91</td><td class="num">77.46</td><td class="num">87.50</td><td class="num">81.83</td></tr>
+        <tr class="best"><td>BPO（Ours）</td><td>fine-tuned</td><td class="num">87.90</td><td class="num">89.60</td><td class="num">83.16</td><td class="num">85.15</td><td class="num">97.00</td><td class="num">88.16</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>规划四元组、长短链融合、课程合成、奖励门控</h2></div>
+  <p class="sec-sub">这一节按三个阶段拆方法：怎么造数据、怎么扩难度、怎么迭代。</p>
+
+  <h3>阶段 1：规划四元组与长短链融合</h3>
+  <p>BPO 把每一步决策写成四元组 <code>Q<sub>t</sub> = (o<sub>t</sub>, e<sub>t</sub>, p<sub>t</sub>, a<sub>t</sub>)</code>：<code>o<sub>t</sub></code> 是观察，<code>e<sub>t</sub></code> 是详尽的长链思考，<code>p<sub>t</sub></code> 是简短的规划意图，<code>a<sub>t</sub></code> 是动作。训练时模型要同时学会生成 <code>e<sub>t</sub></code> 和 <code>p<sub>t</sub></code>。</p>
+  <p>推理时，模型先生成详细的 <code>e<sub>t</sub></code> 来辅助决策，但写回历史时只保存简短的 <code>p<sub>t</sub></code>。论文把这叫 long-short chain-of-thought fusion。目的有两个：减少上下文长度，避免早期信息被冗长思考挤出注意力窗口；同时让每一步的上下文只保留“计划”，不保留全部“草稿”。</p>
+
+  <h3>阶段 2：课程合成</h3>
+  <p>Stage 1 的数据来自 seed 分布，模型容易只学会这批任务的套路。Stage 2 用教师模型生成新的 task skeleton，结构、长度、goal complexity（目标复杂度）都和 seed 数据不同；再用规划四元组把 skeleton 填成完整轨迹。随后按轨迹长度给任务分级，先短后长地训练。论文把轨迹长度当作规划复杂度的代理指标（§3.2.2）。</p>
+
+  <h3>阶段 3：奖励门控的拒绝采样</h3>
+  <p>Stage 2 得到的模型在环境里继续采样，产生大量新轨迹；只保留最终成功的轨迹，加入训练集，再微调下一代模型。这个过程可以迭代：<code>π<sub>k</sub> → 采样 → 成功轨迹 → 微调 → π<sub>k+1</sub></code>。论文把这叫 data curation flywheel。</p>
+  <p>关键区别是：奖励不参与梯度计算，只参与“要不要这条数据”的判断。作者在 §Stage 3 写得很直接：二元成功奖励对基于梯度的信用分配是不够的，但对分类“这条轨迹成功了吗”是一个有效、无噪声的信号。</p>
+</section>
+
+<!-- ================= 04 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练是 SFT 飞轮，不是 policy gradient</h2></div>
+  <p class="sec-sub">这一节说明数据、模型和开销：BPO 的“训练”主要是生成轨迹、筛成功样本、做监督微调。</p>
+
+  <p><strong>模型。</strong>主实验用 Llama-3.1-8B-Instruct，泛化实验用 Qwen2.5-7B-Instruct（Table 3）。两个模型都走同一套三阶段流程，说明方法不依赖某个特定底座。</p>
+
+  <p><strong>数据。</strong>Stage 1 先用 off-the-shelf reasoning model（如 DeepSeek-R1）在目标环境收集 seed 成功轨迹，再用教师模型（如 GPT-4o）以 few-shot 方式做 synthetic expansion，生成更多 reasoning trace，最后蒸馏成简短的 planning thought <code>p<sub>t</sub></code>。Stage 2 的 task skeleton 由教师模型生成；Stage 3 的数据来自当前模型在环境里的成功轨迹。论文正文与附录 B/C 都没有给出每个阶段的轨迹条数或教师模型的具体版本：附录 B 只有 prompt，附录 C 是 case study，页面未转录。</p>
+
+  <p><strong>开销。</strong>BPO 不做 policy gradient，也不需要 reward model；主要开销是环境交互（生成轨迹）和 SFT。Table 5 报告推理侧的 # Tokens：BPO 112，DeepSeek-R1 620，Qwen-3-Thinking 763。§4.4.3 称它们为 reasoning tokens；原文没有说明是否按步平均，也没有说明是否包含教师模型调用。</p>
+
+  <p><strong>评测口径。</strong>ALFWorld 与 ScienceWorld 分 Seen / Unseen；WebShop 用标准 test set。成功率是二元任务完成率（%）。论文没有在正文报告多次运行的方差或置信区间；页面只引用单次报告值。</p>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三阶段飞轮：冷启动 → 扩难度 → 筛成功样本</h2></div>
+  <p class="sec-sub">这张图只画数据流，不画模型内部结构；重点是奖励在哪一步被用作过滤器。</p>
+
+  <figure>
+    <svg viewBox="0 0 960 300" style="width:100%;height:auto" role="img" aria-label="BPO 三阶段数据飞轮示意图">
+      <defs>
+        <marker id="bp-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect class="flow-c1" x="20" y="60" width="190" height="100" rx="10"></rect>
+      <text class="flow-t" x="115" y="86" text-anchor="middle">Stage 1 · 冷启动</text>
+      <text class="flow-s" x="115" y="108" text-anchor="middle">规划四元组</text>
+      <text class="flow-s" x="115" y="128" text-anchor="middle">(o, e, p, a)</text>
+      <text class="flow-s" x="115" y="148" text-anchor="middle">长短链融合</text>
+
+      <rect class="flow-box" x="260" y="60" width="190" height="100" rx="10"></rect>
+      <text class="flow-t" x="355" y="86" text-anchor="middle">Stage 2 · 外推</text>
+      <text class="flow-s" x="355" y="108" text-anchor="middle">教师模型合成</text>
+      <text class="flow-s" x="355" y="128" text-anchor="middle">task skeleton</text>
+      <text class="flow-s" x="355" y="148" text-anchor="middle">按长度分课程</text>
+
+      <rect class="flow-pa" x="500" y="60" width="210" height="100" rx="10"></rect>
+      <text class="flow-t" x="605" y="86" text-anchor="middle">Stage 3 · 精炼</text>
+      <text class="flow-s" x="605" y="108" text-anchor="middle">当前模型采样轨迹</text>
+      <text class="flow-s" x="605" y="128" text-anchor="middle">只留成功轨迹</text>
+      <text class="flow-s" x="605" y="148" text-anchor="middle">SFT 下一代模型</text>
+
+      <rect class="flow-box" x="760" y="60" width="180" height="100" rx="10"></rect>
+      <text class="flow-t" x="850" y="86" text-anchor="middle">更强模型</text>
+      <text class="flow-s" x="850" y="108" text-anchor="middle">π<tspan dy="3" font-size="8">k+1</tspan></text>
+      <text class="flow-s" x="850" y="128" text-anchor="middle">回到 Stage 3</text>
+      <text class="flow-s" x="850" y="148" text-anchor="middle">继续采样</text>
+
+      <path class="flow-line" d="M210 110 L256 110" marker-end="url(#bp-arr)"></path>
+      <path class="flow-line" d="M450 110 L496 110" marker-end="url(#bp-arr)"></path>
+      <path class="flow-line" d="M710 110 L756 110" marker-end="url(#bp-arr)"></path>
+      <path class="flow-line flow-dash" d="M850 164 C850 230, 605 230, 605 164" marker-end="url(#bp-arr)"></path>
+
+      <text class="flow-s" x="852" y="196" text-anchor="end">奖励在这里只做过滤：成功 / 失败</text>
+      <text class="flow-s" x="480" y="278" text-anchor="middle">示意图按 §Method 重绘；虚线是 Stage 3 的迭代回路，不表示梯度反传。</text>
+    </svg>
+    <figcaption>BPO 的三阶段数据流。Stage 3 的奖励只决定“这条轨迹是否进入训练集”，不参与 loss 的梯度。配色上，Stage 1 的冷启动用基线色 <code>--c1</code>，Stage 3 的奖励过滤用强调色 <code>--accent</code>。</figcaption>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均分比 MPO 高 6.33 个点，unseen 增益只在多数 split 更大</h2></div>
+  <p class="sec-sub">这一节把主结果、模型泛化、消融、RL 对照和 token 效率分开看，避免把不同条件的数字混在一起。</p>
+
+  <h3>主结果：Llama-3.1-8B</h3>
+  <p>BPO 的 Average 是 <span class="mono" data-src="Table 1">88.16%</span>，MPO 是 <span class="mono" data-src="Table 1">81.83%</span>，绝对高 <span class="mono" data-src="Table 1">6.33</span> 个百分点。分基准看：ALFWorld Seen 高 <span class="mono" data-src="Table 1">5.00</span>（87.90 对 82.90），ALFWorld Unseen 高 <span class="mono" data-src="Table 1">11.20</span>（89.60 对 78.40），ScienceWorld Seen 高 <span class="mono" data-src="Table 1">2.25</span>（83.16 对 80.91），ScienceWorld Unseen 高 <span class="mono" data-src="Table 1">7.69</span>（85.15 对 77.46），WebShop 高 <span class="mono" data-src="Table 1">9.50</span>（97.00 对 87.50）。</p>
+
+  <h3>泛化到 Qwen2.5-7B</h3>
+  <p>同一套流程换到 Qwen2.5-7B：Average 从 MPO 的 <span class="mono" data-src="Table 3">78.05%</span> 到 BPO 的 <span class="mono" data-src="Table 3">87.81%</span>，绝对高 <span class="mono" data-src="Table 3">9.76</span> 个百分点。ALFWorld Seen 高 <span class="mono" data-src="Table 3">8.60</span>（90.00 对 81.40），ALFWorld Unseen 高 <span class="mono" data-src="Table 3">2.90</span>（91.00 对 88.10），ScienceWorld Seen 高 <span class="mono" data-src="Table 3">12.37</span>（78.35 对 65.98），ScienceWorld Unseen 高 <span class="mono" data-src="Table 3">18.01</span>（78.20 对 60.19），WebShop 高 <span class="mono" data-src="Table 3">3.00</span>（97.50 对 94.50）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 3 数值转录 · Qwen2.5-7B-Instruct 底座上的 Base / SFT / ETO / MPO / BPO 成功率（%）。只转录 Qwen2.5-7B 部分；Llama-3.1-8B 行与 Table 1 相同，未重复转录。原文自身不一致：MPO 行五列均值 <span class="mono" data-src="Table 3">78.03</span>，Average 列写 78.05；页面照录 Average。</caption>
+      <thead>
+        <tr><th>方法</th><th>ALFWorld Seen</th><th>ALFWorld Unseen</th><th>ScienceWorld Seen</th><th>ScienceWorld Unseen</th><th>WebShop</th><th>Average</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base</td><td class="num">72.10</td><td class="num">76.10</td><td class="num">28.35</td><td class="num">33.18</td><td class="num">91.50</td><td class="num">60.65</td></tr>
+        <tr><td>SFT</td><td class="num">84.30</td><td class="num">80.60</td><td class="num">55.67</td><td class="num">63.25</td><td class="num">94.50</td><td class="num">75.26</td></tr>
+        <tr><td>ETO</td><td class="num">82.10</td><td class="num">76.10</td><td class="num">59.28</td><td class="num">65.88</td><td class="num">94.00</td><td class="num">75.47</td></tr>
+        <tr><td>MPO</td><td class="num">81.40</td><td class="num">88.10</td><td class="num">65.98</td><td class="num">60.19</td><td class="num">94.50</td><td class="num">78.05</td></tr>
+        <tr class="best"><td>BPO</td><td class="num">90.00</td><td class="num">91.00</td><td class="num">78.35</td><td class="num">78.20</td><td class="num">97.50</td><td class="num">87.81</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>消融：三个阶段各贡献多少</h3>
+  <p>Table 2 在 Llama-3.1-8B 上累积加阶段。Base 的 Average 是 <span class="mono" data-src="Table 2">44.88%</span>；加 Stage 1 到 <span class="mono" data-src="Table 2">80.60%</span>（+<span class="mono" data-src="Table 2">35.72</span> 个百分点）；加 Stage 2 到 <span class="mono" data-src="Table 2">85.24%</span>（+<span class="mono" data-src="Table 2">4.64</span>）；加 Stage 3 到 <span class="mono" data-src="Table 2">88.16%</span>（+<span class="mono" data-src="Table 2">2.92</span>）。Stage 1 的冷启动贡献最大，Stage 2/3 是增量改进。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2 完整转录 · 三阶段累积消融（Llama-3.1-8B）。每个单元格是成功率（%）。</caption>
+      <thead>
+        <tr><th>方法</th><th>ALFWorld Seen</th><th>ALFWorld Unseen</th><th>ScienceWorld Seen</th><th>ScienceWorld Unseen</th><th>WebShop</th><th>Average</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base</td><td class="num">32.90</td><td class="num">40.30</td><td class="num">42.27</td><td class="num">46.92</td><td class="num">60.00</td><td class="num">44.88</td></tr>
+        <tr><td>+ Stage 1</td><td class="num">77.90</td><td class="num">82.10</td><td class="num">76.29</td><td class="num">77.73</td><td class="num">87.00</td><td class="num">80.60</td></tr>
+        <tr><td>+ Stage 2</td><td class="num">87.10</td><td class="num">83.60</td><td class="num">79.38</td><td class="num">79.62</td><td class="num">95.50</td><td class="num">85.24</td></tr>
+        <tr class="best"><td>+ Stage 3</td><td class="num">87.90</td><td class="num">89.60</td><td class="num">83.16</td><td class="num">85.15</td><td class="num">97.00</td><td class="num">88.16</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>RL 对照：DPO/GRPO 在稀疏奖励下反而更差</h3>
+  <p>Table 4 在 ScienceWorld 上比较 SFT 与两种 RL。SFT 的 Seen/Unseen 是 76.29/77.73；SFT+DPO 降到 73.71/73.46；SFT+GRPO 降到 69.93/64.43；BPO 是 83.16/85.15。BPO 的 Unseen 比 SFT 高 <span class="mono" data-src="Table 4">7.42</span> 个百分点，比 SFT+GRPO 高 <span class="mono" data-src="Table 4">20.72</span> 个百分点；Seen 比 GRPO 高 <span class="mono" data-src="Table 4">13.23</span> 个百分点。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 4 完整转录 · ScienceWorld 上 SFT 与 RL 的对照，含 BPO。Seen/Unseen 两列都是成功率（%）。</caption>
+      <thead>
+        <tr><th>方法</th><th>Seen</th><th>Unseen</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SFT</td><td class="num">76.29</td><td class="num">77.73</td></tr>
+        <tr><td>SFT + DPO</td><td class="num">73.71</td><td class="num">73.46</td></tr>
+        <tr><td>SFT + GRPO</td><td class="num">69.93</td><td class="num">64.43</td></tr>
+        <tr class="best"><td>BPO</td><td class="num">83.16</td><td class="num">85.15</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>交互：token 效率与成功率的两种视角</h3>
+  <p>Table 5 把 BPO 和一个更大的推理模型（DeepSeek-R1 671B）、一个同规模推理模型（Qwen-3-Thinking 8B）放在一起。SR 列 BPO 的 83.16% 是 ScienceWorld Seen；R1/Qwen3 为 zero-shot，token/SR 不是同条件比较。切换标签会重画同一组模型的 token 数或成功率；token 视图按 763 归一化（柱高 = 值/763），SR 视图固定按 0–100 归一化（柱高 = 值/100），标签是表格原值。</p>
+
+  <div class="sim">
+    <div class="tabs" id="bp-tabs">
+      <button class="tab active" type="button" data-view="tok">平均推理 token</button>
+      <button class="tab" type="button" data-view="sr">成功率 (%)</button>
+    </div>
+    <div class="readout" data-src="Table 5">
+      <div class="r-head">当前读数</div>
+      <div id="bp-msg">平均推理 token：DeepSeek-R1（671B）620，Qwen-3-Thinking（8B）763，BPO（8B）112；BPO 分别是它们的 1/5.54 和 1/6.81。SR 视图：BPO 的 83.16% 是 ScienceWorld Seen。</div>
+    </div>
+    <div class="chart eff-chart" id="bp-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>DeepSeek-R1 · 671B</span>
+      <span><i style="background:var(--c2)"></i>Qwen-3-Thinking · 8B</span>
+      <span><i style="background:var(--accent)"></i>BPO · 8B（SR 为 ScienceWorld Seen）</span>
+    </div>
+    <p class="sim-note">Table 5 的 SR 条件：BPO 的 83.16% 对应 ScienceWorld Seen（Table 4），DeepSeek-R1 与 Qwen-3-Thinking 是 zero-shot；BPO 在 ScienceWorld 上做了微调，token 与 SR 不是同条件比较。</p>
+  </div>
+
+  <details>
+    <summary>手算（2 组）：柱高与倍数<span class="sum-sub">与 JS 的归一化公式一致</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组，token 视图：</strong>最大值取 763。BPO <code>112/763×100 = 14.68%</code>；DeepSeek-R1 <code>620/763×100 = 81.26%</code>；Qwen-3-Thinking <code>763/763×100 = 100.00%</code>。倍数：<code>620/112 = 5.5357… ≈ 5.54</code>，<code>763/112 = 6.8125 ≈ 6.81</code>。</p>
+      <p><strong>第 2 组，SR 视图：</strong>固定按 0–100 归一化。BPO <code>83.16/100×100 = 83.16%</code>；DeepSeek-R1 <code>56.70/100×100 = 56.70%</code>；Qwen-3-Thinking <code>57.45/100×100 = 57.45%</code>。差值：<code>83.16 − 56.70 = 26.46</code> 个百分点。</p>
+      <p><strong>口径：</strong>柱高取 <code>Math.max(1, 值/max×100)</code>，最小值也保留 1% 的可见高度；token 视图的 max 来自 Table 5 的 763，SR 视图固定为 100。这里不涉及标准差。</p>
+    </div>
+  </details>
+
+  <h3>发现 1：token 更少，ScienceWorld Seen 成功率更高</h3>
+  <p>Table 5 里 BPO 的 # Tokens 是 <span class="mono" data-src="Table 5">112</span>（原文未说明是否按步平均），SR 是 <span class="mono" data-src="Table 5">83.16</span>%（ScienceWorld Seen，见 Table 4）；DeepSeek-R1 是 620 token、56.70%，Qwen-3-Thinking 是 763 token、57.45%。成功率比 R1 高 <span class="mono" data-src="Table 5">26.46</span> 个百分点，token 是 R1 的 1/<span class="mono" data-src="Table 5">5.54</span>、Qwen-3-Thinking 的 1/<span class="mono" data-src="Table 5">6.81</span>。</p>
+  <p>论文正文写的是“an order of magnitude fewer reasoning tokens”。按 Table 5 的 620/112 与 763/112 复算，倍数是 5.54 与 6.81，不是 10。页面把原文措辞和复算结果并列，不替原文统一。</p>
+  <p>条件提醒：BPO 的 83.16% 是 ScienceWorld Seen（Table 4），DeepSeek-R1 与 Qwen-3-Thinking 是 zero-shot；BPO 在 ScienceWorld 上做了微调，三者的 token 与 SR 不是同条件比较。</p>
+
+  <h3>发现 2：unseen 增益在 Llama 上更大，Qwen 上因基准而异</h3>
+  <p>Llama 上 ALFWorld 的 Seen/Unseen 提升分别是 <span class="mono" data-src="Table 1">5.00</span>/<span class="mono" data-src="Table 1">11.20</span>，ScienceWorld 是 <span class="mono" data-src="Table 1">2.25</span>/<span class="mono" data-src="Table 1">7.69</span>：两个基准的 unseen 增益都大于 seen。Qwen 上 ScienceWorld 是 <span class="mono" data-src="Table 3">12.37</span>/<span class="mono" data-src="Table 3">18.01</span>，unseen 增益更大；但 ALFWorld 相反：Seen 提升 <span class="mono" data-src="Table 3">8.60</span>（90.00−81.40），Unseen 只有 <span class="mono" data-src="Table 3">2.90</span>（91.00−88.10）。所以不能概括成“两个底座的 unseen 都更好”。这与 Stage 2 的课程合成目标方向一致<span class="infer">推断</span>（依据：§3.2 称合成任务是 OOD 扩张；论文没有按 split 归因）。WebShop 只有一个 test split，不能做同样的 seen/unseen 拆分。</p>
+
+  <h3>发现 3：Stage 2 的增益集中在 ALFWorld Seen（+<span class="mono" data-src="Table 2">9.20</span>）与 WebShop test set（+<span class="mono" data-src="Table 2">8.50</span>）</h3>
+  <p>Table 2 里，Stage 1 的 ALFWorld Seen 是 77.90%，Stage 2 到 87.10%，提升 <span class="mono" data-src="Table 2">9.20</span> 个百分点，是 Stage 2 各列中最大的增益；WebShop 从 87.00% 到 95.50%，提升 <span class="mono" data-src="Table 2">8.50</span> 个百分点。原文对 WebShop 的口径自身不一致：§4.1.1 写 WebShop 用 standard test set，§4.3 却写“unseen tasks from 87.00% to 95.50%”；页面并列两处，不替原文统一。ALFWorld Unseen 在 Stage 2 只提升 <span class="mono" data-src="Table 2">1.50</span>（82.10→83.60），Stage 3 提升 <span class="mono" data-src="Table 2">6.00</span>（83.60→89.60）；ScienceWorld Unseen 在 Stage 2 提升 <span class="mono" data-src="Table 2">1.89</span>（77.73→79.62），Stage 3 提升 <span class="mono" data-src="Table 2">5.53</span>（79.62→85.15）。不同基准上，两个阶段的作用大小不同，论文没有做进一步归因。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决不了：模拟环境、微调条件、教师模型依赖、没有方差报告</h2></div>
+  <p class="sec-sub">这些限制决定了 88.16% 能推广到哪里，以及“8B 超过 671B”该怎么读。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">限制 1</span><h4>三个基准都是模拟环境</h4></div>
+      <p>ALFWorld 是文本家务模拟器，ScienceWorld 是文本科学实验，WebShop 是模拟电商网站。真实机器人、真实浏览器、真实 API 的长时程任务没有实验。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">限制 2</span><h4>对比不是同条件</h4></div>
+      <p>Table 1 把 zero-shot 推理模型与 fine-tuned 方法分组。BPO 在三个环境上做了微调，o3-mini/DeepSeek-R1 没有；因此“8B 超过 671B”只在“fine-tuned vs zero-shot”的设定下成立，不能读成同条件的能力对比。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">限制 3</span><h4>依赖教师模型</h4></div>
+      <p>Stage 2 的 task skeleton 由教师模型生成。教师模型的能力、分布和成本会直接影响合成数据的质量<span class="infer">推断</span>（依据：§3.2 用教师模型生成 skeleton；论文未做换型、分布或成本实验）。论文没有给出教师模型换型的消融。</p>
+    </div>
+  </div>
+
+  <p><strong>奖励必须是可靠的二元信号。</strong>BPO 的过滤器假设环境给出的成功/失败是可信的。如果奖励有噪声、可被 hack，或者成功标准本身有歧义，筛出来的“成功轨迹”会把错误策略固化进下一轮<span class="infer">推断</span>（依据：§3.3 只论证二元奖励对分类无噪声，未做奖励噪声实验）。论文在 §3.3 强调二元奖励对分类“无噪声”，但没有做奖励噪声实验。</p>
+
+  <p><strong>没有多次运行的方差。</strong>主表和消融表都是单次报告值；论文没有给出不同 seed 的均值/方差或置信区间。BPO 与 MPO 的差距在 2.25–18.01 个百分点之间，页面不把这些差值当成统计显著性检验的结果。<span class="infer">推断</span>（依据：Table 1/2/3 只列单值，正文未报告 seed 数或方差。）</p>
+
+  <p><strong>什么时候别用：</strong>如果任务没有可靠的二元成功信号，BPO 的过滤器没有依据；如果环境交互很贵、成功轨迹很少，飞轮第一圈可能转不起来；如果需要在线学习、奖励随时间变化，静态的成功轨迹筛选会滞后。反过来，在长时程、稀疏奖励、可以大量采样、成功轨迹可复用的规划任务里，BPO 的思路最直接：把奖励当过滤器，把成功经验当训练数据。<span class="infer">推断</span>（依据：论文只在三个基准的静态设定上做了实验，未覆盖无奖励、交互昂贵或奖励漂移的条件。）</p>
+</section>
+
+<footer>
+  <div>Beyond Policy Optimization: A Data Curation Flywheel for Sparse-Reward Long-Horizon Planning</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.03018v2" target="_blank" rel="noopener">arXiv:2508.03018v2</a><br>
+    笔记：<a href="/beyond-policy-optimizationa-data-curation-flywheel-for-sparse-reward-long-horizon-planning/">Beyond Policy Optimization：A Data Curation Flywheel for Sparse-Reward Long-Horizon Planning</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    <strong>笔记勘误</strong><br>
+    1. 笔记称“用一个 80 亿参数的模型，在效果上超越了更大、更强的专用推理模型”。Table 1 把 o3-mini、DeepSeek-R1、Qwen-3-8B-Thinking 归为 zero-shot，把 BPO 归为 fine-tuned；BPO 在三个环境上做了微调，这些推理模型没有。页面保留“8B 平均 88.16% 高于 zero-shot R1 的 58.86%”这个表内事实，但不把它读成同条件对比。<br>
+    2. 笔记引 Table 5 的 112 vs 620、83.16%（ScienceWorld Seen） vs 56.70% 与原文一致；原文正文写“an order of magnitude fewer”，按表中数字复算是 5.54× 与 6.81×。页面把两种口径并列。<br>
+    3. 笔记称 Table 4 的 SFT/DPO/GRPO 为 77.73/73.46/64.43，BPO 为 85.15，均与原文 Unseen 列一致。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var MODELS = [
+    { name: 'DeepSeek-R1', size: '671B', tok: 620, sr: 56.70, color: 'var(--c1)' },
+    { name: 'Qwen-3-Thinking', size: '8B', tok: 763, sr: 57.45, color: 'var(--c2)' },
+    { name: 'BPO', size: '8B', tok: 112, sr: 83.16, color: 'var(--accent)' }
+  ];
+  var MSG = {
+    tok: '平均推理 token：DeepSeek-R1（671B）620，Qwen-3-Thinking（8B）763，BPO（8B）112；BPO 分别是它们的 1/5.54 和 1/6.81。SR 视图：BPO 的 83.16% 是 ScienceWorld Seen。',
+    sr: 'ScienceWorld Seen 成功率：BPO 83.16%；DeepSeek-R1 56.70%、Qwen-3-Thinking 57.45%（zero-shot）。BPO 比 R1 高 26.46 个百分点；BPO 在 ScienceWorld 上微调，三者不是同条件。'
+  };
+  var view = 'tok';
+  var tabs = document.getElementById('bp-tabs');
+  var chart = document.getElementById('bp-chart');
+  var msg = document.getElementById('bp-msg');
+  function render() {
+    if (!chart) return;
+    var max = view === 'tok' ? 763 : 100;
+    chart.innerHTML = MODELS.map(function (m) {
+      var val = view === 'tok' ? m.tok : m.sr;
+      var h = Math.max(1, (val / max) * 100);
+      var label = view === 'tok' ? String(m.tok) : m.sr.toFixed(2) + (m.name === 'BPO' ? ' · SW Seen' : '');
+      return '<div class="crow"><div class="cname">' + m.name + ' · ' + m.size + '</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill" style="height:' + h + '%;background:' + m.color + '"></div></div><div class="num">' + label + '</div></div></div></div>';
+    }).join('');
+    if (msg) msg.textContent = MSG[view];
+  }
+  if (tabs) {
+    tabs.addEventListener('click', function (e) {
+      var b = e.target.closest('.tab');
+      if (!b) return;
+      view = b.getAttribute('data-view');
+      var btns = tabs.querySelectorAll('.tab');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].getAttribute('data-view') === view) btns[i].classList.add('active');
+        else btns[i].classList.remove('active');
+      }
+      render();
+    });
+  }
+  render();
+})();
+</script>
+</body>
+</html>

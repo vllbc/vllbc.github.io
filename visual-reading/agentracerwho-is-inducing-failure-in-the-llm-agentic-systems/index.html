@@ -1,0 +1,486 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 26.0 | Table 1 | 69.10-43.10 |
+| 12.2 | Table 1 | 69.10-56.90 |
+| 22.68 | Table 2 | 36.17-13.49 |
+| 9.04 | Table 2 | 36.17-27.13 |
+| 17.57 | Table 2 | 36.17-18.60 |
+| 13.34 | Table 1 | 42.86-29.52 |
+| 2.21 | Table 1 | 42.86-40.65 |
+| 1.92 | Table 2 | 55.20-53.28 |
+| 1.53 | Table 1 | 38.83-37.30 |
+| 11.01 | Table 2 | 29.52-18.51 |
+| 17.38 | Table 1 | 69.10-51.72 |
+| 11.44 | Table 1 | 37.30-25.86 |
+| 5.84 | Table 2 | 36.17-30.33 |
+| 37.3 | Table 2 | (29.52-18.51)/29.52*100 |
+| 2476 | Table 3 | 1288+630+558 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgenTracer：多智能体系统失败了，是谁在哪一步造成的？</title>
+<meta name="description" content="AgenTracer 用反事实回放与程序化故障注入自动标注失败轨迹，得到 TracerTraj-2.5K；再用多粒度 GRPO 训练 8B 失败追踪器。Who&When 自动子集 step-level（w/ G）42.86%，高于 Claude-4-Sonnet 的 40.65%；w/o G 时 Claude 38.83 反超 AgenTracer 的 37.30。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b3{background:var(--c2)}
+.cbar .num{color:var(--text-muted)}
+.chart .track{height:56px}
+.cbar{max-width:84px}
+.crow{grid-template-columns:150px 1fr}
+.crow.hl .cname{color:var(--accent);font-weight:700}
+.grp td{background:var(--bg-soft);font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-soft)}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.arrow-head{fill:var(--text-soft)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:17px;font-weight:600;fill:var(--text)}
+.svg-t.sm{font-size:15px}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+details.handcalc{margin-top:12px}
+@media(max-width:560px){.crow{grid-template-columns:104px 1fr}.svg-l{font-size:14px}.svg-s{font-size:14px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">AgenTracer</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">工程账</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM Agent · 失败归因 · arXiv 2025</span>
+  <h1>AgenTracer：多智能体系统失败了，是谁在哪一步造成的？</h1>
+  <p class="hero-sub">多智能体系统越复杂，失败越难查：日志很长，错误可能藏在很早的一步，表面看却像后面才坏。AgenTracer 把「失败归因」做成数据问题：对失败轨迹做反事实回放，逐步用分析器提供的正确动作替换、重跑，最早能让任务转成功的那一步就是关键错误；对成功轨迹做程序化故障注入，主动制造已知位置的失败。两条路合成 TracerTraj-2.5K，再用多粒度 GRPO 训练 8B 追踪器。Who&When 自动子集 step-level 上（w/ G），它拿到 42.86%，Claude-4-Sonnet 是 40.65%；同一格去掉 G 后 Claude 38.83 反超 AgenTracer 的 37.30。</p>
+  <div class="meta">
+    <span>Guibin Zhang、Junhao Wang、Junjie Chen、Wangchunshu Zhou、Kun Wang、Shuicheng Yan · NUS / CUHK / OPPO / NTU</span>
+    <a href="https://arxiv.org/abs/2509.03312v2" target="_blank" rel="noopener">原文 v2 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>论文把「关键错误」定义为<strong>决定性的最早错误</strong>：轨迹里存在某一步，把它替换成 oracle 给出的修正动作并重跑后续步骤后，整个任务从失败变成成功；所有满足条件的位置里取时间最早的那个。对失败轨迹，作者让 DeepSeek-R1 扮演分析器，逐步给出「最小侵入」的修正动作，重跑并检查结果，找到最早成功点。对成功轨迹，则随机选 K 个注入点，用扰动算子改掉动作再重跑；一旦诱发失败，注入点就是已知标签。</p>
+  <p>训练侧，AgenTracer-8B 以 Qwen3-8B 为底座，用去掉 KL 的 GRPO。奖励是三段式：格式必须严格包在 <code>&lt;think&gt;</code> 与 <code>&lt;answer&gt;</code> 里（二值门控）；agent 级是否正确（二值）；step 级用高斯核按距离给部分分。最终输出 <code>&lt;agentID&gt; | &lt;stepID&gt;</code>。这套组合在 Who&When 两个子集上多数单元格超过 Claude-4-Sonnet 与 Gemini-2.5-Pro，但并非每个单元格都赢：automated step-level 去掉 G 后 Claude 38.83 高于 AgenTracer 37.30；TracerTraj-agentic 的 agent-level（w/ G）Claude 55.20 也高于 AgenTracer 53.28。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">42.86</div><div class="k">Who&When automated · Step-level（w/ G）；Claude-4-Sonnet 40.65，Gemini-2.5-Pro 29.52（均 w/ G）</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">69.10</div><div class="k">Who&When handcraft · Agent-level（w/ G）；GPT-4.1 43.10，Claude-4-Sonnet 56.90（均 w/ G）</div></div>
+    <div class="metric"><div class="v" data-src="§5.3">+14.21<small>%</small></div><div class="k">MaAS + MATH-500 · baseline + 3 轮（Trial 1–4）后 +14.21%，原文未说明相对/绝对；OWL + GAIA 为 +4.8%</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>系统越像团队，失败越像谜案</h2></div>
+  <p class="sec-sub">读完这节你应该知道：失败归因要回答什么，以及为什么现成的大模型做不好。</p>
+  <p>一个由 Planner、Coder、Tester 等多个角色组成的系统，执行一条长轨迹后给出错误答案。最终答案错了，但错误可能来自很早就下载错的文档、某个 agent 传错的参数、或某次工具调用的静默失败；后面的步骤看起来都「正常」，只是在错误前提上继续推理。论文引用的 Berkeley 研究显示，流行多智能体框架的失败率最高可达 86.7%。<span class="mono" data-src="§1">§1</span></p>
+  <p>论文把任务形式化为：给定失败轨迹 τ 和二元判定 Ω(τ)∈{0,1}，找到责任 agent <code>i*</code> 与决定性错误步 <code>t*</code>。这里的「决定性」不是「看起来最可疑」，而是「修正它就能让任务成功」；若有多个这样的位置，取时间最早的那个。这个定义把归因从主观阅读日志，变成可复现的反事实实验。<span class="mono" data-src="§3">§3</span></p>
+  <p>现成模型的表现并不好：论文称当前推理模型在该任务上的准确率通常低于 10%；Table 1 里 Who&When handcraft 的 step-level，GPT-4.1 只有 3.44/3.44（w/ G 与 w/o G），Gemini-2.5-Pro 只有 9.72/6.90。AgenTracer-8B 在这一格是 20.68/20.68。<span class="mono" data-src="Table 1">Table 1</span></p>
+  <div class="three-col">
+    <div class="card"><span class="pill p1">输入</span><h4>一条失败轨迹</h4><p>包含每一步的状态、动作与执行 agent；日志长，错误可能被后续「看似正常」的步骤掩盖。</p></div>
+    <div class="card"><span class="pill p2">输出</span><h4>责任 agent + 错误步</h4><p>输出格式固定为 <code>&lt;agentID&gt; | &lt;stepID&gt;</code>；两个粒度分别评分，避免只猜对 agent 或只猜近步骤。</p></div>
+    <div class="card"><span class="pill p3">难点</span><h4>错误早、信号晚</h4><p>Figure 4 的案例里，根因在第 2 步（Web Surfer 取到旧文件），直到第 11 步才出现能证明它的证据。</p></div>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有方案：人工标注太贵，直接让 LLM 读日志又太弱</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Who&When、MAST 与 AgenTracer 的数据规模差在哪里。</p>
+  <div class="two-col">
+    <div class="card">
+      <span class="pill p1">路线 A</span>
+      <h4>人工标注的失败数据集</h4>
+      <p>Who&When 是公开的失败归因基准，含 handcraft 与 automated 两个子集；MAST 也提供人工标注的失败轨迹。论文指出 MAST 与 Who&When 分别只有约 200 与 127 条人工标注的多智能体失败轨迹，规模不足以系统训练归因模型。<span class="mono" data-src="§1">§1</span></p>
+    </div>
+    <div class="card">
+      <span class="pill p2">路线 B</span>
+      <h4>让通用 LLM 直接推理</h4>
+      <p>把整条轨迹一次性喂给 GPT-4.1、Gemini-2.5-Pro、Claude-4-Sonnet 等模型，让它们输出错误位置；这是论文的 all-at-once 设定 <span class="mono" data-src="§5.1">§5.1</span>。Table 1/2 显示这类直接推理在 step-level 上普遍很弱，且给不给 ground truth G 并不稳定提升准确率，有时反而更差 <span class="mono" data-src="§5.2">§5.2</span>。</p>
+    </div>
+  </div>
+  <p>AgenTracer 的不同点是先自动造数据、再训专用小模型：用反事实实验与故障注入生成「错误位置已知」的监督信号；论文把这套标注流程称为 automatic trajectory annotation；训练时再用格式门控与高斯核把「接近正确步骤」变成可学习的部分分。<span class="mono" data-src="§4">§4</span></p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>方法：反事实回放找「最早能救活」的那一步，故障注入造「已知错在哪」的样本</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两条标注路径怎么工作、奖励函数怎么拆、为什么可以去掉 KL。</p>
+
+  <h3>3.1 反事实回放（失败轨迹）</h3>
+  <p>对每条失败轨迹 τ，按时间从 0 到 T 逐步尝试：分析器 <code>π<sub>analyzer</sub></code> 拿到当前状态、原动作、历史、环境反馈 F 与标准答案 G，给出一个「最小侵入」的修正动作 <code>a'<sub>t</sub></code>；用修正动作替换原动作，重跑后续步骤得到 τ'。若 <code>Ω(τ')=1</code>，说明第 t 步是能翻转结果的位置；取最早满足条件的 t 作为 <code>t*</code>，该步执行 agent <code>μ(t*)</code> 即 <code>i*</code>。分析器被要求只给修复指导，不泄露完整答案。<span class="mono" data-src="§4.1">§4.1</span></p>
+
+  <h3>3.2 程序化故障注入（成功轨迹）</h3>
+  <p>对每条成功轨迹，从 0..T 中随机抽 K 个注入点；在每个点用扰动算子 Π 改掉原动作，得到 <code>ã<sub>t</sub></code>，再重跑。若注入后 <code>Ω(τ̃)=0</code>，则注入点 <code>(μ(t), t)</code> 按构造就是决定性错误：因为我们知道错误是亲手放进去的。每条成功轨迹取第一个成功诱发失败的点，避免同一轨迹重复标注。两条路径合并成 <code>D<sub>tracer</sub> = D<sup>−</sup> ∪ D<sup>+</sup></code>，即 TracerTraj-2.5K。<span class="mono" data-src="§4.1">§4.1</span></p>
+
+  <h3>3.3 训练：去 KL 的 GRPO + 三段奖励</h3>
+  <p>底座是 Qwen3-8B，RL 算法用 GRPO，但去掉 KL 项，并把裁剪参数改成随训练步数衰减的 <code>B<sub>s</sub> = max(0.2·B<sub>0</sub>, B<sub>0</sub>(1 − s/S<sub>total</sub>))</code>：前期裁剪宽、鼓励探索，后期收窄、稳定利用。论文没有给出 B<sub>0</sub> 的具体取值。<span class="mono" data-src="§4.2">§4.2</span></p>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Eq.11–12 的奖励结构；格式是门控，agent 是二值，step 是高斯核。</caption>
+      <thead><tr><th>项</th><th>定义</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td><code>I<sub>format</sub></code></td><td>输出必须为 <code>&lt;think&gt;…&lt;/think&gt;</code> + <code>&lt;answer&gt;agentID | stepID&lt;/answer&gt;</code></td><td>不满足则总奖励为 0</td></tr>
+        <tr><td><code>r<sub>agent</sub></code></td><td><code>I(î<sub>k</sub> = i*)</code></td><td>责任 agent 是否猜对</td></tr>
+        <tr class="best"><td><code>r<sub>step</sub></code></td><td><code>exp(−(t̂<sub>k</sub> − t*)² / 2σ²)</code></td><td>预测步骤离真值越近，奖励越高；σ=1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>总奖励是 <code>R = I<sub>format</sub> · (λ·r<sub>step</sub> + (1−λ)·r<sub>agent</sub>)</code>，λ=0.5。论文把这样设计的收益写成 smoother reward landscape：step 奖励提供部分分与平滑梯度，格式门控（hard gating）保证输出可解析；agent 奖励是二值信号，直接监督责任主体是否判对。<span class="mono" data-src="§4.2">§4.2</span></p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>工程账：8 张 H100、2,476 条标注、batch 32</h2></div>
+  <p class="sec-sub">读完这节你应该知道：复现需要哪些设置，以及论文没有报告什么。</p>
+  <div class="two-col">
+    <div class="card">
+      <span class="pill p1">数据</span>
+      <h4>TracerTraj-2.5K：2,476 条</h4>
+      <p>六个多智能体系统（MetaGPT、AutoGen、Smolagents、AgentPrune、AFlow、OWL-Workforce）× 六个基准（MBPP+、KodCode、Blackjack、GAIA、MATH、GSM8K）；测试集按 9:1 划分 <span class="mono" data-src="§5.1">§5.1</span>。Table 3 的分域统计：Curated Trajectories 为 2,170 / 1,185 / 1,300，其中带错误步标注的 TracerTraj-2.5K 为 code 1,288、math 630、agentic 558，合计 2,476；测试集三域分别 147 / 63 / 56 <span class="mono" data-src="Appendix A">Appendix A</span>。</p>
+    </div>
+    <div class="card">
+      <span class="pill p2">训练</span>
+      <h4>verl、batch 32、rollout 8、lr 1e-6</h4>
+      <p>8 张 NVIDIA H100 80GB；RL 用 verl；batch size 32，rollout 数 8，学习率 1×10<sup>−6</sup>；奖励 λ=0.5，高斯核 σ=1；分析器与扰动算子都用 DeepSeek-R1。论文没有给 B<sub>0</sub>、训练步数、训练显存占用或总 GPU 小时。<span class="mono" data-src="§5.1">§5.1</span></p>
+    </div>
+  </div>
+  <p>Table 3 与实验设置还有一处统计口径差异：论文说六个基准 <span class="mono" data-src="§5.1">§5.1</span>，Table 3 的 General Agentic Tasks 下列了 GAIA 与 HotpotQA 两个，合计七个 <span class="mono" data-src="Appendix A">Appendix A</span>。论文没有解释 HotpotQA 是否只用于某个系统子集；页面按 Table 3 转录，并标出这一差异。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹的旅程：先分流，再反事实或注入，最后进 GRPO</h2></div>
+  <p class="sec-sub">读完这节你应该知道：失败轨迹与成功轨迹分别走哪条分支，标签在什么时候确定。</p>
+  <figure>
+    <svg viewBox="0 0 760 350" role="img" aria-label="AgenTracer 流程：六个多智能体系统与六或七个基准产生轨迹，按成功失败分流；失败轨迹逐步反事实替换并重跑，找到最早翻转为成功的一步；成功轨迹随机选 K 个点注入故障并重跑，诱发失败则注入点即标签；两路合并成 TracerTraj-2.5K，用多粒度 GRPO 训练 AgenTracer-8B。">
+      <defs>
+        <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="arrow-head"/></marker>
+      </defs>
+      <rect class="svg-box" x="18" y="20" width="168" height="58" rx="10"/>
+      <text x="102" y="45" text-anchor="middle" class="svg-t sm">6 MAS × 6/7 基准</text>
+      <text x="102" y="64" text-anchor="middle" class="svg-l">§5.1 六 / Table 3 七</text>
+      <path class="svg-ln" d="M186 49 L199 49" marker-end="url(#ar)"/>
+      <rect class="svg-box" x="204" y="20" width="145" height="58" rx="10"/>
+      <text x="276" y="45" text-anchor="middle" class="svg-t">收集轨迹</text>
+      <text x="276" y="64" text-anchor="middle" class="svg-l">τ = (s0,a0,…,sT)</text>
+      <path class="svg-ln" d="M349 49 L365 49" marker-end="url(#ar)"/>
+      <rect class="svg-box" x="370" y="20" width="150" height="58" rx="10"/>
+      <text x="445" y="45" text-anchor="middle" class="svg-t">按 Ω 分流</text>
+      <text x="445" y="64" text-anchor="middle" class="svg-l">成功 / 失败</text>
+      <text x="651" y="45" text-anchor="middle" class="svg-t">两条标注路径</text>
+      <text x="651" y="64" text-anchor="middle" class="svg-l">反事实 / 故障注入</text>
+
+      <path class="svg-ln" d="M445 78 L445 100 L198 100 L198 118" marker-end="url(#ar)"/>
+      <path class="svg-ln" d="M445 78 L445 100 L621 100 L621 118" marker-end="url(#ar)"/>
+      <rect class="svg-box" x="18" y="123" width="330" height="92" rx="10"/>
+      <text x="183" y="147" text-anchor="middle" class="svg-t">失败轨迹：反事实回放</text>
+      <text x="183" y="167" text-anchor="middle" class="svg-l">t = 0..T：分析器给 a′t，替换后重跑</text>
+      <text x="183" y="185" text-anchor="middle" class="svg-l">最早 Ω(τ′)=1 的 t 即 t*</text>
+      <text x="183" y="203" text-anchor="middle" class="svg-l">标签 (μ(t*), t*)</text>
+      <rect class="svg-box" x="412" y="123" width="330" height="92" rx="10"/>
+      <text x="577" y="147" text-anchor="middle" class="svg-t">成功轨迹：故障注入</text>
+      <text x="577" y="167" text-anchor="middle" class="svg-l">随机 K 个点：Π(at) → ãt，重跑</text>
+      <text x="577" y="185" text-anchor="middle" class="svg-l">首个 Ω(τ̃)=0 的注入点即标签</text>
+      <text x="577" y="203" text-anchor="middle" class="svg-l">标签 (μ(t), t)</text>
+
+      <path class="svg-ln" d="M183 215 L183 240 L300 240" marker-end="url(#ar)"/>
+      <path class="svg-ln" d="M577 215 L577 240 L460 240" marker-end="url(#ar)"/>
+      <rect class="svg-hot" x="305" y="222" width="150" height="36" rx="8"/>
+      <text x="380" y="245" text-anchor="middle" class="svg-t">TracerTraj-2.5K</text>
+      <path class="svg-ln" d="M380 258 L380 276" marker-end="url(#ar)"/>
+      <rect class="svg-box" x="205" y="276" width="350" height="72" rx="10"/>
+      <text x="380" y="301" text-anchor="middle" class="svg-t">多粒度 GRPO（无 KL）</text>
+      <text x="380" y="321" text-anchor="middle" class="svg-l">格式门控 + agent 二值 + step 高斯核</text>
+      <text x="380" y="339" text-anchor="middle" class="svg-l">输出 &lt;agentID&gt; | &lt;stepID&gt;</text>
+    </svg>
+    <figcaption>按 Figure 2、Algorithm 1 与 §4.2 重绘。反事实路径逐 t 扫描并早停；注入路径每条成功轨迹只取第一个成功诱发失败的点。Figure 2 图内标作 AgenTracer-3k，正文与图注称 TracerTraj-2.5K，页面按正文写法。系统与基准清单见 §5.1；Table 3 另列 HotpotQA，故图内写 6/7 基准。</figcaption>
+  </figure>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：Who&When 上领先，但 TracerTraj-agentic 有一个单元格输给 Claude</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两张表怎么读、w/ G 与 w/o G 的差别，以及论文自己的百分比口径。</p>
+
+  <h3>6.1 Table 1 完整转录（Who&When）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1（完整转录）：每格为 w/ G / w/o G；G 在 Table 1 原注中指 ground truth trajectory（“the failure tracer has access to ground truth trajectory”），在 §5.1 指 ground truth G / solution，两种原话并列。原文粗体/下划线未复刻。</caption>
+      <thead>
+        <tr><th rowspan="2">模型</th><th colspan="2">Handcraft · Agent</th><th colspan="2">Handcraft · Step</th><th colspan="2">Automated · Agent</th><th colspan="2">Automated · Step</th></tr>
+        <tr><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen3-8B</td><td class="num">42.10</td><td class="num">39.50</td><td class="num">1.72</td><td class="num">3.45</td><td class="num">58.73</td><td class="num">60.32</td><td class="num">3.97</td><td class="num">5.56</td></tr>
+        <tr><td>LLaMA-3.2-3B</td><td class="num">37.93</td><td class="num">50.00</td><td class="num">1.72</td><td class="num">3.45</td><td class="num">37.30</td><td class="num">45.23</td><td class="num">2.38</td><td class="num">8.73</td></tr>
+        <tr><td>Qwen3-32B</td><td class="num">44.80</td><td class="num">44.80</td><td class="num">1.72</td><td class="num">1.72</td><td class="num">63.49</td><td class="num">57.93</td><td class="num">9.52</td><td class="num">8.73</td></tr>
+        <tr><td>Qwen3-Coder</td><td class="num">51.72</td><td class="num">60.35</td><td class="num">8.62</td><td class="num">13.79</td><td class="num">42.86</td><td class="num">36.50</td><td class="num">34.13</td><td class="num">32.54</td></tr>
+        <tr><td>GPT-4.1</td><td class="num">43.10</td><td class="num">37.93</td><td class="num">3.44</td><td class="num">3.44</td><td class="num">55.55</td><td class="num">59.52</td><td class="num">29.52</td><td class="num">21.90</td></tr>
+        <tr><td>DeepSeek-R1</td><td class="num">56.90</td><td class="num">53.44</td><td class="num">13.29</td><td class="num">6.90</td><td class="num">66.67</td><td class="num">65.08</td><td class="num">31.32</td><td class="num">29.52</td></tr>
+        <tr><td>Gemini-2.5-Pro</td><td class="num">51.72</td><td class="num">51.72</td><td class="num">9.72</td><td class="num">6.90</td><td class="num">61.11</td><td class="num">57.14</td><td class="num">29.52</td><td class="num">25.86</td></tr>
+        <tr><td>Claude-4-Sonnet</td><td class="num">56.90</td><td class="num">50.00</td><td class="num">17.24</td><td class="num">18.97</td><td class="num">57.93</td><td class="num">51.11</td><td class="num">40.65</td><td class="num">38.83</td></tr>
+        <tr class="best"><td>AgenTracer-8B</td><td class="num">69.10</td><td class="num">63.82</td><td class="num">20.68</td><td class="num">20.68</td><td class="num">69.62</td><td class="num">63.73</td><td class="num">42.86</td><td class="num">37.30</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>6.2 Table 2 完整转录（TracerTraj）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2（完整转录）：每格为 w/ G / w/o G（G 的两种原话见 Table 1 caption）。代码、数学、通用智能体三个域；测试集按 9:1 从 TracerTraj-2.5K 划分。</caption>
+      <thead>
+        <tr><th rowspan="2">模型</th><th colspan="2">Code · Agent</th><th colspan="2">Code · Step</th><th colspan="2">MATH · Agent</th><th colspan="2">MATH · Step</th><th colspan="2">Agentic · Agent</th><th colspan="2">Agentic · Step</th></tr>
+        <tr><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th><th class="num">w/ G</th><th class="num">w/o G</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen3-8B</td><td class="num">45.35</td><td class="num">32.99</td><td class="num">2.36</td><td class="num">1.15</td><td class="num">31.74</td><td class="num">33.58</td><td class="num">9.52</td><td class="num">12.96</td><td class="num">27.93</td><td class="num">30.16</td><td class="num">13.49</td><td class="num">15.31</td></tr>
+        <tr><td>LLaMA-3.2-3B</td><td class="num">13.38</td><td class="num">11.81</td><td class="num">2.36</td><td class="num">3.93</td><td class="num">15.87</td><td class="num">14.28</td><td class="num">4.76</td><td class="num">3.17</td><td class="num">8.11</td><td class="num">13.15</td><td class="num">2.18</td><td class="num">5.09</td></tr>
+        <tr><td>Qwen3-32B</td><td class="num">62.99</td><td class="num">63.78</td><td class="num">2.36</td><td class="num">1.75</td><td class="num">17.46</td><td class="num">17.46</td><td class="num">4.76</td><td class="num">7.93</td><td class="num">30.55</td><td class="num">30.55</td><td class="num">18.60</td><td class="num">15.31</td></tr>
+        <tr><td>Qwen3-Coder</td><td class="num">69.29</td><td class="num">66.92</td><td class="num">14.96</td><td class="num">14.17</td><td class="num">28.57</td><td class="num">33.58</td><td class="num">11.11</td><td class="num">22.22</td><td class="num">40.67</td><td class="num">43.12</td><td class="num">24.99</td><td class="num">25.69</td></tr>
+        <tr><td>GPT-4.1</td><td class="num">59.84</td><td class="num">53.54</td><td class="num">12.59</td><td class="num">11.02</td><td class="num">39.55</td><td class="num">35.18</td><td class="num">35.81</td><td class="num">26.63</td><td class="num">43.61</td><td class="num">40.67</td><td class="num">24.99</td><td class="num">25.69</td></tr>
+        <tr><td>DeepSeek-R1</td><td class="num">11.81</td><td class="num">11.81</td><td class="num">10.23</td><td class="num">10.23</td><td class="num">42.68</td><td class="num">38.58</td><td class="num">29.52</td><td class="num">18.51</td><td class="num">45.12</td><td class="num">46.19</td><td class="num">27.13</td><td class="num">21.80</td></tr>
+        <tr><td>Gemini-2.5-Pro</td><td class="num">70.07</td><td class="num">66.92</td><td class="num">11.02</td><td class="num">6.29</td><td class="num">58.79</td><td class="num">58.79</td><td class="num">32.22</td><td class="num">27.40</td><td class="num">37.16</td><td class="num">32.18</td><td class="num">18.60</td><td class="num">17.04</td></tr>
+        <tr><td>Claude-4-Sonnet</td><td class="num">65.98</td><td class="num">63.78</td><td class="num">15.51</td><td class="num">11.02</td><td class="num">46.03</td><td class="num">50.79</td><td class="num">38.10</td><td class="num">46.03</td><td class="num">55.20</td><td class="num">49.13</td><td class="num">30.33</td><td class="num">29.80</td></tr>
+        <tr class="best"><td>AgenTracer-8B</td><td class="num">72.95</td><td class="num">72.21</td><td class="num">18.85</td><td class="num">18.85</td><td class="num">59.32</td><td class="num">66.10</td><td class="num">57.63</td><td class="num">57.63</td><td class="num">53.28</td><td class="num">50.61</td><td class="num">36.17</td><td class="num">35.55</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>6.3 交互：切换数据集与粒度，看 w/ G 与 w/o G</h3>
+  <div class="tabs" id="ds-tabs">
+    <button class="tab active" data-d="hand-agent">Who&When handcraft</button>
+    <button class="tab" data-d="auto">Who&When automated</button>
+    <button class="tab" data-d="code">TracerTraj code</button>
+    <button class="tab" data-d="math">TracerTraj math</button>
+    <button class="tab" data-d="agentic">TracerTraj agentic</button>
+  </div>
+  <div class="tabs" id="lv-tabs">
+    <button class="tab active" data-l="agent">Agent-level</button>
+    <button class="tab" data-l="step">Step-level</button>
+  </div>
+  <div class="legend" id="at-legend"></div>
+  <div class="chart" id="at-chart"></div>
+  <div class="readout" data-src="Table 1" id="at-readout"></div>
+  <p class="sub">每行一个模型，两根柱依次为 w/ G 与 w/o G；柱高按百分比直接换算（满格 100）。AgenTracer 行用强调色标出。</p>
+
+  <details class="handcalc">
+    <summary>手算对账 <span class="sum-sub">两组视图的柱高与差值</span></summary>
+    <div class="details-body">
+      <p><strong>视图 A：Who&When handcraft · Agent-level，w/ G。</strong>Table 1 给 AgenTracer 69.10、GPT-4.1 43.10、Claude-4-Sonnet 56.90、Gemini-2.5-Pro 51.72。柱高按 JS 公式 <code>Math.round(v / 100 × 1000) / 10</code> 保留一位小数，分别为 69.1% / 43.1% / 56.9% / 51.7%（占 track 高度）。readout 只显示与 w/ G 最高基线 56.90（Claude 与 DeepSeek-R1 并列）的差：<code>69.10 − 56.90 = 12.20</code>。手算另列：AgenTracer − GPT-4.1 = <code>26.0</code>，− Gemini = <code>17.38</code>，这两个差值不在 readout 中。</p>
+      <p><strong>视图 B：TracerTraj agentic · Step-level，w/ G。</strong>Table 2 给 AgenTracer 36.17、Qwen3-8B 13.49、DeepSeek-R1 27.13、Gemini-2.5-Pro 18.60。柱高分别为 36.2% / 13.5% / 27.1% / 18.6%；readout 的 w/ G 最高基线是 Claude-4-Sonnet 30.33，<code>36.17 − 30.33 = 5.84</code>。手算另列：− Qwen3-8B = <code>22.68</code>，− DeepSeek-R1 = <code>9.04</code>，− Gemini = <code>17.57</code>，均不在 readout 中。</p>
+      <p><strong>反例对账：TracerTraj agentic · Agent-level，w/ G。</strong>Claude-4-Sonnet 55.20、AgenTracer 53.28，差 <code>55.20 − 53.28 = 1.92</code>，方向是 Claude 更高；页面在 §6.4 明确写出，不把该单元格算作 AgenTracer 的胜利。</p>
+    </div>
+  </details>
+
+  <h3>6.4 读表：领先项与反例</h3>
+  <p>先看论文主打的 Who&When。Handcraft agent-level（w/ G）：AgenTracer 69.10，Claude 56.90，GPT-4.1 43.10，分别高 12.2 与 26.0 点；Automated step-level（w/ G）：AgenTracer 42.86，Claude 40.65，Gemini 29.52，分别高 2.21 与 13.34 点。w/o G 时并非每一项都领先：automated step 上 Claude 38.83 高于 AgenTracer 37.30，AgenTracer 低 1.53 点；论文没有在正文点出这一格，页面并列。<span class="mono" data-src="Table 1">Table 1</span></p>
+  <p>在 TracerTraj 上，AgenTracer 的优势主要集中在 math 与 code：Code agent（w/ G）72.95 对 Gemini 70.07；MATH step（w/ G）57.63 对 Claude 38.10；agentic step（w/ G）36.17 对 Claude 30.33。但 agentic agent-level（w/ G）Claude 55.20 高于 AgenTracer 53.28（+1.92），所以「全面超越 Claude-4-Sonnet」不能成立。<span class="mono" data-src="Table 2">Table 2</span></p>
+  <p>论文的百分比口径也有两处对不上。论文说 DeepSeek-R1 在 TracerTraj-math 去掉 G 后「suffers a 9.21% drop」，Table 2 的 MATH step 是 29.52 → 18.51，绝对差 11.01 点（相对 37.3%），9.21 无法由该行复算 <span class="mono" data-src="§5.2">§5.2</span>；同一句说 AgenTracer 保持 57.63，这一格 w/ G 与 w/o G 都是 57.63，确实没掉。摘要与引言说在 Who&When 上比 Gemini-2.5-Pro 高「约 18.18%」 <span class="mono" data-src="§1">§1</span>，但 Table 1 里 handcraft agent 的最大差是 17.38 点（69.10−51.72），automated step 的最大差是 13.34 点（42.86−29.52），18.18 没有直接对应的单元格；页面并列原文写法与表格复算，不替原文统一。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：标注质量依赖分析器，合成失败未必像真实失败</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些结论有表格支撑，哪些是论文没有验证的空白。</p>
+  <div class="three-col">
+    <div class="card"><span class="pill p1">分析器</span><h4>oracle 上限决定标签质量</h4><p>反事实回放依赖 DeepSeek-R1 给出「最小侵入」的修正动作；若分析器本身判断错，最早成功点可能标错。论文没有报告分析器自身的修正成功率或人工抽检一致率。<span class="mono" data-src="§4.1">§4.1</span></p></div>
+    <div class="card"><span class="pill p2">合成分布</span><h4>注入失败 ≠ 真实失败</h4><p>故障注入制造的失败由扰动算子决定，模式可能比真实系统里的交互错误、环境变化、幻觉更简单<span class="infer">推断</span>（论文只描述注入机制，未做合成 vs 真实的分布对比）。<span class="mono" data-src="§4.1">§4.1</span></p></div>
+    <div class="card"><span class="pill p3">统计</span><h4>没有种子与方差</h4><p><span class="mono" data-src="Table 1">Table 1</span> / <span class="mono" data-src="Table 2">Table 2</span> 在每个设定下只有一个数（每格为 w/ G / w/o G 两值）；没有报告多种子、标准差或置信区间。AgenTracer 与 Claude 在 automated step w/o G 的 1.53 点差（<span class="mono" data-src="Table 1">Table 1</span>）、agentic agent w/ G 的 1.92 点差（<span class="mono" data-src="Table 2">Table 2</span>），都无法判断是否稳定。</p></div>
+  </div>
+  <p>还有两点。第一，「最早决定性错误」是一个有用但单一的定义：如果失败是多个小偏差累积、或真正的根因在更晚但更深的策略层，最早翻转点可能只是表层症状<span class="infer">推断</span>（由定义只取最早满足条件的位置推出）；论文没有讨论这种归因偏差。第二，Table 3（Appendix A）的 TracerTraj 测试集按域划分后每域只有 147 / 63 / 56 条，math 与 agentic 的单元格样本量很小，百分比的一位小数并不代表高精度<span class="infer">推断</span>（样本量小，论文未给方差）。<span class="mono" data-src="Appendix A">Appendix A</span></p>
+  <p>Table 1 与 Table 2 的粗体/下划线声称标出最好与次好，但抽取文本无法复现格式；页面不据此判定最优，只按数值转录。<span class="mono" data-src="Table 1">Table 1</span> / <span class="mono" data-src="Table 2">Table 2</span></p>
+  <p>最后，论文只验证了 coding、math 与通用 agentic 三类任务 <span class="mono" data-src="Table 2">Table 2</span>；机器人控制、多智能体博弈、实时环境等更开放场景没有实验。论文结论只说这条路线 paves the way for self-correcting and self-evolving agentic systems <span class="mono" data-src="§6">§6</span>；「自动修复」与「实时归因」是笔记列出的未来方向，不是该节的内容。</p>
+</section>
+
+<footer>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.03312v2">https://arxiv.org/abs/2509.03312v2</a><br>
+    论文全名：AgenTracer: Who Is Inducing Failure in the LLM Agentic Systems?<br>
+    笔记：<a href="/agentracerwho-is-inducing-failure-in-the-llm-agentic-systems/">AGENTRACER：WHO IS INDUCING FAILURE IN THE LLM AGENTIC SYSTEMS</a>
+  </div>
+  <div class="errata">
+    <p><strong>笔记对照与勘误（只改页面，不动笔记）：</strong></p>
+    <ul>
+      <li>笔记写 AgenTracer-8B「全面超越了…Gemini-2.5-Pro 和 Claude-4-Sonnet」。Table 1 的 Who&When automated step-level（w/o G）Claude 38.83 > AgenTracer 37.30；Table 2 的 TracerTraj-agentic agent-level（w/ G）Claude 55.20 > AgenTracer 53.28。「全面」不成立，页面并列反例。</li>
+      <li>笔记引用的 42.86% 是 Who&When automated step-level 的 w/ G 值；同一格 w/o G 是 37.30（Claude 为 40.65 / 38.83）。笔记没有区分 w/ G 与 w/o G，读者可能把 42.86 当成无 ground truth 的结果。页面在表格与正文都标出两列。</li>
+      <li>笔记说「AgenTracer-8B 的 step-level 准确率 42.86%，而 Gemini-2.5-Pro 仅为 29.52%」——数值正确，但这是 w/ G 的比较；Gemini 的 w/o G 是 25.86，AgenTracer 的 w/o G 是 37.30。w/ G 差 13.34（42.86 − 29.52），w/o G 差 11.44（37.30 − 25.86），差距更小，不是更大。笔记只引了 w/ G 一侧，不是数值错误，但不完整。</li>
+      <li>笔记说「6 个基准测试」；§5.1 也写六个（MBPP+、KodCode、Blackjack、GAIA、MATH、GSM8K），但 Table 3 的 General Agentic Tasks 下还列了 HotpotQA，合计七个。原文两处口径并列：§5.1 写六个，Table 3 列七个；页面按 Table 3 转录并标出，不把它算成笔记错误。</li>
+      <li>笔记说 TracerTraj 有「超过 2000 个高质量标注」；Table 3 的 Curated Trajectories 行为 2,170 / 1,185 / 1,300，其中带错误步标注的 TracerTraj-2.5K 为 1,288 + 630 + 558 = 2,476，论文称 TracerTraj-2.5K。数值成立，页面给出精确总数。</li>
+      <li>笔记说「在 MaAS+MATH-500 任务上，经过 3 轮迭代…提升了约 14.2%」；论文 §5.3 原文是 +14.21%，Figure 3 横轴为 Trial 1–4，对应 baseline + 3 轮迭代。笔记正确，页面写作 +14.21%。</li>
+      <li>笔记没有提到论文 §5.2 的「9.21% drop」与 Table 2 的 11.01 点差对不上（29.52 → 18.51），也没有提到摘要「18.18%」与 Table 1 可直接复算的 17.38 / 13.34 点差对不上。这两处是原文自身口径问题，页面并列，不记在笔记账上。</li>
+      <li>笔记开头的「单打独ت斗」应为「单打独斗」；页面不改笔记原文，只在此标注。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var MODELS = ['Qwen3-8B', 'LLaMA-3.2-3B', 'Qwen3-32B', 'Qwen3-Coder', 'GPT-4.1', 'DeepSeek-R1', 'Gemini-2.5-Pro', 'Claude-4-Sonnet', 'AgenTracer-8B'];
+  var DATA = {
+    'hand-agent': {
+      name: 'Who&When handcraft · Agent-level',
+      g: [42.10, 37.93, 44.80, 51.72, 43.10, 56.90, 51.72, 56.90, 69.10],
+      wo: [39.50, 50.00, 44.80, 60.35, 37.93, 53.44, 51.72, 50.00, 63.82]
+    },
+    'auto': {
+      name: 'Who&When automated · Step-level',
+      g: [3.97, 2.38, 9.52, 34.13, 29.52, 31.32, 29.52, 40.65, 42.86],
+      wo: [5.56, 8.73, 8.73, 32.54, 21.90, 29.52, 25.86, 38.83, 37.30]
+    },
+    'code': {
+      name: 'TracerTraj code · Agent-level',
+      g: [45.35, 13.38, 62.99, 69.29, 59.84, 11.81, 70.07, 65.98, 72.95],
+      wo: [32.99, 11.81, 63.78, 66.92, 53.54, 11.81, 66.92, 63.78, 72.21]
+    },
+    'math': {
+      name: 'TracerTraj math · Step-level',
+      g: [9.52, 4.76, 4.76, 11.11, 35.81, 29.52, 32.22, 38.10, 57.63],
+      wo: [12.96, 3.17, 7.93, 22.22, 26.63, 18.51, 27.40, 46.03, 57.63]
+    },
+    'agentic': {
+      name: 'TracerTraj agentic · Agent-level',
+      g: [27.93, 8.11, 30.55, 40.67, 43.61, 45.12, 37.16, 55.20, 53.28],
+      wo: [30.16, 13.15, 30.55, 43.12, 40.67, 46.19, 32.18, 49.13, 50.61]
+    }
+  };
+  // 每张表两个粒度的数据；上面 DATA 只放默认视图，切换时按粒度重填。
+  var BOTH = {
+    'hand-agent': {
+      agent: DATA['hand-agent'],
+      step: {
+        name: 'Who&When handcraft · Step-level',
+        g: [1.72, 1.72, 1.72, 8.62, 3.44, 13.29, 9.72, 17.24, 20.68],
+        wo: [3.45, 3.45, 1.72, 13.79, 3.44, 6.90, 6.90, 18.97, 20.68]
+      }
+    },
+    'auto': {
+      agent: {
+        name: 'Who&When automated · Agent-level',
+        g: [58.73, 37.30, 63.49, 42.86, 55.55, 66.67, 61.11, 57.93, 69.62],
+        wo: [60.32, 45.23, 57.93, 36.50, 59.52, 65.08, 57.14, 51.11, 63.73]
+      },
+      step: DATA['auto']
+    },
+    'code': {
+      agent: DATA['code'],
+      step: {
+        name: 'TracerTraj code · Step-level',
+        g: [2.36, 2.36, 2.36, 14.96, 12.59, 10.23, 11.02, 15.51, 18.85],
+        wo: [1.15, 3.93, 1.75, 14.17, 11.02, 10.23, 6.29, 11.02, 18.85]
+      }
+    },
+    'math': {
+      agent: {
+        name: 'TracerTraj math · Agent-level',
+        g: [31.74, 15.87, 17.46, 28.57, 39.55, 42.68, 58.79, 46.03, 59.32],
+        wo: [33.58, 14.28, 17.46, 33.58, 35.18, 38.58, 58.79, 50.79, 66.10]
+      },
+      step: DATA['math']
+    },
+    'agentic': {
+      agent: DATA['agentic'],
+      step: {
+        name: 'TracerTraj agentic · Step-level',
+        g: [13.49, 2.18, 18.60, 24.99, 24.99, 27.13, 18.60, 30.33, 36.17],
+        wo: [15.31, 5.09, 15.31, 25.69, 25.69, 21.80, 17.04, 29.80, 35.55]
+      }
+    }
+  };
+  var state = { d: 'hand-agent', l: 'agent' };
+  var chart = document.getElementById('at-chart');
+  var readout = document.getElementById('at-readout');
+  var legend = document.getElementById('at-legend');
+  var dsTabs = document.getElementById('ds-tabs');
+  var lvTabs = document.getElementById('lv-tabs');
+
+  function bar(value, cls) {
+    var bar = document.createElement('div');
+    bar.className = 'cbar';
+    var track = document.createElement('div');
+    track.className = 'track';
+    var fill = document.createElement('div');
+    fill.className = 'fill ' + cls;
+    fill.style.height = Math.round(value / 100 * 1000) / 10 + '%';
+    track.appendChild(fill);
+    var num = document.createElement('div');
+    num.className = 'num';
+    num.textContent = value.toFixed(2);
+    bar.appendChild(track);
+    bar.appendChild(num);
+    return bar;
+  }
+
+  function render() {
+    if (!chart) return;
+    chart.innerHTML = '';
+    if (legend) legend.innerHTML = '<span><i style="background:var(--accent)"></i>w/ G</span><span><i style="background:var(--c2)"></i>w/o G</span>';
+    var view = BOTH[state.d][state.l];
+    MODELS.forEach(function (m, i) {
+      var crow = document.createElement('div');
+      crow.className = 'crow' + (m === 'AgenTracer-8B' ? ' hl' : '');
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = m;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      bars.appendChild(bar(view.g[i], 'b1'));
+      bars.appendChild(bar(view.wo[i], 'b3'));
+      crow.appendChild(name);
+      crow.appendChild(bars);
+      chart.appendChild(crow);
+    });
+    var a = view.g[8], b = view.wo[8];
+    var isT1 = state.d === 'hand-agent' || state.d === 'auto';
+    var tableLabel = isT1 ? 'Table 1' : 'Table 2';
+    if (readout) {
+      readout.dataset.src = tableLabel;
+      readout.innerHTML = '<div class="r-head">' + view.name + ' · ' + tableLabel + '</div>' +
+        'AgenTracer-8B：w/ G <strong>' + a.toFixed(2) + '</strong>，w/o G <strong>' + b.toFixed(2) + '</strong>；' +
+        '与 w/ G 最高基线 <strong>' + Math.max.apply(null, view.g.slice(0, 8)).toFixed(2) + '</strong> 相差 <strong>' + (a - Math.max.apply(null, view.g.slice(0, 8))).toFixed(2) + '</strong> 点。';
+    }
+  }
+
+  if (dsTabs) {
+    dsTabs.querySelectorAll('.tab').forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        dsTabs.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+        state.d = tab.getAttribute('data-d');
+        render();
+      });
+    });
+  }
+  if (lvTabs) {
+    lvTabs.querySelectorAll('.tab').forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        lvTabs.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+        tab.classList.add('active');
+        state.l = tab.getAttribute('data-l');
+        render();
+      });
+    });
+  }
+  render();
+})();
+</script>
+</body>
+</html>

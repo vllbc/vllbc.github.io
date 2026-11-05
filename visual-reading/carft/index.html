@@ -1,0 +1,692 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 2.5 | Table 3 | 64.8-62.3 |
+| 1.1 | Table 3 | 88.0-86.9 |
+| 7.13 | Table 3 | 50.95-43.82 |
+| 3.64 | Table 3 | 84.31-80.67 |
+| 10.15 | Table 3 | 86.16-76.01 |
+| 14.56 | Table 3 | 80.67-66.11 |
+| 18.2 | Table 3 | 84.31-66.11 |
+| 4.82 | Table 3 | 57.88-53.06 |
+| 1.49 | Table 3 | 57.88-56.39 |
+| 2.37 | Table 3 | 86.16-83.79 |
+| 1.7 | Table 4 | 64.2-62.5 |
+| 0.5 | Table 4 | 64.2-63.7 |
+| 1.2 | Table 4 | 63.7-62.5 |
+| 7.50 | Table 4 | 24.49-16.99 |
+| 30.62 | Table 4 | (24.49-16.99)/24.49*100 |
+| 2.87 | Table 4 | 16.99-14.12 |
+| 20.33 | Table 4 | (16.99-14.12)/14.12*100 |
+| 0.53 | Table 5 | 51.48-50.95 |
+| 2.2 | Table 6 | 88.9-86.7 |
+| 2.3 | Figure 5 | 64.8-62.5 |
+| 0.4 | Figure 5 | 62.9-62.5 |
+| 1.9 | Figure 5 | 64.8-62.9 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CARFT · 把标注 CoT 留在 RL 循环里</title>
+<meta name="description" content="CARFT 把标注 CoT 与 on-policy rollout 编码成向量，用 masked InfoNCE 与嵌入增强部分奖励稳定 ReFT；本页拆解方法、训练配置、Table 3/4 结果与边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+blockquote{margin:16px 0;padding:12px 18px;border-left:3px solid var(--border-strong);background:var(--bg-soft);color:var(--text-muted);font-size:14px;line-height:1.8}
+blockquote p:last-child{margin-bottom:0}
+.tbl-cap{font-size:13px;color:var(--text-soft);margin:18px 0 8px;line-height:1.7}
+.tbl-cap strong{color:var(--text)}
+.sim-note{font-size:12.5px;color:var(--text-soft);margin-top:6px;line-height:1.6}
+.reward-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
+.reward-box{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px}
+.reward-box.hit{border-color:var(--accent);background:var(--accent-soft)}
+.reward-box .k{font-size:12px;color:var(--text-soft);font-family:"JetBrains Mono",monospace}
+.reward-box .v2{font-family:"JetBrains Mono",monospace;font-size:28px;font-weight:600;margin-top:4px;color:var(--text);line-height:1.2}
+.reward-box.hit .v2{color:var(--accent-deep)}
+@media (max-width:880px){.reward-grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">CARFT</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · EMNLP 2025 · arXiv 2508.15868v2</span>
+  <h1>CARFT：把标注 CoT 留在 RL 循环里，用对比信号稳住探索</h1>
+  <p class="hero-sub">
+    SFT 每个题只教一条<strong>标注 CoT</strong>，ReFT 只让模型自己采样 rollout。CARFT 把两者编码成定长向量，用 masked InfoNCE 拉近「答对的 rollout」与标注 CoT，再用嵌入相似度做部分奖励。
+    代价是多了一次 CoT 编码与对比损失的计算；换来的不只是准确率，还有训练过程中的一条额外约束。
+  </p>
+  <div class="meta">
+    <span>Wenqiao Zhu, Ji Liu, Rongjuncheng Zhang, Haipang Wu, Yulun Zhang</span>
+    <a href="https://arxiv.org/abs/2508.15868v2" target="_blank" rel="noopener">arXiv 2508.15868v2 ↗</a>
+    <a href="https://github.com/WNQzhu/CARFT" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    SFT 每个题只给一条 CoT；ReFT 只让模型自己采样，探索时把标注 CoT 丢掉了，并且 PPO 训练可能出现 <em>model collapse</em>（§1）。
+  </p>
+  <p>
+    CARFT 不新增第三个模型：它用 value function 的 softmax 权重把一条 CoT 压成一个向量，对「标注 CoT vs rollout」做 InfoNCE；只有答对的 rollout 进入正样本项（Eq. 6–7）。
+  </p>
+  <p>
+    主实验只启用正向信号；负向信号要用 LCS 拆序列，增益小。真正把读数推上去的是正向对比损失，加上把「答错但接近」的 rollout 也纳入的 <em>embedding-enhanced partial reward</em>（§4.3）。
+  </p>
+  <p>
+    在 Table 3 的四个「模型 × 数据集」组合里，CARFT 都高于 SFT/ReFT；但 Table 4 的 64.2% 低于 Table 3 的 64.8%，论文自己也说 Figure 4 上 CARFT 可能不稳定。收益不是无条件的。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 3">10.15<small>pp</small></div>
+      <div class="k">Qwen 两数据集中均准确率之差<br>86.16 − 76.01；论文写作 up to 10.15%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">30.62<small>%</small></div>
+      <div class="k">相对 Dr.GRPO 的训练时间减少<br>24.49 → 16.99 h</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">14.56<small>pp</small></div>
+      <div class="k">ReFT 在 Qwen / GSM8K 上低于 SFT 的幅度<br>66.11 vs 80.67</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>同一个题有多种解法，SFT 只教一种，ReFT 只让模型自己找</h2></div>
+  <p class="sec-sub">读完这节要知道：两条主流路线不是「一个强一个弱」，而是各自丢掉了对方手里的信息。</p>
+
+  <p>SFT 的训练样本是三元组 <code>(x, c, y)</code>：问题、标注 CoT、答案。标注 CoT 通常由专家或更强的模型写出，质量高，但每个题只有一条。论文在 §1 的原话是：</p>
+  <blockquote>“SFT-based reasoning enhancement approaches only exploit a single annotated CoT for each question within the training dataset.”</blockquote>
+  <p>一条路径不等于只有一条正确路径。模型如果只模仿这一条，遇到同题异解、或标注路径不适配的题，就容易僵化；论文的判断是这会限制泛化（§1）。</p>
+
+  <p>ReFT 走另一条路：用 PPO 在训练中在线采样 CoT，用最终答案对错给奖励。它能看到多条路径，但论文指出两个问题：</p>
+  <ul>
+    <li><strong>丢掉标注 CoT</strong>：§1 写 “existing RL-based approaches solely rely on on-policy sampled CoTs without considering the highly valued annotated CoTs”；奖励 hacking 还可能把错误但可提取数字的路径喂进训练。</li>
+    <li><strong>训练不稳</strong>：§1 写 “The inherent exploratory nature of RL can lead to model collapse”；Figure 3 里 Qwen2.5-7B 的 ReFT 在一个 epoch 后就出现崩溃。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>SFT 有锚点没探索，ReFT 有探索没锚点</h4></div>
+    <p>SFT 把一条高质量路径当成单一目标；ReFT 把这条路径从训练信号里删掉，只保留答案对错。前者只有一条路径，后者没有标注锚点。CARFT 的问题定义就是：<strong>能不能让标注 CoT 在 RL 循环里继续起作用，同时不放弃 on-policy 探索？</strong></p>
+  </div>
+
+  <p>这个问题在数学应用题上尤其明显：答案可以自动判对错，所以 RL 能跑；但同一道题往往有多条正确解法，所以只学一条 CoT 的 SFT 会受限。论文选的 SVAMP 与 GSM8K 都属于这个设定（§4.1）。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有方案：SFT 有锚点没探索，ReFT 有探索没锚点</h2></div>
+  <p class="sec-sub">Table 1 把「用不用标注 CoT」和「用不用自采样 CoT」拆成两列，缺口一眼可见。</p>
+
+  <p class="tbl-cap"><strong>Table 1</strong> · 各方法是否使用 Annotated CoT（A-CoT）与 Self-Generated CoT（SG-CoT）。原表用勾 / 叉，这里转写为文字。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>Annotated CoT (A-CoT)</th><th>Self-generated CoT (SG-CoT)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SFT</td><td>采用</td><td>不使用</td></tr>
+        <tr><td>PPO-like（如 ReFT）</td><td>不使用</td><td>采用</td></tr>
+        <tr class="best"><td>CARFT</td><td>采用</td><td>采用</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sim-note">Table 1 原表只把 ReFT 作为 PPO-like 的例子；Dr.GRPO 也属于 on-policy 路线，但没有单独出现在这张表里。</p>
+
+  <h3>SFT：便宜，但只学一条路</h3>
+  <p>SFT 的复杂度是 <code>O(N)</code>（§4.4），没有 rollout，也没有奖励模型。它的训练信号只有「下一个 token 要像标注 CoT」；标注 CoT 之外的正确路径，模型没有动力去覆盖。</p>
+
+  <h3>ReFT：每个 step 只采样一条，便宜但可能崩</h3>
+  <p>ReFT 用 PPO 做 on-policy 微调，每个 step 只生成一条 CoT，<strong>单次前向</strong>的复杂度是 <code>O((L+1)·N)</code>（§4.4）；原文这句话是 per-forward-pass，不是 per-step 的完整成本。Table 4 的记录里，ReFT 在 SVAMP + CodeLlama-7B 上训练 14.12 h，低于 Dr.GRPO 的 24.49 h。代价是它完全不看标注 CoT，且论文报告 ReFT 会受 model collapse 影响（§1、§4.2）。</p>
+
+  <h3>Dr.GRPO：多 rollout 换准确率，也换时间</h3>
+  <p>Dr.GRPO 是 GRPO 的改进版，用多条 rollout 估计优势；§2 说 DAPO 针对长 CoT 场景，而 DAPO / Dr.GRPO 这类方法都带来更高的计算复杂度。Appendix A.1 里为了让比较公平，把 Dr.GRPO 的 <code>G</code> 设为 2，与 CARFT 每个 step 最多两条 CoT（一条标注 + 一条 rollout）对齐。Table 4 里它的时间是 24.49 h，准确率 63.7%。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">缺口</span><h4>没有方法同时用两列信号</h4></div>
+    <p>SFT 只用 A-CoT，ReFT / Dr.GRPO 只用 SG-CoT；Table 1 里同时打两个「采用」的是 CARFT 行。CARFT 的切入点不是换 RL 算法，而是把 A-CoT 变成 RL 循环里的一个<strong>对比锚点</strong>。</p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心方法：把 CoT 压成向量，用 masked InfoNCE 拉近答对的 rollout</h2></div>
+  <p class="sec-sub">这节拆三件事：CoT 怎么变成向量、正 / 负对比信号怎么构造、总损失怎么拼。</p>
+
+  <h3>3.1 一条变长 CoT → 一个定长向量（Eq. 6）</h3>
+  <p>给定 CoT <code>c = [a<sub>1</sub>, …, a<sub>L</sub>]</code>，token embedding 为 <code>H = [H<sub>1</sub>, …, H<sub>L</sub>]</code>，value function 输出为 <code>V<sub>φ</sub> = [V<sub>φ</sub>(1), …, V<sub>φ</sub>(L)]</code>。先把每个 <code>H<sub>i</sub></code> 过一层 MLP 投影到低维（实验中投影维度为 64，Appendix A.1），再按 softmax 归一化的 state value 加权求和：</p>
+  <div class="eq">
+    e = Σ Softmax(V<sub>φ</sub>) ⊙ H
+  </div>
+  <div class="eq-cap">Eq. 6 · ⊙ 是逐元素乘；投影发生在加权求和之前（§3.2.2）</div>
+  <p>softmax 是单调的，所以 <code>V<sub>φ</sub></code> 高的 token 在聚合里权重更大；论文没有进一步解释这个设计动机，只说明投影是为了降低显存（§3.2.2 原话 “in order to reduce memory consumption”）。这一步把任意长度的 CoT 变成一个定长向量，后面的对比学习才有统一的比较对象。</p>
+
+  <h3>3.2 正信号：答对的 rollout 才进分子（Eq. 7）</h3>
+  <p>对一个 batch 里的第 <code>i</code> 个问题，记标注 CoT 的嵌入为 <code>e<sub>i</sub><sup>annotated</sup></code>，rollout 的嵌入为 <code>e<sub>i</sub><sup>rollout</sup></code>。InfoNCE 形式是：</p>
+  <div class="eq">
+    L<sub>c1</sub> = Σ<sub>i</sub> −log [ exp(⟨e<sub>i</sub><sup>annotated</sup>, e<sub>i</sub><sup>rollout</sup>⟩ / τ) ⊙ M<sub>1</sub> / Σ<sub>j</sub> exp(⟨e<sub>i</sub><sup>annotated</sup>, e<sub>j</sub><sup>rollout</sup>⟩ / τ) ]
+  </div>
+  <div class="eq-cap">Eq. 7 · M<sub>1</sub> = 1 表示该 rollout 答案正确；τ = 0.2（Appendix A.1）</div>
+  <p>分子只保留「标注 CoT 与自己的 rollout」这一对；分母把 batch 内所有 rollout 都放进来。于是拉近正对、推远其他样本。M<sub>1</sub> 的作用是只让答对的 rollout 参与正样本项。</p>
+  <p>公式层面有一个细节：Eq. 7 把 M<sub>1</sub> 乘在 softmax 分子上，按字面 M<sub>1</sub> = 0 时 log 的参数为 0；论文正文只说 M<sub>1</sub> 是 0/1 mask，没有给 M<sub>1</sub> = 0 的实现分支。本页的交互只演示 M<sub>1</sub> = 1 的正样本项，不对这个分支做补全。</p>
+
+  <h3>3.3 负信号：用 LCS 拆出「共同部分」和「各自多出的部分」（Eq. 8）</h3>
+  <p>对答错的 rollout，论文先算标注 CoT <code>A</code> 与 rollout <code>B</code> 的最长公共子序列 <code>C</code>，再分别嵌入 <code>C</code>、<code>A\C</code>、<code>B\C</code>。Eq. 8 让 rollout 的 <code>C</code> 靠近 annotated 的 <code>A\C</code>，同时把 rollout 的 <code>B\C</code> 推远：</p>
+  <div class="eq">
+    L<sub>c2</sub> = Σ<sub>i</sub> −log [ exp(⟨e<sub>i,LCS</sub><sup>rollout</sup>, e<sub>i,exc</sub><sup>annotated</sup>⟩ / τ) ⊙ M<sub>2</sub> / Σ<sub>j</sub> exp(⟨e<sub>i,LCS</sub><sup>rollout</sup>, e<sub>j,exc</sub><sup>rollout</sup>⟩ / τ) ]
+  </div>
+  <div class="eq-cap">Eq. 8 · M<sub>2</sub> = 1 表示该 rollout 答案错误；细节见 Appendix A.3 / Algorithm 2</div>
+  <p>原文 §3.2.3 说构造四个嵌入（LCS 与 exc 各有 annotated / rollout 两版），但 Eq. 8 里可见的是 rollout 的 LCS 嵌入、annotated 的 exc 嵌入，以及 batch 内 rollout 的 exc 嵌入；annotated 的 LCS 嵌入没有出现在式子中。这里按原式转录，不替它补全。</p>
+  <p>主实验没有用负信号：§4.3 写 “Due to its excellent performance, we employ the positive signal in our experiments.” Figure 5 里负信号只比 ReFT 高 0.4 个百分点。</p>
+
+  <h3>3.4 总损失：PPO 损失 + 对比损失（Eq. 9）</h3>
+  <p>PPO 部分沿用 ReFT 的 <code>L<sub>RL</sub> = L<sub>policy</sub> + αL<sub>value</sub></code>（Eq. 5）；CARFT 再把对比损失按系数 <code>c</code> 加进去：</p>
+  <div class="eq">
+    L = L<sub>RL</sub> + c · { L<sub>c1</sub> or L<sub>c2</sub> }
+  </div>
+  <div class="eq-cap">Eq. 9 · c = 1e-3（Appendix A.1）；主实验取 L<sub>c1</sub></div>
+  <p>这个式子是 CARFT 的全部改动：策略优化还是 PPO，奖励还是答案对错加部分奖励，只是在同一个 step 里多算一项「当前 rollout 与标注 CoT 的对比」。论文没有引入新的 critic 或新的奖励模型。</p>
+
+  <h3>自己动手：InfoNCE 的 softmax 在做什么</h3>
+  <p>固定 4 个样本的相似度，只算第 1 个正样本的损失项。拖动 <code>s<sub>1</sub></code> 或 <code>τ</code>，看正样本权重和 <code>L</code> 怎么变。负样本的相似度是页面设定，用来展示 softmax 形状，不是论文数据；<code>τ = 0.2</code> 来自 Appendix A.1。</p>
+
+  <div class="sim" id="nce-sim">
+    <div class="slots" id="nce-slots">
+      <div class="slot hit">
+        <div class="slot-name">s₁ · 正样本</div>
+        <div class="slot-val"><span id="nce-sim0">0.80</span><br><span id="nce-w0">0.9135</span></div>
+        <div class="bar"><i class="b1" id="nce-b0" style="width:91.35%"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">s₂ · 负样本</div>
+        <div class="slot-val"><span id="nce-sim1">0.30</span><br><span id="nce-w1">0.0750</span></div>
+        <div class="bar"><i class="b2" id="nce-b1" style="width:7.50%"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">s₃ · 负样本</div>
+        <div class="slot-val"><span id="nce-sim2">-0.10</span><br><span id="nce-w2">0.0101</span></div>
+        <div class="bar"><i class="b2" id="nce-b2" style="width:1.01%"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">s₄ · 负样本</div>
+        <div class="slot-val"><span id="nce-sim3">-0.50</span><br><span id="nce-w3">0.0014</span></div>
+        <div class="bar"><i class="b2" id="nce-b3" style="width:0.14%"></i></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>正样本相似度 s₁ <span class="v" id="nce-s1-v">0.80</span></label>
+        <input type="range" id="nce-s1-range" min="-1" max="1" step="0.01" value="0.8">
+      </div>
+      <div class="ctrl">
+        <label>温度 τ <span class="v" id="nce-tau-v">0.20</span></label>
+        <input type="range" id="nce-tau-range" min="0.05" max="0.5" step="0.01" value="0.2">
+      </div>
+    </div>
+
+    <div class="readout" data-src="§3.2.3">
+      <div class="r-head">Eq. 7 · 当前读数</div>
+      <div id="nce-out">当前：s = (0.80, 0.30, -0.10, -0.50)，τ = 0.20。分母 Z = 59.7685，正样本权重 w₁ = 0.9135，L = −ln(w₁) = <strong>0.0905</strong>。</div>
+    </div>
+
+    <details>
+      <summary>手算对账：两组参数，逐位对 JS 输出<span class="sum-sub">没有标准差，不涉及 ÷N / ÷(N−1)</span></summary>
+      <div class="details-body">
+        <p><strong>公式（与 JS 的 update() 同一式子）：</strong><br>
+        <code>w_i = exp(s_i / τ) / Σ_j exp(s_j / τ)</code>，<code>L = −ln(w_1)</code>。权重保留 4 位小数，损失保留 4 位小数。</p>
+
+        <p><strong>第 1 组（页面默认）：</strong><code>τ = 0.20</code>，<code>s = (0.80, 0.30, -0.10, -0.50)</code></p>
+        <ul>
+          <li><code>exp(0.80/0.20) = exp(4) = 54.598150</code></li>
+          <li><code>exp(0.30/0.20) = exp(1.5) = 4.481689</code></li>
+          <li><code>exp(-0.10/0.20) = exp(-0.5) = 0.606531</code></li>
+          <li><code>exp(-0.50/0.20) = exp(-2.5) = 0.082085</code></li>
+          <li><code>Z = 54.598150 + 4.481689 + 0.606531 + 0.082085 = 59.768455</code></li>
+          <li><code>w₁ = 54.598150 / 59.768455 = 0.913494</code>；<code>L = −ln(0.913494) = 0.090478</code></li>
+        </ul>
+        <p>页面读数（保留 4 位）：<strong>Z = 59.7685，w₁ = 0.9135，L = 0.0905</strong>。</p>
+
+        <p><strong>第 2 组：</strong><code>τ = 0.10</code>，<code>s₁ = 0.45</code>，负样本不变 <code>(0.30, -0.10, -0.50)</code></p>
+        <ul>
+          <li><code>exp(0.45/0.10) = exp(4.5) = 90.017131</code></li>
+          <li><code>exp(0.30/0.10) = exp(3) = 20.085537</code></li>
+          <li><code>exp(-0.10/0.10) = exp(-1) = 0.367879</code></li>
+          <li><code>exp(-0.50/0.10) = exp(-5) = 0.006738</code></li>
+          <li><code>Z = 90.017131 + 20.085537 + 0.367879 + 0.006738 = 110.477285</code></li>
+          <li><code>w₁ = 90.017131 / 110.477285 = 0.814802</code>；<code>L = −ln(0.814802) = 0.204810</code></li>
+        </ul>
+        <p>页面读数（保留 4 位）：<strong>Z = 110.4773，w₁ = 0.8148，L = 0.2048</strong>。</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>这个交互覆盖了什么、没覆盖什么<span class="sum-sub">简化模拟的边界</span></summary>
+      <div class="details-body">
+        <p><strong>覆盖：</strong>Eq. 7 中 <code>M<sub>1</sub> = 1</code>、单正样本项的 softmax 分母与 <code>−log</code>；<code>τ</code> 对权重分布的影响；<code>τ = 0.2</code> 这一论文设置。</p>
+        <p><strong>未覆盖：</strong>M<sub>1</sub> = 0 时按字面会让 log 的参数为 0，论文没有给实现细节，本模拟不展示该分支；也不模拟 Eq. 8 的负信号、Eq. 6 的嵌入生成与投影、batch 内多个正样本的求和。负样本相似度与 batch=4 都是页面为了可读性设定的，论文的 batch 是 64（SVAMP）或 64/96（GSM8K，Appendix A.1）。</p>
+        <p>因此这里演示的是 <strong>Eq. 7 的形状</strong>，不是论文实验数值的复现。</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么训练：SFT 热身后，在每个 PPO step 加一次对比损失</h2></div>
+  <p class="sec-sub">读完这节要知道：CARFT 没有第三个训练阶段；它是在 ReFT 的每个 RL step 里加了一次 CoT 编码和对比损失。</p>
+
+  <p>§3.2.1 的流程是两段：</p>
+  <ul>
+    <li><strong>Stage 1 · SFT</strong>：用标注三元组做几个 epoch，先把 instruction-following 拉起来。Appendix A.1 说 SFT baseline 最多 60 epochs；CARFT 的 warmup 是 4 epochs，并挑最好的 checkpoint 进入 RL。</li>
+    <li><strong>Stage 2 · contrastive feedback</strong>：每个 RL step 从 <code>D<sub>train</sub></code> 采样 batch，当前 policy 生成一条 rollout；同时取出该题的标注 CoT。两条 CoT 都过 Eq. 6 得到嵌入，算 Eq. 7 的对比损失，再加到 PPO 的 <code>L<sub>RL</sub></code> 上（Eq. 9）。</li>
+  </ul>
+
+  <p class="tbl-cap"><strong>Appendix A.1</strong> · 论文给出的训练配置（原表不是表格，这里按条目转录）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>项目</th><th>设置</th></tr></thead>
+      <tbody>
+        <tr><td>硬件</td><td>8 × H100-80GB</td></tr>
+        <tr><td>加速</td><td>FlashAttention + DeepSpeed ZeRO stage 3</td></tr>
+        <tr><td>batch size</td><td>SVAMP：64；GSM8K：Qwen 64、CodeLlama 96</td></tr>
+        <tr><td>学习率</td><td>SFT / warmup：1e-5；RL 阶段：3e-7</td></tr>
+        <tr><td>KL 系数</td><td>0.05</td></tr>
+        <tr><td>对比温度 τ</td><td>0.2</td></tr>
+        <tr><td>对比损失系数 c</td><td>1e-3</td></tr>
+        <tr><td>投影维度</td><td>64</td></tr>
+        <tr><td>PPO</td><td>λ = 1，γ = 0.95，α = 5，ε = 0.2，U = 2</td></tr>
+        <tr><td>训练轮数</td><td>SFT baseline 最多 60 epochs；CARFT / ReFT / Dr.GRPO 先微调 4 epochs 选 checkpoint，再 RL 70 epochs（Appendix A.2 的 Qwen2.5-14B 补充实验为 100 epochs）</td></tr>
+        <tr><td>Dr.GRPO 的 G</td><td>2（与 CARFT 每 step 最多两条 CoT 对齐）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>4.1 部分奖励：答错也给分，但按 CoT 相似度给</h3>
+  <p>ReFT 对「能抽出数字但答错」的 CoT 给固定 0.1；CARFT 把它换成 Eq. 10：</p>
+  <div class="eq">
+    r(x, y) = ⟨e<sup>annotated</sup>, e<sup>rollout</sup>⟩ × 0.1 + 0.2
+  </div>
+  <div class="eq-cap">Eq. 10 · 内积范围 [−1, 1]，所以 r ∈ [0.1, 0.3]（§3.2.4）</div>
+  <p>这个式子把「答错」拆成了连续的两端：与标注 CoT 越不像，越接近 0.1；越像，越接近 0.3。论文的意图是给错误 CoT 一个比固定 0.1 更有区分度的信号，从而稳定训练（§3.2.4）。注意它只作用于「答案错误但能抽出数字」的样本；答案正确时奖励仍是 1（Appendix A.1）。</p>
+
+  <div class="sim" id="reward-sim">
+    <div class="reward-grid">
+      <div class="reward-box hit">
+        <div class="k">CARFT · Eq. 10</div>
+        <div class="v2" id="rw-carft">0.260</div>
+        <div class="sim-note" id="rw-carft-formula">r = 0.1 × 0.60 + 0.2</div>
+      </div>
+      <div class="reward-box">
+        <div class="k">ReFT · 固定部分奖励</div>
+        <div class="v2" id="rw-reft">0.100</div>
+        <div class="sim-note">无论 s 是多少，都是 0.1</div>
+      </div>
+    </div>
+
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>CoT 嵌入相似度 s <span class="v" id="rw-s-v">0.60</span></label>
+        <input type="range" id="rw-s" min="-1" max="1" step="0.01" value="0.6">
+      </div>
+    </div>
+
+    <div class="readout" data-src="§3.2.4">
+      <div class="r-head">Eq. 10 · 当前读数</div>
+      <div id="rw-out">s = 0.60 → CARFT r = 0.1 × 0.60 + 0.2 = <strong>0.260</strong>；ReFT 固定 r = <strong>0.100</strong>。</div>
+    </div>
+
+    <details>
+      <summary>手算对账：两组相似度 → 奖励<span class="sum-sub">与滑块输出逐位一致</span></summary>
+      <div class="details-body">
+        <p><strong>公式（与 JS 的 update() 同一式子）：</strong><code>r = 0.1 × s + 0.2</code>，保留 3 位小数。没有标准差，不涉及 ÷N / ÷(N−1)。</p>
+        <p><strong>第 1 组：</strong><code>s = 0.37</code> → <code>r = 0.1 × 0.37 + 0.2 = 0.037 + 0.2 = 0.237</code>；页面读数 <strong>0.237</strong>。</p>
+        <p><strong>第 2 组：</strong><code>s = -0.42</code> → <code>r = 0.1 × (-0.42) + 0.2 = -0.042 + 0.2 = 0.158</code>；页面读数 <strong>0.158</strong>。</p>
+        <p>端点核对：<code>s = -1</code> → 0.100；<code>s = 1</code> → 0.300。与 §3.2.4 写的 [0.1, 0.3] 一致。</p>
+      </div>
+    </details>
+
+    <details>
+      <summary>这个交互覆盖了什么、没覆盖什么<span class="sum-sub">简化模拟的边界</span></summary>
+      <div class="details-body">
+        <p><strong>覆盖：</strong>Eq. 10 的线性映射 <code>r = 0.1·s + 0.2</code>，<code>s ∈ [-1, 1]</code> 的完整区间；ReFT 固定 0.1 的对照。</p>
+        <p><strong>未覆盖：</strong>嵌入怎么由 Eq. 6 产生、真实 CoT 的相似度怎么算、mask 与 PPO 优势估计怎么结合、答案正确时奖励为 1 的分支。这里的 <code>s</code> 是抽象后的余弦相似度，不是论文实验里某个具体样本的读数。</p>
+      </div>
+    </details>
+  </div>
+
+  <h3>4.2 复杂度：多了一次 M·d·L，但比多 rollout 便宜</h3>
+  <p>§4.4 给的<strong>单次前向</strong>复杂度：SFT 是 <code>O(N)</code>；ReFT 是 <code>O((L+1)·N)</code>；Dr.GRPO 是 <code>O((G·L+1)·N)</code>；CARFT 是 <code>O((L+1)·N + M·d·L)</code>，其中 <code>M·d</code> 远小于 <code>N</code>。空间复杂度 CARFT 为 <code>O(N + L·d + M + L·d<sub>2</sub>)</code>，<code>d<sub>2</sub></code> 是压缩后的 hidden size（§4.4）。</p>
+  <p>Table 4 的实际时间：ReFT 14.12 h，CARFT 16.99 h（多 2.87 h，相对多 20.33%），Dr.GRPO 24.49 h（CARFT 相对少 30.62%）。这就是论文说的 efficiency gain 的来源：<strong>不是比 ReFT 快，而是比多 rollout 的 Dr.GRPO 快</strong>。如果只看 ReFT，CARFT 的对比分支是净开销。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">代价</span><h4>多出的 2.87 h 花在哪</h4></div>
+    <p>Limitations 写 CARFT “requires additional computational overhead to compute the embeddings of CoTs”，所以训练时间比 ReFT 和 SFT 长；比 Dr.GRPO 短，是因为 CARFT 每个 step 只需要一条 rollout（Dr.GRPO 用 <code>G = 2</code>）。省的是 rollout 的生成与评估，花的是 CoT 编码与对比损失。</p>
+  </div>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>架构：一条标注支路、一条 rollout 支路，在 InfoNCE 汇合</h2></div>
+  <p class="sec-sub">这张图只画主实验的正向信号路径；负向信号的 LCS 分支在 Appendix A.3，没有画进来。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 500" role="img" aria-label="CARFT 训练流程：SFT 后，policy 生成 rollout，与标注 CoT 分别编码，进入 masked InfoNCE，再与 PPO 损失相加">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <!-- arrows behind boxes -->
+      <path d="M190,100 L228,100" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M370,100 L408,100" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M570,80 C590,80 600,55 618,48" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M770,47 L798,47" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M105,140 L105,265 L595,265 L595,152 L618,152" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M770,152 L798,152" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M800,47 L790,47 L790,238" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M820,180 L820,238" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M755,320 L755,358" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M490,150 L490,358" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M650,392 L592,392" fill="none" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></path>
+      <path d="M380,370 C340,370 340,180 408,165" fill="none" stroke="var(--text-soft)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)"></path>
+
+      <!-- dataset -->
+      <rect x="20" y="60" width="170" height="80" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="105" y="86" text-anchor="middle" font-size="14" font-weight="600" fill="var(--text)">训练集 D<tspan font-size="10" dy="3">train</tspan></text>
+      <text x="105" y="108" text-anchor="middle" font-size="12" font-family="JetBrains Mono, monospace" fill="var(--text)">(x, c, y)</text>
+      <text x="105" y="127" text-anchor="middle" font-size="11" fill="var(--text-soft)">SVAMP / GSM8K</text>
+
+      <!-- sft -->
+      <rect x="230" y="70" width="140" height="60" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="300" y="95" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Stage 1 · SFT</text>
+      <text x="300" y="115" text-anchor="middle" font-size="11" fill="var(--text-soft)">few epochs</text>
+
+      <!-- policy -->
+      <rect x="410" y="60" width="160" height="90" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="490" y="88" text-anchor="middle" font-size="14" font-weight="600" fill="var(--c1)">Policy πθ</text>
+      <text x="490" y="110" text-anchor="middle" font-size="11" fill="var(--text)">生成 1 条 rollout</text>
+      <text x="490" y="130" text-anchor="middle" font-size="11" fill="var(--text-soft)">CodeLlama / Qwen2.5</text>
+
+      <!-- rollout -->
+      <rect x="620" y="20" width="150" height="55" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="695" y="42" text-anchor="middle" font-size="13" font-weight="600" fill="var(--c2)">Rollout ĉ</text>
+      <text x="695" y="62" text-anchor="middle" font-size="11" fill="var(--text-soft)">on-policy 采样</text>
+
+      <!-- annotated -->
+      <rect x="620" y="125" width="150" height="55" rx="8" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="695" y="147" text-anchor="middle" font-size="13" font-weight="600" fill="var(--c3)">Annotated c</text>
+      <text x="695" y="167" text-anchor="middle" font-size="11" fill="var(--text-soft)">数据集里的标注 CoT</text>
+
+      <!-- embeddings -->
+      <rect x="800" y="20" width="85" height="55" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="842" y="43" text-anchor="middle" font-size="12" font-family="JetBrains Mono, monospace" fill="var(--text)">e_rollout</text>
+      <text x="842" y="62" text-anchor="middle" font-size="10" fill="var(--text-soft)">Eq. 6</text>
+
+      <rect x="800" y="125" width="85" height="55" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="842" y="148" text-anchor="middle" font-size="12" font-family="JetBrains Mono, monospace" fill="var(--text)">e_annot</text>
+      <text x="842" y="167" text-anchor="middle" font-size="10" fill="var(--text-soft)">Eq. 6</text>
+
+      <!-- infoNCE -->
+      <rect x="650" y="240" width="210" height="80" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="755" y="266" text-anchor="middle" font-size="14" font-weight="600" fill="var(--accent-deep)">Masked InfoNCE</text>
+      <text x="755" y="288" text-anchor="middle" font-size="11" fill="var(--text)">Eq. 7 · 只取答对的 rollout</text>
+      <text x="755" y="308" text-anchor="middle" font-size="11" fill="var(--text-soft)">τ = 0.2（Appendix A.1）</text>
+
+      <!-- loss -->
+      <rect x="650" y="360" width="210" height="65" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="755" y="385" text-anchor="middle" font-size="13" font-weight="600" fill="var(--accent-deep)">L = L_RL + c · L_c1</text>
+      <text x="755" y="407" text-anchor="middle" font-size="11" fill="var(--text-soft)">Eq. 9 · c = 1e-3</text>
+
+      <!-- ppo -->
+      <rect x="380" y="360" width="210" height="75" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="485" y="386" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">PPO / ReFT 分支</text>
+      <text x="485" y="408" text-anchor="middle" font-size="11" fill="var(--text-soft)">reward + GAE + KL</text>
+      <text x="485" y="426" text-anchor="middle" font-size="10" fill="var(--text-soft)">Eq. 1–5</text>
+
+      <!-- labels -->
+      <text x="350" y="255" text-anchor="middle" font-size="11" fill="var(--text-soft)">标注 CoT c</text>
+      <text x="505" y="250" text-anchor="start" font-size="11" fill="var(--text-soft)">答案奖励</text>
+      <text x="328" y="300" text-anchor="end" font-size="11" fill="var(--text-soft)">更新 θ</text>
+      <text x="620" y="382" text-anchor="middle" font-size="11" fill="var(--text-soft)">相加</text>
+      <text x="450" y="478" text-anchor="middle" font-size="11" fill="var(--text-soft)">主实验只走正向信号；负向信号需要 LCS 分解（Eq. 8），见 Appendix A.3。</text>
+    </svg>
+    <figcaption>按 §3.2.1 与 Figure 2 重绘的流程；只画主实验使用的正向信号路径。负向信号的 LCS 分支见 Appendix A.3，未画入。图中 Eq. 6 的投影、Eq. 7 的 mask 与 Eq. 10 的部分奖励在图上合并成「对比损失」与「PPO 奖励」两块。</figcaption>
+  </figure>
+
+  <h3>把流程拆成四步</h3>
+  <ol>
+    <li><strong>SFT 热身</strong>：用 <code>(x, c, y)</code> 做几个 epoch，得到一个能生成 CoT 的初始 policy。</li>
+    <li><strong>采样 rollout</strong>：每个 RL step 取一个 batch，当前 policy 对每个问题生成一条 CoT，得到答案与奖励。</li>
+    <li><strong>编码与对比</strong>：标注 CoT 与 rollout 分别过 Eq. 6；答对的 rollout 进 Eq. 7 的正样本项，得到 <code>L<sub>c1</sub></code>。</li>
+    <li><strong>合并更新</strong>：把 <code>c·L<sub>c1</sub></code> 加到 PPO 的 <code>L<sub>RL</sub></code>，反传更新 policy；答错但能抽出数字的样本按 Eq. 10 给部分奖励。</li>
+  </ol>
+  <p>图里没有画 value function 的单独分支：<code>V<sub>φ</sub></code> 既用于 PPO 的 GAE，也用于 Eq. 6 的 softmax 权重。论文没有说这两个用途是否共享同一个 value head；这里只按 §3.2.2 与 §3.1 的符号画成同一个 <code>V<sub>φ</sub></code>。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：四个组合都更高，但 64.8 与 64.2 要并列看</h2></div>
+  <p class="sec-sub">先看 Table 3 的六行原数，再看 Table 4 的时间代价、Table 5/6 的补充实验和 Figure 5 的消融。</p>
+
+  <p>Table 3 是主结果。所有准确率单位为 %；<strong>下文正文括注里的差</strong>是两列准确率相减，单位为百分点（Table 3 表内本身没有括号差列）。论文在 §4.2 把最大的平均差写成 “up to 10.15%”，按平均列复算是 86.16 − 76.01 = 10.15 个百分点，不是相对提升。</p>
+
+  <p class="tbl-cap"><strong>Table 3</strong> · 各方法在 SVAMP / GSM8K 上的准确率（%，原表六行全部转录）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Backbone</th><th>方法</th><th>SVAMP</th><th>GSM8K</th><th>Average</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CodeLlama-7B</td><td>SFT</td><td class="num">62.3</td><td class="num">43.82</td><td class="num">53.06</td></tr>
+        <tr><td>CodeLlama-7B</td><td>ReFT</td><td class="num">62.5</td><td class="num">50.27</td><td class="num">56.39</td></tr>
+        <tr class="best"><td>CodeLlama-7B</td><td>CARFT</td><td class="num">64.8</td><td class="num">50.95</td><td class="num">57.88</td></tr>
+        <tr><td>Qwen2.5-7B-Instruct</td><td>SFT</td><td class="num">86.9</td><td class="num">80.67</td><td class="num">83.79</td></tr>
+        <tr><td>Qwen2.5-7B-Instruct</td><td>ReFT</td><td class="num">85.9</td><td class="num">66.11</td><td class="num">76.01</td></tr>
+        <tr class="best"><td>Qwen2.5-7B-Instruct</td><td>CARFT</td><td class="num">88.0</td><td class="num">84.31</td><td class="num">86.16</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>按数据集拆：SVAMP 上 CodeLlama 从 62.3 到 64.8（高 2.5 个百分点），Qwen 从 86.9 到 88.0（高 1.1）；GSM8K 上 CodeLlama 从 43.82 到 50.95（高 7.13），Qwen 从 80.67 到 84.31（高 3.64）。按平均列拆：CodeLlama 57.88 比 SFT 53.06 高 4.82、比 ReFT 56.39 高 1.49；Qwen 86.16 比 SFT 83.79 高 2.37、比 ReFT 76.01 高 10.15。</p>
+
+  <p>ReFT 的失败模式在 Qwen / GSM8K 这一格最明显：66.11 比 SFT 的 80.67 低 14.56 个百分点；同一格 CARFT 是 84.31，比 ReFT 高 18.2 个百分点。§4.2 把这些读数归因于 model collapse，并写 “when model collapse occurs, the performance of ReFT lags far behind that of SFT (up to 14.56%) and CARFT (up to 18.2%)”。</p>
+
+  <h3>Table 4：准确率之外，还有训练时间</h3>
+  <p class="tbl-cap"><strong>Table 4</strong> · SVAMP、CodeLlama-7B 的准确率与时间（原表三行全部转录）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>方法</th><th>Accuracy</th><th>Time Cost (hours)</th></tr></thead>
+      <tbody>
+        <tr><td>ReFT</td><td class="num">62.5%</td><td class="num">14.12</td></tr>
+        <tr><td>Dr.GRPO</td><td class="num">63.7%</td><td class="num">24.49</td></tr>
+        <tr class="best"><td>CARFT</td><td class="num">64.2%</td><td class="num">16.99</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>CARFT 的 64.2% 比 ReFT 的 62.5% 高 1.7 个百分点，比 Dr.GRPO 的 63.7% 高 0.5；Dr.GRPO 比 ReFT 高 1.2。时间上，CARFT 16.99 h 比 ReFT 14.12 h 多 2.87 h（相对多 20.33%），比 Dr.GRPO 24.49 h 少 7.50 h（相对少 30.62%）。论文说的 “efficiency up to 30.62%” 指的是最后这个相对时间差，不是准确率。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">两处并列</span><h4>同是 SVAMP + CodeLlama，Table 3 写 64.8%，Table 4 写 64.2%</h4></div>
+    <p>Table 3 的 CARFT 行是 64.8%；Table 4 的 CARFT 行是 64.2%。§4.2 在介绍 Table 4 时写的是 “CARFT with embedding-enhanced partial reward enabled”，所以 64.2 对应启用了 Eq. 10 的版本；Table 3 的表注没有说明是否启用 partial reward。两处都指向 SVAMP + CodeLlama-7B，论文没有在表注或正文里说明这两个数的对应关系。本页并列保留：不把 64.2 覆盖成 64.8，也不把 64.8 当成「启用 partial reward 后」的结果。</p>
+  </div>
+
+  <h3>Table 5 / Table 6：两个补充实验</h3>
+  <p class="tbl-cap"><strong>Table 5</strong> · CodeLlama-7B + GSM8K，不同 batch size 的 CARFT 准确率（原表两行转录）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Batch Size</th><th>Accuracy</th></tr></thead>
+      <tbody>
+        <tr><td class="num">64</td><td class="num">51.48%</td></tr>
+        <tr><td class="num">96</td><td class="num">50.95%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>batch 从 64 加到 96，准确率低 0.53 个百分点。Appendix A.2 的解读是“increasing the batch size can degrade the performance”，并建议更小的 batch 可能更好；这个结论只基于这一组 GSM8K 实验。</p>
+
+  <p class="tbl-cap"><strong>Table 6</strong> · Qwen2.5-14B-Instruct + SVAMP 的 SFT / CARFT 准确率（原表两行转录；该表没有 ReFT / Dr.GRPO 行）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Model</th><th>方法</th><th>Accuracy</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen2.5-14B-Instruct</td><td>SFT</td><td class="num">86.7%</td></tr>
+        <tr class="best"><td>Qwen2.5-14B-Instruct</td><td>CARFT</td><td class="num">88.9%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>14B 上 CARFT 比 SFT 高 2.2 个百分点。这是一组小规模补充实验，不能单独支撑「方法随规模线性扩展」这种结论；论文的原话是它“highlight the effectiveness and strong generalization of CARFT across diverse model scales and datasets”（Appendix A.2）。</p>
+
+  <h3>Figure 5：正信号贡献大，负信号贡献小</h3>
+  <p class="tbl-cap"><strong>Figure 5</strong> · SVAMP + CodeLlama-7B 的消融读数（原图是柱状图，这里按图上的数字转录为 %）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>设置</th><th>Accuracy</th></tr></thead>
+      <tbody>
+        <tr class="best"><td>Positive Signal</td><td class="num">64.8%</td></tr>
+        <tr><td>Negative Signal</td><td class="num">62.9%</td></tr>
+        <tr><td>ReFT</td><td class="num">62.5%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Positive 比 ReFT 高 2.3 个百分点，Negative 比 ReFT 高 0.4，Positive 比 Negative 高 1.9。§4.3 的表述是 positive 2.30% higher、negative 0.4% higher、positive 比 negative 高 1.9%；这些差的单位和上面一样，都是百分点。Figure 5 的 Positive 64.8% 与 Table 3 的 CARFT 64.8% 相同。根据这两个相同读数与 §4.3 “主实验采用 positive signal” 的说明，<span class="infer">推断</span> Table 3 的 CARFT 行对应正向信号版本。</p>
+
+  <h3>稳定性：ReFT 会崩，CARFT 也不是全程平稳</h3>
+  <p>Figure 3（Qwen + SVAMP）里，§4.2 写 ReFT “undergoes model collapse after undergoing fine-tuning for just one epoch”；同图的 SFT 也出现随训练推进准确率下降的现象。Figure 4（CodeLlama + SVAMP）里，CARFT 收敛更快，但 §4.2 明确写 “CARFT is potentially vulnerable to unstable fine-tuning process”。所以“CARFT 更稳”要看 backbone 与配置：Table 4 的 64.2% 是启用 partial reward 的版本，Figure 8 声称该奖励让曲线更稳（§4.3）。<span class="infer">推断</span>（依据：Figure 3/4 的曲线与 §4.2 的措辞；正文用准确率曲线讨论稳定性，附录 A.2 另有 Figures 12–17 的 RL / contrastive loss 曲线，但没有方差、标准差这类汇总指标）。</p>
+
+  <p>另一个反直觉点是 batch：Table 5 里更大的 batch 反而更低。论文只给了这一组读数，没有把 batch 效应拆到不同模型或数据集上；本页不把它推广成“小 batch 一定更好”。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：要标注 CoT、只做数学题、上下文不到 1024 token</h2></div>
+  <p class="sec-sub">读完这节要知道：CARFT 的收益有明确的适用条件，不是「任何 RL 推理训练都该加对比损失」。</p>
+
+  <ul>
+    <li><strong>需要集中式标注 CoT</strong>：Limitations 写 “CARFT is designed to exploit a centralized annotated CoT dataset. The annotated datasets may be stored in multiple data centers or devices, which may hinder the application of CARFT with decentralized data.” 没有高质量标注 CoT，Eq. 7 的锚点就不存在。</li>
+    <li><strong>上下文受限</strong>：Limitations 写 “we have restricted the context to fewer than 1024 tokens in this work”。超过这个长度的推理链，论文没有验证。</li>
+    <li><strong>比 ReFT 慢</strong>：Table 4 的 16.99 h vs 14.12 h，多 2.87 h（相对多 20.33%）。如果延迟或吞吐比 Dr.GRPO 的绝对时间更重要，CARFT 的对比分支是净开销。</li>
+    <li><strong>只验证了数学应用题</strong>：SVAMP / GSM8K；模型是 CodeLlama-7B、Qwen2.5-7B-Instruct，外加 Table 6 的 Qwen2.5-14B。论文没有给代码、多模态或开放式推理的实验。</li>
+    <li><strong>负信号增益小</strong>：Figure 5 的 +0.4 个百分点；主实验用正信号，负信号放在 Appendix A.3。负信号的 LCS 分解还多了一层序列对齐的实现成本。</li>
+    <li><strong>标注质量未讨论</strong>：如果标注 CoT 本身有错，Eq. 7 会把 rollout 拉向错误锚点；论文没有给这种噪声下的实验。<span class="infer">推断</span>（依据：§3.2 把 annotated CoT 当作正锚点，Limitations 未提标注噪声）。</li>
+    <li><strong>model collapse 的根因未分析</strong>：论文观察并缓解了 ReFT 的崩溃，但没有给出梯度、价值估计或探索策略层面的根因分析；这是本页的批评，不是原文结论。<span class="infer">推断</span>（依据：§1 与 §4.3 只描述现象和对比结果）。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">什么时候别用</span><h4>三种不适配的场景</h4></div>
+    <p><strong>没有可靠标注 CoT：</strong>Eq. 7 的正样本项依赖标注路径；只有答案没有 CoT 时，CARFT 退化成 ReFT 加一个空锚点。<span class="infer">推断</span>（依据：Eq. 7 的分子需要 e<sup>annotated</sup>）。<br>
+    <strong>上下文远超 1024 token：</strong>论文没有验证；CoT 编码与对比损失还会随长度增加。<br>
+    <strong>答案不可自动判对错：</strong>论文的奖励来自可验证的数学答案（§2）；开放式任务需要另做奖励模型，Eq. 7 的 mask 也不再是简单的对/错。<span class="infer">推断</span>（依据：§2 写数学答案 “can be explicitly verified”；Limitations 未覆盖开放式任务）。</p>
+  </div>
+
+  <p>最后是一个原文内部的对照：§4.2 说 CARFT 在 Figure 3 上“remarkable stability”，但同一节对 Figure 4 又说“potentially vulnerable to unstable fine-tuning process”。两处描述的是不同 backbone 的曲线；本页并列保留，不把它们合并成一句“CARFT 稳定”。</p>
+</section>
+
+<footer>
+  <div>CARFT: Boosting LLM Reasoning via Contrastive Learning with Annotated Chain-of-Thought-based Reinforced Fine-Tuning</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.15868v2">https://arxiv.org/abs/2508.15868v2</a>（v2，2025-09-08；EMNLP 2025）<br>
+    代码：<a href="https://github.com/WNQzhu/CARFT">https://github.com/WNQzhu/CARFT</a><br>
+    笔记：<a href="/carftboosting-llm-reasoning-via-contrastive-learning-with-annotated-chain-of-thought-based-reinforced-fine-tuning/">CARFT：Boosting LLM Reasoning via Contrastive Learning with Annotated Chain-of-Thought-based Reinforced Fine-Tuning</a>
+  </div>
+  <div style="margin-top:16px;line-height:1.9">
+    <strong>笔记勘误（不改原笔记，仅在此说明）：</strong><br>
+    1. 笔记称实验“仅限于 7B 参数级别”；原文 Table 6 另有 Qwen2.5-14B-Instruct（SFT 86.7% → CARFT 88.9%）。<br>
+    2. 笔记称 Figure 3 和 Figure 4 都显示 ReFT 断崖式下跌、CARFT 平稳上升；原文 §4.2 只在 Figure 3（Qwen）里说 ReFT 训练一个 epoch 后就 collapse，Figure 4（CodeLlama）里 ReFT 没有断崖，CARFT 也有波动，§4.2 对 Figure 4 写的是 “CARFT is potentially vulnerable to unstable fine-tuning process”。<br>
+    3. 笔记称负向信号“单独使用时效果不佳”；Figure 5 的负向信号 62.9% 仍高于 ReFT 的 62.5%（+0.4 个百分点），只是小于正向信号的 +2.3。<br>
+    4. 笔记的 Table 3 简化版六行数值与原文一致，但没有提到 Table 4 的 64.2%（partial reward 版本）与 Table 3 的 64.8% 的并列关系。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var s1 = document.getElementById('nce-s1-range');
+  var tau = document.getElementById('nce-tau-range');
+  if (s1 && tau) {
+    var fixed = [0.30, -0.10, -0.50];
+    function updateNce() {
+      var a = parseFloat(s1.value);
+      var t = parseFloat(tau.value);
+      var vals = [a].concat(fixed);
+      var ex = vals.map(function (v) { return Math.exp(v / t); });
+      var Z = ex.reduce(function (p, c) { return p + c; }, 0);
+      var w = ex.map(function (v) { return v / Z; });
+      var L = -Math.log(w[0]);
+      var s1v = document.getElementById('nce-s1-v');
+      var tv = document.getElementById('nce-tau-v');
+      if (s1v) s1v.textContent = a.toFixed(2);
+      if (tv) tv.textContent = t.toFixed(2);
+      for (var i = 0; i < 4; i++) {
+        var se = document.getElementById('nce-sim' + i);
+        var we = document.getElementById('nce-w' + i);
+        var be = document.getElementById('nce-b' + i);
+        if (se) se.textContent = vals[i].toFixed(2);
+        if (we) we.textContent = w[i].toFixed(4);
+        if (be) be.style.width = (w[i] * 100).toFixed(2) + '%';
+      }
+      var out = document.getElementById('nce-out');
+      if (out) {
+        out.innerHTML = '当前：s = (' + vals.map(function (v) { return v.toFixed(2); }).join(', ') +
+          ')，τ = ' + t.toFixed(2) + '。分母 Z = ' + Z.toFixed(4) +
+          '，正样本权重 w₁ = ' + w[0].toFixed(4) +
+          '，L = −ln(w₁) = <strong>' + L.toFixed(4) + '</strong>。';
+      }
+    }
+    s1.addEventListener('input', updateNce);
+    tau.addEventListener('input', updateNce);
+    updateNce();
+  }
+
+  var rs = document.getElementById('rw-s');
+  if (rs) {
+    function updateReward() {
+      var v = parseFloat(rs.value);
+      var carft = 0.1 * v + 0.2;
+      var sv = document.getElementById('rw-s-v');
+      var cv = document.getElementById('rw-carft');
+      var cf = document.getElementById('rw-carft-formula');
+      if (sv) sv.textContent = v.toFixed(2);
+      if (cv) cv.textContent = carft.toFixed(3);
+      if (cf) cf.textContent = 'r = 0.1 × ' + v.toFixed(2) + ' + 0.2';
+      var out = document.getElementById('rw-out');
+      if (out) {
+        var diff = carft - 0.1;
+        out.innerHTML = 's = ' + v.toFixed(2) + ' → CARFT r = 0.1 × ' + v.toFixed(2) +
+          ' + 0.2 = <strong>' + carft.toFixed(3) + '</strong>；ReFT 固定 r = <strong>0.100</strong>。' +
+          (diff > 0 ? ' CARFT 比 ReFT 多 ' + diff.toFixed(3) + '。' : ' CARFT 与 ReFT 相同。');
+      }
+    }
+    rs.addEventListener('input', updateReward);
+    updateReward();
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,698 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 15.7 | Table 1 | 60.14-44.45 |
+| 14.4 | Table 2 | 37.49-23.08 |
+| 25.9 | Table 1 | 41.78-15.86 |
+| 22.0 | Table 1 | 66.02-44.05 |
+| 54.8 | Table 3 | 59.06-4.24 |
+| 35.3 | Table 1 | (60.14-44.45)/44.45*100 |
+| 7.91 | Table 3 | 7.91-0.00 |
+| 100 | Figure 4 | 1.000*100 |
+| 100 | Figure 5 | 1.000*100 |
+| 52.6 | Table 3 | 58.57-5.99 |
+| 48.8 | Table 3 | 52.29-3.49 |
+| 136 | Table 4 | 40+24+25+37+10 |
+| 32 | §3.2 | 4*8 |
+| 4 | §3.2 | 256/64 |
+| 0.2 | Figure 4 | (0.990-0.988)*100 |
+| 21.2 | Figure 5 | (0.600-0.388)*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProRL · 把 RL 训练拉长，推理边界才会在部分任务上外扩</title>
+<meta name="description" content="arXiv 2505.24864v1 精读：ProRL 用 136K 五领域数据、DAPO 裁剪、KL 正则与参考策略重置把 RL 训练拉到 2k+ 步；boxnet 上 base pass@256=0、final 到 100%，但数学 pass@k 反而略降。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页局部微调：交互图表高亮、k 滑块、SVG 流程图文字 */
+.k-row{display:flex;align-items:center;gap:14px;margin:16px 0;flex-wrap:wrap}
+.k-row input[type=range]{flex:1 1 240px;accent-color:var(--accent);cursor:pointer;margin:0}
+.k-val{font-family:"JetBrains Mono",monospace;font-weight:600;color:var(--accent);min-width:78px;text-align:right}
+.chart .cbar .num{font-size:10px}
+.cbar.sel .track{outline:2px solid var(--text);outline-offset:1px}
+.cbar.sel .num{color:var(--text);font-weight:700}
+.stage-readout{min-height:104px}
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}
+.pipe-b{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-text{font-family:Inter,"Noto Sans SC",sans-serif;font-size:12px;fill:var(--text)}
+.pipe-small{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.pipe-arrow{stroke:var(--text-soft);stroke-width:1.3;fill:none;marker-end:url(#arr)}
+.pipe-dash{stroke:var(--text-soft);stroke-width:1.2;stroke-dasharray:4 4;fill:none;marker-end:url(#arr)}
+@media (max-width:600px){.chart .cbar .num{font-size:9px}.k-val{min-width:64px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">ProRL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">训练</a>
+      <a href="#pipeline">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2505.24864v1 · 2025</span>
+  <h1>ProRL：把 RL 训练拉到 2k 步，推理边界在部分任务上真正外扩</h1>
+  <p class="hero-sub">
+    过去用 pass@k 得出的「RL 只是把 base 已有的高奖励解采样得更高效」这一结论，可能受限于两个实验条件：训练通常只有几百步，且集中在数学这类已经被反复训练过的领域。
+    这篇论文把数据扩到 5 个领域、把训练拉到 2k+ 步，并用 KL 正则和周期性参考策略重置让长训练不崩。
+    结果是：在某些任务上，base 采样 256 次都得不到的解，RL 后能稳定采到；但在数学上，pass@1 涨了，pass@k 反而略降。
+  </p>
+  <div class="meta">
+    <span>Mingjie Liu, Shizhe Diao, Ximing Lu, Jian Hu, Xin Dong, Yejin Choi, Jan Kautz, Yi Dong · NVIDIA</span>
+    <a href="https://arxiv.org/abs/2505.24864v1" target="_blank" rel="noopener">arXiv 2505.24864v1 ↗</a>
+    <a href="https://huggingface.co/nvidia/Nemotron-Research-Reasoning-Qwen-1.5B" target="_blank" rel="noopener">模型权重 ↗</a>
+    <a href="/prorlprolonged-reinforcement-learning-expands-reasoning-boundaries-in-large-language-models/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    争议的核心不是「RL 有没有用」，而是它<strong>教会了 base 不会的解</strong>，还是只把 base 分布里已有的正确解<em>采样得更高效</em>。
+    若只看短训练、单领域的 pass@k，后者很容易成立。
+  </p>
+  <p>
+    论文的判断是：此前的负面结论来自<strong>方法约束</strong>，不是 RL 的上限。ProRL 用 136K 五领域数据、DAPO 的解耦裁剪与动态采样、KL 正则，以及周期性的 reference policy reset，把训练撑到 <strong>2k+ 步</strong>、约 16k GPU 小时。
+  </p>
+  <p>
+    最硬的证据来自高 k 采样：在 OOD 任务 <code>boxnet</code> 上，base 的 pass@k 在 256 次采样内全为 0；final 在 Figure 5 的 pass@1 是 <strong>0.077</strong>、pass@256 是 <strong>1.000</strong>，Table 3 的连续奖励是 <strong>7.91</strong>；<code>dice</code> 也从全 0 到 100%。
+    论文据此认为，这些解不在 base 的高概率区域。
+  </p>
+  <p>
+    但边界不是普遍外扩。<code>math</code> 上 final 的 pass@1 从 0.844 升到 0.918，pass@256 却从 0.990 降到 <strong>0.988</strong>；Figure 3 还给出 base 初始能力与增益的负相关（R²=0.879）。论文的结论应读成「在部分任务、部分采样预算下能外扩」，不是「RL 一定扩边界」。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">15.7<small> pt</small></div>
+      <div class="k">数学平均 pass@1 点差<br>44.45 → 60.14（绝对值差 15.69）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">7.91<small>%</small></div>
+      <div class="k">boxnet 连续奖励均值<br>Table 3：base 0.00；Figure 5 的 pass@1 为 0.077</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§3.2">16k<small> GPU h</small></div>
+      <div class="k">约 16k GPU 小时<br>4 个 8×H100-80GB 节点</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>短训练 + 单领域，可能把 RL 误判成只会放大</h2></div>
+  <p class="sec-sub">先分清两种主张：RL 是「放大器」还是「探索器」；再看到底用什么证据区分它们。</p>
+
+  <p>「放大器」的意思是：base 模型的输出分布里已经包含正确解，RL 只是提高它们的概率，让 pass@1 变高；把采样次数 k 拉大，RL 模型不会超过 base。「探索器」的意思是：训练能生成 base 几乎采不到的新解，因此高 k 下也能超过 base。</p>
+
+  <p>这两种主张在 pass@k 上给出不同的可检验预测。问题在于，<strong>高 k 采样很贵</strong>：论文为每个 prompt 采 256 次，并且因为算力限制，只从 Reasoning Gym 的 96 个任务里随机选了 18 个重跑（§4）。如果只采到 16 或 32 次，就很容易把「还没采到」误判成「不存在」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">变量一</span><h4>训练时长</h4></div>
+      <p>论文引用的负面结果大多在<strong>几百步</strong>内停止（§1 称 [13] 通常不超过数百步）。短训练下，策略还没离开 base 的高概率区域，pass@k 自然看不出新解。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">变量二</span><h4>任务多样性</h4></div>
+      <p>只练数学，等于在 base 已经被预训练/后训练反复覆盖的领域里打转。论文认为这会限制探索，让「RL 只放大」的结论更容易出现。</p>
+    </div>
+  </div>
+
+  <p>论文由此提出一个更长的因果链：<strong>训练不够久 → 策略没离开 base 邻域 → pass@k 看起来没外扩</strong>。要验证它，必须同时改两件事：把训练拉长，把任务铺开；而这两件事都会把训练推向熵坍塌和不稳定。方法部分就是围绕「怎么撑住」展开的。</p>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人的证据停在短程，ProRL 从工程约束上拆题</h2></div>
+  <p class="sec-sub">已有工作提供了两套可直接复用的组件，但都没有同时解决「长」和「多样」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">证据侧</span><h4>pass@k 的负面结论</h4></div>
+      <p>论文把 [13]–[15] 的结论概括为：RL 训练后的模型没有获得 base 之外的新推理能力；有些任务上 pass@k 不升反降。论文不否认这些观察，而是指出它们的实验条件：数学占比过高、训练步数通常只有几百步（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">工程侧</span><h4>GRPO / DAPO 的稳定性组件</h4></div>
+      <p>GRPO 去掉 value model，用组内分数做 baseline；DAPO 再加解耦裁剪和动态采样。这些组件能延缓熵坍塌，但论文认为它们本身不足以支撑 2k 步——还需要显式的 KL 正则和参考策略重置（§2.3）。</p>
+    </div>
+  </div>
+
+  <p>ProRL 直接复用了 DAPO 的两项设置。第一是<strong>解耦裁剪</strong>：下界和上界分开，上界放得更宽，让低概率 token 也有机会被抬起来：</p>
+
+  <div class="eq">
+    clip(r<sub>θ</sub>(τ), 1 − ε<sub>low</sub>, 1 + ε<sub>high</sub>)
+    &nbsp;&nbsp;→&nbsp;&nbsp;
+    ε<sub>low</sub> = 0.2, ε<sub>high</sub> = 0.4
+  </div>
+  <div class="eq-cap">Eq. 3 · clip-higher：上界放宽，减少过早 mode collapse（§2.3）</div>
+
+  <p>第二是<strong>动态采样</strong>：把组内准确率为 1 或 0 的 prompt 过滤掉，因为这两类样本给不出组内相对优势。留下来的都是「有对有错」的中间难度题，训练信号更密（§2.3）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">缺口</span><h4>稳定 ≠ 能跑长</h4></div>
+    <p>DAPO 的组件让短程训练更稳；但论文观察到，随着训练推进，KL 项会在损失里越来越大，策略更新幅度被压小，验证分数停滞。要跨过这个平台，必须让参考策略「跟着走」——这就是 reference policy reset 的动机（§2.3.1）。</p>
+  </div>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>四件事让 2k 步不崩：裁剪、动态采样、KL、参考策略重置</h2></div>
+  <p class="sec-sub">ProRL 不是新算法，而是在 GRPO 上叠了一套能撑住长训练的约束；核心是最后一件事。</p>
+
+  <p>基础算法仍是 GRPO。对每个 prompt 采一组回答 τ，用组内奖励的均值和标准差算优势，再做带裁剪的策略梯度：</p>
+
+  <div class="eq">
+    L<sub>GRPO</sub>(θ) = E<sub>τ∼π<sub>θ</sub></sub>[
+    min( r<sub>θ</sub>(τ)A(τ),
+    clip(r<sub>θ</sub>(τ), 1−ε, 1+ε)A(τ) )
+    ]
+  </div>
+  <div class="eq-cap">Eq. 1 · GRPO 目标；r<sub>θ</sub>(τ)=π<sub>θ</sub>(τ)/π<sub>old</sub>(τ)</div>
+
+  <div class="eq">
+    A(τ) = ( R<sub>τ</sub> − mean({R<sub>i</sub>}<sub>i∈G(τ)</sub>) )
+    / std({R<sub>i</sub>}<sub>i∈G(τ)</sub>)
+  </div>
+  <div class="eq-cap">Eq. 2 · 组内标准化优势；不需要 critic model</div>
+
+  <p>在这之上，ProRL 加了三层稳定器：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">① DAPO 裁剪</span><h4>别把低概率 token 一刀切掉</h4></div>
+      <p>ε<sub>low</sub>=0.2、ε<sub>high</sub>=0.4。上界放宽后，原本概率很低的 token 也有机会被抬高，探索不会在早期被封死。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">② 动态采样</span><h4>只留中间难度</h4></div>
+      <p>准确率 1 或 0 的 prompt 对组内优势没有贡献，直接过滤。训练信号始终落在「有对有错」的区域。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">③ KL 正则</span><h4>给策略一根缰绳</h4></div>
+      <p>在当前策略和参考策略之间加 KL 惩罚，既保熵，也防止策略为了短期奖励漂得太远。</p>
+    </div>
+  </div>
+
+  <div class="eq">
+    L<sub>KL-RL</sub>(θ) = L<sub>GRPO</sub>(θ) − β D<sub>KL</sub>(π<sub>θ</sub> ‖ π<sub>ref</sub>)
+  </div>
+  <div class="eq-cap">Eq. 4 · KL 正则；β 为惩罚系数，论文 v1 未在正文给出具体取值</div>
+
+  <p>关键在于：<strong>KL 项会随训练变大</strong>。论文的原话是「KL term may increasingly dominate the loss, leading to diminishing policy updates」。这时候继续训练，策略几乎动不了，验证分数停在平台上。ProRL 的处理不是去掉 KL，而是<strong>周期性 hard reset</strong>：</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心机制</span><h4>Reference policy reset</h4></div>
+    <p>把参考策略 π<sub>ref</sub> 直接重置为当前在线策略 π<sub>θ</sub> 的一个较新快照，同时重新初始化 optimizer states。这样 KL 项从「旧锚点」切换到「新锚点」，策略又能继续更新，而 KL 正则仍然保留（§2.3.1）。</p>
+    <p>论文把重置触发条件写成「验证指标明显退化或提升停滞」；重置不仅是恢复稳定性，也提供了一个调整超参、加数据、改 reward shaping 的窗口（Appendix E）。</p>
+  </div>
+
+  <p>为什么不能只靠温度？论文说提高 rollout 温度只能<strong>推迟</strong>熵坍塌，不能阻止熵继续下降；他们确实用了 1.2 的高温，但它只是延缓项之一（§2.2.1）。真正的长程支撑来自裁剪 + 动态采样 + KL + reset 的组合。</p>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>136K 题、32 张 H100、约 16k GPU 小时，分 8 个 run 拼出来</h2></div>
+  <p class="sec-sub">这一节回答「怎么训、代价多大」：数据怎么配、每步怎么算、8 个 run 各自改了什么。</p>
+
+  <p>训练集共 136K 条，覆盖五个领域，每条都有可验证的奖励信号（二值或连续）：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 4 转录：训练数据构成；总量 136K = 40k + 24k + 25k + 37k + 10k</caption>
+      <thead>
+        <tr><th>领域</th><th>奖励</th><th style="text-align:right">数量</th><th>来源</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Math</td><td>Binary</td><td class="num">40k</td><td>DeepScaleR Dataset</td></tr>
+        <tr><td>Code</td><td>Continuous</td><td class="num">24k</td><td>Eurus-2-RL Dataset</td></tr>
+        <tr><td>STEM</td><td>Binary</td><td class="num">25k</td><td>SCP-116K</td></tr>
+        <tr><td>Logical Puzzles</td><td>Continuous</td><td class="num">37k</td><td>Reasoning Gym</td></tr>
+        <tr><td>Instruction Following</td><td>Continuous</td><td class="num">10k</td><td>Llama-Nemotron</td></tr>
+        <tr><td><strong>合计</strong></td><td></td><td class="num"><strong>136k</strong></td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>训练设置（§3.2）：用 verl 做 RL 训练；每个 prompt 采 <code>n=16</code> 条回答，上下文上限 8096，采样温度 1.2；batch 256、mini-batch 64，也就是每次 rollout 做 <span data-src="§3.2">4</span> 次梯度更新；AdamW，恒定学习率 2×10<sup>−6</sup>；4 个 8×H100-80GB 节点（共 <span data-src="§3.2">32</span> 张），全程约 16k GPU 小时。</p>
+
+  <p>训练不是一条固定超参跑到底，而是 8 个 run 的顺序拼接。按 Appendix E，可以归纳成 6 个阶段。点下面的阶段看每一步改了什么：</p>
+
+  <div class="sim">
+    <div class="sim-top" id="stage-btns">
+      <button class="rule-btn active" data-stage="0">Run 1<span class="r-sub">4 任务 · 8k · n=16</span></button>
+      <button class="rule-btn" data-stage="1">Run 2<span class="r-sub">hard reset · 8k</span></button>
+      <button class="rule-btn" data-stage="2">Run 3<span class="r-sub">加入 IF · 8k</span></button>
+      <button class="rule-btn" data-stage="3">Run 4–5<span class="r-sub">reward shaping</span></button>
+      <button class="rule-btn" data-stage="4">Run 6–7<span class="r-sub">n 16→32 · 两次重置</span></button>
+      <button class="rule-btn" data-stage="5">Run 8<span class="r-sub">8k→16k · n=16</span></button>
+    </div>
+    <div class="readout stage-readout" id="stage-readout" data-src="Appendix E">
+      <div class="r-head">Run 1 · 4 个任务 · 8k · n=16</div>
+      <div id="stage-msg">先用 math/code/STEM/logic 四类数据启动，暂不含 instruction following。响应长度先降后升，验证分数上升；阶段末出现不稳定与退化。</div>
+    </div>
+  </div>
+
+  <p>代价也要说清楚：约 16k GPU 小时、多次 hard reset、以及每阶段重新调参，意味着这不是一个「设好超参就跑」的配方。Appendix A 把「计算资源」和「训练过程复杂性」都列为明确限制。</p>
+
+  <p>奖励侧还有两个工程细节：代码按通过的测试用例比例给连续奖励，编译失败、语法错误或超过 5 秒总超时直接记 0（Appendix D.2）；数学和 STEM 是二值奖励，逻辑谜题和指令遵循用规则 verifier 的连续分数（Appendix D）。这些条件决定了后面所有数字的口径。</p>
+</section>
+
+<!-- ================= 05 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条 RL 流水线，重置点决定它能跑多远</h2></div>
+  <p class="sec-sub">把数据、rollout、奖励、策略更新和重置画在一起，才能看出「长训练」到底长在哪。</p>
+
+  <figure>
+    <svg viewBox="0 0 780 420" role="img" aria-label="ProRL 训练与参考策略重置流程">
+      <title>ProRL 训练与参考策略重置流程</title>
+      <desc>五领域数据进入 prompt batch，rollout 后用 verifier 给奖励，GRPO 加 DAPO 裁剪和 KL 正则更新策略；验证指标停滞或退化时，将 reference policy 重置为当前策略快照并重新初始化 optimizer。</desc>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect class="pipe-box" x="10" y="42" width="130" height="248" rx="10"></rect>
+      <text class="pipe-text" x="75" y="64" text-anchor="middle" font-weight="600">训练数据 136K</text>
+      <rect class="pipe-b" x="20" y="76" width="110" height="28" rx="5"></rect>
+      <text class="pipe-small" x="75" y="94" text-anchor="middle">Math 40k</text>
+      <rect class="pipe-b" x="20" y="110" width="110" height="28" rx="5"></rect>
+      <text class="pipe-small" x="75" y="128" text-anchor="middle">Code 24k</text>
+      <rect class="pipe-b" x="20" y="144" width="110" height="28" rx="5"></rect>
+      <text class="pipe-small" x="75" y="162" text-anchor="middle">STEM 25k</text>
+      <rect class="pipe-b" x="20" y="178" width="110" height="28" rx="5"></rect>
+      <text class="pipe-small" x="75" y="196" text-anchor="middle">Logic 37k</text>
+      <rect class="pipe-b" x="20" y="212" width="110" height="28" rx="5"></rect>
+      <text class="pipe-small" x="75" y="230" text-anchor="middle">IF 10k</text>
+      <text class="pipe-small" x="75" y="266" text-anchor="middle">五领域 · 二值/连续奖励</text>
+
+      <line class="pipe-arrow" x1="140" y1="166" x2="168" y2="166"></line>
+      <rect class="pipe-box" x="170" y="140" width="108" height="52" rx="8"></rect>
+      <text class="pipe-text" x="224" y="162" text-anchor="middle">Prompt batch</text>
+      <text class="pipe-small" x="224" y="179" text-anchor="middle">256</text>
+
+      <line class="pipe-arrow" x1="278" y1="166" x2="306" y2="166"></line>
+      <rect class="pipe-a" x="308" y="132" width="132" height="68" rx="8"></rect>
+      <text class="pipe-text" x="374" y="153" text-anchor="middle">Rollout</text>
+      <text class="pipe-small" x="374" y="170" text-anchor="middle">n=16/32 · T=1.2</text>
+      <text class="pipe-small" x="374" y="187" text-anchor="middle">8k → 16k</text>
+
+      <line class="pipe-arrow" x1="440" y1="166" x2="468" y2="166"></line>
+      <rect class="pipe-box" x="470" y="140" width="112" height="52" rx="8"></rect>
+      <text class="pipe-text" x="526" y="162" text-anchor="middle">Verifier</text>
+      <text class="pipe-small" x="526" y="179" text-anchor="middle">binary / continuous</text>
+
+      <line class="pipe-arrow" x1="582" y1="166" x2="610" y2="166"></line>
+      <rect class="pipe-a" x="612" y="126" width="158" height="80" rx="8"></rect>
+      <text class="pipe-text" x="691" y="148" text-anchor="middle">GRPO + DAPO clip</text>
+      <text class="pipe-small" x="691" y="165" text-anchor="middle">+ β · KL(πθ ‖ πref)</text>
+      <text class="pipe-small" x="691" y="182" text-anchor="middle">εlow=0.2 · εhigh=0.4</text>
+
+      <line class="pipe-arrow" x1="691" y1="206" x2="691" y2="238"></line>
+      <rect class="pipe-c" x="620" y="240" width="142" height="46" rx="8"></rect>
+      <text class="pipe-text" x="691" y="267" text-anchor="middle">Policy πθ</text>
+
+      <path class="pipe-dash" d="M 620 263 L 620 300 L 440 300 L 440 206"></path>
+      <text class="pipe-small" x="500" y="316" text-anchor="middle">下一批 rollout</text>
+
+      <rect class="pipe-box" x="470" y="240" width="112" height="46" rx="8"></rect>
+      <text class="pipe-text" x="526" y="267" text-anchor="middle">Reference πref</text>
+      <path class="pipe-arrow" d="M 526 240 L 526 220 L 640 220 L 640 206"></path>
+
+      <rect class="pipe-box" x="170" y="330" width="210" height="66" rx="8"></rect>
+      <text class="pipe-text" x="275" y="352" text-anchor="middle">Validation blend</text>
+      <text class="pipe-small" x="275" y="369" text-anchor="middle">AIME24 · Codeforces · GPQA-D</text>
+      <text class="pipe-small" x="275" y="385" text-anchor="middle">IFEval · graph_color</text>
+
+      <line class="pipe-arrow" x1="380" y1="363" x2="408" y2="363"></line>
+      <rect class="pipe-a" x="410" y="326" width="220" height="74" rx="8"></rect>
+      <text class="pipe-text" x="520" y="348" text-anchor="middle">Reset trigger</text>
+      <text class="pipe-small" x="520" y="365" text-anchor="middle">验证退化 / 停滞 → πref ← πθ</text>
+      <text class="pipe-small" x="520" y="382" text-anchor="middle">optimizer 重新初始化</text>
+
+      <path class="pipe-dash" d="M 520 326 L 520 290 L 500 290 L 500 286"></path>
+      <text class="pipe-small" x="560" y="310" text-anchor="middle">hard reset</text>
+    </svg>
+    <figcaption>图：ProRL 的训练与重置流程（按 §2.3、§3.3、Appendix E 重绘，不是原文插图）。数据量与超参数取自 Table 4、§3.2；验证集构成取自 Appendix E。</figcaption>
+  </figure>
+
+  <p>流程里有两条回路。第一条是常规的 rollout → reward → update → 再 rollout；第二条是<strong>验证监控回路</strong>：AIME2024、Codeforces、GPQA-diamond、IFEval、graph_color 组成 blended validation set，一旦指标明显退化或平台化，就触发 hard reset。重置后不仅参考策略更新，optimizer 状态也重新初始化；这同时给了一个调整数据配比、reward shaping 和超参的窗口（Appendix E）。</p>
+
+  <p>所以「2k 步」不是一次连续优化，而是多次「训练—监控—重置—再训练」的拼接。理解这一点，才能理解为什么同一个 final checkpoint 在不同任务上会同时出现「边界外扩」和「边界收窄」。</p>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>pass@1 全线涨；pass@k 有的外扩、有的收窄</h2></div>
+  <p class="sec-sub">先看主表，再用可切换的 pass@k 面板看「外扩」和「收窄」同时存在。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 1（数学）、Table 2（代码）、Table 3（STEM/指令/逻辑）合并转录。数学/代码/GPQA 为 pass@1（16 次采样）；逻辑与指令遵循为规则 verifier 的连续奖励均值（采样数原文未单列）。7B 行为参考。</caption>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">Math avg</th><th style="text-align:right">Code avg</th><th style="text-align:right">GPQA</th><th style="text-align:right">IFEval</th><th style="text-align:right">Logic avg</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DeepSeek-R1-Distill-Qwen-1.5B</td><td class="num">44.45</td><td class="num">23.08</td><td class="num">15.86</td><td class="num">44.05</td><td class="num">4.24</td></tr>
+        <tr><td><strong>Nemotron-Research-Reasoning-Qwen-1.5B</strong></td><td class="num"><strong>60.14</strong></td><td class="num"><strong>37.49</strong></td><td class="num"><strong>41.78</strong></td><td class="num"><strong>66.02</strong></td><td class="num"><strong>59.06</strong></td></tr>
+        <tr><td>DeepSeek-R1-Distill-Qwen-7B（参考）</td><td class="num">63.19</td><td class="num">41.39</td><td class="num">35.44</td><td class="num">58.01</td><td class="num">28.55</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>按上表逐列做减法，ProRL 相对 base 的点差是：数学 <strong>15.7 个百分点</strong>（60.14−44.45，pass@1）、代码 <strong>14.4</strong>（37.49−23.08，pass@1）、GPQA <strong>25.9</strong>（41.78−15.86，pass@1）、IFEval <strong>22.0</strong>（66.02−44.05，连续奖励）、逻辑 <strong>54.8</strong>（59.06−4.24，连续奖励）。这里统一用「个百分点」，不是相对百分比；论文 §3 和笔记里的「+15.7% / +14.4%」按表复算就是这些点差。</p>
+
+  <p>与 7B 参考模型比，结论要分领域看：GPQA（41.78 vs 35.44）、IFEval（66.02 vs 58.01）、逻辑（59.06 vs 28.55）高于 7B；数学平均（60.14 vs 63.19）和代码平均（37.49 vs 41.39）仍低于 7B。论文的「matches or surpasses」应理解为部分基准，而不是所有列。</p>
+
+  <h3>OOD 任务：base 采不到，不等于模型「不会」</h3>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 3 的 OOD 三列转录；数值为连续奖励均值（Reasoning Gym 规则 verifier），不是 pass@1。acre / boxnet / game_of_life_halting 均未在训练中出现。</caption>
+      <thead>
+        <tr><th>模型</th><th style="text-align:right">acre</th><th style="text-align:right">boxnet</th><th style="text-align:right">game</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DeepSeek-R1-Distill-Qwen-1.5B</td><td class="num">5.99</td><td class="num">0.00</td><td class="num">3.49</td></tr>
+        <tr><td>DeepSeek-R1-Distill-Qwen-7B（参考）</td><td class="num">20.21</td><td class="num">1.71</td><td class="num">12.94</td></tr>
+        <tr><td><strong>Nemotron-Research-Reasoning-Qwen-1.5B</strong></td><td class="num"><strong>58.57</strong></td><td class="num"><strong>7.91</strong></td><td class="num"><strong>52.29</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>boxnet 是最能说明问题的一列：Table 3 的连续奖励从 base 0.00、7B 参考 1.71 到 final 7.91；在 Figure 5 的 256 次采样里，base 的整条 pass@k 曲线都是 0，final 的 pass@1 是 0.077、pass@256 是 1.000。两个口径不要混：Table 3 是 16 次采样的连续奖励均值，Figure 5 是 pass@k。dice 也类似：base 全程 0，final 从 pass@1 0.390 升到 pass@256 1.000（Figure 4）。acre 与 game 的连续奖励点差分别是 52.6（58.57−5.99）和 48.8（52.29−3.49）。</p>
+
+  <h3>自己看：四个任务的 pass@k 曲线</h3>
+  <p>切换任务、拖动 k，读三个模型在同一采样预算下的成功率。注意：这是<strong>直接查表</strong>，不是拟合；曲线只连接图里的 9 个离散 k 点。</p>
+
+  <div class="sim">
+    <div class="tabs" id="passk-tabs">
+      <button class="tab active" data-task="boxnet">boxnet · OOD</button>
+      <button class="tab" data-task="dice">dice · Sustained</button>
+      <button class="tab" data-task="codecontests">codecontests · Sustained</button>
+      <button class="tab" data-task="math">math · Diminish</button>
+    </div>
+
+    <div class="chart" id="passk-chart"></div>
+    <div class="cx" id="passk-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>Base · DeepSeek-R1-1.5B</span>
+      <span><i style="background:var(--c2)"></i>Intermediate</span>
+      <span><i style="background:var(--accent)"></i>Final · ProRL</span>
+    </div>
+
+    <div class="k-row">
+      <label for="k-slider" class="mono" style="font-size:12.5px;color:var(--text-muted)">采样次数 k</label>
+      <input type="range" id="k-slider" min="0" max="8" step="1" value="8">
+      <span class="k-val" id="k-val">k = 256</span>
+    </div>
+
+    <div class="readout" id="passk-readout" data-src="Figure 5">
+      <div class="r-head">boxnet · k = 256</div>
+      <div id="passk-msg"></div>
+    </div>
+  </div>
+
+  <p>四个面板对应三种形态：boxnet / dice 是「base 在 256 次内为 0，final 到 100%」；codecontests 是「final、intermediate、base 三层都分开」的持续增益；math 是「pass@1 涨、pass@256 略降」的收窄。论文把 Figure 4 的 9 个面板归为 Diminish / Plateau / Sustained 三类，并明确指出：<strong>数学等 base 本来就很强的任务，pass@128 可能下降</strong>。</p>
+
+  <details>
+    <summary>交互的覆盖范围与手算对账<span class="sum-sub">点开看哪些面板被覆盖、哪些没有</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>Figure 4 的 math、codecontests、dice 三个面板，以及 Figure 5 的 boxnet，共 4 个任务、每个 9 个 k 点（1/2/4/8/16/32/64/128/256）。</p>
+      <p><strong>未覆盖：</strong>Figure 4 的另外 6 个面板（deepcoder_livecodebench、letter_counting、gpqa_diamond、maze、palindrome、taco），以及 appendix 里的其余 pass@k 图。曲线以直线连接离散点，未做平滑、拟合或误差棒。</p>
+      <p><strong>手算 1 · boxnet，k=16：</strong>k 列表 <code>[1,2,4,8,16,32,64,128,256]</code> 中 16 的索引是 4（从 0 起）。final[4]=0.600，intermediate[4]=0.388，base[4]=0.000。final − intermediate = 0.212，即 <strong>21.2 个百分点</strong>。</p>
+      <p><strong>手算 2 · math，k=256：</strong>索引 8。final[8]=0.988，intermediate[8]=0.982，base[8]=0.990。final − base = −0.002，即 <strong>−0.2 个百分点</strong>。</p>
+      <p><strong>标准差口径：</strong>本交互是确定性查表，不做重复采样，因此不涉及 ÷N 或 ÷(N−1)。原图每个点是 256 次采样的 pass@k 估计，图上未画误差棒。</p>
+    </div>
+  </details>
+
+  <h3>反直觉的发现：增益和 base 的初始能力负相关</h3>
+  <p>Figure 3 左图把每个任务放在「base pass@128」和「pass@128 增益」两轴上，线性回归的 R²=0.879：base 越弱，RL 带来的边界增益越大；base 越强，增益越小，甚至为负。右图进一步用 creativity index 对 DOLMA 做重叠度分析：增益小的任务，base 回答与预训练语料的重叠度更高，论文据此认为它们更像「已经见过」。</p>
+
+  <p>这也解释了为什么 Table 1/2/3 的「全线分数上涨」不能直接推成「全线边界外扩」：pass@1（或连续奖励）只说明首答更准，pass@k 才说明解空间有没有变宽。数学是后者的反例。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">原文内部数字</span><h4>§1 与 §3 的增益数字不一致</h4></div>
+    <p>§1 写的是数学 14.7、代码 13.9、STEM 25.1、指令遵循 18.1；§3 写的是数学 15.7、代码 14.4、STEM 25.9、指令遵循 22.0。按 Table 1–3 复算是 15.69、14.41、25.92、21.97 个百分点。本页采用表内可复算的点差；两处原文数字并列在此，不做取舍。</p>
+  </div>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它能证明的比标题窄：1.5B、可验证奖励、256 次采样</h2></div>
+  <p class="sec-sub">把论文自己的限制和数据的边界放在一起，才知道什么时候不该用这套结论。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界一</span><h4>只验证了 1.5B</h4></div>
+      <p>所有实验基于 DeepSeek-R1-Distill-Qwen-1.5B。论文在 Appendix A 明确写：方法能否扩展到更大模型仍不清楚，参数变大后计算需求会更突出。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界二</span><h4>成本与复杂度</h4></div>
+      <p>约 16k GPU 小时、8 个 run、多次 hard reset 和逐阶段调参。Appendix A 把计算资源和训练过程复杂性都列为限制；这不是一个轻量配方。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">边界三</span><h4>任务范围</h4></div>
+      <p>训练和评测都依赖可验证奖励。开放、模糊、没有明确对错的任务不在覆盖范围内；论文在 Appendix A 也承认训练集只是可能推理任务的一个子集。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界四</span><h4>不是所有类别都变好</h4></div>
+      <p>Table 5 的 Reasoning Gym 连续奖励里，arc 从 1.53 到 2.52、code 从 1.22 到 29.84、cognition 从 6.47 到 40.16、games 从 2.34 到 26.38；论文仍说模型在这些更难的类别上「fails to make meaningful progress」，可能需要额外冷启动数据。</p>
+    </div>
+  </div>
+
+  <p>还有一个证据强度问题：<strong>pass@256=0 只说明这 256 次采样里没有成功</strong>，不能证明该解在 base 分布中的概率严格为 0。论文用「fails to produce any correct solutions regardless of the amount of sampling」来描述这些任务，但实际可核查的测量上限是 256 次；更高 k 或不同温度下是否仍然为 0，论文没有给出。<span class="infer">推断</span>（依据：§4 只报告 256 次采样，未给全分布证明）因此，把结果读成「base 绝对不会」比读成「base 在 256 次预算内采不到」更强。</p>
+
+  <p>同理，「RL 发现了全新的推理路径」是一个操作性结论：它由 pass@k 超过 base、creativity index 更高、OOD 任务提升共同支撑，而不是对解空间的穷举证明。数学上的 pass@k 收窄也提醒：<strong>RL 既可能外扩边界，也可能把分布压窄</strong>；方向取决于 base 的初始能力和任务类型。</p>
+
+  <p>一句话：ProRL 证明的是「在部分任务、部分采样预算下，长程 RL 能把 base 采样不到的解变成可采样」；它没有证明「RL 一定扩边界」，也没有证明「扩出来的边界能迁移到所有领域」。用这套方法前，先确认你有可验证奖励、能承担长训练成本，并且接受它在强 base 任务上可能收窄。</p>
+</section>
+
+<footer>
+  <div>ProRL: Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models · Mingjie Liu, Shizhe Diao, Ximing Lu, Jian Hu, Xin Dong, Yejin Choi, Jan Kautz, Yi Dong · NVIDIA</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2505.24864v1" target="_blank" rel="noopener">https://arxiv.org/abs/2505.24864v1</a>（以 v1 为准）<br>
+    笔记：<a href="/prorlprolonged-reinforcement-learning-expands-reasoning-boundaries-in-large-language-models/">ProRL：Prolonged Reinforcement Learning Expands Reasoning Boundaries in Large Language Models</a><br>
+    数据范围：Table 1–5、Figure 3–5、§1–§4、Appendix D/E；交互数据转录自 v1 的矢量图。
+  </div>
+  <div style="margin-top:18px">
+    <strong>笔记勘误（不改笔记原文）：</strong>
+    <ul style="margin-top:8px">
+      <li>笔记写「数学平均提升了15.7%，代码提升14.4%」；按 Table 1/2，这是 <strong>15.69 / 14.41 个百分点</strong> 的绝对点差，不是相对百分比。相对口径下，数学是 15.69/44.45≈35.3%。</li>
+      <li>笔记写 boxnet「pass@1 14.4%，pass@256 94.0%」；Figure 5 的 final pass@1 是 <strong>0.077（7.7%）</strong>、pass@256 是 <strong>1.000（100%）</strong>；Table 3 的连续奖励是 7.91（连续奖励均值，不是 pass@1）。0.940 是 final 在 k=64 的值；14.4 是代码平均点差（Table 2），不是 boxnet pass@1。</li>
+      <li>笔记写 base「pass@256 为 0，意味着即便给 256 次机会也永远无法找到正确答案」；可核查的证据是 <strong>256 次采样内为 0</strong>（Figure 4/5），不能推出对所有采样次数都为 0。本页统一写「在 256 次采样内为 0」。</li>
+      <li>笔记的「R²=0.879」「16k GPU 小时」「2k+ 步」「136K 样本」与原文一致；「1.5B 在某些方面媲美或超过 7B」也成立，但数学/代码平均仍低于 7B（Table 1/2）。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------- pass@k explorer ---------------- */
+  var KS = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+
+  var TASKS = {
+    boxnet: {
+      name: 'boxnet · OOD',
+      src: 'Figure 5',
+      desc: '训练中未出现的 Reasoning Gym 任务。base 在 256 次采样内全为 0；final 从 pass@1 0.077 升到 pass@256 1.000。',
+      final: [0.077, 0.144, 0.255, 0.413, 0.600, 0.789, 0.940, 0.997, 1.000],
+      mid:   [0.029, 0.058, 0.113, 0.215, 0.388, 0.636, 0.884, 0.994, 1.000],
+      base:  [0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000]
+    },
+    dice: {
+      name: 'dice · Sustained',
+      src: 'Figure 4',
+      desc: 'base 全程 0；final 在 k=1 为 0.390，k=256 为 1.000。intermediate 在 k=16 只有 0.280，说明延长训练确实把曲线继续往上推。',
+      final: [0.390, 0.605, 0.808, 0.931, 0.980, 0.995, 0.999, 1.000, 1.000],
+      mid:   [0.029, 0.055, 0.099, 0.170, 0.280, 0.445, 0.666, 0.889, 1.000],
+      base:  [0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000]
+    },
+    codecontests: {
+      name: 'codecontests · Sustained',
+      src: 'Figure 4',
+      desc: 'final 在 9 个 k 上都高于 intermediate，intermediate 又高于 base；这是论文所说「延长训练继续外扩」的代码面板。',
+      final: [0.530, 0.651, 0.755, 0.835, 0.892, 0.931, 0.959, 0.975, 0.979],
+      mid:   [0.442, 0.567, 0.683, 0.778, 0.848, 0.896, 0.930, 0.952, 0.966],
+      base:  [0.259, 0.358, 0.464, 0.567, 0.662, 0.743, 0.806, 0.852, 0.881]
+    },
+    math: {
+      name: 'math · Diminish',
+      src: 'Figure 4',
+      desc: 'pass@1 从 base 的 0.844 升到 final 的 0.918，但 pass@256 从 0.990 降到 0.988：首答更准，边界略窄。',
+      final: [0.918, 0.943, 0.957, 0.966, 0.972, 0.976, 0.979, 0.986, 0.988],
+      mid:   [0.897, 0.931, 0.951, 0.958, 0.972, 0.975, 0.979, 0.981, 0.982],
+      base:  [0.844, 0.903, 0.937, 0.963, 0.972, 0.978, 0.983, 0.988, 0.990]
+    }
+  };
+
+  var currentTask = 'boxnet';
+  var kIndex = 8;
+
+  function renderPassk() {
+    var cfg = TASKS[currentTask];
+    var chart = document.getElementById('passk-chart');
+    if (!cfg || !chart) return;
+
+    chart.innerHTML = '';
+    var series = [
+      { key: 'base',  label: 'Base 1.5B',      color: 'var(--c1)' },
+      { key: 'mid',   label: 'Intermediate',   color: 'var(--c2)' },
+      { key: 'final', label: 'Final · ProRL',  color: 'var(--accent)' }
+    ];
+
+    series.forEach(function (s) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = s.label;
+
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+
+      cfg[s.key].forEach(function (val, idx) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar' + (idx === kIndex ? ' sel' : '');
+
+        var track = document.createElement('div');
+        track.className = 'track';
+
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = s.color;
+        fill.style.height = Math.max(2, val * 100) + '%';
+        track.appendChild(fill);
+
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = val.toFixed(3);
+
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+
+    var x = document.getElementById('passk-x');
+    if (x) {
+      x.innerHTML = KS.map(function (k) { return '<span>' + k + '</span>'; }).join('');
+    }
+
+    var msg = document.getElementById('passk-msg');
+    if (msg) {
+      msg.innerHTML = '<div class="r-head">' + cfg.name + ' · k = ' + KS[kIndex] + '</div>'
+        + '<strong>final</strong> ' + cfg.final[kIndex].toFixed(3)
+        + ' · <strong>intermediate</strong> ' + cfg.mid[kIndex].toFixed(3)
+        + ' · <strong>base</strong> ' + cfg.base[kIndex].toFixed(3)
+        + '<br>' + cfg.desc;
+    }
+
+    var readout = document.getElementById('passk-readout');
+    if (readout) readout.setAttribute('data-src', cfg.src);
+  }
+
+  document.querySelectorAll('#passk-tabs .tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#passk-tabs .tab').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      currentTask = btn.dataset.task || 'boxnet';
+      renderPassk();
+    });
+  });
+
+  var slider = document.getElementById('k-slider');
+  if (slider) {
+    slider.addEventListener('input', function (e) {
+      kIndex = parseInt(e.target.value, 10) || 0;
+      var kv = document.getElementById('k-val');
+      if (kv) kv.textContent = 'k = ' + KS[kIndex];
+      renderPassk();
+    });
+  }
+
+  renderPassk();
+
+  /* ---------------- training stage explorer ---------------- */
+  var STAGES = [
+    {
+      t: 'Run 1',
+      sub: '4 个任务 · 8k · n=16',
+      h: '先用 math/code/STEM/logic 四类数据启动，暂不含 instruction following。响应长度先降后升，验证分数上升；阶段末出现不稳定与退化。'
+    },
+    {
+      t: 'Run 2',
+      sub: 'hard reset · 8k · n=16',
+      h: '对 reference policy 和 optimizer 做 hard reset，其余设置不变。论文没有像 DeepScaleR 那样加长响应，而是保持 8k，因为 8k 已足够让验证分数继续上升。'
+    },
+    {
+      t: 'Run 3',
+      sub: '加入 IF · 8k · n=16',
+      h: '把 instruction-following 数据并入训练。随后响应长度突然上升，主要原因是模型重复答案、无法以 &lt;eos&gt; 结束。'
+    },
+    {
+      t: 'Run 4–5',
+      sub: 'reward shaping · 8k · n=16',
+      h: '对未正确终止的响应加惩罚。生成行为改善，响应长度小幅下降。'
+    },
+    {
+      t: 'Run 6–7',
+      sub: 'n 16→32 · 两次重置',
+      h: 'rollout 数从 16 提到 32，过程中做两次 hard reset。响应长度再次上升，同时验证指标继续改善。'
+    },
+    {
+      t: 'Run 8',
+      sub: '上下文 8k→16k · n=16',
+      h: '最后约 200 步把上下文扩到 16k，rollout 降回 16。模型很快适应；AIME 这类难题只有边际提升，其他领域提升更明显。'
+    }
+  ];
+
+  function renderStage(idx) {
+    var s = STAGES[idx];
+    var msg = document.getElementById('stage-msg');
+    var head = document.querySelector('#stage-readout .r-head');
+    if (!s || !msg) return;
+    if (head) head.textContent = s.t + ' · ' + s.sub;
+    msg.innerHTML = s.h;
+  }
+
+  document.querySelectorAll('#stage-btns .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#stage-btns .rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var idx = parseInt(btn.dataset.stage, 10) || 0;
+      renderStage(idx);
+    });
+  });
+
+  renderStage(0);
+})();
+</script>
+</body>
+</html>

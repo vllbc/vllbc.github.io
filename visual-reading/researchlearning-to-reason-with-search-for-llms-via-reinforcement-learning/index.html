@@ -1,0 +1,442 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 9.16 | Table 2 | 43.52-34.36 |
+| 11.40 | Table 2 | 63.62-52.22 |
+| 19.67 | Table 2 | 47.59-27.92 |
+| 22.36 | Table 2 | 54.22-31.86 |
+| 13.61 | Table 2 | 22.30-8.69 |
+| 17.29 | Table 2 | 33.43-16.14 |
+| 17.60 | Table 2 | 42.40-24.80 |
+| 17.60 | Table 2 | 54.40-36.80 |
+| 6.92 | Table 2 | 46.73-39.81 |
+| 8.90 | Table 2 | 67.70-58.80 |
+| 11.26 | Table 2 | 44.90-33.64 |
+| 12.08 | Table 2 | 50.30-38.22 |
+| 13.91 | Table 2 | 26.40-12.49 |
+| 18.45 | Table 2 | 38.56-20.11 |
+| 25.60 | Table 2 | 56.80-31.20 |
+| 20.00 | Table 2 | 67.20-47.20 |
+| 20.80 | Table 2 | 42.40-21.60 |
+| 19.20 | Table 2 | 54.40-35.20 |
+| 27.20 | Table 2 | 56.80-29.60 |
+| 22.40 | Table 2 | 67.20-44.80 |
+| 15.81 | Table 2 | (9.16+19.67+13.61+20.80)/4 |
+| 17.56 | Table 2 | (11.40+22.36+17.29+19.20)/4 |
+| 14.82 | Table 2 | (6.92+11.26+13.91+27.20)/4 |
+| 15.46 | Table 2 | (8.90+12.08+18.45+22.40)/4 |
+| 64 | Appendix B | 8*8 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReSearch · 把搜索动作写进推理链，用 GRPO 从结果里学</title>
+<meta name="description" content="ReSearch 用 GRPO 训练 Qwen2.5-7B/32B 在推理中自主调用搜索；只训 MuSiQue，四个多跳 QA 基准上 7B 平均提升 15.81 / 17.56 个百分点（原文报告值，按 Table 2 为对 Iter-RetGen 的绝对差平均）。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.quote{margin:18px 0;padding:14px 18px 14px 20px;border-left:3px solid var(--accent);background:var(--bg-surface);border-radius:0 var(--radius) var(--radius) 0;color:var(--text-muted);font-size:14.5px;line-height:1.8}
+.quote span{display:block;margin-top:6px;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft)}
+.table-cap{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);margin:18px 0 6px;line-height:1.6}
+.src-note{font-size:12px;color:var(--text-soft);margin:10px 0 0;font-family:"JetBrains Mono",monospace;line-height:1.6}
+.errata{margin-top:18px;background:var(--bg-soft);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;color:var(--text-muted);font-size:13px;line-height:1.8}
+.errata strong{color:var(--text)}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:8px}
+svg text{font-family:"Noto Sans SC","Inter",sans-serif;font-size:13px;fill:var(--text)}
+svg text.sub{font-size:11px;fill:var(--text-soft)}
+svg rect.box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+svg rect.hl{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.token{font-family:"JetBrains Mono",monospace;font-size:12.5px;background:var(--bg-soft);padding:1px 5px;border-radius:4px}
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b2{background:var(--c1)}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.tldr .token{background:rgba(255,255,255,.16);color:var(--bg);border:1px solid rgba(255,255,255,.28)}
+@media(max-width:500px){
+  .chart .crow{grid-template-columns:86px 1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">ReSearch</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">开销</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Search Agent · NeurIPS 2025 · v3</span>
+  <h1>ReSearch：把搜索动作写进推理链，用最终答案的 F1 当奖励</h1>
+  <p class="hero-sub">
+    多跳问题需要「先搜 A，看到结果再决定搜 B」。ReSearch 不标注任何推理步骤，直接把 <span class="token">&lt;think&gt;</span>、<span class="token">&lt;search&gt;</span>、<span class="token">&lt;result&gt;</span>、<span class="token">&lt;answer&gt;</span> 拼成一条 rollout，用 GRPO 优化最终答案的 F1；检索结果 token 在损失里被掩码，模型只为自己的思考与查询负责。
+    只在 MuSiQue 上训练；7B 模型在四个多跳基准上的平均提升为 <strong data-src="§3.2">15.81</strong> 个百分点 EM、<strong data-src="§3.2">17.56</strong> 个百分点 LJ（原文报告值；按 Table 2 复算，口径是四个基准对 Iter-RetGen 的绝对点差平均，见 §6.2）。
+  </p>
+  <div class="meta">
+    <span>Mingyang Chen 等 · 百川智能 / 中国科学院大学（UCAS） / 同济 / 爱丁堡 / 浙大</span>
+    <a href="https://arxiv.org/abs/2503.19470v3" target="_blank" rel="noopener">arXiv 2503.19470v3 ↗</a>
+    <a href="https://github.com/Agent-RL/ReSearch" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>搜索不是前置步骤，而是推理链里的动作。</strong> 模型每写一个 <span class="token">&lt;search&gt;</span>，环境就检索一次并把结果塞进 <span class="token">&lt;result&gt;</span>；模型基于结果继续写 <span class="token">&lt;think&gt;</span>，直到输出 <span class="token">&lt;answer&gt;</span>。搜索的时机、查询词、迭代次数都由模型自己决定（§2.1、Figure 2）。</p>
+  <p><strong>奖励只有两项：答案 F1 + 格式。</strong> F1 非 0 时奖励就是 F1；F1 为 0 但格式正确给 <strong data-src="§2.3">0.1</strong>；格式也错给 0。没有过程奖励，也没有推理步骤标注（§2.3、Eq.2）。</p>
+  <p><strong>只在 MuSiQue 上训练，评测四个基准。</strong> 训练集 <strong data-src="§3.1">19,938</strong> 条，<strong data-src="§3.1">2</strong> 个 epoch；评测 HotpotQA、2WikiMultiHopQA、MuSiQue、Bamboogle。原文报告 7B 的平均提升是 <strong data-src="§3.2">15.81</strong> 个百分点 EM、<strong data-src="§3.2">17.56</strong> 个百分点 LJ，32B 是 <strong data-src="§3.2">14.82</strong> / <strong data-src="§3.2">15.46</strong> 个百分点。按 Table 2 复算，这四个数是四个基准对 Iter-RetGen 的绝对点差平均，不是相对提升，也不是对每列最强基线的差值平均（详见 §6.2）。</p>
+  <p><strong>案例里出现了自我纠错，但只是单例。</strong> 第一次搜「Martín Ramírez Pech」搜到同名画家，模型在下一段 <span class="token">&lt;think&gt;</span> 里说「我似乎搜错了」，把查询改成「Martín Ramírez Pech political party」，再继续搜（Table 3）。论文把它作为定性证据，不是系统性评测。</p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§3.2">15.81<small>pp</small></div>
+      <div class="k">7B 平均 EM 提升（原文报告值）<br>复算口径：四个基准对 Iter-RetGen 的绝对点差平均</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§3.2">17.56<small>pp</small></div>
+      <div class="k">7B 平均 LJ 提升（原文报告值）<br>同为绝对点差平均 · GPT-4o-mini 评测</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">56.80<small>%</small></div>
+      <div class="k">32B-Instruct 的 Bamboogle EM<br>最强基线 IRCoT 为 <span data-src="Table 2">31.20%</span></div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>多跳问题的瓶颈：下一步搜什么，取决于上一步搜到了什么</h2></div>
+  <p class="sec-sub">传统 RAG 把检索当预处理；ReSearch 把检索当动作，让模型在推理过程中反复决定。</p>
+  <p>「《星际穿越》的导演的出生地的市长是谁？」这类问题需要三条依赖链：先找导演，再找出生地，再找市长。传统 RAG 通常在回答前检索一次或固定几次，把结果拼进上下文；它无法根据「第一次搜到了什么」动态决定「第二次搜什么」（§1）。</p>
+  <p>提示工程路线（Iter-RetGen、IRCoT）可以让模型多轮检索，但轮次与提示模板由人设计；模型是在「遵循流程」，不是在「学习策略」。监督微调路线需要标注推理步骤，成本高、规模受限。论文的切入点是：只给最终答案的对错，让模型在试错中自己学出「什么时候搜、搜什么」（§1、§2）。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">缺口 1</span><h4>检索与推理是割裂的</h4></div>
+      <p>Naive RAG 先检索再生成；Iter-RetGen 与 IRCoT 虽然迭代，但迭代规则由外部提示控制。模型没有把「搜索」当成自己的动作（§1、§3.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">缺口 2</span><h4>过程标注太贵</h4></div>
+      <p>要监督「第几步该搜什么」，需要人工写推理链。论文选择不标注过程，只用最终答案的 F1 与格式做奖励（§2.3）。</p>
+    </div>
+  </div>
+  <p>这个设定带来一个工程问题：rollout 里既有模型生成的 token，也有检索环境返回的 token。如果损失把检索结果也算进去，策略会被「环境写的文本」带偏。ReSearch 的做法是把 <span class="token">&lt;result&gt;</span> 内的 token 全部掩码，只对 <span class="token">&lt;think&gt;</span> 与 <span class="token">&lt;search&gt;</span> 计算损失（§2.1）。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>四条对照路线：无 RAG、Naive RAG、Iter-RetGen、IRCoT</h2></div>
+  <p class="sec-sub">Table 2 的基线都是提示/RAG 方法；论文没有把 Search-R1 等 RL 搜索 Agent 放进同一张表。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">基线 A</span><h4>Naive Generation</h4></div>
+      <p>不检索，直接用指令微调模型回答。多跳问题需要的事实往往不在参数里，因此 EM 最低（§3.1、Table 2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">基线 B</span><h4>Naive RAG</h4></div>
+      <p>先用问题检索一次，把结果拼进上下文再生成。比不检索好，但仍然只有一轮，无法根据中间结果改写查询（§3.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">基线 C</span><h4>Iter-RetGen / IRCoT</h4></div>
+      <p>两者都做多轮检索与生成：Iter-RetGen 交替检索与生成，IRCoT 用思维链引导检索。轮次与提示由人设计，不是从奖励里学出来的（§3.1）。</p>
+    </div>
+  </div>
+  <p>ReSearch 与这些基线的差别不是「多搜几次」，而是「搜索策略由策略网络生成」。同一套 Qwen2.5 底座下，ReSearch 只在 MuSiQue 训练，却在 HotpotQA、2Wiki、Bamboogle 上也能用；这被论文称为泛化能力（§3.2）。</p>
+  <div class="quote">
+    “We treat the search operation as part of the chain-like reasoning process, and the search operation will interact with text-based thinking.”
+    <span>§1 · 论文对 ReSearch 的核心表述</span>
+  </div>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>一条 rollout 就是「思考—搜索—结果—再思考」的循环</h2></div>
+  <p class="sec-sub">没有 SFT 冷启动，直接在 Qwen2.5 权重上做 GRPO；格式靠 prompt 约束，正确性靠 F1。</p>
+  <h3 style="margin-top:26px">3.1 Rollout：遇到 &lt;/search&gt; 就停，检索完再续写</h3>
+  <p>生成过程遇到 <span class="token">&lt;/search&gt;</span> 时暂停，把最近的查询送给检索器；检索结果包进 <span class="token">&lt;result&gt;</span> 后拼回上下文，模型继续生成。这个过程循环到模型输出结束符或 <span class="token">&lt;answer&gt;</span>（§2.1、Figure 2b）。</p>
+  <div class="eq">
+    x → &lt;think&gt; … &lt;/think&gt; &lt;search&gt; q<sub>1</sub> &lt;/search&gt; &lt;result&gt; r<sub>1</sub> &lt;/result&gt;<br>
+    → &lt;think&gt; … &lt;/think&gt; &lt;search&gt; q<sub>2</sub> &lt;/search&gt; &lt;result&gt; r<sub>2</sub> &lt;/result&gt; → … → &lt;answer&gt; a &lt;/answer&gt;
+  </div>
+  <div class="eq-cap">§2.1 · 查询与结果交替追加；模型只为 &lt;think&gt; 与 &lt;search&gt; 内的 token 负责</div>
+  <p>检索环境是 FlashRAG + E5-base-v2，知识库是 2018 年 12 月的 Wikipedia；每次查询取 top-<strong data-src="§3.1">5</strong>。训练与评测用同一个环境（§3.1）。这意味着模型学到的是「在这个 Wikipedia 检索器上怎么搜」 <span class="infer">推断</span>；换到真实网页搜索是否成立，论文没有实验（依据：§3.1 的训练与评测共用同一 FlashRAG + E5-base-v2 + 2018 Wikipedia 环境，未测试其他检索器或知识库）。</p>
+
+  <h3 style="margin-top:30px">3.2 GRPO：组内比较，不需要 critic</h3>
+  <p>每个问题采样 <strong data-src="Table 4">5</strong> 条 rollout，用组内奖励的均值与标准差归一化出优势；目标函数带 clip 与 KL 惩罚，KL 系数 <strong data-src="Table 4">0.001</strong>，clip 比例 <strong data-src="Table 4">0.2</strong>（§2.1、Eq.1、Table 4）。相比 PPO，GRPO 不需要单独训练 critic，省一份模型与一份显存。</p>
+  <p>奖励是规则式的，没有奖励模型：</p>
+  <div class="eq">
+    r = F1(a<sub>pred</sub>, a<sub>gt</sub>)&nbsp;&nbsp;if F1 &gt; 0<br>
+    r = 0.1&nbsp;&nbsp;if F1 = 0 and format correct<br>
+    r = 0&nbsp;&nbsp;if F1 = 0 and format incorrect
+  </div>
+  <div class="eq-cap">§2.3、Eq.2 · 格式检查主要看标签是否正确、答案是否放在 boxed 里</div>
+  <p>这个奖励的设计后果是：模型只要格式对，就能拿到 0.1 的「保底分」；一旦答案 F1 大于 0，奖励就变成连续的 F1，而不是 0/1。论文没有额外加长度惩罚或搜索次数惩罚；Figure 3 的搜索次数随训练上升，但论文没有给搜索次数的上限或成本约束（§3.3）。<span class="infer">推断</span>：奖励只来自最终答案 F1 与格式，模型可能倾向「多搜几次」而不是「更准地搜」（依据：§2.3 的 Eq.2 没有搜索次数/成本项，§3.3 未给上限）。</p>
+
+  <h3 style="margin-top:30px">3.3 Prompt：base 与 instruct 两套模板</h3>
+  <p>base 模型直接把模板拼在问题前；instruct 模型把模板作为 system prompt，再套 chat template。模板里给出一个完整的标签示例，要求模型用 <span class="token">&lt;think&gt;</span>、<span class="token">&lt;search&gt;</span>、<span class="token">&lt;result&gt;</span>、<span class="token">&lt;answer&gt;</span> 组织输出（§2.2、Table 1）。</p>
+  <p>论文强调模板「简单、简洁」，让模型在 RL 中自然延续，而不是靠复杂的格式约束。F1 为 0 但格式正确的 rollout 仍可拿到 0.1，这是格式保底奖励的用途（§2.2、§2.3、Eq.2）。</p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>64 张 H800、全参数、2 个 epoch；训练数据只有 MuSiQue</h2></div>
+  <p class="sec-sub">这是论文给出的全部训练开销信息；没有报告总 GPU 小时或费用。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">硬件</span><h4>8×8 Nvidia H800</h4></div>
+      <p>共 <strong data-src="Appendix B">64</strong> 张 H800，全参数优化 + gradient checkpointing（Appendix B）。论文没有给单卡显存、训练时长或总 GPU 小时。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">数据</span><h4>MuSiQue 训练集 19,938 条</h4></div>
+      <p>只使用 MuSiQue 训练集，训练 <strong data-src="§3.1">2</strong> 个 epoch；batch size <strong data-src="Table 4">256</strong>，学习率 <strong data-src="Table 4">1e-6</strong>，rollout 温度 <strong data-src="Table 4">1.0</strong>（§3.1、Table 4）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">检索</span><h4>top-5 Wikipedia，E5-base-v2</h4></div>
+      <p>知识库是 2018 年 12 月的 Wikipedia，检索器 E5-base-v2，每次取 top-<strong data-src="§3.1">5</strong>；索引与 embedding 由 FlashRAG 预处理（§3.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">评测</span><h4>四个基准，EM + GPT-4o-mini</h4></div>
+      <p>HotpotQA <strong data-src="§3.1">7,405</strong> 条、2Wiki <strong data-src="§3.1">12,576</strong> 条、MuSiQue <strong data-src="§3.1">2,417</strong> 条、Bamboogle <strong data-src="§3.1">125</strong> 条；EM 与 LLM-as-a-Judge 并用（§3.1）。</p>
+    </div>
+  </div>
+  <p>论文没有做不同硬件、不同 batch size 或不同检索器数量的消融。<span class="infer">推断</span>：不能把 64 张 H800 的配置直接外推到更小或更大的集群（依据：Appendix B 只给 8×8 H800、全参数 + gradient checkpointing，未报告显存、并行策略或训练时长）。也没有报告训练总 token 数或检索调用次数。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>训练管线：问题 → 多轮 rollout → 组内优势 → 策略更新</h2></div>
+  <p class="sec-sub">上半是单条 rollout 的结构，下半是 GRPO 的组内比较；检索环境在 rollout 中间介入。</p>
+  <div class="card" style="padding:10px 8px 4px">
+    <svg viewBox="0 0 900 390" role="img" aria-label="ReSearch 训练流程：问题进入策略模型，生成思考与搜索查询，检索环境返回结果，循环直到答案；多条 rollout 组成一组，用奖励归一化计算优势，更新策略">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+      <rect class="box" x="20" y="30" width="130" height="52" rx="8"></rect>
+      <text x="85" y="52" text-anchor="middle">问题 x</text>
+      <text class="sub" x="85" y="69" text-anchor="middle">多跳 QA</text>
+
+      <rect class="hl" x="180" y="30" width="190" height="52" rx="8"></rect>
+      <text x="275" y="52" text-anchor="middle">策略模型 πθ</text>
+      <text class="sub" x="275" y="69" text-anchor="middle">生成 think / search</text>
+
+      <rect class="box" x="400" y="30" width="150" height="52" rx="8"></rect>
+      <text x="475" y="52" text-anchor="middle">检索环境</text>
+      <text class="sub" x="475" y="69" text-anchor="middle">top-5 · E5 · Wikipedia</text>
+
+      <rect class="box" x="580" y="30" width="150" height="52" rx="8"></rect>
+      <text x="655" y="52" text-anchor="middle">result 拼回</text>
+      <text class="sub" x="655" y="69" text-anchor="middle">继续生成</text>
+
+      <rect class="box" x="760" y="30" width="120" height="52" rx="8"></rect>
+      <text x="820" y="52" text-anchor="middle">answer</text>
+      <text class="sub" x="820" y="69" text-anchor="middle">F1 + 格式奖励</text>
+
+      <rect class="box" x="20" y="145" width="200" height="52" rx="8"></rect>
+      <text x="120" y="167" text-anchor="middle">同一问题采样 5 条</text>
+      <text class="sub" x="120" y="184" text-anchor="middle">rollout 组</text>
+
+      <rect class="box" x="250" y="145" width="200" height="52" rx="8"></rect>
+      <text x="350" y="167" text-anchor="middle">组内奖励归一化</text>
+      <text class="sub" x="350" y="184" text-anchor="middle">(r - mean) / std</text>
+
+      <rect class="box" x="480" y="145" width="200" height="52" rx="8"></rect>
+      <text x="580" y="167" text-anchor="middle">GRPO 目标</text>
+      <text class="sub" x="580" y="184" text-anchor="middle">clip + KL(πθ || πref)</text>
+
+      <rect class="box" x="710" y="145" width="170" height="52" rx="8"></rect>
+      <text x="795" y="167" text-anchor="middle">更新策略</text>
+      <text class="sub" x="795" y="184" text-anchor="middle">全参数 · 2 epoch</text>
+
+      <rect class="box" x="20" y="275" width="860" height="72" rx="8"></rect>
+      <text x="450" y="303" text-anchor="middle">评测：HotpotQA · 2Wiki · MuSiQue · Bamboogle</text>
+      <text class="sub" x="450" y="326" text-anchor="middle">EM + LLM-as-a-Judge (GPT-4o-mini) · 同一 top-5 检索环境</text>
+
+      <path d="M150 56 L180 56" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M370 56 L400 56" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M550 56 L580 56" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M730 56 L760 56" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M655 82 L655 110 L120 110 L120 145" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M220 171 L250 171" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M450 171 L480 171" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M680 171 L710 171" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M795 197 L795 275" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="6 4" fill="none" marker-end="url(#ar2)"></path>
+      <text class="sub" x="807" y="240" fill="var(--accent)">评测</text>
+    </svg>
+  </div>
+  <p>图里的回路是单条 rollout：模型在 <span class="token">&lt;search&gt;</span> 处暂停，环境返回结果，模型继续。下面的组内比较是 GRPO 与 PPO 的关键差别：不需要 critic，直接用同一问题的一组 rollout 的奖励均值与标准差做基线（§2.1）。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>7B 平均 EM 提升 15.81 个百分点、LJ 提升 17.56 个百分点；32B 的 Bamboogle EM 到 56.80</h2></div>
+  <p class="sec-sub">先看四个基准的绝对值，再看对最强基线的差值，并说明原文 15.81 / 17.56 的复算口径；最后讨论训练曲线与案例。</p>
+
+  <h3 style="margin-top:26px">6.1 Table 2：四个基准、两种指标、四个模型</h3>
+  <p>Table 2 覆盖 Qwen2.5-7B 与 32B 的 base/instruct 四个起点。7B-Instruct 在 HotpotQA 上 EM <strong data-src="Table 2">43.52%</strong>、LJ <strong data-src="Table 2">63.62%</strong>；在 2Wiki 上 EM <strong data-src="Table 2">47.59%</strong>、LJ <strong data-src="Table 2">54.22%</strong>；在 MuSiQue 上 EM <strong data-src="Table 2">22.30%</strong>、LJ <strong data-src="Table 2">33.43%</strong>；在 Bamboogle 上 EM <strong data-src="Table 2">42.40%</strong>、LJ <strong data-src="Table 2">54.40%</strong>。32B-Instruct 的 Bamboogle EM 达到 <strong data-src="Table 2">56.80%</strong>，是 Bamboogle 列最高 EM。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th rowspan="2">模型</th><th colspan="2">HotpotQA</th><th colspan="2">2Wiki</th><th colspan="2">MuSiQue</th><th colspan="2">Bamboogle</th></tr>
+        <tr><th class="num">EM</th><th class="num">LJ</th><th class="num">EM</th><th class="num">LJ</th><th class="num">EM</th><th class="num">LJ</th><th class="num">EM</th><th class="num">LJ</th></tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="9" class="src-note">Qwen2.5-7B(-Instruct)</td></tr>
+        <tr><td>Naive Generation</td><td class="num">19.18</td><td class="num">30.64</td><td class="num">25.76</td><td class="num">27.87</td><td class="num">3.76</td><td class="num">10.38</td><td class="num">10.40</td><td class="num">22.40</td></tr>
+        <tr><td>Naive RAG</td><td class="num">31.90</td><td class="num">49.59</td><td class="num">25.78</td><td class="num">29.52</td><td class="num">6.21</td><td class="num">12.78</td><td class="num">20.80</td><td class="num">32.00</td></tr>
+        <tr><td>Iter-RetGen</td><td class="num">34.36</td><td class="num">52.22</td><td class="num">27.92</td><td class="num">31.86</td><td class="num">8.69</td><td class="num">16.14</td><td class="num">21.60</td><td class="num">35.20</td></tr>
+        <tr><td>IRCoT</td><td class="num">30.33</td><td class="num">52.06</td><td class="num">21.57</td><td class="num">30.65</td><td class="num">6.99</td><td class="num">14.19</td><td class="num">24.80</td><td class="num">36.80</td></tr>
+        <tr><td>ReSearch-Qwen-7B</td><td class="num">40.57</td><td class="num">60.26</td><td class="num">44.67</td><td class="num">50.06</td><td class="num">21.68</td><td class="num">32.19</td><td class="num">43.20</td><td class="num">54.40</td></tr>
+        <tr><td><strong>ReSearch-Qwen-7B-Instruct</strong></td><td class="num"><strong>43.52</strong></td><td class="num"><strong>63.62</strong></td><td class="num"><strong>47.59</strong></td><td class="num"><strong>54.22</strong></td><td class="num"><strong>22.30</strong></td><td class="num"><strong>33.43</strong></td><td class="num">42.40</td><td class="num">54.40</td></tr>
+        <tr><td colspan="9" class="src-note">Qwen2.5-32B(-Instruct)</td></tr>
+        <tr><td>Naive Generation</td><td class="num">24.63</td><td class="num">38.26</td><td class="num">27.23</td><td class="num">29.68</td><td class="num">6.12</td><td class="num">14.23</td><td class="num">18.40</td><td class="num">29.60</td></tr>
+        <tr><td>Naive RAG</td><td class="num">36.46</td><td class="num">55.73</td><td class="num">30.38</td><td class="num">34.87</td><td class="num">9.27</td><td class="num">15.97</td><td class="num">23.20</td><td class="num">40.80</td></tr>
+        <tr><td>Iter-RetGen</td><td class="num">39.81</td><td class="num">58.80</td><td class="num">33.64</td><td class="num">38.22</td><td class="num">12.49</td><td class="num">20.11</td><td class="num">29.60</td><td class="num">44.80</td></tr>
+        <tr><td>IRCoT</td><td class="num">28.44</td><td class="num">55.44</td><td class="num">13.53</td><td class="num">29.50</td><td class="num">7.82</td><td class="num">18.20</td><td class="num">31.20</td><td class="num">47.20</td></tr>
+        <tr><td>ReSearch-Qwen-32B</td><td class="num">42.77</td><td class="num">64.27</td><td class="num">38.52</td><td class="num">45.59</td><td class="num">26.40</td><td class="num">37.57</td><td class="num">54.40</td><td class="num">66.40</td></tr>
+        <tr><td><strong>ReSearch-Qwen-32B-Instruct</strong></td><td class="num"><strong>46.73</strong></td><td class="num"><strong>67.70</strong></td><td class="num"><strong>44.90</strong></td><td class="num"><strong>50.30</strong></td><td class="num"><strong>26.40</strong></td><td class="num"><strong>38.56</strong></td><td class="num"><strong>56.80</strong></td><td class="num"><strong>67.20</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">Table 2 · 原文按模型组加粗；页面只转录了部分加粗。ReSearch-7B-Instruct 在 Bamboogle 的 EM <strong data-src="Table 2">42.40</strong> 低于 7B 的 <strong data-src="Table 2">43.20</strong>，不是每个单元格都随 instruct 提升。</div>
+
+  <h3 style="margin-top:34px">6.2 相对最强基线：7B 的平均提升更大，32B 的 Bamboogle 差距最大</h3>
+  <p>按每个基准的最强基线算，7B-Instruct 的 EM 差值是：HotpotQA <strong data-src="Table 2">9.16</strong>、2Wiki <strong data-src="Table 2">19.67</strong>、MuSiQue <strong data-src="Table 2">13.61</strong>、Bamboogle <strong data-src="Table 2">17.60</strong> 个百分点；LJ 差值是 <strong data-src="Table 2">11.40</strong>、<strong data-src="Table 2">22.36</strong>、<strong data-src="Table 2">17.29</strong>、<strong data-src="Table 2">17.60</strong>。32B-Instruct 的 EM 差值是 HotpotQA <strong data-src="Table 2">6.92</strong>、2Wiki <strong data-src="Table 2">11.26</strong>、MuSiQue <strong data-src="Table 2">13.91</strong>、Bamboogle <strong data-src="Table 2">25.60</strong>；LJ 差值是 <strong data-src="Table 2">8.90</strong>、<strong data-src="Table 2">12.08</strong>、<strong data-src="Table 2">18.45</strong>、<strong data-src="Table 2">20.00</strong>。注意这是页面图的“每列最强基线”口径；原文 §3.2 报告的 15.81 / 17.56 / 14.82 / 15.46 按 Table 2 复算，是四个基准对 Iter-RetGen 的绝对点差平均（原文未说明 Bamboogle 为何不用该列最强的 IRCoT），两套数的 Bamboogle 加数不同，复算见下方手算块。</p>
+  <div class="sim">
+    <div class="sim-top" id="delta-tabs">
+      <button class="rule-btn active" data-mode="7em">7B · EM<span class="r-sub">对最强基线</span></button>
+      <button class="rule-btn" data-mode="7lj">7B · LJ<span class="r-sub">对最强基线</span></button>
+      <button class="rule-btn" data-mode="32em">32B · EM<span class="r-sub">对最强基线</span></button>
+      <button class="rule-btn" data-mode="32lj">32B · LJ<span class="r-sub">对最强基线</span></button>
+    </div>
+    <div class="chart" id="delta-chart" data-src="Table 2"></div>
+    <div class="src-note">柱高按固定上限 28 个百分点满格（四个标签共用同一刻度）；柱旁数字为精确差值，单位百分点。</div>
+    <div class="readout" id="delta-readout" data-src="Table 2">选择模型与指标，查看相对最强基线的绝对差值（单位：百分点）。</div>
+  </div>
+  <details>
+    <summary>手算对账 <span class="sum-sub">四个基准的差值与基线归属</span></summary>
+    <div class="details-body">
+      <p>7B 的最强 EM 基线：HotpotQA / 2Wiki / MuSiQue 都是 Iter-RetGen（34.36 / 27.92 / 8.69），Bamboogle 是 IRCoT（24.80）。7B-Instruct 减出来是 9.16 / 19.67 / 13.61 / 17.60。</p>
+      <p>32B 的最强 EM 基线：HotpotQA / 2Wiki / MuSiQue 都是 Iter-RetGen（39.81 / 33.64 / 12.49），Bamboogle 是 IRCoT（31.20）。32B-Instruct 减出来是 6.92 / 11.26 / 13.91 / 25.60。</p>
+      <p><strong>原文 15.81 / 17.56 / 14.82 / 15.46 的复算：</strong>原文 §3.2 写的是 “the average improvement of ReSearch over the best baseline is 15.81% in exact match and 17.56% in LLM-as-a-judge, for Qwen2.5 model with 7B parameters. For Qwen2.5 model with 32B parameters, the average improvement is 14.82% in exact match and 15.46% in LLM-as-a-judge.”；但按 Table 2 复算，这四个数是四个基准对 <strong>Iter-RetGen</strong> 的绝对点差平均，单位是百分点：</p>
+      <ul>
+        <li>7B EM：<strong data-src="Table 2">9.16 / 19.67 / 13.61 / 20.80</strong>（依次为 HotpotQA / 2Wiki / MuSiQue / Bamboogle；Bamboogle 用 Iter-RetGen 21.60，42.40 − 21.60 = 20.80），平均 <strong data-src="Table 2">15.81</strong>。</li>
+        <li>7B LJ：<strong data-src="Table 2">11.40 / 22.36 / 17.29 / 19.20</strong>（Bamboogle 用 Iter-RetGen 35.20，54.40 − 35.20 = 19.20），平均 <strong data-src="Table 2">17.56</strong>。</li>
+        <li>32B EM：<strong data-src="Table 2">6.92 / 11.26 / 13.91 / 27.20</strong>（Bamboogle 用 Iter-RetGen 29.60，56.80 − 29.60 = 27.20），平均 <strong data-src="Table 2">14.82</strong>。</li>
+        <li>32B LJ：<strong data-src="Table 2">8.90 / 12.08 / 18.45 / 22.40</strong>（Bamboogle 用 Iter-RetGen 44.80，67.20 − 44.80 = 22.40），平均 <strong data-src="Table 2">15.46</strong>。</li>
+      </ul>
+      <p>页面图按“每列最强基线”算，Bamboogle 换成 IRCoT（7B EM 24.80 / 7B LJ 36.80 / 32B EM 31.20 / 32B LJ 47.20），所以图上的 Bamboogle 差值是 17.60 / 17.60 / 25.60 / 20.00，而不是原文平均值的加数 20.80 / 19.20 / 27.20 / 22.40。差异只来自基线切换；页面把两套口径并列，不把 15.81 等写成“相对提升”。</p>
+    </div>
+  </details>
+
+  <h3 style="margin-top:34px">6.3 训练曲线与案例：搜索次数上升，出现一次自我纠错</h3>
+  <p>Figure 3 统计训练过程中的响应长度与搜索次数：四条曲线（7B/32B × base/instruct）的搜索次数都随训练步数上升；32B 的响应长度在前 20 步先下降，约 60 步后再上升（§3.3）。论文的解释是 32B 初始更依赖内部知识，收到奖励信号后才开始更多检索。Figure 3 没有标出每条曲线的具体数值，页面只引用趋势，不引用精确次数。</p>
+  <p>Table 3 的案例是「Martín Ramírez Pech 所属政党所在国家的 2018 年总统选举谁赢了」。第一次搜「Martín Ramírez Pech」返回同名画家的信息；模型在下一段 <span class="token">&lt;think&gt;</span> 里说「我似乎搜错了」，把查询改成「Martín Ramírez Pech political party」，第二次搜到墨西哥工党，再搜「2018 Mexican presidential election」，最后答 Andrés Manuel López Obrador。整条轨迹用了三次 <span class="token">&lt;search&gt;</span>（Table 3）。这是一个定性案例，论文没有统计这种自我纠错在测试集上的频率。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：只用 Wikipedia、只训 MuSiQue、只验证短答案</h2></div>
+  <p class="sec-sub">这些条件决定了 ReSearch 的结论能推广到哪一步。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">检索环境</span><h4>2018 年 Wikipedia + E5-base-v2</h4></div>
+      <p>知识库固定为 2018 年 12 月的 Wikipedia，检索器固定 E5-base-v2，top-5。没有真实网页搜索、没有多语言、没有时效性数据；换检索器或换知识库后的表现未测（§3.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">训练数据</span><h4>只训 MuSiQue 一个数据集</h4></div>
+      <p>训练集 <strong data-src="§3.1">19,938</strong> 条，<strong data-src="§3.1">2</strong> 个 epoch。论文把跨 HotpotQA/2Wiki/Bamboogle 的结果称为泛化，但这些都是英文多跳 QA，任务形态接近；不能据此推断开放域研究或长文写作也能泛化 <span class="infer">推断</span>（§3.1、§3.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">奖励</span><h4>短答案 + F1，不适合长回答</h4></div>
+      <p>奖励要求答案能被 F1 比较，适合事实型短答案；论文在 Appendix C 明确说，更长、更微妙的回答需要更复杂的奖励建模（Appendix C）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">对照</span><h4>没有 RL 搜索 Agent 基线</h4></div>
+      <p>Table 2 的基线是 Naive Generation、Naive RAG、Iter-RetGen、IRCoT，都是提示/RAG 方法；没有把 Search-R1 等 RL 训练方法放进同一张表。跨论文比较受底座、数据、检索环境影响，不能直接下结论（§3.1、Table 2）。</p>
+    </div>
+  </div>
+  <p>结果层面还有三条边界。第一，<strong>不是每个单元格都随 instruct 提升</strong>：7B-Instruct 的 Bamboogle EM <strong data-src="Table 2">42.40</strong> 低于 7B 的 <strong data-src="Table 2">43.20</strong>。第二，<strong>论文的「<span data-src="§1">8.9%–22.4%</span> 绝对提升」与 Table 2 的 Bamboogle 差值 <strong data-src="Table 2">25.60</strong> 不一致</strong>：正文这句话对应 Figure 1，而 Table 2 的 32B-Instruct <strong data-src="Table 2">56.80</strong> 对 IRCoT <strong data-src="Table 2">31.20</strong> 差 <strong data-src="Table 2">25.60</strong>；页面把两处并列，不替作者消解。第三，<strong>训练曲线只给趋势</strong>：Figure 3 没有标出搜索次数的具体值，不能引用「从 1.5 涨到 3.5」这类读数。</p>
+  <p>方法层面最值得记住的是「检索结果掩码」：它让策略只为自己的思考与查询负责，不被环境文本带偏。代价是模型学不到「如何改写检索结果」，也不直接优化检索质量 <span class="infer">推断</span>；检索器的召回上限就是策略的上限（依据：§2.1 的损失掩码让 &lt;result&gt; token 不参与梯度，§2.3 的奖励只来自最终答案 F1 与格式，没有检索质量项）。</p>
+
+</section>
+
+<footer>
+  <div>ReSearch: Learning to Reason with Search for LLMs via Reinforcement Learning</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2503.19470v3">https://arxiv.org/abs/2503.19470v3</a>（NeurIPS 2025；页面以 v3 为准）<br>
+    代码：<a href="https://github.com/Agent-RL/ReSearch">https://github.com/Agent-RL/ReSearch</a><br>
+    笔记：<a href="/researchlearning-to-reason-with-search-for-llms-via-reinforcement-learning/">ReSearch：Learning to Reason with Search for LLMs via Reinforcement Learning</a><br>
+    数字口径：<span data-src="§3.2">15.81 / 17.56 / 14.82 / 15.46</span> 为原文 §3.2 报告值；按 Table 2 复算为四个基准对 Iter-RetGen 的绝对点差平均（见 §6.2）。
+  </div>
+
+  <div class="errata">
+    <strong>笔记勘误（只记录，不修改原笔记）</strong>
+    <ul>
+      <li><strong>「和 Search-R1 的区别就是多了个格式奖励」不完整：</strong><a href="https://arxiv.org/abs/2503.09516" target="_blank" rel="noopener">Search-R1 论文</a>（arXiv 2503.09516）用 EM 作答案奖励、每次检索 top-3、训练集是 NQ + HotpotQA；ReSearch 改成 F1、top-5、只训 MuSiQue（§2.3、§3.1）。另外 Search-R1 论文 §3.4 明确写 “we do not incorporate format rewards”，其官方仓库的 format 变体才设置 <code data-src="scripts/nq_hotpotqa/v0.3/train_grpo_format.sh:81">reward_model.structure_format_score=0.2</code>、<code data-src="scripts/nq_hotpotqa/v0.3/train_grpo_format.sh:82">final_format_score=0.1</code>；所以格式奖励也不是 ReSearch 独有。</li>
+      <li><strong>「平均提升 15.81%」是绝对点差，不是相对提升：</strong>原文 §3.2 写的是 “the average improvement of ReSearch over the best baseline is <strong data-src="§3.2">15.81%</strong> in exact match and <strong data-src="§3.2">17.56%</strong> in LLM-as-a-judge”；但按 Table 2 复算，四个数是四个基准对 Iter-RetGen 的绝对点差平均（7B EM 加数 <strong data-src="Table 2">9.16 / 19.67 / 13.61 / 20.80</strong>），不是相对提升，也不是对每列最强基线的差值平均（Bamboogle 若用 IRCoT 24.80，差值是 17.60）。页面统一写成 15.81 个百分点，并另列逐基准差值。</li>
+      <li><strong>「Bamboogle <span data-src="Table 2">31.20</span>→<span data-src="Table 2">56.80</span>」正确，但「提升幅度巨大」要限定：</strong><strong data-src="Table 2">31.20</strong> 是 IRCoT 的 EM，<strong data-src="Table 2">56.80</strong> 是 32B-Instruct 的 EM；这是 EM 口径，LJ 是 <strong data-src="Table 2">47.20</strong>→<strong data-src="Table 2">67.20</strong>。两者不能混着说。</li>
+      <li><strong>「Figure 3 搜索次数稳步上升」正确，但没有具体数值：</strong>图里只有曲线，没有标注每次训练步的平均搜索次数；不能从图上读出一个精确的起止值。</li>
+      <li><strong>「只在 MuSiQue 上训练」正确，但评测也是英文多跳 QA：</strong>HotpotQA、2Wiki、MuSiQue、Bamboogle 都是英文多跳问答；「泛化」不能外推到开放域网页研究或长文任务。</li>
+    </ul>
+    <strong style="display:block;margin-top:16px">原文自身表述（非笔记错误）</strong>
+    <ul>
+      <li><strong>§1 的「8.9%–22.4%」与 Table 2 的 <span data-src="Table 2">25.60</span> 差值不一致：</strong>论文 §1 说绝对提升范围是 <span data-src="§1">8.9%–22.4%</span>（对应 Figure 1），但 Table 2 的 Bamboogle EM <strong data-src="Table 2">56.80</strong> 对 IRCoT <strong data-src="Table 2">31.20</strong> 差 <strong data-src="Table 2">25.60</strong> 个百分点。原文图与表没有对齐，页面并列呈现。另有 Figure 1 的图注/数值错位：图注称所有 baseline 基于 Qwen2.5-32B-Instruct，但图中 ReSearch-32B-Instruct 的 LJ 读数 <span data-src="Figure 1">63.6 / 54.2 / 33.4 / 54.4</span> 等于 Table 2 的 7B-Instruct 行（<span data-src="Table 2">63.62 / 54.22 / 33.43 / 54.40</span>），不是 32B-Instruct 的 <span data-src="Table 2">67.70 / 50.30 / 38.56 / 67.20</span>；图中其余柱也与 Table 2 的 7B 行一致。原文没有说明这处错位，页面不替作者消解。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var DELTAS = {
+    '7em': {name: '7B · EM', vals: [9.16, 19.67, 13.61, 17.60], labels: ['HotpotQA', '2Wiki', 'MuSiQue', 'Bamboogle']},
+    '7lj': {name: '7B · LJ', vals: [11.40, 22.36, 17.29, 17.60], labels: ['HotpotQA', '2Wiki', 'MuSiQue', 'Bamboogle']},
+    '32em': {name: '32B · EM', vals: [6.92, 11.26, 13.91, 25.60], labels: ['HotpotQA', '2Wiki', 'MuSiQue', 'Bamboogle']},
+    '32lj': {name: '32B · LJ', vals: [8.90, 12.08, 18.45, 20.00], labels: ['HotpotQA', '2Wiki', 'MuSiQue', 'Bamboogle']}
+  };
+
+  function barRow(label, value, cls, max) {
+    var pct = (value / max) * 100;
+    if (pct < 1.5) pct = 1.5;
+    return '<div class="crow"><div class="cname">' + label + '</div><div class="cbars"><div class="cbar"><div class="track"><span class="fill ' + cls + '" style="height:' + pct.toFixed(1) + '%"></span></div><div class="num">+' + value.toFixed(2) + '</div></div></div></div>';
+  }
+
+  function renderDelta(key) {
+    var d = DELTAS[key];
+    var chart = document.getElementById('delta-chart');
+    var out = document.getElementById('delta-readout');
+    if (!chart || !out) return;
+    var html = '';
+    for (var i = 0; i < d.vals.length; i++) {
+      html += barRow(d.labels[i], d.vals[i], i === 3 ? 'b1' : 'b2', 28);
+    }
+    chart.innerHTML = html;
+    out.innerHTML = d.name + ' 相对最强基线的差值：HotpotQA +' + d.vals[0].toFixed(2) + '、2Wiki +' + d.vals[1].toFixed(2) + '、MuSiQue +' + d.vals[2].toFixed(2) + '、Bamboogle +' + d.vals[3].toFixed(2) + ' 个百分点。';
+  }
+
+  var tabs = document.getElementById('delta-tabs');
+  if (tabs) {
+    tabs.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      Array.prototype.forEach.call(tabs.querySelectorAll('.rule-btn'), function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      renderDelta(btn.getAttribute('data-mode'));
+    });
+    renderDelta('7em');
+  }
+})();
+</script>
+</body>
+</html>

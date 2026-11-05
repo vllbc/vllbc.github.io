@@ -1,0 +1,459 @@
+<!-- LEDGER
+| 27.3 | Table 1 | 40.2-12.9 |
+| 211.6 | Table 1 | (40.2-12.9)/12.9*100 |
+| 40.3 | Table 1 | 73.0-32.7 |
+| 123.2 | Table 1 | (73.0-32.7)/32.7*100 |
+| 8.1 | Table 1 | 15.8-7.7 |
+| 105.2 | Table 1 | (15.8-7.7)/7.7*100 |
+| 23.8 | Table 1 | 54.9-31.1 |
+| 76.5 | Table 1 | (54.9-31.1)/31.1*100 |
+| -1.4 | Table 1 | 27.7-29.1 |
+| -4.8 | Table 1 | (27.7-29.1)/29.1*100 |
+| 26.6 | Table 4 | 43.3-16.7 |
+| 159.3 | Table 4 | (43.3-16.7)/16.7*100 |
+| 29.7 | Table 4 | 65.0-35.3 |
+| 84.1 | Table 4 | (65.0-35.3)/35.3*100 |
+| 45.4 | Table 3 Δ 行 | 45.4 |
+| 43.2 | Table 3 | 76.2-33.0 |
+| 40.0 | Table 3 | 76.3-36.3 |
+| 26.2 | Table 3 | 58.7-32.5 |
+| 16.8 | Table 3 Δ 行 | 16.8 |
+| 32.1 | Table 1 | 12.9/40.2*100 |
+| 100.0 | Table 1 | 40.2/40.2*100 |
+| 19.2 | Table 1 | 7.7/40.2*100 |
+| 39.3 | Table 1 | 15.8/40.2*100 |
+| 19.7 | Table 1 | 7.9/40.2*100 |
+| 59.7 | Table 1 | 24.0/40.2*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TTRL：用多数投票当奖励，在测试时做强化学习</title>
+<meta name="description" content="TTRL 对每道无标签测试题采样 64 条回答，用多数投票当伪标签，再以 0/1 奖励跑 GRPO。Qwen2.5-Math-7B 的 AIME2024 pass@1 从 12.9 到 40.2，相对 +211.6%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b2{background:var(--c1)}
+.cbar .fill.b3{background:var(--c2)}
+.cbar .fill.b4{background:var(--c3)}
+.cbar .num{color:var(--text-muted)}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.arrow-head{fill:var(--text-soft)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:18px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:13px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:12.5px;fill:var(--text-muted)}
+.svg-scroll{overflow-x:auto}
+.svg-scroll svg{min-width:800px}
+.tbl-scroll .tbl-wide{min-width:900px}
+.tbl-scroll .tbl-mid{min-width:700px}
+.tbl-center td,.tbl-center th{text-align:center}
+.model-row td{background:var(--bg-soft);font-weight:700;color:var(--text)}
+@media(max-width:560px){.controls{grid-template-columns:1fr}.svg-l{font-size:14px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">TTRL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">代价</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Test-Time RL · NeurIPS 2025</span>
+  <h1>TTRL：用多数投票当奖励，在测试时做强化学习</h1>
+  <p class="hero-sub">测试数据没有标签，但模型可以自己采样 64 条回答、数一数哪个答案出现最多，把这个“多数答案”当成伪标签；与它一致的得 1 分，不一致得 0 分，再跑 GRPO 更新参数。Qwen2.5-Math-7B 在 AIME2024 上 pass@1 从 <span data-src="Table 1">12.9</span> 升到 <span data-src="Table 1">40.2</span>（相对 <span data-src="Table 1">211.6</span>%），而训练信号只是 maj@n。</p>
+  <div class="meta">
+    <span>Yuxin Zuo、Kaiyan Zhang、Li Sheng 等 · 清华大学 / 上海 AI Lab</span>
+    <a href="https://arxiv.org/abs/2504.16084" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/PRIME-RL/TTRL" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>TTRL 把测试时缩放（TTS）里的多数投票从“一次性推理技巧”改成“RL 奖励源”。每道题采样 N 条回答，按最终答案投票得到伪标签 y；每条回答与 y 比较，得 1 或 0；用 GRPO 更新模型。这个过程可以在测试数据上在线迭代，不需要任何人工标签。</p>
+  <p>论文的关键发现是：TTRL 的最终平均准确率能超过它最初的 maj@n 上限，也能接近用真标签训练的模型；在 AIME2024 上，Qwen2.5-Math-7B 的 12.9→40.2 是相对 <span data-src="Table 1">211.6</span>% 的提升，四个基准平均 31.1→54.9（相对 <span data-src="Table 1">76.5</span>%）。</p>
+  <p>机制上，伪标签不一定准：Qwen2.5-Math-7B（base）在 AIME2024 上初始标签准确率只有 37%，但奖励准确率约 92%（§4.2、Figure 9）。原因是“Lucky Hit”：即使伪标签错了，与它不同的错误回答仍会得到 0 分，而这恰好是正确答案应得的奖励。代价是每道题要采样 64 条回答、训练 32 条，推理算力远高于单次前向。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">40.2<small>%</small></div><div class="k">Qwen2.5-Math-7B 的 AIME2024 pass@1（w/ TTRL）；base 12.9%</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">73.0<small>%</small></div><div class="k">Qwen2.5-Math-1.5B 的 MATH-500 pass@1；base 32.7%</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">211.6<small>%</small></div><div class="k">7B 在 AIME2024 上的相对提升（12.9→40.2）</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>测试时没有标签，但推理本身会产生“共识”</h2></div>
+  <p class="sec-sub">传统流程把训练和测试分开：训练用标签，测试只前向。TTRL 问的是：能不能在测试时继续更新参数，而标签从模型自己的多次采样里来？</p>
+  <p>给定一道无标签测试题 x，策略 πθ 采样 N 条回答 {y<sub>1</sub>, …, y<sub>N</sub>}。多数投票取出现次数最多的最终答案作为伪标签 y*：</p>
+  <div class="eq">y* = argmax<sub>a</sub> Σ<sub>i=1</sub><sup>N</sup> 1[ extract(y<sub>i</sub>) = a ]</div>
+  <div class="eq-cap">Eq. 4 的多数投票形式；答案抽取器把每条回答映射成最终答案。</div>
+  <p>然后给每条回答一个 0/1 奖励：</p>
+  <div class="eq">R(y<sub>i</sub>, y*) = 1, 若 extract(y<sub>i</sub>) = y*；否则 0</div>
+  <div class="eq-cap">Eq. 3：奖励只做“与伪标签是否一致”的比较，不需要真标签。</div>
+  <p>RL 目标就是最大化期望奖励：</p>
+  <div class="eq">max<sub>θ</sub> E<sub>y∼πθ(·|x)</sub>[ R(y, y*) ]<br>θ ← θ + η ∇<sub>θ</sub> E<sub>y∼πθ(·|x)</sub>[ R(y, y*) ]</div>
+  <div class="eq-cap">Eq. 1–2：TTRL 的在线更新；η 是学习率。</div>
+  <p>这套流程有三个隐含前提。第一，模型对同一道题要能生成足够多样的回答，否则投票没有意义；第二，答案要能被抽取和比较，数学题可以用规则 verifier；第三，模型的先验要足够强，能在多数投票里形成比随机更好的共识。论文的 Table 3 就是在测第三个前提。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>自训练是离线的，自洽性不改参数，TTRL 把两者接起来</h2></div>
+  <p class="sec-sub">TTRL 的位置可以用两条轴划清：标签从哪来、参数更不更新。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">自训练 / 伪标签</span><h4>离线：教师打标，学生拟合</h4></div>
+      <p>传统 self-training 先用一个模型生成伪标签，再拿这些伪标签做 SFT。学生性能通常被教师的伪标签质量限制，且训练是离线的，不会在测试过程中持续改进。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">自洽性 / Best-of-N</span><h4>只改推理，不改参数</h4></div>
+      <p>Self-consistency 对同一题采样多条回答并投票，用投票结果作为最终答案；Best-of-N 用奖励模型选一条。它们都只利用测试时算力，不更新模型参数。</p>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">TTRL</span><h4>在线：投票 → 奖励 → RL</h4></div>
+      <p>投票结果不只用来选答案，还变成奖励信号去更新参数；更新后的模型下一轮投票更准，形成在线循环。论文称其为“lifts itself up by its own bootstraps”。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">与 RLHF 的区别</span><h4>没有人工偏好，也没有真标签</h4></div>
+      <p>RLHF/RLAIF 需要人类偏好或强模型反馈；TTRL 的奖励完全来自模型自身的多数投票。它仍然需要一个答案抽取器/规则 verifier 来比较答案，不是“连 verifier 都不要”。</p>
+    </div>
+  </div>
+  <table class="tbl-mid">
+    <caption>表 0A · 四类方法的标签来源与测试时更新（页面整理，非论文表格）</caption>
+    <thead><tr><th>方法</th><th>标签来源</th><th>测试时更新参数</th><th>主要成本</th></tr></thead>
+    <tbody>
+      <tr><td>Self-training</td><td>教师模型伪标签</td><td>否（离线 SFT）</td><td>教师生成 + SFT</td></tr>
+      <tr><td>Self-consistency</td><td>自身多数投票</td><td>否</td><td>N 次前向</td></tr>
+      <tr><td>RLHF / RLAIF</td><td>人类偏好 / AI 反馈</td><td>训练阶段</td><td>偏好数据 + RL</td></tr>
+      <tr class="best"><td>TTRL</td><td>自身多数投票</td><td>是（测试时 RL）</td><td>N 次采样 + 反向传播</td></tr>
+    </tbody>
+  </table>
+  <p class="eq-cap">表中“测试时更新”指在无标签测试数据上继续训练；TTRL 的更新是 GRPO，不是 SFT。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>投票得伪标签，0/1 奖励，GRPO 更新</h2></div>
+  <p class="sec-sub">方法本身很短：采样、投票、比较、更新。真正需要解释的是“为什么伪标签不准也能训”。</p>
+  <h3>四步循环</h3>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">1 · Rollout</span><h4>采样 N 条</h4></div><p>对每道题用温度采样生成 64 条回答；论文再把每条回答下采样到 32 条用于训练，以降低计算。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">2 · Vote</span><h4>多数答案当伪标签</h4></div><p>抽取每条回答的最终答案，取出现次数最多者为 y*；平票时按实现里的计数顺序处理，论文没有展开平票规则。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pa">3 · Reward</span><h4>一致 1，不一致 0</h4></div><p>奖励是二元的，没有负奖励，也没有部分 credit；同一条回答与 y* 的答案字符串/数值相等才得 1。</p></div>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p1">4 · Update</span><h4>GRPO 更新策略</h4></div>
+    <p>把 (回答, 奖励) 交给 GRPO，按组内相对优势更新 πθ；论文也在 MATH-500 / Qwen2.5-Math-1.5B 上验证了 PPO、PRIME 可以替换 GRPO，三条准确率/熵曲线“closely aligned”（Figure 5）。</p>
+  </div>
+
+  <h3>为什么伪标签错了还能训：Lucky Hit</h3>
+  <p>假设真答案是 A，但模型采样出的多数答案是 B（错）。对于一条预测为 C（也错）的回答，奖励函数比较 C 与 B：不相等，给 0。这个 0 对“C 是错的”来说恰好是正确奖励。也就是说，伪标签不需要等于真答案，只需要<strong>与错误回答不同</strong>，就能给出正确的负奖励。</p>
+  <p>论文在 Qwen2.5-Math-7B（base）的 AIME2024 上观察到：初始标签准确率只有 37%，但奖励准确率约 92%；标签准确率多数时候在 50% 以下，奖励准确率多数时候在 75% 以上（§4.2、Figure 9）。原因是 base model 的错误回答很分散，多数答案的占比只有 16.6%，所以“多数答案”与大量错误回答不同，Lucky Hit 频繁发生。</p>
+  <details class="handcalc">
+    <summary>手算：一个 8 条回答的投票例子 <span class="sum-sub">0/1 奖励与奖励准确率</span></summary>
+    <div class="details-body">
+      <p>设真答案 A，8 条回答的最终答案是：A, A, A, B, B, C, D, E。多数票 y* = A（3 票），伪标签正确。</p>
+      <p>奖励：3 条 A 得 1；B/C/D/E 共 5 条得 0。若按真答案 A 计算奖励，这 8 条也应分别是 1/1/1/0/0/0/0/0，所以奖励准确率 = 8/8 = 100%。</p>
+      <p>若真答案是 F，而多数票仍是 A（伪标签错），则 3 条 A 得 1（错误奖励），5 条非 A 得 0（正确奖励）；奖励准确率 = 5/8 = 62.5%。只要错误回答足够分散，这个比例就会高，Lucky Hit 就越有效。</p>
+      <p>这个例子只解释奖励机制，不代表论文的具体分布；论文的 37%/92% 是 Qwen2.5-Math-7B（base）在 AIME2024 上的实测曲线。</p>
+    </div>
+  </details>
+  <p>注意 TTRL 并没有“解决”伪标签错误：它只是让奖励在伪标签错误时仍然大概率正确。若多数票集中在一个错误答案上、且模型其他回答与它大量重合，Lucky Hit 就会失效，这也是论文把“先验知识不足”列为失败条件的原因。</p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>8×A100、64 条采样、32 条训练：省的是标签，不是算力</h2></div>
+  <p class="sec-sub">TTRL 把标注成本换成了测试时采样与反向传播成本；论文给了完整训练配置，但没有给单题平均 GPU 小时。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-mid tbl-center">
+    <caption>表 0B · TTRL 训练与评测配置（页面整理，数字取自 §3.1/§3.2）</caption>
+    <thead><tr><th>项目</th><th>设置</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>硬件</td><td>8×A100 80GB</td><td>全部实验</td></tr>
+      <tr><td>投票采样</td><td>64 条 / 题</td><td>温度 0.6；Qwen2.5-Math 与 LRM 用 1.0</td></tr>
+      <tr><td>训练采样</td><td>32 条 / 题</td><td>从 64 条中下采样，降低计算</td></tr>
+      <tr><td>最大生成长度</td><td>3,072 tokens</td><td>LRM 为 32,768 tokens</td></tr>
+      <tr><td>优化器</td><td>AdamW，cosine</td><td>峰值学习率 5e−7</td></tr>
+      <tr><td>episodes</td><td>10 / 30 / 80</td><td>MATH-500 / AMC / AIME2024，按数据规模设定</td></tr>
+      <tr><td>评测</td><td>16 条 / 题</td><td>温度 0.6、top-p 0.95；32k 上下文用 4 条</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">§3.1 与 §3.2：TTRL 对每个 benchmark 单独训练；主表用非零温度采样报告 pass@1，附录 A 的 Table 4 用 greedy decoding，两者不是同一口径。</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">标签成本</span></div><p>0 个人工标签；但需要答案抽取器与规则 verifier，数学题之外的任务要先定义“答案相等”。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">采样成本</span></div><p>每题 64 条 rollout，是单次推理的 64 倍；训练再取 32 条，反向传播成本随模型规模上升。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pa">训练成本</span></div><p>8×A100 80GB；论文没有给总 GPU 小时、单题耗时或显存峰值。</p></div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>采样 → 投票 → 奖励 → GRPO → 下一轮采样</h2></div>
+  <p class="sec-sub">在线循环的关键是：更新后的模型会改变下一轮的投票分布，伪标签质量与奖励质量一起变化。</p>
+  <figure>
+    <div class="svg-scroll">
+    <svg viewBox="0 0 880 360" role="img" aria-label="TTRL 流程：无标签问题采样 64 条回答，多数投票得伪标签，0/1 奖励，GRPO 更新模型，再回到采样">
+      <defs><marker id="ttrl-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" class="arrow-head"/></marker></defs>
+      <rect class="svg-box" x="20" y="30" width="150" height="58" rx="10"/>
+      <text x="95" y="55" text-anchor="middle" class="svg-t">无标签问题 x</text>
+      <text x="95" y="75" text-anchor="middle" class="svg-s">测试数据流</text>
+      <rect class="svg-box" x="210" y="30" width="180" height="58" rx="10"/>
+      <text x="300" y="55" text-anchor="middle" class="svg-t">采样 64 条</text>
+      <text x="300" y="75" text-anchor="middle" class="svg-s">π_θ(·|x)，温度 &gt; 0</text>
+      <rect class="svg-hot" x="430" y="30" width="180" height="58" rx="10"/>
+      <text x="520" y="55" text-anchor="middle" class="svg-t">多数投票</text>
+      <text x="520" y="75" text-anchor="middle" class="svg-s">伪标签 y*</text>
+      <rect class="svg-hot" x="650" y="30" width="210" height="58" rx="10"/>
+      <text x="755" y="55" text-anchor="middle" class="svg-t">0/1 奖励</text>
+      <text x="755" y="75" text-anchor="middle" class="svg-s">与 y* 一致得 1，否则 0</text>
+      <rect class="svg-box" x="430" y="145" width="180" height="58" rx="10"/>
+      <text x="520" y="170" text-anchor="middle" class="svg-t">GRPO 更新</text>
+      <text x="520" y="190" text-anchor="middle" class="svg-s">32 条 / 题</text>
+      <rect class="svg-box" x="210" y="145" width="180" height="58" rx="10"/>
+      <text x="300" y="170" text-anchor="middle" class="svg-t">新策略 π_θ</text>
+      <text x="300" y="190" text-anchor="middle" class="svg-s">下一轮投票更准</text>
+      <rect class="svg-box" x="20" y="145" width="150" height="58" rx="10"/>
+      <text x="95" y="170" text-anchor="middle" class="svg-t">在线循环</text>
+      <text x="95" y="190" text-anchor="middle" class="svg-s">可持续自进化</text>
+      <rect class="svg-box" x="210" y="265" width="400" height="58" rx="10"/>
+      <text x="410" y="290" text-anchor="middle" class="svg-t">评测</text>
+      <text x="410" y="310" text-anchor="middle" class="svg-s">pass@1（16 条）· 训练日志：熵 / 多数比例 / 奖励准确率</text>
+      <path class="svg-ln" d="M170 59 L210 59" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M390 59 L430 59" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M610 59 L650 59" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M755 88 L755 120 L520 120 L520 145" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M430 174 L390 174" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M210 174 L170 174" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M300 203 L300 265" marker-end="url(#ttrl-ar)"/>
+      <path class="svg-ln" d="M95 145 L95 92" marker-end="url(#ttrl-ar)"/>
+    </svg>
+    </div>
+    <figcaption>图：TTRL 的在线循环。伪标签来自当前策略的多次采样，奖励是 0/1 比较；训练后策略变化，下一轮伪标签也随之变化。图不覆盖分布式 rollout、答案抽取器实现与 GRPO 的具体超参。</figcaption>
+  </figure>
+  <div class="two-col">
+    <div class="card"><div class="card-head"><span class="pill p1">与 TTS 的关系</span><h4>投票既是推理，也是训练信号</h4></div><p>同一批 rollout 既用于选出最终答案，也用于计算奖励；TTRL 没有额外标注，只是把 TTS 的计算复用为 RL 数据。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">与 TTT 的关系</span><h4>在线更新，不是离线适配</h4></div><p>传统 TTT 用自监督辅助损失适配单个测试样本；TTRL 用 RL 奖励在测试分布上持续更新，属于在线学习。</p></div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>AIME 12.9→40.2、MATH-500 32.7→73.0：多数模型提升，但不是全部都涨</h2></div>
+  <p class="sec-sub">先看 Table 1 的主结果，再看 Table 2 的更多模型、Table 3 的难度分层，最后区分 greedy 与采样口径。</p>
+
+  <h3>Table 1 · 主结果（4 个基准 + 平均）</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-wide">
+    <thead><tr><th>模型</th><th>AIME2024</th><th>AMC</th><th>MATH-500</th><th>GPQA</th><th>Avg</th></tr></thead>
+    <tbody>
+      <tr class="model-row"><td colspan="6">Qwen2.5-Math-1.5B</td></tr>
+      <tr><td>Base</td><td class="num">7.7</td><td class="num">28.6</td><td class="num">32.7</td><td class="num">24.9</td><td class="num">23.5</td></tr>
+      <tr class="best"><td>w/ TTRL</td><td class="num">15.8</td><td class="num">48.9</td><td class="num">73.0</td><td class="num">26.1</td><td class="num">41.0</td></tr>
+      <tr class="model-row"><td colspan="6">Qwen2.5-Math-7B</td></tr>
+      <tr><td>Base</td><td class="num">12.9</td><td class="num">35.6</td><td class="num">46.7</td><td class="num">29.1</td><td class="num">31.1</td></tr>
+      <tr class="best"><td>w/ TTRL</td><td class="num">40.2</td><td class="num">68.1</td><td class="num">83.4</td><td class="num">27.7</td><td class="num">54.9</td></tr>
+      <tr class="model-row"><td colspan="6">Qwen2.5-7B</td></tr>
+      <tr><td>Base</td><td class="num">7.9</td><td class="num">34.8</td><td class="num">60.5</td><td class="num">31.8</td><td class="num">33.8</td></tr>
+      <tr class="best"><td>w/ TTRL</td><td class="num">23.3</td><td class="num">56.6</td><td class="num">80.5</td><td class="num">33.6</td><td class="num">48.5</td></tr>
+      <tr class="model-row"><td colspan="6">Qwen2.5-32B</td></tr>
+      <tr><td>Base</td><td class="num">7.9</td><td class="num">32.6</td><td class="num">55.8</td><td class="num">33.2</td><td class="num">32.4</td></tr>
+      <tr class="best"><td>w/ TTRL</td><td class="num">24.0</td><td class="num">59.3</td><td class="num">83.2</td><td class="num">37.7</td><td class="num">51.1</td></tr>
+      <tr class="model-row"><td colspan="6">LLaMA3.1-8B</td></tr>
+      <tr><td>Base</td><td class="num">4.6</td><td class="num">23.3</td><td class="num">48.6</td><td class="num">30.8</td><td class="num">26.8</td></tr>
+      <tr class="best"><td>w/ TTRL</td><td class="num">10.0</td><td class="num">32.3</td><td class="num">63.7</td><td class="num">34.1</td><td class="num">35.0</td></tr>
+      <tr class="model-row"><td colspan="6">Qwen3-8B（non-thinking，3k context）</td></tr>
+      <tr><td>Base</td><td class="num">26.9</td><td class="num">57.8</td><td class="num">82.3</td><td class="num">48.1</td><td class="num">53.8</td></tr>
+      <tr class="best"><td>w/ TTRL</td><td class="num">46.7</td><td class="num">69.1</td><td class="num">89.3</td><td class="num">53.0</td><td class="num">64.5</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 1：主结果。AIME/AMC/MATH-500/GPQA 均为 pass@1；主实验用 16 条非零温度采样评测。Qwen2.5-Math-7B 的 GPQA 是 <span data-src="Table 1">27.7</span> 对 base <span data-src="Table 1">29.1</span>，低 <span data-src="Table 1">1.4</span> 点（相对 <span data-src="Table 1">4.8</span>%），不是所有单元格都上升。</p>
+  <p>7B 的 AIME 差值是 <span data-src="Table 1">27.3</span> 点、相对 <span data-src="Table 1">211.6</span>%；1.5B 的 MATH-500 差值是 <span data-src="Table 1">40.3</span> 点、相对 <span data-src="Table 1">123.2</span>%；7B 的四基准平均从 <span data-src="Table 1">31.1</span> 到 <span data-src="Table 1">54.9</span>，相对 <span data-src="Table 1">76.5</span>%。1.5B 的 AIME 从 <span data-src="Table 1">7.7</span> 到 <span data-src="Table 1">15.8</span>，相对 <span data-src="Table 1">105.2</span>%。</p>
+
+  <div class="sim">
+    <div class="tabs" id="ttrl-metric-tabs">
+      <button class="tab active" data-metric="aime">AIME2024</button>
+      <button class="tab" data-metric="amc">AMC</button>
+      <button class="tab" data-metric="math">MATH-500</button>
+      <button class="tab" data-metric="gpqa">GPQA</button>
+    </div>
+    <div class="readout" data-src="Table 1"><div class="r-head">当前读数</div><div id="ttrl-chart-out"></div></div>
+    <div class="chart" id="ttrl-chart">
+      <div class="crow"><div class="cname">1.5B Base</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="ttrl-fill-0"></div></div><div class="num" id="ttrl-num-0">7.7</div></div></div></div>
+      <div class="crow"><div class="cname">1.5B TTRL</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b1" id="ttrl-fill-1"></div></div><div class="num" id="ttrl-num-1">15.8</div></div></div></div>
+      <div class="crow"><div class="cname">7B Base</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="ttrl-fill-2"></div></div><div class="num" id="ttrl-num-2">12.9</div></div></div></div>
+      <div class="crow"><div class="cname">7B TTRL</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b1" id="ttrl-fill-3"></div></div><div class="num" id="ttrl-num-3">40.2</div></div></div></div>
+      <div class="crow"><div class="cname">32B Base</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="ttrl-fill-4"></div></div><div class="num" id="ttrl-num-4">7.9</div></div></div></div>
+      <div class="crow"><div class="cname">32B TTRL</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b1" id="ttrl-fill-5"></div></div><div class="num" id="ttrl-num-5">24.0</div></div></div></div>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>w/ TTRL</span><span><i style="background:var(--c1)"></i>Base</span><span>柱高按当前指标的最大值归一；数值逐字取自 Table 1</span></div>
+  </div>
+  <details class="handcalc">
+    <summary>手算：AIME 视图的柱高 <span class="sum-sub">与 JS 逐位一致</span></summary>
+    <div class="details-body">
+      <p>最大值是 7B TTRL 40.2，所以 7B TTRL 柱高 = round(40.2/40.2×1000)/10 = 100.0%；7B Base = round(12.9/40.2×1000)/10 = 32.1%。</p>
+      <p>1.5B Base = round(7.7/40.2×1000)/10 = 19.2%；1.5B TTRL = 39.3%；32B Base = 19.7%；32B TTRL = 59.7%。</p>
+      <p>柱高最低 1.2%，避免 0 值柱不可见；本视图最小值 19.2%，不会触发。图表只画三个模型，完整六个模型见 Table 1。</p>
+    </div>
+  </details>
+
+  <h3>Table 2 · 更多模型：AIME 有 0，个别单元格下降</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-mid">
+    <thead><tr><th>模型</th><th>AIME</th><th>AMC</th><th>MATH-500</th></tr></thead>
+    <tbody>
+      <tr><td>LLaMA-3.2-3B-Oat-Zero</td><td class="num">0.8 → 3.3</td><td class="num">15.1 → 25.3</td><td class="num">41.9 → 55.7</td></tr>
+      <tr><td>LLaMA-3.2-3B-Instruct</td><td class="num">6.0 → 13.3</td><td class="num">19.4 → 31.3</td><td class="num">43.9 → 61.6</td></tr>
+      <tr><td>Mistral-Nemo-Instruct</td><td class="num">0.8 → 0</td><td class="num">15.4 → 24.8</td><td class="num">40.8 → 51.0</td></tr>
+      <tr><td>Ministral-8B-Instruct</td><td class="num">1.3 → 3.3</td><td class="num">19.7 → 28.9</td><td class="num">52.4 → 57.8</td></tr>
+      <tr><td>DeepSeek-Math-7B-Instruct</td><td class="num">1.9 → 2.5</td><td class="num">16.3 → 22.9</td><td class="num">42.3 → 52.4</td></tr>
+      <tr><td>DeepSeek-R1-LLaMA-8B</td><td class="num">51.7 → 69.2</td><td class="num">81.6 → 88.9</td><td class="num">89.6 → 90.9</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 2：更多模型。Mistral-Nemo 的 AIME 从 0.8 降到 0；其余大多数单元格上升，但不是每个都上升。</p>
+
+  <h3>Table 3 · 难度分层：越难，提升越小</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-wide">
+    <thead><tr><th>指标</th><th>MATH-500-L1</th><th>L2</th><th>L3</th><th>L4</th><th>L5</th></tr></thead>
+    <tbody>
+      <tr><td>Backbone 准确率</td><td class="num">25.9</td><td class="num">33.0</td><td class="num">36.3</td><td class="num">32.5</td><td class="num">22.3</td></tr>
+      <tr><td>w/ TTRL 准确率</td><td class="num">71.2</td><td class="num">76.2</td><td class="num">76.3</td><td class="num">58.7</td><td class="num">39.2</td></tr>
+      <tr><td>准确率差（点）</td><td class="num">+45.4</td><td class="num">+43.2</td><td class="num">+40.0</td><td class="num">+26.2</td><td class="num">+16.8</td></tr>
+      <tr><td>Backbone 回答长度</td><td class="num">2,339.2</td><td class="num">2,125.1</td><td class="num">2,120.6</td><td class="num">1,775.1</td><td class="num">1,751.3</td></tr>
+      <tr><td>w/ TTRL 回答长度</td><td class="num">624.3</td><td class="num">614.4</td><td class="num">672.3</td><td class="num">783.5</td><td class="num">985.3</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 3：MATH-500 按难度五等分，Qwen2.5-Math-1.5B。L1 准确率 +45.4 点，L5 只有 +16.8 点；回答长度也大幅缩短。论文把这一趋势归因于“先验知识不足”；<span class="infer">推断</span>：这不是 TTRL 的奖励机制在难题上失效。原表 Δ 行与显示单元格直接相减在 L1、L5 上差 0.1（45.4 vs 45.3、16.8 vs 16.9），应为未舍入值的舍入差异。</p>
+
+  <h3>Table 4 · greedy 口径：159.3%，不是 211.6%</h3>
+  <p>附录 A 的 Table 4 用 greedy decoding，Qwen2.5-Math-7B 从 <span data-src="Table 4">16.7</span> 到 <span data-src="Table 4">43.3</span>，相对 <span data-src="Table 4">159.3</span>%；三基准平均从 <span data-src="Table 4">35.3</span> 到 <span data-src="Table 4">65.0</span>，相对 <span data-src="Table 4">84.1</span>%。主表 Table 1 的 211.6% 用的是 16 条非零温度采样；两个数字不是同一评测口径，不能混用。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">原文内部并列</span><h4>211.6% 与 159.3% 是同一模型的不同评测</h4></div>
+    <p>摘要与 Table 1 的 211.6% 来自 16 条采样、非零温度；附录 A 的 159.3% 来自 greedy decoding。论文没有把两者统一，页面并列。类似地，Table 1 的 7B GPQA 下降 1.4 点，但四基准平均仍上升 23.8 点，这两个结论也并列。</p>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它不是“无标签就一定能涨”：先验、超参、算力三道门槛</h2></div>
+  <p class="sec-sub">TTRL 的失败条件比成功条件更值得看：多数投票要有可用的共识，RL 要能稳定训练，算力要付得起。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">先验不足</span><h4>难题上提升变小</h4></div>
+      <p>Table 3 的 L5 只提升 16.8 点，L1 提升 45.4 点；论文明确说模型先验不足以支撑更难问题的学习。若多数投票接近随机，伪标签和奖励都会失去意义。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">超参敏感</span><h4>温度与 batch 能训崩</h4></div>
+      <p>Figure 11 展示失败尝试：温度 1.0（相对 0.6）和训练 batch 256 都可能让熵持续偏高、准确率不涨。TTRL 没有数据过滤或课程学习，超参错误会被测试分布放大。</p>
+    </div>
+  </div>
+  <p>算力上，TTRL 每题要 64 条 rollout，训练再用 32 条；仅采样就约为单次推理的 64 倍。论文节省的是人工标注，不是总 compute。对 API 服务，这意味着测试时延迟和成本显著上升；对本地部署，需要额外的反向传播显存与时间。</p>
+  <p>理论上，论文没有给收敛性证明或性能上界；它只给经验观察（avg@n 超过初始 maj@n）和机制解释（Lucky Hit）。奖励是 0/1，没有利用模型置信度、答案语义相似度或过程奖励；多数投票也可能把错误共识放大，论文对 mode collapse 的缓解讨论有限。</p>
+  <p>任务范围上，主实验是数学（AIME/AMC/MATH-500）与 GPQA；开放域生成、代码、多模态、Agent 任务没有验证。数学题有明确最终答案和规则 verifier，这是 TTRL 能工作的关键数据条件；换成开放式任务，答案抽取与“相等”判定本身就是难题。</p>
+</section>
+
+<footer>
+  <div>TTRL: Test-Time Reinforcement Learning · Yuxin Zuo、Kaiyan Zhang、Li Sheng 等 · 清华大学 / 上海 AI Lab · NeurIPS 2025</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2504.16084">https://arxiv.org/abs/2504.16084</a>（本页以 arXiv 2504.16084v3 为准）<br>
+    代码：<a href="https://github.com/PRIME-RL/TTRL">https://github.com/PRIME-RL/TTRL</a><br>
+    笔记：<a href="/ttrltest-time-reinforcement-learning/">TTRL：Test-Time Reinforcement Learning</a>
+  </div>
+  <div class="errata">
+    <p><strong>笔记勘误（只改页面，不动笔记）：</strong></p>
+    <ul>
+      <li>笔记开头把 TTRL 描述为伪标签训练的开创性工作。“伪标签/self-training”在本文之前已有很长历史；论文本身也没有主张开创性。TTRL 的主张是“在测试时用多数投票奖励做 RL”，不是发明伪标签。页面不使用“开创性”“首次”这类表述。</li>
+      <li>笔记说“不一致的则获得零奖励或负奖励”。论文 Eq. 3 的奖励只有 1 和 0，没有负奖励；页面按 0/1 写。</li>
+      <li>笔记说“几乎所有模型在所有测试基准上都获得显著的正向收益”。Table 1 里 Qwen2.5-Math-7B 的 GPQA 是 27.7 对 29.1（−1.4 点，相对 −4.8%）；Table 2 里 Mistral-Nemo 的 AIME 从 0.8 降到 0。更准确的说法是“大多数模型/基准上升，个别单元格下降”。</li>
+      <li>笔记说 TTRL“完全自给自足”“实现真正的无监督学习”。TTRL 不需要人工标签，但仍需要答案抽取器和规则 verifier 来判断“回答与伪标签是否一致”；它不是连验证器都不需要的无监督学习。页面用“无标签测试时 RL”描述。</li>
+    </ul>
+    <p><strong>补充说明（不指控笔记，只补条件）：</strong></p>
+    <ul>
+      <li>论文 §4.1 / Figure 6 的具体观察是：AMC 上 Qwen2.5-Math-1.5B 的 avg@16 超过初始 maj@16 20+ 点；这是该设置下的结果，不是所有模型、所有基准的统一幅度。笔记引用 Figure 6 的方向本身成立。</li>
+      <li>论文 Figure 5 的“closely aligned”是在 MATH-500 / Qwen2.5-Math-1.5B 上比较 GRPO、PPO、PRIME，不是跨任务的普遍结论；笔记的“可以结合、表现相似”在该设置下成立，页面补上条件。</li>
+      <li>论文 §4.3 讨论的是先验不足与超参失败，没有系统分析 mode collapse；笔记说论文对此着墨不多，本身成立，页面不把“模式崩溃”写成论文结论。</li>
+    </ul>
+    <p><strong>原文内部并列（不替原文消解）：</strong></p>
+    <ul>
+      <li>摘要/Table 1 的 211.6% 与附录 A/Table 4 的 159.3% 是同一模型的不同评测（采样 vs greedy），页面并列。</li>
+      <li>Table 1 的 Qwen2.5-Math-7B GPQA 下降 1.4 点，但四基准平均上升 23.8 点；Table 2 的 Mistral-Nemo AIME 从 0.8 到 0；这些与“整体提升”的叙述并列，不删去反例。</li>
+      <li>Figure 9 的标签准确率约 37%、奖励准确率约 92% 是 Qwen2.5-Math-7B（base）在初始 AIME2024 的观察；正文又说标签准确率多数时候在 50% 以下、奖励准确率多数时候在 75% 以上。页面引用这两个范围，不把它们当成所有数据集的值。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var chart = document.getElementById('ttrl-chart');
+  var chartOut = document.getElementById('ttrl-chart-out');
+  var tabs = document.getElementById('ttrl-metric-tabs');
+  if (chart && chartOut && tabs) {
+    var LABELS = {aime: 'AIME2024', amc: 'AMC', math: 'MATH-500', gpqa: 'GPQA'};
+    var DATA = {
+      aime: [7.7, 15.8, 12.9, 40.2, 7.9, 24.0],
+      amc: [28.6, 48.9, 35.6, 68.1, 32.6, 59.3],
+      math: [32.7, 73.0, 46.7, 83.4, 55.8, 83.2],
+      gpqa: [24.9, 26.1, 29.1, 27.7, 33.2, 37.7]
+    };
+    var active = 'aime';
+    function renderChart() {
+      var vals = DATA[active];
+      var max = Math.max.apply(null, vals);
+      for (var i = 0; i < vals.length; i++) {
+        var fill = document.getElementById('ttrl-fill-' + i);
+        var num = document.getElementById('ttrl-num-' + i);
+        if (fill) {
+          var pct = Math.round(vals[i] / max * 1000) / 10;
+          if (pct < 1.2) pct = 1.2;
+          fill.style.height = pct + '%';
+        }
+        if (num) num.textContent = vals[i].toFixed(1);
+      }
+      chartOut.innerHTML = LABELS[active] + '：7B Base ' + vals[2].toFixed(1) +
+        ' → TTRL ' + vals[3].toFixed(1) + '；1.5B ' + vals[0].toFixed(1) +
+        ' → ' + vals[1].toFixed(1) + '；32B ' + vals[4].toFixed(1) +
+        ' → ' + vals[5].toFixed(1) + '。';
+    }
+    var btns = tabs.querySelectorAll('.tab');
+    for (var t = 0; t < btns.length; t++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          active = btn.getAttribute('data-metric');
+          for (var k = 0; k < btns.length; k++) btns[k].classList.toggle('active', btns[k] === btn);
+          renderChart();
+        });
+      })(btns[t]);
+    }
+    renderChart();
+  }
+})();
+</script>
+</body>
+</html>

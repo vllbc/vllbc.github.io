@@ -1,0 +1,797 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.87 | Table 1 | 58.56-56.69 |
+| 12.11 | Table 1 | 58.56-46.45 |
+| 0.09 | Table 1 | 3.20-3.11 |
+| 1.32 | Table 1 | 4.43-3.11 |
+| 1.94 | Table 1 | 59.02-57.08 |
+| 9.69 | Table 1 | 59.02-49.33 |
+| 3.3 | Table 1 | (58.56-56.69)/56.69*100 |
+| 10 | §6.1 | 0.33/0.033 |
+| 292.79 | Table 1 | 68.73+46.99+74.31+43.00+59.76 |
+| 58.56 | Table 1 | 292.79/5 |
+| 257.83 | Table 1 | 57.51+37.46+69.48+40.64+52.74 |
+| 51.57 | Table 1 | 257.83/5 |
+| 1.514 | Table 1 | (1.63+1.66+1.34+0.59+2.35)/5 |
+| 0.544 | Table 1 | (0.81+0.34+0.39+0.51+0.67)/5 |
+| 1.334 | Table 1 | (1.22+1.53+0.88+0.97+2.07)/5 |
+| 0.412 | Table 1 | (0.21+0.34+0.24+0.83+0.44)/5 |
+| 1.682 | Table 1 | (2.32+2.32+1.19+0.07+2.51)/5 |
+| 0.540 | Table 1 | (0.57+0.21+0.41+0.73+0.78)/5 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peri-LN · 子层两端各加一次归一化，让残差方差线性增长</title>
+<meta name="description" content="Peri-LN 在 Transformer 子层的输入和输出各加一次 LayerNorm，把 Pre-LN 的指数方差增长改成线性增长；论文在 400M/1.5B/3.2B、30B token、5 个种子上对比 Post-LN/Pre-LN，并给出梯度上界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共样式全部来自 base.css */
+.tcap{caption-side:top;text-align:left;font-size:12.5px;color:var(--text-soft);padding:0 0 8px}
+.diagram-note{font-size:12.5px;color:var(--text-soft);text-align:center;margin-top:10px}
+.box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.5}
+.box.soft{fill:var(--bg-soft)}
+.box.accent{fill:var(--accent-soft);stroke:var(--accent)}
+.box.dashed{stroke-dasharray:5 4;fill:var(--bg-soft)}
+.lbl{font-size:13px;font-weight:600;fill:var(--text);font-family:Inter,"Noto Sans SC",sans-serif}
+.sub{font-size:10.5px;fill:var(--text-soft);font-family:Inter,"Noto Sans SC",sans-serif}
+.arrow{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.ln-node{transition:opacity .18s ease}
+.pos-label{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+.pos-label.on{fill:var(--accent);font-weight:700}
+.plus{font-family:"JetBrains Mono",monospace;font-size:14px;fill:var(--text);font-weight:600}
+.errata{margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);font-size:12.5px;line-height:1.8;color:var(--text-soft)}
+.errata strong{color:var(--text-muted)}
+.errata ul{margin:7px 0 0;padding-left:18px}
+.errata li{margin-bottom:6px}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.prop-eq{text-align:left;font-size:14px;line-height:1.95}
+.prop-eq>div{white-space:nowrap}
+.prop-eq .tag-ln{font-family:Inter,"Noto Sans SC",sans-serif;font-size:12px;color:var(--text-soft);margin-right:8px}
+.eq-break{display:none}
+figure svg + svg{margin-top:28px}
+#placement-sim[data-active="post"] .box.accent{fill:var(--c1-soft);stroke:var(--c1)}
+#placement-sim[data-active="pre"] .box.accent{fill:var(--c2-soft);stroke:var(--c2)}
+#placement-sim[data-active="peri"] .box.accent{fill:var(--accent-soft);stroke:var(--accent)}
+#placement-sim[data-active="post"] .pos-label.on{fill:var(--c1)}
+#placement-sim[data-active="pre"] .pos-label.on{fill:var(--c2)}
+#placement-sim[data-active="peri"] .pos-label.on{fill:var(--accent)}
+#placement-sim[data-active="post"] .slot.hit{border-color:var(--c1);background:var(--c1-soft);box-shadow:0 0 0 3px var(--c1-soft)}
+#placement-sim[data-active="pre"] .slot.hit{border-color:var(--c2);background:var(--c2-soft);box-shadow:0 0 0 3px var(--c2-soft)}
+#placement-sim[data-active="peri"] .slot.hit{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 3px var(--accent-soft)}
+@media (max-width:600px){.prop-eq{font-size:12px}.eq-break{display:block}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Peri-LN</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#existing">两条路</a>
+      <a href="#method">公式</a>
+      <a href="#train">训练</a>
+      <a href="#arch">结构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · ICML 2025 · arXiv 2502.02732v3</span>
+  <h1>Peri-LN：在子层两端各放一个归一化，让残差干道既通梯度又不积方差</h1>
+  <p class="hero-sub">
+    Post-LN 把 LN 压在残差相加之后，方差稳了，梯度却要一层层穿过 LN；Pre-LN 把 LN 挪到模块输入，梯度通了，模块输出却直接堆进残差干道。
+    这篇论文把 Gemma、OLMo 等模型里已经出现的第三种做法命名为 <strong>Peri-LN</strong>：模块输入和输出都归一化。作者用方差递推和梯度上界解释它为什么有效，并在 400M / 1.5B / 3.2B、30B token、5 个种子上与 Post-LN、Pre-LN 对比。
+  </p>
+  <div class="meta">
+    <span>Jeonghoon Kim 等 · NAVER Cloud · KAIST · NAVER AI Lab</span>
+    <a href="https://arxiv.org/abs/2502.02732v3" target="_blank" rel="noopener">arXiv 2502.02732v3 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    三种放置的差别只在 LN 放在子层的哪个位置，但它决定了残差干道是不是被归一化。Post-LN 把 LN 放在残差相加之后（Figure 2 的 C），主路径被压住，梯度却要穿过 LN。
+  </p>
+  <p>
+    Pre-LN 只归一化模块输入（A），残差干道没有 LN，梯度路径更直；代价是模块输出不经归一化就加进干道。§3.2 指出，初始化时 Pre-LN 的方差近似随深度线性增长，但训练开始后会指数上升；Figure 1 用 1.5B 模型追踪了这一点。
+  </p>
+  <p>
+    Peri-LN 在模块输入和输出各放一个 LN（A + B），即 <code>y<sub>l</sub> = x<sub>l</sub> + Norm(Module(Norm(x<sub>l</sub>)))</code>。如果归一化后的模块输出方差近似常数 β<sub>0</sub>，则 <code>Var(x<sub>l+1</sub>) ≈ Var(x<sub>l</sub>) + β<sub>0</sub></code>（Eq. 4），方差增长从乘法变成加法。Proposition 3.1 进一步给出：对最后一层 MLP 权重，Pre-LN 的梯度范数正比于 <code>||h||</code>，而 Peri-LN 的上界带一个阻尼因子 <code>1/||a||</code>（Eq. 8）。
+  </p>
+  <p>
+    Table 1 的 3.2B 模型平均分 58.56，Pre-LN 56.69，Post-LN 46.45；C4 evaluation loss 3.11，Pre-LN 3.20。论文没有做显著性检验，这些是 5 个训练种子下的均值与标准差所对应的点差。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">58.56</div>
+      <div class="k">3.2B 平均基准分<br>Pre-LN 56.69 / Post-LN 46.45</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">3.11</div>
+      <div class="k">3.2B C4 evaluation loss<br>Pre-LN 3.20 / Post-LN 4.43</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+1.87<small>pp</small></div>
+      <div class="k">3.2B 平均分相对 Pre-LN<br>58.56 − 56.69</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Pre-LN 的残差干道越干净，巨量激活越容易一路带到最后一层</h2></div>
+  <p class="sec-sub">先建立问题：LN 放在哪里，决定了模块输出能不能污染残差干道；而这个问题在训练开始后才会暴露。</p>
+
+  <p>Transformer 的一个子层可以写成 <code>y<sub>l</sub> = x<sub>l</sub> + Module(x<sub>l</sub>)</code>。残差连接把 <code>x<sub>l</sub></code> 原样送到下一层，<code>Module</code> 只负责在主干上加一个增量。LN 放在增量的哪一侧，决定了这个增量在汇入主干前是否被约束。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Post-LN</span><h4>LN 在残差相加之后</h4></div>
+      <p><code>y<sub>l</sub> = Norm(x<sub>l</sub> + Module(x<sub>l</sub>))</code>（Eq. 1）。主路径上的每一步都被归一化，激活不会逐层放大。</p>
+      <p>代价是反向传播要穿过每一层的 LN。§3.1–3.2 说，深层模型里这会削弱梯度流，可能出现部分梯度消失和更慢的收敛。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Pre-LN</span><h4>LN 只在模块输入</h4></div>
+      <p><code>y<sub>l</sub> = x<sub>l</sub> + Module(Norm(x<sub>l</sub>))</code>（Eq. 2）。残差主路径上没有 LN，梯度可以沿恒等路径直接回传。</p>
+      <p>代价是 <code>Module(Norm(x<sub>l</sub>))</code> 没有归一化就加到 <code>x<sub>l</sub></code> 上。模块输出一旦很大，就会沿着残差路径一路保留。</p>
+    </div>
+  </div>
+
+  <p>论文把后者和 Sun et al. (2024) 的 <em>massive activations</em> 联系起来：Pre-LN 的残差恒等路径没有归一化，大激活可以从浅层一直传到深层。§3.2 的原句是：</p>
+  <blockquote>
+    “Pre-LN normalizes x<sub>l</sub> before the module but leaves the module output unnormalized, allowing hidden-state variance to accumulate exponentially once parameter updates amplify the input.”
+  </blockquote>
+
+  <p>关键在“once parameter updates amplify the input”。初始化时，Pre-LN 的方差增长看起来只是随深度线性增加（Kedia et al., 2024，转引）；但论文观察的是训练过程。Figure 1 用 1.5B 模型从初始化追到 6.3B token；§3.2 的文字结论是 Post-LN 的方差大致恒定，Pre-LN 在训练开始后指数上升。Figure 1 的 caption 则笼统写 “the growth in hidden-state variance for both Pre-LN and Post-LN architectures”，措辞比 §3.2 正文更宽泛。Peri-LN 的受控方差是 §3.3 引入 Output-LN 之后讨论的。</p>
+
+  <p>这不只是训练曲线好不好看。Figure 11 追踪 3.2B 模型的全局 top-100 绝对激活值：Pre-LN 在 0.5B token 左右就超过 FP16 可表示上限 <span class="mono" data-src="Appendix K">65,504</span>，而 Peri-LN 一直低于这条线。Appendix K 还提到，V100 不支持 BF16，这类溢出会直接变成数值问题。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">本节结论</span><h4>问题不是“要不要 LN”，而是“LN 要不要碰残差主路径”</h4></div>
+    <p>Post-LN 让 LN 碰主路径，换来稳定方差，但梯度要穿过它；Pre-LN 让主路径保持干净，换来梯度通路，但模块输出可以不受约束地加进去。两条路都把同一个 trade-off 推到了极端。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="existing">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Post-LN 管住方差但压住梯度，Pre-LN 放开梯度却放开方差</h2></div>
+  <p class="sec-sub">两条主流路线不是谁对谁错，而是把同一个 trade-off 推向了相反的两端；先看清各自卡在哪。</p>
+
+  <h3>放置位置只有三个：A、B、C</h3>
+  <p>Figure 2 把 LN 的可能位置拆成三个：<strong>A</strong> 在模块输入，<strong>B</strong> 在模块输出，<strong>C</strong> 在残差相加之后。三种策略的勾选表如下（转录自 Figure 2）：</p>
+
+  <table>
+    <caption class="tcap">Figure 2（§3.1–3.3）的 A/B/C 勾选表（转录）</caption>
+    <thead>
+      <tr><th>策略</th><th style="text-align:center">A · 模块输入</th><th style="text-align:center">B · 模块输出</th><th style="text-align:center">C · 残差相加之后</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Post-LN</td><td style="text-align:center">×</td><td style="text-align:center">×</td><td style="text-align:center">✓</td></tr>
+      <tr><td>Pre-LN</td><td style="text-align:center">✓</td><td style="text-align:center">×</td><td style="text-align:center">×</td></tr>
+      <tr class="best"><td>Peri-LN</td><td style="text-align:center">✓</td><td style="text-align:center">✓</td><td style="text-align:center">×</td></tr>
+    </tbody>
+  </table>
+
+  <p>这张表已经说明了三者的结构差异：Post-LN 只有 C，Pre-LN 只有 A，Peri-LN 同时有 A 和 B，但没有 C。也就是说，Peri-LN 保留了 Pre-LN 的干净主路径，同时在模块输出汇入残差之前加了一道约束。</p>
+
+  <h3>梯度范数的排序，和分数排序并不一致</h3>
+  <p>§4.4 和 Figure 5(a) 报告：在训练稳定的 run 里，final-layer gradient norm 满足 <strong>Post-LN &gt; Pre-LN &gt; Peri-LN</strong>。但 Table 1 的 benchmark 平均分排序是 <strong>Peri-LN &gt; Pre-LN &gt; Post-LN</strong>。两组排序方向相反。</p>
+  <p>论文没有把 final-layer gradient norm 当作排名指标；§5.2 更关心的是梯度在层间是否均匀：Figure 7 显示 Post-LN 在训练后期的低层梯度变小，Pre-LN 在初始化阶段反向传播时梯度变大，而 Peri-LN 在初始化和训练结束时都保持较均匀的逐层分布。<span class="infer">推断</span>（依据：§4.4 只报告排序，§5.2 才把“均匀”作为稳定性的解释；两处量的口径不同。）</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">共同盲区</span><h4>两者都没有在“模块输出汇入残差之前”做约束</h4></div>
+    <p>Post-LN 在汇入之后归一化，Pre-LN 在汇入之前只归一化输入。前者让主路径被 LN 覆盖，后者让未归一化的模块输出直接进入主路径。Peri-LN 选的是第三条：在汇入之前，对模块输出本身做归一化。</p>
+  </div>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Peri-LN 把模块输出也归一化，方差从指数增长变成每层加一个常数</h2></div>
+  <p class="sec-sub">核心只有一行公式；真正要理解的是它为什么能把方差增长从乘法变成加法，以及梯度上界里的阻尼因子从哪来。</p>
+
+  <div class="eq">
+    y<sub>l</sub> = x<sub>l</sub> + <span class="hl-c">Norm</span>( Module( <span class="hl-a">Norm</span>(x<sub>l</sub>) ) )
+  </div>
+  <div class="eq-cap">Eq. 3 · 输入侧沿用 Pre-LN 的 Norm(x<sub>l</sub>)；输出侧新增的 Norm 是 Peri-LN 与 Pre-LN 的关键结构差别</div>
+
+  <p>与 Pre-LN 相比，Peri-LN 多了最外层的 <code>Norm</code>；与 Post-LN 相比，这个 <code>Norm</code> 没有放在残差相加之后，所以主路径仍然没有 LN。论文在 §3.3 里把这一步写成 <code>Norm(Module(Norm(x<sub>l</sub>)))</code>，并指出如果这一项的方差近似常数 β<sub>0</sub>，就有：</p>
+
+  <div class="eq">
+    Var(x<sub>l+1</sub>) ≈ Var(x<sub>l</sub>) + β<sub>0</sub>
+  </div>
+  <div class="eq-cap">Eq. 4 · 每层只加一个常数项；结果是线性或次指数增长，而不是 Pre-LN 的指数增长</div>
+
+  <p>这就是“外围归一化”的核心：它不改变残差主路径的结构，只在模块输出汇入主路径之前把增量的尺度固定住。主路径仍然可以直通梯度，但不会再被一个未归一化的大增量反复放大。</p>
+
+  <h3>Proposition 3.1：Pre-LN 的梯度正比于 ||h||，Peri-LN 多了一个分母</h3>
+  <p>论文考虑最后一层 MLP 的权重 <code>W<sup>(2)</sup></code>，令 <code>h = ReLU(x̃W<sup>(1)</sup> + b<sup>(1)</sup>)</code>。两种策略的梯度行为分别是：</p>
+
+  <div class="eq prop-eq">
+    <div><span class="tag-ln">Pre-LN</span>x̃ = Norm(x)，a = MLP(x̃)，o = x + a&nbsp;（Eq. 5）</div>
+    <div><span class="tag-ln">梯度</span>∂L(o)/∂W<sup>(2)</sup><sub>i,j</sub> ∝ ||h||&nbsp;（Eq. 6）</div>
+    <div><span class="tag-ln">Peri-LN</span>x̃ = Norm(x)，a = MLP(x̃)，ã = Norm(a)，<span class="eq-break"></span>o = x + ã&nbsp;（Eq. 7）</div>
+    <div><span class="tag-ln">梯度</span>∂L(o)/∂W<sup>(2)</sup><sub>i,j</sub> ≤ 4γ√D ||h|| / ||a||&nbsp;（Eq. 8）</div>
+  </div>
+  <div class="eq-cap">Eq. 5–8 · 论文分析的是最后一层 MLP 权重 W<sup>(2)</sup>；Eq. 8 的阻尼来自对 a 的归一化</div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Pre-LN</span><h4>梯度随 ||h|| 放大</h4></div>
+      <p>模块输入先归一化，输出直接加回残差（Eq. 5）。梯度对最后一层 MLP 权重的范数正比于 <code>||h||</code>（Eq. 6）。</p>
+      <p>当 massive activation 让 <code>||h||</code> 很大时，梯度范数可以随之爆炸，导致训练不稳定。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Peri-LN</span><h4>梯度被 ||a|| 阻尼</h4></div>
+      <p>模块输入和输出都归一化（Eq. 7）。梯度上界带一个 <code>1/||a||</code> 的阻尼因子（Eq. 8）。</p>
+      <p>即使 <code>||h||</code> 很大，这个比值也能保持有界。论文称之为 self-regularizing gradient。</p>
+    </div>
+  </div>
+
+  <p>注意这个上界的范围：它只针对最后一层 MLP 权重 <code>W<sup>(2)</sup></code> 的梯度，是局部上界，不是逐层或全局上界。§3.4 与 Appendix C 给了形式化陈述和证明，但论文没有给出端到端的全局收敛证明。这个边界在 §07 还会再提一次。</p>
+
+  <h3>自己动手：切换三种放置，看 LN 到底碰不碰主路径</h3>
+  <p>下图只画前向放置。点按钮切换策略，观察 A、B、C 三个位置哪些被启用，以及对应的方差行为和梯度通路。</p>
+
+  <div class="sim" id="placement-sim" data-active="pre">
+    <div class="sim-top" id="placement-btns">
+      <button class="rule-btn" data-place="post">Post-LN<span class="r-sub">LN 在残差相加之后（C）</span></button>
+      <button class="rule-btn active" data-place="pre">Pre-LN<span class="r-sub">LN 只在模块输入（A）</span></button>
+      <button class="rule-btn" data-place="peri">Peri-LN<span class="r-sub">模块输入 + 输出（A + B）</span></button>
+    </div>
+
+    <div class="placement-stage">
+      <svg viewBox="0 0 760 190" role="img" aria-label="Post-LN、Pre-LN、Peri-LN 的 LN 放置对比示意图">
+        <defs>
+          <marker id="parr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--text-soft)"></path>
+          </marker>
+        </defs>
+        <!-- 主路径与残差路径 -->
+        <path d="M 50 115 H 710" class="arrow" marker-end="url(#parr)"></path>
+        <path d="M 50 115 V 40 H 560 V 103" class="arrow" marker-end="url(#parr)"></path>
+        <text x="300" y="32" class="sub" text-anchor="middle">残差恒等路径（没有 LN）</text>
+        <text x="30" y="120" class="lbl" text-anchor="end">x_l</text>
+        <text x="720" y="120" class="lbl">y_l</text>
+
+        <!-- Module -->
+        <rect x="250" y="75" width="150" height="80" rx="8" class="box"></rect>
+        <text x="325" y="108" class="lbl" text-anchor="middle">Module</text>
+        <text x="325" y="128" class="sub" text-anchor="middle">Attention / MLP</text>
+
+        <!-- Addition -->
+        <circle cx="560" cy="115" r="12" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.5"></circle>
+        <text x="560" y="120" class="plus" text-anchor="middle">+</text>
+
+        <!-- LN A -->
+        <g class="ln-node" data-ln="A">
+          <rect x="150" y="95" width="70" height="40" rx="8" class="box accent"></rect>
+          <text x="185" y="120" class="lbl" text-anchor="middle">Norm</text>
+        </g>
+        <!-- LN B -->
+        <g class="ln-node" data-ln="B">
+          <rect x="430" y="95" width="70" height="40" rx="8" class="box accent"></rect>
+          <text x="465" y="120" class="lbl" text-anchor="middle">Norm</text>
+        </g>
+        <!-- LN C -->
+        <g class="ln-node" data-ln="C">
+          <rect x="600" y="95" width="70" height="40" rx="8" class="box accent"></rect>
+          <text x="635" y="120" class="lbl" text-anchor="middle">Norm</text>
+        </g>
+
+        <!-- 位置标签 -->
+        <text x="185" y="158" class="pos-label" data-pos="A" text-anchor="middle">A · 输入</text>
+        <text x="465" y="158" class="pos-label" data-pos="B" text-anchor="middle">B · 输出</text>
+        <text x="635" y="158" class="pos-label" data-pos="C" text-anchor="middle">C · 相加后</text>
+      </svg>
+      <div class="diagram-note">A = 模块输入；B = 模块输出；C = 残差相加之后。位置与 Figure 2 的勾选表一致。</div>
+    </div>
+
+    <div class="slots s3" id="placement-slots">
+      <div class="slot" data-slot="A">
+        <div class="slot-name">A · 模块输入</div>
+        <div class="slot-val" id="slot-a">ON</div>
+      </div>
+      <div class="slot" data-slot="B">
+        <div class="slot-name">B · 模块输出</div>
+        <div class="slot-val" id="slot-b">—</div>
+      </div>
+      <div class="slot" data-slot="C">
+        <div class="slot-name">C · 相加之后</div>
+        <div class="slot-val" id="slot-c">—</div>
+      </div>
+    </div>
+
+    <div class="readout" id="placement-readout" data-src="Figure 2">
+      <div class="r-head">当前放置：Pre-LN</div>
+      <div id="placement-msg">Pre-LN 只在 A 放 LN。主路径没有 LN，模块输出不经归一化就加进残差；训练开始后方差会指数累积（§3.2, Figure 1）。</div>
+      <div class="diagram-note" style="margin-top:8px;text-align:left">位置定义来自 Figure 2；A/B/C 的公式与方差/梯度讨论见 §3.1–3.3。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个交互覆盖了什么，没覆盖什么？<span class="sum-sub">点开看分支对照</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖的分支：</strong>三个前向放置与 Figure 2 的勾选表一一对应——Post-LN 只有 C；Pre-LN 只有 A；Peri-LN 有 A 和 B。A/B/C 的位置定义逐字来自 Figure 2 与 §3.1–3.3 的公式。</p>
+      <p><strong>没覆盖的分支：</strong>反向传播的具体路径、embedding/final LN、γ 的可学习性、Attention 与 MLP 两个子层的重复结构。图中的 Module 是二者的抽象；真实 block 里每个子层各有一套 A/B，见 §05 的结构图。</p>
+      <p><strong>参数 → 结果（2 组）：</strong></p>
+      <ul>
+        <li>Pre-LN → A 开、B 关、C 关 → 主路径无 LN；模块输出未归一化；方差在训练开始后指数增长（§3.2）。</li>
+        <li>Peri-LN → A 开、B 开、C 关 → 主路径无 LN；模块输出先归一化再汇入；若其方差近似 β<sub>0</sub>，方差每层加一个常数（Eq. 4）。</li>
+      </ul>
+      <p>这个交互没有数值常量；判定来自 Figure 2 的勾选表和 §3.1–3.3 的公式，不是从表格读数。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练配方没有为 Peri-LN 特调：30B token、5 个种子、标准 Megatron-LM</h2></div>
+  <p class="sec-sub">把实验条件摊开看：规模、数据、优化器和 SFT 都沿用 DCLM / Llama 3 的一套设置；论文没有报告 Peri-LN 的吞吐或显存开销。</p>
+
+  <p>模型规模是 400M、1.5B、3.2B（均不含 embedding 参数），每个规模训练 30B token，使用 5 个随机种子；序列长度 8192，数据是 DCLM-baseline，tokenizer 是 TikToken 的 cl100k base，架构主要跟随 Llama 3（SwiGLU MLP），归一化层主要用 RMSNorm，训练框架是 Megatron-LM（§4.1）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption class="tcap">Table 2（v3）转录：预训练通用配置</caption>
+      <thead>
+        <tr><th>Global Batch</th><th>Weight Decay</th><th>Iterations</th><th>Optimizer</th><th>LR Schedule</th><th>Warmup</th><th>Weight Init.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">256</td><td class="num">0.033</td><td class="num">14400</td><td>Adam</td><td>Cosine</td><td class="num">10%</td><td class="num">0.02</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption class="tcap">Table 4（v3）转录：模型配置（不含 embedding 参数）</caption>
+      <thead>
+        <tr><th>Size</th><th>n_layers</th><th>n_heads</th><th>d_model</th><th>d_head</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>400M</td><td class="num">24</td><td class="num">8</td><td class="num">1024</td><td class="num">128</td></tr>
+        <tr><td>1.5B</td><td class="num">24</td><td class="num">16</td><td class="num">2048</td><td class="num">128</td></tr>
+        <tr><td>3.2B</td><td class="num">32</td><td class="num">16</td><td class="num">2560</td><td class="num">160</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>学习率方面，§4.2 说 Pre-LN 在所有规模上的最佳学习率都是 <span class="mono" data-src="§4.2">2 × 10<sup>-3</sup></span>，因此 Pre-LN 和 Peri-LN 都用这个值；Post-LN 的合适学习率更低，Appendix E.1 单独做了搜索。SFT 用 LIMA 的 1,000 条样本，训练 15 个 epoch，batch size 128，Adam 初始学习率 <span class="mono" data-src="Appendix D.2">1e-5</span>，cosine schedule；checkpoint 按 OpenBookQA、CommonSenseQA 和 GLUE NLI 上的表现挑选（Appendix D.2）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">工程视角</span><h4>多出来的是一次 Norm，但没有吞吐数字</h4></div>
+    <p>从结构上看，Peri-LN 在每个子层多一次归一化：Pre-LN 每个子层一次，Peri-LN 是两次。论文没有报告这部分带来的吞吐、显存或 FLOPs 变化；Table 2 只给训练超参。能还原的是配置，不是耗时。<span class="infer">推断</span>（依据：全文没有吞吐/显存表格；§7.2 只讨论精度约束。）</p>
+  </div>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一个 block 里，LN 把 Attention 和 MLP 各包了两圈</h2></div>
+  <p class="sec-sub">把 Eq. 3 落成结构：输入 embedding 可选归一化，每个子层的输入和输出各一次 LN，最后再归一化输出。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 120" role="img" aria-label="Peri-LN 模型整体流程">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--text-soft)"></path>
+        </marker>
+      </defs>
+      <rect x="20" y="30" width="130" height="56" rx="8" class="box"></rect>
+      <text x="85" y="63" class="lbl" text-anchor="middle">Token Embedding</text>
+      <path d="M 150 58 H 190" class="arrow" marker-end="url(#a1)"></path>
+      <rect x="190" y="30" width="140" height="56" rx="8" class="box dashed"></rect>
+      <text x="260" y="55" class="lbl" text-anchor="middle">Norm（optional）</text>
+      <text x="260" y="74" class="sub" text-anchor="middle">Eq. 3 第 1 步</text>
+      <path d="M 330 58 H 370" class="arrow" marker-end="url(#a1)"></path>
+      <rect x="370" y="20" width="220" height="76" rx="10" class="box accent"></rect>
+      <text x="480" y="52" class="lbl" text-anchor="middle">Peri-LN Block × N</text>
+      <text x="480" y="74" class="sub" text-anchor="middle">Attention + MLP</text>
+      <path d="M 590 58 H 630" class="arrow" marker-end="url(#a1)"></path>
+      <rect x="630" y="30" width="120" height="56" rx="8" class="box"></rect>
+      <text x="690" y="55" class="lbl" text-anchor="middle">Final Norm</text>
+      <text x="690" y="74" class="sub" text-anchor="middle">Eq. 3 第 3 步</text>
+      <path d="M 750 58 H 790" class="arrow" marker-end="url(#a1)"></path>
+      <rect x="790" y="30" width="90" height="56" rx="8" class="box"></rect>
+      <text x="835" y="63" class="lbl" text-anchor="middle">LM Head</text>
+      <text x="480" y="112" class="sub" text-anchor="middle">虚线框：Eq. 3 标为 optional；§5.3 的 γ 实验省略了它</text>
+    </svg>
+
+    <svg viewBox="0 0 900 330" role="img" aria-label="Peri-LN 单个 block 的内部结构">
+      <defs>
+        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--text-soft)"></path>
+        </marker>
+      </defs>
+      <text x="30" y="30" class="lbl">Attention 子层</text>
+      <text x="30" y="64" class="lbl" text-anchor="end">x_l</text>
+      <path d="M 50 60 H 70" class="arrow" marker-end="url(#a2)"></path>
+      <rect x="70" y="40" width="80" height="40" rx="7" class="box accent"></rect>
+      <text x="110" y="65" class="lbl" text-anchor="middle">Norm A</text>
+      <path d="M 150 60 H 190" class="arrow" marker-end="url(#a2)"></path>
+      <rect x="190" y="30" width="150" height="60" rx="8" class="box"></rect>
+      <text x="265" y="65" class="lbl" text-anchor="middle">Attention</text>
+      <path d="M 340 60 H 380" class="arrow" marker-end="url(#a2)"></path>
+      <rect x="380" y="40" width="80" height="40" rx="7" class="box accent"></rect>
+      <text x="420" y="65" class="lbl" text-anchor="middle">Norm B</text>
+      <path d="M 460 60 H 500" class="arrow" marker-end="url(#a2)"></path>
+      <circle cx="512" cy="60" r="12" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.5"></circle>
+      <text x="512" y="65" class="plus" text-anchor="middle">+</text>
+      <path d="M 50 60 V 12 H 512 V 48" class="arrow" marker-end="url(#a2)"></path>
+      <text x="280" y="8" class="sub" text-anchor="middle">残差</text>
+      <text x="545" y="64" class="sub">中间状态</text>
+
+      <path d="M 524 60 V 150 H 30 V 208" class="arrow" marker-end="url(#a2)"></path>
+      <text x="300" y="145" class="sub" text-anchor="middle">中间状态进入 MLP 子层</text>
+
+      <text x="30" y="185" class="lbl">MLP 子层</text>
+      <text x="30" y="224" class="lbl" text-anchor="end">x'</text>
+      <path d="M 50 220 H 70" class="arrow" marker-end="url(#a2)"></path>
+      <rect x="70" y="200" width="80" height="40" rx="7" class="box accent"></rect>
+      <text x="110" y="225" class="lbl" text-anchor="middle">Norm A</text>
+      <path d="M 150 220 H 190" class="arrow" marker-end="url(#a2)"></path>
+      <rect x="190" y="190" width="150" height="60" rx="8" class="box"></rect>
+      <text x="265" y="225" class="lbl" text-anchor="middle">MLP</text>
+      <path d="M 340 220 H 380" class="arrow" marker-end="url(#a2)"></path>
+      <rect x="380" y="200" width="80" height="40" rx="7" class="box accent"></rect>
+      <text x="420" y="225" class="lbl" text-anchor="middle">Norm B</text>
+      <path d="M 460 220 H 500" class="arrow" marker-end="url(#a2)"></path>
+      <circle cx="512" cy="220" r="12" style="fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.5"></circle>
+      <text x="512" y="225" class="plus" text-anchor="middle">+</text>
+      <path d="M 50 220 V 172 H 512 V 208" class="arrow" marker-end="url(#a2)"></path>
+      <text x="280" y="168" class="sub" text-anchor="middle">残差</text>
+      <text x="545" y="224" class="sub">x_{l+1}</text>
+    </svg>
+    <figcaption>
+      图：Peri-LN 的整体流程（上）与单个 block 内部（下）。按 §3.3 Eq. 3 与 Figure 2 重绘。
+      <br>覆盖：embedding/final LN 的位置、Attention 与 MLP 各自的输入/输出 LN、残差相加的位置。
+      未覆盖：反向传播路径、γ 的动态、QK-Norm；图中的 Module 是 Attention/MLP 的抽象。
+    </figcaption>
+  </figure>
+
+  <p>这张图里有两个容易混淆的点。第一，Peri-LN 的残差主路径仍然没有 LN；它只是把每个子层的输出在加回残差之前归一化。第二，§3.3 的架构描述说 Peri-LN “further normalizes the input and final output embeddings”，Eq. 3 也在最后对 <code>x<sub>L</sub></code> 做一次 Norm，但第 1 步（输入 embedding）标为 optional；§5.3 说，为了单独考察 output-LN 的作用，那个实验省略了 embedding LN。因此页面把输入侧画成 optional，而不把“Peri-LN 默认含 embedding LN”当成 Table 1 的设定。<span class="infer">推断</span>（依据：§3.3 的架构描述与 Eq. 3 的 optional 标注；§5.3 明说该实验省略 embedding LN。）</p>
+
+  <p>与 OLMo2-style 的 Peri-LN（含 QK-Norm）相比，论文在 Appendix H 里说两者整体表现可比，Peri-LN 在 400M 和 1B（原文正文；Appendix H 的 Figure 33 标的是 1.5B）规模上略有优势；但这条对比不是本文的主实验，Table 1 也不包含 QK-Norm 变体。</p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>增益不大但方向一致：3.2B 平均分 +1.87 个百分点，C4 loss 低 0.09</h2></div>
+  <p class="sec-sub">先看 Table 1 的完整转录，再用交互切换三个规模；最后看两个反直觉的发现：梯度范数排序与分数排序相反，以及强 weight decay 也补不上差距。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption class="tcap">Table 1（v3）完整转录：均值 ± 标准差，5 个训练种子；Loss 为 C4 evaluation loss；SFT Avg. 为指令微调后的平均分；发散的 checkpoint 不计入。</caption>
+      <thead>
+        <tr>
+          <th>Size</th><th>Arch.</th><th style="text-align:right">ARC-Easy</th><th style="text-align:right">HellaSwag</th><th style="text-align:right">PIQA</th><th style="text-align:right">SIQA</th><th style="text-align:right">Winogrande</th><th style="text-align:right">Avg. ↑</th><th style="text-align:right">Loss ↓</th><th style="text-align:right">SFT Avg. ↑</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>400M</td><td>Post-LN</td><td class="num">35.70 ±1.09</td><td class="num">28.91 ±0.16</td><td class="num">62.26 ±0.73</td><td class="num">34.48 ±1.04</td><td class="num">50.88 ±0.75</td><td class="num">42.45</td><td class="num">7.46</td><td class="num">46.44</td></tr>
+        <tr><td>400M</td><td>Pre-LN</td><td class="num">54.87 ±1.63</td><td class="num">34.17 ±1.66</td><td class="num">68.79 ±1.34</td><td class="num">39.73 ±0.59</td><td class="num">50.88 ±2.35</td><td class="num">49.69</td><td class="num">3.43</td><td class="num">49.96</td></tr>
+        <tr class="best"><td>400M</td><td>Peri-LN</td><td class="num">57.51 ±0.81</td><td class="num">37.46 ±0.34</td><td class="num">69.48 ±0.39</td><td class="num">40.64 ±0.51</td><td class="num">52.74 ±0.67</td><td class="num">51.57</td><td class="num">3.34</td><td class="num">51.96</td></tr>
+        <tr><td>1.5B</td><td>Post-LN</td><td class="num">42.92 ±0.93</td><td class="num">31.69 ±0.41</td><td class="num">66.72 ±0.40</td><td class="num">35.84 ±0.61</td><td class="num">50.30 ±1.87</td><td class="num">45.49</td><td class="num">5.38</td><td class="num">48.95</td></tr>
+        <tr><td>1.5B</td><td>Pre-LN</td><td class="num">61.51 ±1.22</td><td class="num">39.88 ±1.53</td><td class="num">71.41 ±0.88</td><td class="num">41.23 ±0.97</td><td class="num">54.51 ±2.07</td><td class="num">53.71</td><td class="num">3.29</td><td class="num">53.89</td></tr>
+        <tr class="best"><td>1.5B</td><td>Peri-LN</td><td class="num">66.17 ±0.21</td><td class="num">43.94 ±0.34</td><td class="num">73.63 ±0.24</td><td class="num">42.34 ±0.83</td><td class="num">56.64 ±0.44</td><td class="num">56.55</td><td class="num">3.18</td><td class="num">56.94</td></tr>
+        <tr><td>3.2B</td><td>Post-LN</td><td class="num">45.30 ±3.23</td><td class="num">33.59 ±0.44</td><td class="num">66.45 ±2.86</td><td class="num">35.82 ±1.09</td><td class="num">51.10 ±1.60</td><td class="num">46.45</td><td class="num">4.43</td><td class="num">49.33</td></tr>
+        <tr><td>3.2B</td><td>Pre-LN</td><td class="num">65.24 ±2.32</td><td class="num">44.23 ±2.32</td><td class="num">73.86 ±1.19</td><td class="num">42.68 ±0.07</td><td class="num">57.42 ±2.51</td><td class="num">56.69</td><td class="num">3.20</td><td class="num">57.08</td></tr>
+        <tr class="best"><td>3.2B</td><td>Peri-LN</td><td class="num">68.73 ±0.57</td><td class="num">46.99 ±0.21</td><td class="num">74.31 ±0.41</td><td class="num">43.00 ±0.73</td><td class="num">59.76 ±0.78</td><td class="num">58.56</td><td class="num">3.11</td><td class="num">59.02</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>交互：切换规模，看五个基准上的三路对比</h3>
+  <div class="tabs" id="size-tabs">
+    <button class="tab" data-size="400M">400M</button>
+    <button class="tab" data-size="1.5B">1.5B</button>
+    <button class="tab active" data-size="3.2B">3.2B</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div id="bench-desc" class="readout" data-src="Table 1" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="bench-chart"></div>
+    <div class="cx" id="bench-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>Post-LN</span>
+      <span><i style="background:var(--c2)"></i>Pre-LN</span>
+      <span><i style="background:var(--accent)"></i>Peri-LN</span>
+    </div>
+    <p class="diagram-note">柱高 = 基准分数（0–100），数字标注为原始分数；不显示标准差。</p>
+  </div>
+
+  <details>
+    <summary>手算核对：Avg 列怎么来的<span class="sum-sub">2 组参数 → 结果</span></summary>
+    <div class="details-body">
+      <p>口径：Avg 是 5 个基准的等权平均，不是按样本数加权。标准差来自论文报告的 5 个训练种子；论文没有说明用 ÷N 还是 ÷(N−1)，本页不重算标准差。</p>
+      <ul>
+        <li>3.2B Peri-LN：(68.73 + 46.99 + 74.31 + 43.00 + 59.76) / 5 = 292.79 / 5 ≈ 58.56（Table 1）。</li>
+        <li>400M Peri-LN：(57.51 + 37.46 + 69.48 + 40.64 + 52.74) / 5 = 257.83 / 5 ≈ 51.57（Table 1）。</li>
+      </ul>
+      <p>交互里的 15 个柱值逐字来自 Table 1；切换规模只改变数据集，不改变口径。</p>
+    </div>
+  </details>
+
+  <h3>3.2B 上的三个点差</h3>
+  <ul>
+    <li><strong>平均分：</strong>Peri-LN 58.56，Pre-LN 56.69，Post-LN 46.45。相对 Pre-LN 提升 1.87 个百分点（58.56 − 56.69），相对提升 3.3%（1.87 / 56.69）；相对 Post-LN 提升 12.11 个百分点（58.56 − 46.45）。</li>
+    <li><strong>C4 evaluation loss：</strong>Peri-LN 3.11，Pre-LN 3.20，Post-LN 4.43。比 Pre-LN 低 0.09（3.20 − 3.11），比 Post-LN 低 1.32（4.43 − 3.11）。</li>
+    <li><strong>SFT 平均分：</strong>Peri-LN 59.02，Pre-LN 57.08，Post-LN 49.33。比 Pre-LN 高 1.94（59.02 − 57.08），比 Post-LN 高 9.69（59.02 − 49.33）。</li>
+  </ul>
+
+  <p>三个规模的方向一致：400M 是 51.57 / 49.69 / 42.45，1.5B 是 56.55 / 53.71 / 45.49，3.2B 是 58.56 / 56.69 / 46.45（Peri-LN / Pre-LN / Post-LN，Table 1）。论文在 §4.5 还报告，Peri-LN 的跨种子标准差“reduced by more than half”。这是笼统表述；按 5 个基准的跨种子标准差均值复算（Table 1，等权平均）：400M 从 1.514 降到 0.544、1.5B 从 1.334 降到 0.412、3.2B 从 1.682 降到 0.540，即平均而言降低一半以上。但并非每个基准都减半，最明显的反例是 3.2B SIQA：Pre-LN ±0.07，Peri-LN ±0.73（Table 1）；3.2B HellaSwag 则是 ±2.32 → ±0.21。这里的均值由 Table 1 报告的标准差复算，论文没有说明标准差用 ÷N 还是 ÷(N−1)。</p>
+
+  <h3>反直觉一：梯度范数排序和分数排序相反</h3>
+  <p>§4.4 的 Figure 5(a) 说，训练稳定时 final-layer gradient norm 的顺序是 Post-LN &gt; Pre-LN &gt; Peri-LN；Table 1 的分数顺序是 Peri-LN &gt; Pre-LN &gt; Post-LN。论文没有把这个梯度范数当作排名指标，而是在 §5.2 用 Figure 7 强调 Peri-LN 的逐层梯度分布更均匀。<span class="infer">推断</span>（依据：§4.4 只报告排序；§5.2 才把“层间均匀”作为稳定性的解释。两处量的口径不同，不能直接合并成“梯度越大越好/越差”。）</p>
+
+  <h3>反直觉二：强 weight decay 能救 Pre-LN，但补不上差距</h3>
+  <p>Table 7 是 400M 模型的 weight decay sweep。把系数从 0.033 加到 0.33（论文称 tenfold rise，§6.1；0.33 / 0.033 = 10），Pre-LN 的平均分从 49.01 升到 49.51，loss 从 3.03 降到 3；Peri-LN 同期从 50.68 升到 52.13，loss 从 2.93 降到 2.90。强 weight decay 能缓解 Pre-LN 的不稳定，但在同一设置下 Peri-LN 仍然更高。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption class="tcap">Table 7（v3）转录：400M 模型，weight decay sweep；loss 越低越好，平均分越高越好</caption>
+      <thead>
+        <tr><th>400M</th><th>Model</th><th style="text-align:right">wd 0</th><th style="text-align:right">wd 0.0033</th><th style="text-align:right">wd 0.033</th><th style="text-align:right">wd 0.33</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Final Training Loss</td><td>Pre-LN</td><td class="num">3.03</td><td class="num">3.03</td><td class="num">3.03</td><td class="num">3</td></tr>
+        <tr><td>Final Training Loss</td><td>Peri-LN</td><td class="num">2.94</td><td class="num">2.94</td><td class="num">2.93</td><td class="num">2.90</td></tr>
+        <tr><td>Averaged Benchmark Score</td><td>Pre-LN</td><td class="num">49.26</td><td class="num">49.18</td><td class="num">49.01</td><td class="num">49.51</td></tr>
+        <tr><td>Averaged Benchmark Score</td><td>Peri-LN</td><td class="num">51.41</td><td class="num">51.14</td><td class="num">50.68</td><td class="num">52.13</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Table 8 和 Table 9 也支持同一方向。Table 8 是 400M 的 Xavier 初始化对比：Xavier 初始化把 Pre-LN 的平均分从 <span data-src="Table 8">49.01</span> 提到 <span data-src="Table 8">51.25</span>，把 Peri-LN 从 <span data-src="Table 8">50.68</span> 提到 <span data-src="Table 8">52.04</span>。Table 9 改变初始化方差：Peri-LN 的 final pre-training loss 在 <span data-src="Table 9">2.902–3.027</span> 之间，Pre-LN 在 10/d 时到达 <span data-src="Table 9">4.526</span>。这些结果说明，调 weight decay 或初始化也能改善 Pre-LN，但论文的实验设置下，Peri-LN 在同样的调参范围内仍然更高。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption class="tcap">Table 8（v3）转录：400M 模型，Xavier 初始化 vs 基线（0.02）</caption>
+      <thead>
+        <tr><th>400M</th><th>Architecture</th><th style="text-align:right">Baseline (0.02)</th><th style="text-align:right">Xavier Initialization</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="2">Loss</td><td>Pre-LN</td><td class="num">3.03</td><td class="num">2.95</td></tr>
+        <tr><td>Peri-LN</td><td class="num">2.93</td><td class="num">2.91</td></tr>
+        <tr><td rowspan="2">Avg.</td><td>Pre-LN</td><td class="num">49.01</td><td class="num">51.25</td></tr>
+        <tr><td>Peri-LN</td><td class="num">50.68</td><td class="num">52.04</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption class="tcap">Table 9（v3）转录：400M 模型，weight-initialization variance 对 final pre-training loss 的影响；越低越好</caption>
+      <thead>
+        <tr><th>400M</th><th>Initialization Variance</th><th style="text-align:right">10/d</th><th style="text-align:right">He(2/d)</th><th style="text-align:right">LeCun(1/d)</th><th style="text-align:right">1/(10d)</th><th style="text-align:right">Baseline (0.02)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="2">Loss</td><td>Pre-LN</td><td class="num">4.526</td><td class="num">2.965</td><td class="num">3.005</td><td class="num">3.012</td><td class="num">3.035</td></tr>
+        <tr><td>Peri-LN</td><td class="num">3.027</td><td class="num">2.929</td><td class="num">2.915</td><td class="num">2.902</td><td class="num">2.916</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是模块输出的方差累积，不是所有训练不稳定</h2></div>
+  <p class="sec-sub">论文的边界写在实验范围里：Decoder-only、最高 3.2B、30B token、主要用 RMSNorm；没有吞吐/推理开销实验。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>残差主路径仍然没有 LN</h4></div>
+    <p>§7.2 的原句是：“Both Pre-LN and Peri-LN architectures leave the main hidden state path unnormalized, so once large values arise in earlier layers, they persist through to later layers.” Peri-LN 阻止的是模块输出继续把方差加进主路径，不是清除主路径里已经存在的大值。如果问题主要来自残差状态本身，Peri-LN 不一定是足够的解。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>规模和架构范围有限</h4></div>
+    <p>实验覆盖 400M、1.5B、3.2B 三个 decoder-only 模型，30B token，DCLM-baseline，Llama 3 风格结构，主要用 RMSNorm。论文没有报告 Encoder-Decoder、ViT、多模态、MoE 或超过 3.2B 的实验；这些架构上的行为需要另行验证。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>增益是点差，不是显著性结论</h4></div>
+    <p>Table 1 报告的是 5 个训练种子的均值与标准差，论文没有做显著性检验，也没有给出置信区间。3.2B 平均分的差值是 +1.87 个百分点（58.56 − 56.69），C4 loss 差值是 0.09（3.20 − 3.11）。这些点差在三个规模上方向一致，但论文没有做显著性检验，不能读成统计显著。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>额外 LN 的开销没有量化</h4></div>
+    <p>Peri-LN 在每个子层多一次归一化，但论文没有报告吞吐、显存或 FLOPs 的对比。对训练吞吐敏感的场景，需要自己测这部分开销；不能从 Table 1 的分数直接推断“更划算”。<span class="infer">推断</span>（依据：全文没有吞吐/显存表格；§7.2 只讨论精度约束。）</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界五</span><h4>Pre-LN 也能被 weight decay / 初始化稳定</h4></div>
+    <p>Table 7 和 Table 8 显示，强 weight decay 或 Xavier 初始化都能改善 Pre-LN。Peri-LN 的优势是在这些调参范围内仍然更高，而不是“Pre-LN 无论怎么调都不行”。如果工程上已经有成熟的 Pre-LN 稳定配方，换架构的收益需要和改动成本一起算。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界六</span><h4>理论是局部的，不是端到端收敛证明</h4></div>
+    <p>Proposition 3.1 给的是最后一层 MLP 权重梯度的上界，Appendix C 有形式化陈述与证明；论文没有给出整个训练过程的全局收敛保证。把它当成“Peri-LN 一定不会发散”的依据，会超出原文的范围。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>Peri-LN 管的是“模块输出汇入残差之前”的那一步；它把 Pre-LN 的指数方差增长改成线性增长，但没有把残差主路径变成归一化路径，也没有承诺所有规模、所有架构都同样受益。</strong></p>
+</section>
+
+<footer>
+  <div>Peri-LN: Revisiting Normalization Layer in the Transformer Architecture · Jeonghoon Kim 等 · ICML 2025</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2502.02732v3" target="_blank" rel="noopener">arXiv 2502.02732v3</a>（本页所有表号、图号、章节均以 v3 为准）<br>
+    笔记：<a href="/peri-lnrevisiting-normalization-layer-in-the-transformer-architecture/">Peri-LN：Revisiting Normalization Layer in the Transformer Architecture</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误与补充（不改笔记原文）：</strong>
+    <ul>
+      <li>笔记用「显著优于」描述 Table 1；原文只报告 5 个种子的均值与标准差，没有做显著性检验。本页按点差陈述。</li>
+      <li>笔记称 C4 上的「困惑度」；Table 1 的表注写的是 C4 evaluation loss，不是 perplexity。</li>
+      <li>笔记称作者「首次」系统命名并理论化 Peri-LN；原文只说 “we coin the term Peri-LN”，并明确 Gemma、OLMo 已采用类似设计（§3.3）。本页不使用「首次」。</li>
+      <li>笔记把 FP16 与 OPT 的不稳定写成确定因果；原文 §7.2 与 Appendix K 的措辞是 “likely exacerbated” 和 “ascribe much of the observed instability”，不是确定因果。</li>
+      <li>笔记称 Proposition 3.1「证明了」巨大激活「会直接导致」梯度爆炸；原文的表述是 an exploding gradient “can arise”（Eq. 6 的比例关系），是可能性而非必然性。本页按 “can arise” 写。</li>
+      <li>补充：笔记没有交代 Figure 4 的规模差异——4(a)–4(c) 是 400M，4(d) 是 1.5B（§4.3）；这不是错误，但读图时容易忽略。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 放置切换：A/B/C 三个 LN 位置的开关
+   ============================================================ */
+(function () {
+  var sim = document.getElementById('placement-sim');
+  if (!sim) return;
+  var btns = sim.querySelectorAll('[data-place]');
+  var nodes = sim.querySelectorAll('.ln-node');
+  var labels = sim.querySelectorAll('.pos-label');
+  var msg = document.getElementById('placement-msg');
+  var head = sim.querySelector('#placement-readout .r-head');
+  var slotA = document.getElementById('slot-a');
+  var slotB = document.getElementById('slot-b');
+  var slotC = document.getElementById('slot-c');
+  var slots = sim.querySelectorAll('.slot');
+  if (!btns.length || !msg) return;
+
+  var ACTIVE = { post: ['C'], pre: ['A'], peri: ['A', 'B'] };
+  var NAMES = { post: 'Post-LN', pre: 'Pre-LN', peri: 'Peri-LN' };
+  var COPY = {
+    post: 'Post-LN 只在 C 放 LN。主路径被归一化，方差大致恒定；反向传播要穿过 LN，深层模型的梯度流可能被削弱（§3.1–3.2）。',
+    pre: 'Pre-LN 只在 A 放 LN。主路径没有 LN，模块输出不经归一化就加进残差；训练开始后方差会指数累积（§3.2, Figure 1）。',
+    peri: 'Peri-LN 在 A 和 B 放 LN。主路径仍然没有 LN，但模块输出在加回残差前被归一化；若其方差近似常数 β0，则 Var(x_l+1) ≈ Var(x_l) + β0（Eq. 4）。'
+  };
+
+  function setSlot(el, on) {
+    if (!el) return;
+    el.textContent = on ? 'ON' : '—';
+  }
+
+  function render(place) {
+    var active = ACTIVE[place] || [];
+    sim.setAttribute('data-active', place);
+    nodes.forEach(function (n) {
+      n.style.display = active.indexOf(n.getAttribute('data-ln')) >= 0 ? '' : 'none';
+    });
+    labels.forEach(function (l) {
+      l.classList.toggle('on', active.indexOf(l.getAttribute('data-pos')) >= 0);
+    });
+    slots.forEach(function (s) {
+      s.classList.toggle('hit', active.indexOf(s.getAttribute('data-slot')) >= 0);
+    });
+    setSlot(slotA, active.indexOf('A') >= 0);
+    setSlot(slotB, active.indexOf('B') >= 0);
+    setSlot(slotC, active.indexOf('C') >= 0);
+    btns.forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-place') === place);
+    });
+    if (head) head.textContent = '当前放置：' + (NAMES[place] || place);
+    msg.innerHTML = COPY[place] || '';
+  }
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      render(b.getAttribute('data-place'));
+    });
+  });
+  render('pre');
+})();
+
+/* ============================================================
+   2) Table 1 柱状图：切换 400M / 1.5B / 3.2B
+   ============================================================ */
+(function () {
+  var tabs = document.querySelectorAll('#size-tabs .tab');
+  var chart = document.getElementById('bench-chart');
+  var xaxis = document.getElementById('bench-x');
+  var desc = document.getElementById('bench-desc');
+  if (!tabs.length || !chart || !xaxis || !desc) return;
+
+  var LABELS = ['ARC-Easy', 'HellaSwag', 'PIQA', 'SIQA', 'Winogrande'];
+  var DATA = {
+    '400M': {
+      post: [35.70, 28.91, 62.26, 34.48, 50.88],
+      pre: [54.87, 34.17, 68.79, 39.73, 50.88],
+      peri: [57.51, 37.46, 69.48, 40.64, 52.74]
+    },
+    '1.5B': {
+      post: [42.92, 31.69, 66.72, 35.84, 50.30],
+      pre: [61.51, 39.88, 71.41, 41.23, 54.51],
+      peri: [66.17, 43.94, 73.63, 42.34, 56.64]
+    },
+    '3.2B': {
+      post: [45.30, 33.59, 66.45, 35.82, 51.10],
+      pre: [65.24, 44.23, 73.86, 42.68, 57.42],
+      peri: [68.73, 46.99, 74.31, 43.00, 59.76]
+    }
+  };
+  var AVG = {
+    '400M': { post: '42.45', pre: '49.69', peri: '51.57' },
+    '1.5B': { post: '45.49', pre: '53.71', peri: '56.55' },
+    '3.2B': { post: '46.45', pre: '56.69', peri: '58.56' }
+  };
+  var COLORS = { post: 'var(--c1)', pre: 'var(--c2)', peri: 'var(--accent)' };
+  var NAMES = { post: 'Post-LN', pre: 'Pre-LN', peri: 'Peri-LN' };
+
+  function render(size) {
+    var d = DATA[size];
+    if (!d) return;
+    chart.innerHTML = '';
+    ['post', 'pre', 'peri'].forEach(function (key) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = NAMES[key];
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      d[key].forEach(function (val) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = COLORS[key];
+        fill.style.height = Math.max(2, val) + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = val.toFixed(2);
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    });
+    xaxis.innerHTML = LABELS.map(function (s) { return '<span>' + s + '</span>'; }).join('');
+    desc.innerHTML = '<div class="r-head">' + size + ' · Table 1</div>'
+      + 'Peri-LN ' + AVG[size].peri + ' / Pre-LN ' + AVG[size].pre + ' / Post-LN ' + AVG[size].post
+      + '（5 个基准等权平均）';
+    tabs.forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-size') === size);
+    });
+  }
+
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () {
+      render(b.getAttribute('data-size'));
+    });
+  });
+  render('3.2B');
+})();
+</script>
+</body>
+</html>

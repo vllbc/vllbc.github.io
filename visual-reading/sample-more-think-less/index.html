@@ -1,0 +1,648 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 2 | §4 | 16/8 |
+| 3 | §4 | 24/8 |
+| 2.8 | Table 2 | 13.0-10.2 |
+| 21.5 | Table 2 | (13.0-10.2)/13.0*100 |
+| 0.4 | Table 2 | 72.1-71.7 |
+| 0.2 | Table 2 | 72.3-72.1 |
+| 0.8 | Table 2 | 72.9-72.1 |
+| 21.3 | Table 2 | 79.5-58.2 |
+| 4.1 | Table 2 | 58.2-54.1 |
+| 7.0 | Table 2 | 54.1-47.1 |
+| 0.250 | Table 2 | 4/16 |
+| 0.375 | Table 2 | 6/16 |
+| 0.500 | Table 2 | 8/16 |
+| 0.750 | Table 1 | 6/8 |
+| 0.333 | Table 2 | 8/24 |
+| 0.250 | Table 2 | 6/24 |
+| 0.167 | Table 2 | 4/24 |
+| 1.8 | Figure 10 | 8.3-6.5 |
+| 0.1 | Figure 10 | 6.6-6.5 |
+| 94.4 | Figure 10 | (8.3-6.6)/(8.3-6.5)*100 |
+| 1.2 | Figure 10 | 3.1-1.9 |
+| 0.4 | Figure 10 | 2.3-1.9 |
+| 66.7 | Figure 10 | (3.1-2.3)/(3.1-1.9)*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GFPO · 多采一组，换更短的推理链</title>
+<meta name="description" content="GFPO 不奖励也不惩罚长度，而是每个问题多采样、按长度或 token 效率筛出 top-k，只让保留的回答产生优势。Shortest-k 把 GRPO 的长度膨胀削减 46–71%，Token Efficiency 达到 71–85%，准确率差异不显著。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式来自 base.css */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.kg-chart .track{height:112px}
+.kg-chart .cbar .num{font-size:10.5px}
+.kg-chart .cbar .fill{min-height:2px}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.flow-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.flow-pa{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.flow-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:14px;font-weight:600;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11.5px;fill:var(--text-muted)}
+.flow-m{font-family:"JetBrains Mono",monospace}
+.tbl-note{font-size:12.5px;color:var(--text-soft);margin:-6px 0 18px;line-height:1.7}
+@media (max-width:520px){
+  .kg-chart .track{height:90px}
+  .kg-chart .cbar .num{font-size:9.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GFPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM-RL · arXiv 2025 · 2508.09726</span>
+  <h1>Sample More to Think Less：多采一组，换更短的推理链</h1>
+  <p class="hero-sub">
+    RLVR 训出来的模型会越说越长，但多出来的 token 很多只是重复、绕圈和“填充”。GFPO 不改奖励函数，也不加长度惩罚：
+    <strong>每个问题先采更多回答，再按长度或 token 效率筛掉一部分，只让保留下来的回答产生优势</strong>。
+    训练时多花的采样，换推理时更短的输出。
+  </p>
+  <div class="meta">
+    <span>Vaishnavi Shrivastava 等 · Microsoft Research</span>
+    <a href="https://arxiv.org/abs/2508.09726" target="_blank" rel="noopener">arXiv 2508.09726v1 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    RLVR 把准确率推高的同时，也把回答长度推高。论文在 Phi-4-reasoning-plus 上看到：即使用了 DAPO 的 token-level 归一化，GRPO 仍在 100 步内把平均长度从 <span class="mono" data-src="§1">4k 推到 14k</span>。更长的回答也不等于更强：在 AIME 25 上，同时有正确和错误回答的题目里，<span class="mono" data-src="§1">72%</span> 的题目是“更长的回答更容易错”。
+  </p>
+  <p>
+    <strong>GFPO 的改动很小：</strong>把每个问题的采样组从 <code>G=8</code> 扩到 <code>16/24</code>，按一个 metric 排序，只保留 top-<code>k</code> 条参与优势计算。被拒回答的掩码 <code>m<sub>i</sub>=0</code>，优势直接置零；均值 <code>μ<sub>S</sub></code> 和标准差 <code>σ<sub>S</sub></code> 也只在保留集合 <code>S</code> 内算。metric 可以是长度、<code>reward/length</code>，或按题目难度动态调 <code>k</code>。
+  </p>
+  <p>
+    在五个基准上，Shortest-k 把 GRPO 相对 SFT 多出来的长度削减 <span class="mono" data-src="Table 1; Table 2">46–71%</span>，Token Efficiency 把它推到 <span class="mono" data-src="Table 1; Table 2">71–85%</span>；准确率差异在 Wilcoxon 检验下不显著。代价是训练时采样更多，收益是部署时每条回答更短。
+  </p>
+  <p>
+    但这不是“免费变短”：只从 <code>G=8</code> 里筛（<code>6/8</code>）在 Omni-MATH 上 ELR 为 <span class="mono" data-src="Table 2">−5.5%</span>，长度反而增加；<code>k/G</code> 也不是严格单调，<code>8/24</code> 的平均 ELR 高于 <code>6/24</code>。真正稳的配置仍要按基准和算力调。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">46.1<small>%</small></div>
+      <div class="k">Shortest 4/24 在 AIME 25 的 ELR<br>五个基准中的最低值</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">84.6<small>%</small></div>
+      <div class="k">Token Efficiency 在 AIME 24 的 ELR<br>同一张表里的最高值</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">79.5<small>%</small></div>
+      <div class="k">Token Efficiency 五基准平均 ELR<br>GRPO 按定义为 0</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>长度膨胀：奖励在鼓励“多说”，而不是“想对”</h2></div>
+  <p class="sec-sub">先分清两件事：难题本来就需要更长；但同一道题内，更长的回答往往更差。</p>
+
+  <p>RLVR 让模型在 AIME、IMO 这类任务上“想得更久”，但副作用是回答长度持续膨胀。论文在引言里引了两条旁证：AIME 25 上 DeepSeek-R1 的回答长度接近 Claude 3.7 Sonnet 的 <span class="mono" data-src="§1">5 倍</span>，准确率却相近；QwQ-32B 在 AIME / HMMT 上最短的那批回答，比随机采样高 <span class="mono" data-src="§1">2%</span>（原文只写 by 2%，未说明是相对还是绝对），同时相对少用 <span class="mono" data-src="§1">31%</span> 的 token。</p>
+
+  <p>问题在于，长回答和答对之间有一个混淆：难题本来就既难又长。为了把“难度带来的长”和“模型自己变啰嗦”分开，作者在 Phi-4-reasoning-plus 上做了同题内比较——只看那些同时生成了正确和错误回答的 AIME 25 题目。结果是：<strong>其中 72% 的题目里，较长的那条回答反而更容易错</strong>（§1）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的直接观察</span><h4>token-level 归一化压不住长度</h4></div>
+    <p>Dr. GRPO 按 batch 内最大长度归一化，DAPO 按总 token 数归一化，本意都是让长回答的权重更大、更重地惩罚长而错的链。但论文指出：这同时也会放大“长而对”的奖励，反而强化了强 SFT 模型本来就有的啰嗦倾向。作者复现时，即使用了 DAPO 的 token-level loss，GRPO 仍在 100 步内把平均长度从 <span class="mono" data-src="§1">4k 推到 14k</span>（§1）。</p>
+  </div>
+
+  <p>所以这篇论文要的不是“再设计一个更聪明的长度惩罚”，而是换一个作用点：<strong>不改奖励，改“哪些回答能进入更新”</strong>。这也是后面所有方法的出发点。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>改损失、加惩罚、推理时截断：三条路都试过，仍没按住</h2></div>
+  <p class="sec-sub">前人不是没做事，而是各自只解决了问题的一部分。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">训练侧 · 改损失</span><h4>Dr. GRPO / DAPO：让长回答的 token 权重更大</h4></div>
+      <p>标准 GRPO 在每条回答内部先归一化再平均，长回答的每个 token 权重更小；Dr. GRPO 改成按 batch 最大长度归一化，DAPO 改成按总 token 数归一化。这样长而错的链会被更重地惩罚。</p>
+      <p><strong>卡在哪：</strong>同一条规则也会放大长而对的正梯度。论文的观察是，强 SFT 模型会顺着这个信号继续变长，长度膨胀并没有被真正压住（§1、§7）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">训练侧 · 加惩罚</span><h4>长度惩罚：要调权重，容易伤准确率</h4></div>
+      <p>一条路是 token 上限（如 ThinkPrune 式截断），一条路是自适应长度惩罚（Su &amp; Cardie 2025；Xiang et al. 2025 按题目解决率缩放），还有把全局长度奖励和压缩奖励合在一起的做法（Cheng et al. 2025）。</p>
+      <p><strong>卡在哪：</strong>论文的初步实验里，直接放大 length penalty 要么没有实质性的长度缩减，要么以减少准确率为代价（§7）。惩罚项和准确率奖励在同一个标量里竞争，权重很难同时调好。</p>
+    </div>
+  </div>
+
+  <h3>第三条路：推理时干预，不改模型</h3>
+  <p>Hassid et al. 2025 在 <code>k</code> 条采样里投票选最短的；Muennighoff et al. 2025 用 “Wait / Final Answer” 之类的短语做 budget forcing；Liu &amp; Wang 2025、Yang et al. 2025 则在生成过程中监测置信度或答案稳定性，提前停止。这些方法和 GFPO 不冲突，但它们是<strong>事后止损</strong>：模型本身的长度分布没有变，部署时仍要为每条候选付出采样成本。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">GFPO 的位置</span><h4>把“筛选”放进 RL 更新，而不是再加一个阶段</h4></div>
+    <p>最接近的前作是 Kim et al. 2024：先跑完 RL，再对每个 prompt 采多条，用最短正确解做 SFT 或 DPO。GFPO 的区别是把拒绝采样直接嵌进 RL 的每一步——采样更大的组，按长度或 reward-per-token 选 top-<code>k</code>，只在这 <code>k</code> 条里算优势。论文把它称为一种<strong>隐式的 reward shaping</strong>：不新增蒸馏阶段、不做 length alignment、也不改奖励函数（§3、§7）。</p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>不碰奖励函数，只改“让谁参与优势计算”</h2></div>
+  <p class="sec-sub">全部机制可以压成一行：在子集 S 内算均值和标准差，S 外的人优势为零。</p>
+
+  <p>标准 GRPO 对每个问题采 <code>G</code> 条回答，用整组的平均奖励做基线，再用组内标准差归一化。GFPO 先按一个 metric 给这 <code>G</code> 条排序，保留前 <code>k</code> 条组成集合 <code>S</code>，然后<strong>只在 S 内</strong>做同样的归一化：</p>
+
+  <div class="eq">
+    <span class="hl-a">S, m = RejectionSample(G, k, metric)</span>, &nbsp; m<sub>i</sub> = 1{i ∈ S}<br>
+    <span class="hl-b">μ<sub>S</sub> = (1/k) Σ<sub>i∈S</sub> R<sub>i</sub></span>, &nbsp;
+    <span class="hl-b">σ<sub>S</sub> = √( (1/k) Σ<sub>i∈S</sub> (R<sub>i</sub> − μ<sub>S</sub>)<sup>2</sup> )</span><br>
+    <span class="hl-c">Â<sub>i,t</sub><sup>(m)</sup> = ((R<sub>i</sub> − μ<sub>S</sub>) / σ<sub>S</sub>) · m<sub>i</sub></span>
+  </div>
+  <div class="eq-cap">Eq. 2–3 · σ<sub>S</sub> 用 ÷k（总体标准差）；S 外的回答 m<sub>i</sub>=0，优势为 0。GRPO 相当于把 S 换成整组 G、并把 m<sub>i</sub> 全设为 1。</div>
+
+  <p>这一步只改优势估计，不动 clipped surrogate、KL 项或熵项，所以论文说它可以和 DAPO、Dr. GRPO、Dual-Clip PPO 等任意 GRPO 变体组合（§3）。真正决定行为的是三个 metric：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Metric 1</span><h4>Shortest k/G</h4></div>
+      <p>按回答长度升序，保留最短的 <code>k</code> 条。最直接，也最容易把“短”学成“少推理”。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Metric 2</span><h4>Token Efficiency</h4></div>
+      <p>按 <code>R<sub>i</sub> / |o<sub>i</sub>|</code> 排序，保留 reward-per-token 最高的 <code>k</code> 条。长回答只有在奖励足够高时才“配得上”它的长度。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Metric 3</span><h4>Adaptive Difficulty</h4></div>
+      <p>用 <code>t-digest</code> 维护已见题目的 reward 均值分位数，把题目分成四档；简单题保留 <code>k=4</code>，中档 6，难和很难 8（<code>G=16</code>）。</p>
+    </div>
+  </div>
+
+  <p>Token Efficiency 值得单独说：论文的解释是，在这个排序下，<strong>短而对</strong>的链拿到最强的正梯度，<strong>长而对</strong>的链只拿温和的奖励或轻微惩罚，<strong>长而错</strong>的链拿到最陡的负梯度</p>
+
+  <p>这正好补上了 Shortest-k 的盲区：最短 k 只保留到第 k 短为止，比第 k 条更长的 token 位置没有直接的梯度信号，只能靠 KL 项慢慢往下推；Token Efficiency 则会给那些尾部低价值 token 明确的负梯度（§5.4）。</p>
+
+  <h3>自己动手：k/G 这个“旋钮”到底有多灵</h3>
+  <p>下面把 Table 1 / Table 2 里所有测过的 Shortest 配置摊开。选 <code>k</code> 和 <code>G</code>，看保留比例 <code>k/G</code>、五个基准的 ELR 和五基准平均。灰柱表示 ELR 为负——长度反而增加。</p>
+
+  <div class="sim" id="kg-sim">
+    <div class="sim-top" id="kg-kbtns">
+      <button class="rule-btn" type="button" data-k="4">k = 4<span class="r-sub">保留 4 条</span></button>
+      <button class="rule-btn" type="button" data-k="6">k = 6<span class="r-sub">保留 6 条</span></button>
+      <button class="rule-btn active" type="button" data-k="8">k = 8<span class="r-sub">保留 8 条</span></button>
+    </div>
+    <div class="tabs" id="kg-gtabs">
+      <button class="tab" type="button" data-g="8">G = 8</button>
+      <button class="tab active" type="button" data-g="16">G = 16</button>
+      <button class="tab" type="button" data-g="24">G = 24</button>
+    </div>
+
+    <div class="readout" data-src="Table 1; Table 2">
+      <div class="r-head">当前配置</div>
+      <div id="kg-msg">k/G = 0.500 · 五基准平均 ELR = 29.7%（Table 2，8 of 16 行）</div>
+    </div>
+
+    <div class="chart kg-chart" id="kg-chart"></div>
+    <div class="cx" id="kg-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>各基准 ELR</span>
+      <span><i style="background:var(--accent-deep)"></i>五基准平均</span>
+      <span><i style="background:var(--text-soft)"></i>负值：长度反而增加</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算：两个配置的 k/G 与读数<span class="sum-sub">与上面的交互同一口径</span></summary>
+    <div class="details-body">
+      <p><strong>配置 A：k=4, G=16。</strong><code>k/G = 4 ÷ 16 = 0.250</code>；平均 ELR = <strong>44.2%</strong>（Table 2，“4 of 16” 行）。五个基准的 ELR 依次为 38.0 / 46.8 / 45.7 / 47.3 / 43.2。</p>
+      <p><strong>配置 B：k=8, G=24。</strong><code>k/G = 8 ÷ 24 = 0.333</code>；平均 ELR = <strong>54.1%</strong>（Table 2，“8 of 24” 行）。五个基准的 ELR 依次为 54.4 / 52.7 / 52.2 / 51.9 / 59.4。</p>
+      <p>ELR 的定义是 <code>(L<sub>GRPO</sub> − L<sub>GFPO</sub>) / (L<sub>GRPO</sub> − L<sub>SFT</sub>)</code>（Eq. 4）。表中 ELR 由作者用未四舍五入的原始长度计算；页面不拿 13.3k / 11.3k 这类显示值反推，以免舍入误差。交互只做 <code>k ÷ G</code> 和表格读数，不做标准差或平均运算；<code>k/G</code> 是保留比例，不存在 ÷N 或 ÷(N−1) 的口径问题。</p>
+    </div>
+  </details>
+
+  <p>还有一个容易忽略的细节：Eq. 2 的分子对所有 <code>G</code> 条求和，但被拒样本的优势为 0；分母 <code>Σ<sub>i=1</sub><sup>G</sup>|o<sub>i</sub>|</code> 仍然覆盖全部 <code>G</code> 条，包括被拒样本。论文正文的说法是 “Responses not in S receive zero advantage, effectively excluding them from influencing policy updates”（§3）。<span class="infer">推断</span> 被拒样本不再贡献梯度方向，但仍会进入归一化分母，因此“零优势”不等于对梯度尺度完全没有影响。</p>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>多采 2×/3×，只学 8 条：训练换推理的账怎么算</h2></div>
+  <p class="sec-sub">GFPO 没有新模型、没有新数据，开销集中在每个问题多生成的那几条 rollout 上。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>§4 训练设置；Table 1 / Table 2 的所有实验都在这一套条件下完成。</caption>
+      <thead>
+        <tr><th>项目</th><th>设置</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>基础模型</td><td>Phi-4-reasoning（14B，仅 SFT，未做 RL）</td><td>§4</td></tr>
+        <tr><td>GRPO 基线</td><td>Phi-4-reasoning-plus；作者复现时用 DAPO token-level loss</td><td>§4</td></tr>
+        <tr><td>训练数据</td><td>72k 数学题；100 步 × batch 64，实际只见到 6.4k 道</td><td>§4</td></tr>
+        <tr><td>硬件</td><td>32 × H100</td><td>§4</td></tr>
+        <tr><td>采样组</td><td>G ∈ {8, 16, 24}；所有 GFPO 实验 k ≤ 8</td><td>§4</td></tr>
+        <tr><td>优化器</td><td>Adam，lr 1e-7，前 10 步 warmup，温度 1.0</td><td>§4</td></tr>
+        <tr><td>正则</td><td>KL β = 0.001，entropy γ = 0.001</td><td>§4</td></tr>
+        <tr><td>上下文</td><td>最大 32k，其中 1k 留给 prompt</td><td>§4</td></tr>
+        <tr><td>评测</td><td>AIME 25/24 每题 32 条；GPQA 5 条；Omni-MATH 1 条；LiveCodeBench 3 条；温度 0.8</td><td>§4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>采样开销：</strong><code>G=16</code> 是 GRPO 基线 <code>G=8</code> 的 <span class="mono" data-src="§4">2×</span>，<code>G=24</code> 是 <span class="mono" data-src="§4">3×</span>。多出来的是 rollout 生成和打分；论文把 <code>k</code> 限制在 8 以内，是为了让模型收到的梯度信号条数与 GRPO 对齐，比较的是“同样 8 条更新信号，筛过和没筛过”的差别（§4）。训练墙钟或 GPU-hour 的具体增量，论文没有给出；它只说更短的回答会让训练本身也部分回本（§3）。</p>
+
+  <h3>Adaptive Difficulty 怎么在线估难度</h3>
+  <p>每个训练步，对每道题采 <code>G=16</code> 条，用这组回答的平均奖励作为“这题有多难”的在线估计：平均奖励低，说明题难。所有见过的题目的 reward 均值被维护在一个 <code>t-digest</code> 里，用它近似分位数，把新题分进四档：很难 / 难 / 中等 / 简单（按 reward 从低到高分别是 bottom 25%、25–50%、50–75%、top 25%）。对应的保留条数是 <code>k = 8 / 8 / 6 / 4</code>；训练最初的 warmup 步对所有题都保留 8 条，避免分位数还没稳定就过度过滤（§3.1、§5.5）。</p>
+
+  <p>这个设计把“简单题多砍、难题多探索”写成了一个课程：简单题正确答案多，激进过滤不容易误伤；难题需要更多候选，保留 <code>k=8</code>。论文报告的平均保留条数是 <code>k=6.5</code>，所以它主要对标 <code>Shortest 6/16</code>（§5.5）。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条流水线：采样 → 打分 → 保留 → 掩码优势</h2></div>
+  <p class="sec-sub">GFPO 的“架构”就是 GRPO 的训练循环里多了一次排序和一次掩码，没有额外网络。</p>
+
+  <figure>
+    <svg viewBox="0 0 960 320" role="img" aria-label="GFPO 训练流程：采样 G 条、按 metric 排序、保留 top-k、只在 S 内算优势、更新策略">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect class="flow-c1" x="10" y="110" width="120" height="82" rx="10"></rect>
+      <text class="flow-t" x="70" y="143" text-anchor="middle">问题 q</text>
+      <text class="flow-s" x="70" y="165" text-anchor="middle">每个训练 step</text>
+      <text class="flow-s" x="70" y="182" text-anchor="middle">取一道数学题</text>
+
+      <rect class="flow-c1" x="170" y="100" width="150" height="102" rx="10"></rect>
+      <text class="flow-t" x="245" y="130" text-anchor="middle">采样 G 条</text>
+      <text class="flow-s" x="245" y="153" text-anchor="middle">G = 16 / 24</text>
+      <text class="flow-s" x="245" y="171" text-anchor="middle">比 GRPO 的 8 条更多</text>
+      <text class="flow-s" x="245" y="189" text-anchor="middle">温度 1.0</text>
+
+      <rect class="flow-c2" x="360" y="100" width="170" height="102" rx="10"></rect>
+      <text class="flow-t" x="445" y="130" text-anchor="middle">按 metric 排序</text>
+      <text class="flow-s" x="445" y="153" text-anchor="middle">长度 / reward-per-token</text>
+      <text class="flow-s" x="445" y="171" text-anchor="middle">或难度自适应</text>
+      <text class="flow-s" x="445" y="189" text-anchor="middle">只排序，不改奖励</text>
+
+      <rect class="flow-pa" x="570" y="100" width="150" height="102" rx="10"></rect>
+      <text class="flow-t" x="645" y="130" text-anchor="middle">保留 top-k</text>
+      <text class="flow-s" x="645" y="153" text-anchor="middle">S = {i₁, …, i_k}</text>
+      <text class="flow-s" x="645" y="171" text-anchor="middle">m_i = 1</text>
+      <text class="flow-s" x="645" y="189" text-anchor="middle">k ≤ 8</text>
+
+      <rect class="flow-pa" x="760" y="90" width="190" height="122" rx="10"></rect>
+      <text class="flow-t" x="855" y="122" text-anchor="middle">只在 S 内算优势</text>
+      <text class="flow-s" x="855" y="146" text-anchor="middle">μ_S, σ_S 只来自保留集</text>
+      <text class="flow-s" x="855" y="166" text-anchor="middle">Â_i,t = (R_i − μ_S)/σ_S</text>
+      <text class="flow-s" x="855" y="186" text-anchor="middle">更新 π_θ</text>
+
+      <path class="flow-line" d="M130 151 L166 151" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M320 151 L356 151" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M530 151 L566 151" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M720 151 L756 151" marker-end="url(#arr)"></path>
+
+      <rect class="flow-box" x="360" y="245" width="360" height="54" rx="8" stroke-dasharray="5 4"></rect>
+      <text class="flow-s" x="540" y="267" text-anchor="middle">被拒样本：m_i = 0，优势置零，不进入 μ_S / σ_S</text>
+      <text class="flow-s" x="540" y="286" text-anchor="middle">但 Eq. 2 的 token-level 分母仍计入全部 G 条</text>
+      <path class="flow-line" d="M645 202 L645 242" marker-end="url(#arr)" stroke-dasharray="5 4"></path>
+    </svg>
+    <figcaption>按 Figure 1 与 Algorithm 1 重绘的简化流程：覆盖“更大组采样 → 按 metric 排序 → top-k 掩码 → 仅在 S 内归一化优势”四个分支；未覆盖 clipped ratio、KL / entropy 项、rollout 生成与分布式训练的实现细节。</figcaption>
+  </figure>
+
+  <p>Algorithm 1 本身只有三步：对每条回答算 metric 分数、排序、取前 <code>k</code> 条并生成掩码。没有额外的奖励模型，也没有额外的标注；筛选发生在<strong>同一个训练 step 内部</strong>，不是后处理阶段。GRPO 与 GFPO 的差别只在优势：GRPO 用整组 <code>G</code> 条算 <code>μ<sub>G</sub>, σ<sub>G</sub></code>，GFPO 用保留集 <code>S</code> 算 <code>μ<sub>S</sub>, σ<sub>S</sub></code>。</p>
+
+  <p>Adaptive Difficulty 只是把“取前 k 条”里的 <code>k</code> 换成由 <code>t-digest</code> 分位数决定的 4 / 6 / 8 / 8；流水线的其余部分不变（Algorithm 2）。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>长度砍掉一大截，准确率没有统计显著变化</h2></div>
+  <p class="sec-sub">先看五个基准的总账，再看两个反直觉发现：Token Efficiency 比 Shortest 更狠，k/G 却不是单调旋钮。</p>
+
+  <p>下表从 Table 1 / Table 2 摘出四行：GRPO、Shortest 4/24、Token Efficiency（k=8, G=16）、Adaptive Difficulty（G=16）。Acc 是 pass@1，Len 是平均响应长度，ELR 是 Eq. 4 的超额长度削减。表中只转录这四行；完整的 11 行（含 SFT 和 7 个 Shortest k/G）见上面的交互，数值同样来自这两张表。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 / Table 2 摘录 · 五基准与平均；ELR 列原文列名为 % Len Inf。</caption>
+      <thead>
+        <tr>
+          <th>基准</th>
+          <th>GRPO<br>Acc</th><th>GRPO<br>Len</th>
+          <th>Shortest 4/24<br>Acc</th><th>Len</th><th>ELR</th>
+          <th>Token Eff.<br>Acc</th><th>Len</th><th>ELR</th>
+          <th>Adaptive<br>Acc</th><th>Len</th><th>ELR</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>AIME 25</td><td class="num">72.4</td><td class="num">14.8k</td><td class="num">70.3</td><td class="num">13k</td><td class="num">46.1</td><td class="num">69.5</td><td class="num">12k</td><td class="num">70.9</td><td class="num">70.8</td><td class="num">12.8k</td><td class="num">50.8</td></tr>
+        <tr><td>AIME 24</td><td class="num">77.7</td><td class="num">13.3k</td><td class="num">76.5</td><td class="num">11.3k</td><td class="num">59.8</td><td class="num">76.4</td><td class="num">10.6k</td><td class="num">84.6</td><td class="num">76.6</td><td class="num">11.6k</td><td class="num">52.9</td></tr>
+        <tr><td>GPQA</td><td class="num">67.5</td><td class="num">10.7k</td><td class="num">68.1</td><td class="num">8.3k</td><td class="num">57.3</td><td class="num">68.5</td><td class="num">7.5k</td><td class="num">79.7</td><td class="num">70.8</td><td class="num">9k</td><td class="num">41.7</td></tr>
+        <tr><td>Omni-MATH</td><td class="num">86.0</td><td class="num">12.7k</td><td class="num">87.6</td><td class="num">10.5k</td><td class="num">71.0</td><td class="num">87.4</td><td class="num">10.1k</td><td class="num">82.6</td><td class="num">88.9</td><td class="num">11.6k</td><td class="num">35.1</td></tr>
+        <tr><td>LiveCodeBench</td><td class="num">56.7</td><td class="num">13.9k</td><td class="num">59.2</td><td class="num">11.8k</td><td class="num">57.0</td><td class="num">57.0</td><td class="num">11k</td><td class="num">79.7</td><td class="num">57.2</td><td class="num">12.1k</td><td class="num">49.4</td></tr>
+        <tr><td>平均</td><td class="num">72.1</td><td class="num">13k</td><td class="num">72.3</td><td class="num">11k</td><td class="num">58.2</td><td class="num">71.7</td><td class="num">10.2k</td><td class="num">79.5</td><td class="num">72.9</td><td class="num">11.4k</td><td class="num">46.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="tbl-note">读法：ELR 的分母是 GRPO 相对 SFT 多出来的长度；GRPO 自己按定义是 0。不同基准的 SFT–GRPO 差距不同，所以 ELR 不能跨基准直接比大小。</p>
+
+  <h3>总账：平均长度 13k → 10.2k，准确率差在噪声内</h3>
+  <p>Token Efficiency 的平均 ELR 是 <span class="mono" data-src="Table 2">79.5%</span>，比 Shortest 4/24 的 <span class="mono" data-src="Table 2">58.2%</span> 高 <span class="mono" data-src="Table 2">21.3 个百分点</span>（79.5 − 58.2）。平均长度从 GRPO 的 <span class="mono" data-src="Table 2">13k</span> 降到 Token Efficiency 的 <span class="mono" data-src="Table 2">10.2k</span>，少 <span class="mono" data-src="Table 2">2.8k</span>；按表中四舍五入值算，相对减少 <span class="mono" data-src="Table 2">21.5%</span>（2.8 / 13.0）。</p>
+
+  <p>准确率方面，论文用 Wilcoxon signed-rank test 比较每题 pass@1 的配对差异，结论是 GFPO 各变体与 GRPO 之间<strong>没有统计显著差异</strong>（§5）。平均准确率上，Shortest 4/24 是 72.3%，比 GRPO 的 72.1% 高 0.2 个百分点；Adaptive 是 72.9%，高 0.8 个百分点；Token Efficiency 是 71.7%，低 0.4 个百分点——这是论文明确说的 “minor non-statistically significant degradations”（§5.4）。</p>
+
+  <h3>反直觉一：Token Efficiency 比“只留最短”更狠</h3>
+  <p>Shortest-k 的梯度只覆盖到第 k 短的链，更长的 token 位置没有直接的负信号，只能靠 KL 项慢慢压。Token Efficiency 按 reward/length 排序后，长而错的链会拿到最陡的负梯度，所以它能砍到 Shortest-k 碰不到的尾部。结果就是平均 ELR 79.5% vs 58.2%，差 21.3 个百分点（Table 2）。</p>
+
+  <p>更反直觉的是简单题：Token Efficiency 在 AIME 25 的 easy 档位 ELR 达到 <span class="mono" data-src="§6.1">121.6%</span>，比 SFT 还短，同时准确率还有提升（§6.1）。这不是笔误：ELR 的分母是 GRPO 相对 SFT 的超额长度，当 GFPO 比 SFT 还短时，分子大于分母，ELR 可以大于 100%。</p>
+
+  <h3>反直觉二：k/G 不是严格单调的旋钮</h3>
+  <p>论文的框架是“降低 k/G 就能缩短长度”，Table 2 大体支持这个趋势，但有两个例外值得记住。第一，<code>8/24</code> 的平均 ELR 是 54.1%，反而高于 <code>6/24</code> 的 47.1%，差 <span class="mono" data-src="Table 2">7.0 个百分点</span>（54.1 − 47.1）。第二，从 <code>8/24</code> 再压到 <code>4/24</code>，平均 ELR 只从 54.1% 升到 58.2%，只多 <span class="mono" data-src="Table 2">4.1 个百分点</span>（58.2 − 54.1）。论文自己也说，继续压保留比例会出现边际收益递减（§5.3）。</p>
+
+  <p>另外，只从 <code>G=8</code> 里筛的 <code>6/8</code> 在 Omni-MATH 上 ELR 是 <span class="mono" data-src="Table 2">−5.5%</span>，长度反而增加；它在 AIME 25 / 24、GPQA 上也只有 1.8 / 9.5 / 11.5（Table 1）。这支持论文的标题：<strong>不先扩大采样组，单靠筛选不够</strong>。</p>
+
+  <h3>它到底砍掉了哪一段：Solution 和 Verification</h3>
+  <p>作者用 GPT-4o 把推理链按句子标成 Problem / Solution / Verification / Final 四段，再统计各段 token 数（§6.5、Figure 10）。GRPO 主要把 Solution 和 Verification 撑长；GFPO 正好压这两段，Problem 重述和 Final 答案基本不动（与 SFT 相差在 10% 以内）。</p>
+
+  <div class="sim" id="trim-sim">
+    <div class="tabs" id="trim-tabs">
+      <button class="tab active" type="button" data-sec="solution">Solution</button>
+      <button class="tab" type="button" data-sec="verification">Verification</button>
+    </div>
+    <div class="chart kg-chart" id="trim-chart"></div>
+    <div class="cx" id="trim-x"></div>
+    <div class="readout" data-src="Figure 10">
+      <div class="r-head">AIME 25 · 各段平均 token</div>
+      <div id="trim-msg"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>SFT</span>
+      <span><i style="background:var(--c2)"></i>GRPO</span>
+      <span><i style="background:var(--accent)"></i>Shortest 8/24</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算：Solution / Verification 的超额长度削减<span class="sum-sub">数值逐字取自 Figure 10 正文</span></summary>
+    <div class="details-body">
+      <p><strong>Solution：</strong>GRPO 相对 SFT 的超额 = <code>8.3 − 6.5 = 1.8k</code>；Shortest 8/24 只剩 <code>6.6 − 6.5 = 0.1k</code>；削减 = <code>(8.3 − 6.6) / (8.3 − 6.5) × 100 = 94.4%</code>。</p>
+      <p><strong>Verification：</strong>GRPO 相对 SFT 的超额 = <code>3.1 − 1.9 = 1.2k</code>；Shortest 8/24 只剩 <code>2.3 − 1.9 = 0.4k</code>；削减 = <code>(3.1 − 2.3) / (3.1 − 1.9) × 100 = 66.7%</code>。</p>
+      <p>这两组是 AIME 25 上 Shortest 8/24 的数字；GPQA 的趋势相同，但 Figure 10 正文没有给出同样的四位数字，本页不转录。交互只显示 Figure 10 的原始 token 数；百分比按上面两行公式手算，和 JS 输出一致。</p>
+    </div>
+  </details>
+
+  <h3>Pareto 与分布外：不是只在一个点上赢</h3>
+  <p>Figure 3 的准确率—长度前沿上，五个基准里有四个至少有一个 GFPO 变体<strong>严格支配</strong> GRPO：既更准又更短。AIME 25 是例外——GRPO 的准确率最高，但 GFPO 变体仍在 Pareto 前沿上，用不显著的准确率损失换明显的长度下降（§5.7）。</p>
+
+  <p>分布外的 LiveCodeBench 更能说明问题：训练集里没有代码数据，GRPO 仍把平均长度从 SFT 的 10.3k 推到 13.9k，准确率却从 57.7% 降到 56.7%——长度涨了，能力没涨。Shortest 8/24 在把 ELR 做到 57.0% 的同时，准确率是 59.2%，高于 SFT 和 GRPO；Token Efficiency 的长度最低（11k，ELR 79.7%），准确率 57.0%（Table 2、§5.6）。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>省的是推理，不是训练；它也没打算管开放式任务</h2></div>
+  <p class="sec-sub">论文自己承认的、以及从表里能直接读出来的边界，一共五条。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>训练开销变大了，而且没有墙钟数字</h4></div>
+    <p><code>G=16/24</code> 对应 <span class="mono" data-src="§4">2×/3×</span> 的采样条数。论文只说更短的回答会“部分抵消”训练成本（§3），没有给 GPU-hour、吞吐或墙钟增量；如果训练资源紧张，这笔前置投入可能比推理节省更难接受。收益是持续的：训练一次，部署时每条回答都更短（§1）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>只在小群里筛，可能反向变长</h4></div>
+    <p>Shortest <code>6/8</code> 在 Omni-MATH 的 ELR 是 <span class="mono" data-src="Table 2">−5.5%</span>，在 AIME 25 只有 1.8%。这说明“筛选”本身不是充分条件：<code>G</code> 不够大时，组里可能根本没有足够短的优质链。论文的结论是先把 <code>G</code> 从 8 扩到 16，再调 <code>k</code>（§5.1、§5.3）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>Token Efficiency 的方差更大，准确率略低</h4></div>
+    <p>Token Efficiency 的平均准确率 71.7% 比 GRPO 的 72.1% 低 <span class="mono" data-src="Table 2">0.4 个百分点</span>，论文说这是非统计显著的轻微退化；训练曲线方差也更大（Figure 2）。作者的解释是：长而对和长而错的链共享尾部 token，梯度方向会冲突（§5.4）。要最稳的准确率，Shortest 8/24 或 Adaptive 更合适。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界四</span><h4>Adaptive Difficulty 在“难题”档会掉一点</h4></div>
+    <p>论文明确说 Adaptive Difficulty 在 hard 档有 modest accuracy drop（§6.2）：简单题和很难的题都好判断，hard 档夹在中间，丢掉一些长但有用的回答会伤准确率。作者建议把 <code>G</code> 从 16 提到 24 来补（Shortest 8/24 在 hard 档追平 GRPO 的 73.4%）。另外，Adaptive 只和 shortest 指标组合过；论文说它也可以换成 token efficiency，但没有给出结果（§5.5）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界五</span><h4>只验证了数学训练 + STEM/代码评测</h4></div>
+    <p>训练集是 72k 数学题，评测覆盖 AIME、GPQA、Omni-MATH 和分布外的 LiveCodeBench；没有开放式对话、创意写作、情感支持或长文任务。论文没有声称这些场景也适用，也没有做安全性或事实性维度的过滤实验。把“简洁”当普遍目标之前，需要先确认任务本身是否奖励长解释。</p>
+  </div>
+
+  <p>还有一个度量层面的边界：ELR 的分母是 <code>L<sub>GRPO</sub> − L<sub>SFT</sub></code>。当 GRPO 相对 SFT 的超额很小时，分母小，ELR 会对舍入和采样噪声很敏感；<code>6/8</code> 在 Omni-MATH 的 −5.5% 就是一个例子。<span class="infer">推断</span> 这也是为什么不同基准的 ELR 不能直接横向比较，只能在同一基准内看相对排序。</p>
+</section>
+
+<footer>
+  <div>Sample More to Think Less: Group Filtered Policy Optimization for Concise Reasoning · Vaishnavi Shrivastava, Ahmed Awadallah, Vidhisha Balachandran, Shivam Garg, Harkirat Behl, Dimitris Papailiopoulos · Microsoft Research · arXiv 2508.09726v1</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.09726" target="_blank" rel="noopener">arXiv:2508.09726</a><br>
+    笔记：<a href="/sample-more-to-think-lessgroup-filtered-policy-optimization-for-concise-reasoning/">Sample More to Think Less：Group Filtered Policy Optimization for Concise Reasoning</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误与口径补充（未改动笔记原文）：</strong><br>
+    1. 笔记说被筛掉的回答“不会对策略梯度更新产生任何影响”。论文正文写的是 “effectively excluding them from influencing policy updates”，但 Eq. 2 的分母 Σ<sub>i=1</sub><sup>G</sup>|o<sub>i</sub>| 仍覆盖全部 G 条（含被拒样本）；零优势不等于对归一化尺度完全没有影响 <span class="infer">推断</span>。<br>
+    2. 笔记把对照模型称为“使用标准 GRPO 方法训练的模型”。论文的 GRPO 基线是 <strong>Phi-4-reasoning-plus</strong>，作者复现时用了 DAPO token-level loss，并对 clipped surrogate 做了小幅修改（§3–§4）。<br>
+    3. 笔记说 GRPO“用平均奖励作为基线”；原文的组内优势还用标准差 σ 归一化（Eq. 1/3），并不只是减均值。<br>
+    4. 笔记没有提一个反例：Shortest 6/8 在 Omni-MATH 上 ELR 为 <strong>−5.5%</strong>，即长度反而增加（Table 2）；这说明“只在小群里筛”并不稳。<br>
+    <br>
+    数字核对：笔记中的 AIME 24 的 77.7% / 13.3k、Shortest 4/24 的 76.5% / 11.3k / 59.8%、Token Efficiency 的 84.6% / 10.6k，以及平均 71.7% vs 72.1% / 79.5% / 13k / 10.2k，均与 Table 1 / Table 2 一致。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) k/G 交互：按配置读取 Table 1 / Table 2 的 ELR
+   ============================================================ */
+(function () {
+  var KG = {
+    '6-8':  { vals: [1.8, 9.5, 11.5, -5.5, 7.0], avg: 4.8 },
+    '8-16': { vals: [23.8, 33.0, 23.7, 31.5, 36.5], avg: 29.7 },
+    '6-16': { vals: [25.6, 35.6, 38.8, 43.7, 37.2], avg: 36.2 },
+    '4-16': { vals: [38.0, 46.8, 45.7, 47.3, 43.2], avg: 44.2 },
+    '8-24': { vals: [54.4, 52.7, 52.2, 51.9, 59.4], avg: 54.1 },
+    '6-24': { vals: [41.0, 44.9, 48.6, 58.2, 42.7], avg: 47.1 },
+    '4-24': { vals: [46.1, 59.8, 57.3, 71.0, 57.0], avg: 58.2 }
+  };
+  var BENCH = ['AIME 25', 'AIME 24', 'GPQA', 'Omni-MATH', 'LiveCodeBench', '平均'];
+  var k = 8, g = 16;
+
+  var msg = document.getElementById('kg-msg');
+  var chart = document.getElementById('kg-chart');
+  var xlab = document.getElementById('kg-x');
+  if (!msg || !chart || !xlab) return;
+
+  function renderKG() {
+    var key = k + '-' + g;
+    var ratio = (k / g).toFixed(3);
+
+    chart.innerHTML = '';
+    xlab.innerHTML = '';
+
+    if (key === '8-8') {
+      msg.innerHTML = 'k/G = 1.000 · 这是 GRPO 基线：G=8，不过滤，不适用 GFPO 的 top-k 选择。';
+      return;
+    }
+    var d = KG[key];
+    if (!d) {
+      msg.innerHTML = 'k/G = ' + ratio + ' · 论文没有测这一组（k=' + k + ', G=' + g + '）。可用配置见 Table 1 / Table 2。';
+      return;
+    }
+
+    msg.innerHTML = 'k/G = <strong>' + ratio + '</strong> · 五基准平均 ELR = <strong>' +
+      d.avg.toFixed(1) + '%</strong>（Table 2，' + k + ' of ' + g + ' 行）';
+
+    var all = d.vals.concat([d.avg]);
+    var row = document.createElement('div');
+    row.className = 'crow';
+    var name = document.createElement('div');
+    name.className = 'cname';
+    name.textContent = 'ELR %';
+    var bars = document.createElement('div');
+    bars.className = 'cbars';
+
+    all.forEach(function (val, i) {
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.height = Math.max(2, Math.abs(val)) + '%';
+      if (val < 0) {
+        fill.style.background = 'var(--text-soft)';
+      } else if (i === 5) {
+        fill.style.background = 'var(--accent-deep)';
+      } else {
+        fill.style.background = 'var(--accent)';
+      }
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = val.toFixed(1);
+      track.appendChild(fill);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+    });
+
+    row.appendChild(name);
+    row.appendChild(bars);
+    chart.appendChild(row);
+
+    xlab.innerHTML = BENCH.map(function (s) { return '<span>' + s + '</span>'; }).join('');
+  }
+
+  document.querySelectorAll('#kg-kbtns .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#kg-kbtns .rule-btn').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      k = parseInt(btn.dataset.k, 10);
+      renderKG();
+    });
+  });
+
+  document.querySelectorAll('#kg-gtabs .tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#kg-gtabs .tab').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      g = parseInt(btn.dataset.g, 10);
+      renderKG();
+    });
+  });
+
+  renderKG();
+})();
+
+/* ============================================================
+   2) Figure 10：Solution / Verification 的分段 token
+   ============================================================ */
+(function () {
+  var TRIM = {
+    solution: {
+      vals: [6.5, 8.3, 6.6],
+      msg: 'Solution：GRPO 相对 SFT 的超额 = 8.3 − 6.5 = 1.8k；Shortest 8/24 只剩 6.6 − 6.5 = 0.1k；削减 <strong>94.4%</strong>（(8.3 − 6.6)/(8.3 − 6.5)）。'
+    },
+    verification: {
+      vals: [1.9, 3.1, 2.3],
+      msg: 'Verification：GRPO 相对 SFT 的超额 = 3.1 − 1.9 = 1.2k；Shortest 8/24 只剩 2.3 − 1.9 = 0.4k；削减 <strong>66.7%</strong>（(3.1 − 2.3)/(3.1 − 1.9)）。'
+    }
+  };
+  var NAMES = ['SFT', 'GRPO', 'Shortest 8/24'];
+  var COLORS = ['var(--c1)', 'var(--c2)', 'var(--accent)'];
+  var cur = 'solution';
+
+  var chart = document.getElementById('trim-chart');
+  var msg = document.getElementById('trim-msg');
+  var xlab = document.getElementById('trim-x');
+  if (!chart || !msg || !xlab) return;
+
+  function renderTrim() {
+    var d = TRIM[cur];
+    chart.innerHTML = '';
+    var row = document.createElement('div');
+    row.className = 'crow';
+    var name = document.createElement('div');
+    name.className = 'cname';
+    name.textContent = 'tokens (k)';
+    var bars = document.createElement('div');
+    bars.className = 'cbars';
+
+    d.vals.forEach(function (val, i) {
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.height = (val / 9 * 100) + '%';
+      fill.style.background = COLORS[i];
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = val.toFixed(1) + 'k';
+      track.appendChild(fill);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+    });
+
+    row.appendChild(name);
+    row.appendChild(bars);
+    chart.appendChild(row);
+    xlab.innerHTML = NAMES.map(function (s) { return '<span>' + s + '</span>'; }).join('');
+    msg.innerHTML = d.msg;
+  }
+
+  document.querySelectorAll('#trim-tabs .tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#trim-tabs .tab').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      cur = btn.dataset.sec;
+      renderTrim();
+    });
+  });
+
+  renderTrim();
+})();
+</script>
+</body>
+</html>

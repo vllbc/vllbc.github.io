@@ -1,0 +1,687 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 6.1 | Table 3 | 67.9-61.8 |
+| 4.7 | Table 3 | 31.1-26.4 |
+| 23.38 | Table 4 | 51.84-28.46 |
+| 7.44 | Table 4 | 16.78-9.34 |
+| 2.92 | Table 4 | 54.76-51.84 |
+| 17.2 | Figure 2 | 54.9-37.7 |
+| 14.6 | Figure 2 | 52.3-37.7 |
+| 3.6 | Table 6 | 67.9-64.3 |
+| 5.6 | Table 6 | 31.1-25.5 |
+| 11.8 | Table 6 | 67.9-56.1 |
+| 1.0 | Table 6 | 31.1-30.1 |
+| 0.4 | Table 6 | 67.9-67.5 |
+| 0.6 | Table 6 | 31.1-30.5 |
+| 1.1 | Table 6 | 69.0-67.9 |
+| 0.9 | Table 6 | 32.0-31.1 |
+| 30.25 | Table 5 | 67.88-37.63 |
+| 12.47 | Table 5 | 31.51-19.04 |
+| 2.0 | Table 5 | 67.88-65.88 |
+| 4.39 | Table 5 | 31.51-27.12 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEER · 用成功轨迹的逐步检索，决定下一步调什么工具</title>
+<meta name="description" content="SEER 把成功轨迹在线存入经验池，按轨迹相似度、工具链覆盖、意图匹配三轴检索 top-k 示例；ToolQA 67.9/31.1，τ-bench 72B 从 28.46 升到 51.84。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调，公共样式全部来自 base.css */
+code{overflow-wrap:anywhere}
+.sim-context{font-size:13px;color:var(--text-muted);background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin:0 0 14px;line-height:1.7}
+.slot .slot-rank{font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft);margin-bottom:3px}
+.slot .slot-sub{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-muted);margin-top:6px;line-height:1.55}
+.slot.sel{box-shadow:inset 0 0 0 2px var(--accent)}
+.sim-note{font-size:12px;color:var(--text-soft);margin-top:12px;line-height:1.65}
+.svg-flow{overflow-x:auto;margin:0 -4px}
+.svg-flow svg{min-width:760px;height:auto;display:block}
+.errata{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;margin-top:16px;font-size:13px;color:var(--text-muted);line-height:1.8}
+.errata h4{margin:0 0 8px;font-size:14px;color:var(--text)}
+.errata ul{margin:0;padding-left:18px}
+.errata li{margin-bottom:6px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SEER</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">检索公式</a>
+      <a href="#train">怎么算</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · EMNLP 2025 · arXiv 2508.15214v3</span>
+  <h1>SEER：不训练模型，让 agent 从自己的成功轨迹里检索「下一步」</h1>
+  <p class="hero-sub">
+    多步工具调用的难点不是单轮问答，而是每一步都要在工具链上做选择。SEER 把成功轨迹连同结构化经验一起存入一个在线经验池，
+    再用轨迹相似度、工具链覆盖、意图匹配三条轴检索 top-k 示例；全部发生在推理时，不更新参数。
+  </p>
+  <div class="meta">
+    <span>Sijia Cui, Aiyao He, Shuai Xu, Hongming Zhang, Yanna Wang, Qingyang Zhang, Yajing Wang, Bo Xu</span>
+    <a href="https://arxiv.org/abs/2508.15214v3" target="_blank" rel="noopener">arXiv 2508.15214v3 ↗</a>
+    <a href="https://github.com/AI-Research-TeamX/SEER" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    多步工具调用里，prompt 中的固定示例覆盖不了不断变化的工具组合；只按初始问题的语义相似度检索，也抓不到「工具怎么串起来」这件事。
+  </p>
+  <p>
+    SEER 做两件事：每次任务成功后，用 LLM 裁判判断是否成功，成功就把整条交互轨迹入池；下一次任务每一步，按<strong>轨迹相似度 s1、工具链覆盖 s2、意图匹配 s3</strong> 给池中候选打分，取 top-k 拼进 prompt。
+  </p>
+  <p>
+    在 ToolQA 上，SEER 的平均 Easy/Hard 为 <span data-src="Table 3">67.9 / 31.1</span>，高于 ExpeL 的 <span data-src="Table 3">61.8 / 26.4</span>；在 τ-bench 上，Qwen2.5-72B 从 <span data-src="Table 4">28.46</span> 升到 <span data-src="Table 4">51.84</span>，但仍低于 GPT-4o 54.76、DeepSeek-v3 57.24 与 Claude 3.5 Sonnet 59.58。
+  </p>
+  <p>
+    自改进曲线从第 1 批 <span data-src="Figure 2">37.7</span> 升到第 10 批 <span data-src="Figure 2">54.9</span>。代价是：经验池最多 1000 条、检索权重固定 1/3、且只收成功轨迹——它优化的是「复用成功」，不是「从失败中学习」。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 3">67.9<small>%</small></div>
+      <div class="k">ToolQA Easy 平均<br>ExpeL 61.8 / Hard 31.1 对 26.4</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">51.84<small>%</small></div>
+      <div class="k">τ-bench 平均（SEER 72B）<br>底座 Qwen2.5-72B 28.46 / GPT-4o 54.76</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 2">54.9<small>%</small></div>
+      <div class="k">第 10 批准确率<br>第 1 批 37.7 / 1530 题分 10 批</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>多步工具调用，难在每一步都要重新决定「调什么」</h2></div>
+  <p class="sec-sub">先把「一条轨迹」和「一次检索」说清楚：SEER 检索的不是答案，而是下一步的动作。</p>
+
+  <p>Function calling 让 LLM 能调用外部工具，但多步场景下，模型同时要解决三件事：选哪个工具、填什么参数、以及把多个工具串成一条链（摘要）。每一步的输入不是原始问题，而是截至当前的全部交互历史：</p>
+
+  <div class="eq">
+    H<sub>t</sub> = { o<sub>0</sub>, a<sub>0</sub>, o<sub>1</sub>, a<sub>1</sub>, …, o<sub>t</sub> }<br>
+    τ = { o<sub>0</sub>, a<sub>0</sub>, o<sub>1</sub>, a<sub>1</sub>, … }
+  </div>
+  <div class="eq-cap">§3.1 · o 是用户输入或工具返回，a 是模型动作；轨迹 τ 是整条 o/a 序列</div>
+
+  <p>于是「找几个相似示例放进 prompt」这件事有两个天然缺陷。第一，prompt 有长度上限，示例不可能覆盖所有工具和问题类型；示例的相关性与复杂度又直接影响模型表现（§1）。第二，人工筛选或预先收集的示例库是静态的，工具和任务一变就失效，而且维护成本高（§1、§2.2）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键差别</span><h4>只比「问题像不像」，抓不到「工具链怎么走」</h4></div>
+    <p>两个任务的初始问题可能几乎一样，但一个只需要查数据库，另一个还要先查航班、再查酒店、最后下单。按初始 query 的语义相似度检索，会把前者排在前面；真正有用的经验，是那条走通了完整工具链的轨迹。</p>
+  </div>
+
+  <p>论文把检索单元定义成「轨迹经验」：不只存问题和答案，还存整条交互过程、初始 query、推断出的用户意图、以及工具调用序列。这样检索才有机会对齐「解决过程」，而不只是「问题表面」。</p>
+
+  <p>规模上，ToolQA 有 <span data-src="Table 1">800 道 Easy、730 道 Hard</span>（55 / 62 个模板，8 个域）；τ-bench 有 <span data-src="Table 2">165 道题</span>（airline 50、retail 115，以 Table 2 为准）。交互步数上限：ToolQA <span data-src="§4.1">T=6</span>，τ-bench <span data-src="§4.1">T=30</span>。步数越多，单看初始 query 越不够。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人两条路：静态示例库，或需要训练的 RL</h2></div>
+  <p class="sec-sub">一路把示例当固定资产，一路把工具使用当策略学习；SEER 选的是推理时的经验复用。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">静态示例 / 检索</span><h4>ART、ExpeL、普通 ICL</h4></div>
+      <p>ART 检索相似的多步推理轨迹来引导中间步骤和函数调用；ExpeL 从过往任务经验中学习。但论文 §2.2 指出，这类方法通常依赖静态的离线数据集；示例库需要预先收集或人工整理。</p>
+      <p><strong>卡点：</strong>池子不随部署过程更新；检索大多停留在任务/查询级相似度，工具链对齐没有被显式建模。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">训练型 RL</span><h4>StepTool、SWiRL</h4></div>
+      <p>StepTool 用步级 reward shaping 和 policy gradient；SWiRL 生成合成多步工具数据，再用 reward model 做步级 RL。它们把工具使用当成策略学习问题。</p>
+      <p><strong>卡点：</strong>需要训练（奖励模型或参数更新），部署成本和数据准备都更重；论文要的是「不加训练」的推理时方案。</p>
+    </div>
+  </div>
+
+  <p>SEER 的增量因此不是一个新的训练目标，而是两件事：把经验池改成<strong>在线更新</strong>，把检索改成<strong>三轴细粒度打分</strong>。它仍然依赖底座 LLM 和 in-context learning，但不改参数。</p>
+
+  <p>这也解释了为什么 ToolQA 上最强的对照是 ExpeL：它同样利用过往经验，差别在于 SEER 的池子是在线长的、检索维度更多。Table 3 里 ExpeL 的 Easy/Hard 平均为 <span data-src="Table 3">61.8 / 26.4</span>，SEER 为 <span data-src="Table 3">67.9 / 31.1</span>。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三条打分轴：轨迹像不像、工具重不重、意图同不同</h2></div>
+  <p class="sec-sub">SEER 的全部检索逻辑，就是三个分数加权求和，然后取 top-k。</p>
+
+  <p>每条经验被表示成一个四元组：</p>
+
+  <div class="eq">d<sup>τ</sup> = ⟨ E<sup>τ</sup>, E<sup>q</sup>, I<sup>τ</sup>, U<sup>τ</sup> ⟩</div>
+  <div class="eq-cap">§3.2 · E<sup>τ</sup> 是整条轨迹的 embedding；E<sup>q</sup> 是初始 query 的 embedding；I<sup>τ</sup> 是 LLM 推断的离散意图；U<sup>τ</sup> 是工具调用序列</div>
+
+  <p>给定当前历史 H<sub>t</sub> 和池中候选 τ′，三个分数分别是：</p>
+
+  <div class="eq">
+    s<sub>1</sub> = (1 + cos(E<sup>Ht</sup>, E<sup>τ′</sup>)) / 2<br>
+    s<sub>2</sub> = |U<sup>Ht</sup> ∩ U<sup>τ′</sup>| / |U<sup>Ht</sup>|<br>
+    s<sub>3</sub> = 1[ I<sup>Ht</sup> = I<sup>τ′</sup> ]<br>
+    <span class="hl-c">Score<sup>τ′</sup> = λ<sub>1</sub>s<sub>1</sub> + λ<sub>2</sub>s<sub>2</sub> + λ<sub>3</sub>s<sub>3</sub></span>
+  </div>
+  <div class="eq-cap">§3.3 · s1 归一化到 [0,1]；s2 是当前工具集被候选覆盖的比例；s3 是意图相同的指示函数</div>
+
+  <p><strong>s1 轨迹相似度</strong>比较的是整条交互历史的 embedding 与候选轨迹的 embedding，归一化为 <code>(1+cos)/2</code>。它让检索超过「初始 query 匹配」，能捞到结构推进和决策模式相似的轨迹。论文在消融里还做了一个 query-based 变体：只比较初始 query 的 embedding，用来隔离「全轨迹」与「仅查询」的差别（§4.4）。</p>
+
+  <p><strong>s2 工具链覆盖</strong>是当前任务已用工具集合被候选覆盖的比例。计算时<strong>忽略工具出现的方向</strong>，把 U 当成无序集合（§3.3）；工具顺序的相似性由 s1 的轨迹表示承担。当前用了 3 个工具、候选覆盖 2 个，s2 就是 <code>2/3</code>。</p>
+
+  <p><strong>s3 意图匹配</strong>是二值指示函数：当前意图与候选意图是否相同。意图不是人工标注，而是由 LLM 根据初始 query 从预定义离散意图集中分类（§3.2；提示模板见 Appendix A.1 的 Figure 4，本页未转录）。</p>
+
+  <p>最终得分是加权和。实验里 λ<sub>1</sub>=λ<sub>2</sub>=λ<sub>3</sub>=<span data-src="§4.1">1/3</span>，默认取 <span data-src="§4.1">top-k = 4</span>；这 4 条经验作为 in-context 示例，引导模型输出下一步动作 a<sub>t</sub>（Algorithm 1）。</p>
+
+  <h3>自己动手：三条轴怎么把候选经验排出先后</h3>
+  <p>下面是一个<strong>机制演示</strong>，不是论文实验的复现。当前任务固定为「意图 <code>travel_booking</code>，已用 3 个工具」；候选 A–E 的 cos 值、工具集合与意图都是示意输入。切换消融开关，看排序和 top-4 入选名单怎么变。</p>
+
+  <div class="sim" id="rank-sim">
+    <div class="sim-top" id="mode-btns">
+      <button class="rule-btn active" data-mode="full">完整 SEER<span class="r-sub">s1 + s2 + s3</span></button>
+      <button class="rule-btn" data-mode="nos2">w/o s2<span class="r-sub">去掉工具链覆盖</span></button>
+      <button class="rule-btn" data-mode="nos3">w/o s3<span class="r-sub">去掉意图匹配</span></button>
+      <button class="rule-btn" data-mode="query">query-based<span class="r-sub">s1 只用初始查询</span></button>
+    </div>
+
+    <div class="sim-context">
+      当前任务（示意）：意图 <code>travel_booking</code>；工具集 <code>flight_search</code>、<code>hotel_search</code>、<code>hotel_book</code>。候选 A–E 见下；k 固定为 4（§4.1）。
+    </div>
+
+    <div class="slots s5" id="cand-slots"></div>
+
+    <div class="readout" id="rank-readout" data-src="§3.3 Algorithm 1">
+      <div class="r-head">当前排序与入选项</div>
+      <div id="rank-msg">正在计算…</div>
+    </div>
+
+    <div class="sim-note">候选 A 同工具链同意图；B 轨迹最像但意图不同；C 查询最像；D 工具覆盖最低；E 折中。分数统一保留 3 位小数。</div>
+  </div>
+
+  <details>
+    <summary>手算核对：两组参数 → 排序<span class="sum-sub">页面 JS 与这里用同一条公式</span></summary>
+    <div class="details-body">
+      <p><strong>设定 1（完整 SEER，λ=(1/3, 1/3, 1/3)），候选 A：</strong><br>
+      cos=0.64 → s1=(1+0.64)/2=0.820；工具交集 3/3 → s2=1.000；意图相同 → s3=1。<br>
+      Score=(0.820+1.000+1)/3=0.940。</p>
+
+      <p><strong>设定 2（w/o s3，λ=(1/2, 1/2, 0)），候选 B：</strong><br>
+      cos=0.91 → s1=(1+0.91)/2=0.955；工具交集 2/3 → s2=0.6667；s3 不参与。<br>
+      Score=(0.955+0.6667)/2=0.8108，页面显示 0.811。同一设定下候选 A=(0.820+1.000)/2=0.910，所以 B 从末位升到第 2。</p>
+
+      <p>显示口径：四舍五入到 3 位小数，JS 用 <code>toFixed(3)</code>；本交互不涉及标准差。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个交互覆盖了什么、没覆盖什么<span class="sum-sub">简化模拟的边界</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>按 Algorithm 1 第 4–8 步实现 s1 的归一化余弦、s2 的集合覆盖率、s3 的指示函数、加权求和、降序排序和 top-k 截断。消融开关按「把对应维度的权重置 0，其余两维等权归一化」实现。</p>
+      <p><strong>未覆盖：</strong>没有实现真正的 embedding 模型与意图分类器，cos 值和意图都是预设的；没有从原始交互文本里抽取工具序列，也没有实现经验池的在线写入。因此页面只演示打分与排序机制，<span class="infer">推断</span>（依据：候选为示意输入，且消融权重处理为页面自定）不能把这里的排序当作 Figure 3 / Table 6 的数值对照。</p>
+      <p>另外，原文没有说明 w/o s2、w/o s3 消融时剩余两维权重如何处理；上面的「等权归一化」是页面为可交互而自定的规则，不是论文规则。原论文的消融结果以 Table 6 为准。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训/怎么算 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>不训练参数：成本在「每步检索 + 池维护」</h2></div>
+  <p class="sec-sub">SEER 是推理时方法；工程上要关心经验池大小、检索频率和裁判调用，而不是反向传播。</p>
+
+  <p>实验配置（§4.1）：底座 <strong>Qwen2.5-72B-Instruct</strong>，温度 0；embedding 用 <strong>bge-large-en-v1.5</strong>；默认 top-k = <span data-src="§4.1">4</span>；λ<sub>1</sub>=λ<sub>2</sub>=λ<sub>3</sub>=<span data-src="§4.1">1/3</span>；经验池上限 <span data-src="§4.1">1000</span> 条；ToolQA 初始池 <span data-src="§4.1">8</span> 条示例，τ-bench 初始池 <span data-src="§4.1">2</span> 条，并用 GPT-4o 扮演用户。</p>
+
+  <p>每一步的检索成本：把当前历史编码成向量和意图，对池中至多 1000 条经验逐条算 s1/s2/s3 并排序，取前 4 条拼进 prompt。没有梯度、没有参数更新；成本随池大小和交互步数增长。论文没有报告检索耗时，也没有说明池满 1000 条后的淘汰策略。</p>
+
+  <p>任务结束后才进入经验池回路：LLM 评估器把模型输出与参考答案比对，给出二分类成功/失败；评估逻辑容忍格式差异和轻微数值差异（§3.4）。成功才抽取四元组入池（Algorithm 2），失败轨迹丢弃。评估器的提示模板见 Appendix A.2 的 Figure 5，本页未转录。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么能「不训练」</span><h4>改进来自 prompt 里的经验，不来自参数</h4></div>
+    <p>SEER 把「从过去任务学习」放在检索层：模型每次看到的示例，是当前池里最相关的成功轨迹。论文的定位是 without additional training（§2.1）；代价是经验池的多样性受底座模型能力约束（Limitations）。</p>
+  </div>
+
+  <p>这套设计有两个直接后果。第一，池子越大，每步打分越贵；论文把池子上限设为 1000，但没有给出延迟数据。第二，只有「裁判认为成功」的轨迹才会入池，所以裁判的判定质量会直接影响池子的质量；论文没有报告裁判自身的准确率。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次任务的两条回路：检索给下一步，评估决定入池</h2></div>
+  <p class="sec-sub">上面是每一步的「检索 → 决策 → 环境反馈」，下面是任务结束后的「评估 → 入池」；两条回路通过经验池连接。</p>
+
+  <figure>
+    <div class="svg-flow">
+      <svg viewBox="0 0 860 420" width="100%" aria-label="SEER 的检索与经验池更新流程">
+        <defs>
+          <marker id="arr-flow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
+          </marker>
+          <marker id="arr-dash" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--c2)"></path>
+          </marker>
+        </defs>
+
+        <!-- 上排：每一步的检索与决策 -->
+        <rect x="10" y="30" width="150" height="64" rx="9" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+        <text x="85" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">当前历史 H_t</text>
+        <text x="85" y="76" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">o0, a0, …, ot</text>
+
+        <rect x="195" y="30" width="160" height="64" rx="9" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="275" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="var(--c1)">表征</text>
+        <text x="275" y="76" text-anchor="middle" font-size="10.5" fill="var(--c1)">轨迹 embedding + 意图</text>
+
+        <rect x="390" y="30" width="160" height="64" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="470" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="var(--accent-deep)">三轴打分</text>
+        <text x="470" y="76" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">s1 · s2 · s3 → Score</text>
+
+        <rect x="585" y="30" width="130" height="64" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="650" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="var(--accent-deep)">top-k 经验</text>
+        <text x="650" y="76" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">k = 4（§4.1）</text>
+
+        <rect x="750" y="30" width="100" height="64" rx="9" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+        <text x="800" y="56" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">LLM 决策</text>
+        <text x="800" y="76" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">a_t</text>
+
+        <line x1="160" y1="62" x2="190" y2="62" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arr-flow)"></line>
+        <line x1="355" y1="62" x2="385" y2="62" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arr-flow)"></line>
+        <line x1="550" y1="62" x2="580" y2="62" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arr-flow)"></line>
+        <line x1="715" y1="62" x2="745" y2="62" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arr-flow)"></line>
+
+        <rect x="750" y="130" width="100" height="60" rx="9" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="800" y="154" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--c1)">环境 / 用户</text>
+        <text x="800" y="174" text-anchor="middle" font-size="10.5" fill="var(--c1)">o_t+1</text>
+        <line x1="800" y1="94" x2="800" y2="125" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#arr-flow)"></line>
+
+        <text x="790" y="212" text-anchor="middle" font-size="10" fill="var(--text-soft)">o_t+1 更新 H_t，进入下一步</text>
+
+        <!-- 下排：任务结束后的经验池更新 -->
+        <rect x="10" y="250" width="170" height="64" rx="9" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+        <text x="95" y="276" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">任务结束（轨迹 τ）</text>
+        <text x="95" y="296" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">整条 o / a 序列</text>
+
+        <rect x="215" y="250" width="170" height="64" rx="9" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+        <text x="300" y="276" text-anchor="middle" font-size="13" font-weight="600" fill="var(--c2)">LLM 评估器 E</text>
+        <text x="300" y="296" text-anchor="middle" font-size="10.5" fill="var(--c2)">二分类：成功 / 失败</text>
+
+        <rect x="420" y="250" width="170" height="64" rx="9" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+        <text x="505" y="276" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">成功 → 抽取 d^τ</text>
+        <text x="505" y="296" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">E^τ, E^q, I^τ, U^τ</text>
+
+        <rect x="625" y="250" width="150" height="64" rx="9" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+        <text x="700" y="276" text-anchor="middle" font-size="13" font-weight="600" fill="var(--c2)">经验池 D</text>
+        <text x="700" y="296" text-anchor="middle" font-size="10.5" fill="var(--c2)">≤ 1000 条</text>
+
+        <line x1="180" y1="282" x2="210" y2="282" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#arr-dash)"></line>
+        <line x1="385" y1="282" x2="415" y2="282" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#arr-dash)"></line>
+        <line x1="590" y1="282" x2="620" y2="282" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#arr-dash)"></line>
+
+        <rect x="215" y="340" width="170" height="48" rx="9" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+        <text x="300" y="364" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">失败 → 丢弃（不入池）</text>
+        <line x1="300" y1="314" x2="300" y2="336" stroke="var(--text-soft)" stroke-width="1.2" marker-end="url(#arr-flow)"></line>
+
+        <path d="M700,250 L700,120 L470,120 L470,98" fill="none" stroke="var(--c2)" stroke-width="1.4" stroke-dasharray="5,3" marker-end="url(#arr-dash)"></path>
+        <text x="585" y="112" text-anchor="middle" font-size="10.5" fill="var(--c2)">候选 d^τ′ → 打分</text>
+      </svg>
+    </div>
+    <figcaption>
+      按 §3 与 Figure 1 的文字描述<strong>简化重绘</strong>，不是原文 Figure 1 的矢量复制。覆盖「检索 → 决策 → 环境反馈」与「评估 → 成功入池 → 再检索」两条回路；未画出 prompt 模板、embedding 模型和意图分类器的内部步骤。
+    </figcaption>
+  </figure>
+
+  <p>读图顺序：当前历史 H<sub>t</sub> 先做表征（轨迹 embedding + 意图分类），再对池中每条 d<sup>τ′</sup> 算 s1/s2/s3，取 top-k 拼进 prompt，LLM 产出动作 a<sub>t</sub>；环境返回 o<sub>t+1</sub>，历史更新。任务结束后，评估器 E 对整条轨迹做二分类；成功才抽取 d<sup>τ</sup> 入池，失败直接丢弃。</p>
+
+  <p>这张图也说明了为什么「只收成功」是一个结构性选择：失败轨迹没有进入打分候选的入口。经验池只会因成功而增长，不会因失败而修正。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>ToolQA 平均更高；τ-bench 仍排在闭源模型之后</h2></div>
+  <p class="sec-sub">先看两张主表，再看自改进曲线、消融和 top-k；所有数字都带表号或图号。</p>
+
+  <p>ToolQA 上，所有基线都用同一个底座 Qwen2.5-72B-Instruct，温度 0（§4.1）。SEER 的平均 Easy/Hard 为 <span data-src="Table 3">67.9 / 31.1</span>，ExpeL 为 <span data-src="Table 3">61.8 / 26.4</span>。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 3 · ToolQA 主结果（Accuracy %），完整转录 7 个方法与 8 个域的 Easy/Hard 列；GSM8K 只有 Easy 列</caption>
+      <thead>
+        <tr>
+          <th>Method</th>
+          <th>Flight E</th><th>Flight H</th>
+          <th>Coffee E</th><th>Coffee H</th>
+          <th>Yelp E</th><th>Yelp H</th>
+          <th>Airbnb E</th><th>Airbnb H</th>
+          <th>DBLP E</th><th>DBLP H</th>
+          <th>SciREX E</th><th>SciREX H</th>
+          <th>Agenda E</th><th>Agenda H</th>
+          <th>GSM8K E</th>
+          <th>Avg E</th><th>Avg H</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Chameleon</td><td class="num">37.0</td><td class="num">2.0</td><td class="num">61.0</td><td class="num">2.3</td><td class="num">60.0</td><td class="num">13.0</td><td class="num">12.0</td><td class="num">4.0</td><td class="num">25.0</td><td class="num">17.0</td><td class="num">6.0</td><td class="num">19.0</td><td class="num">57.0</td><td class="num">0.0</td><td class="num">17.0</td><td class="num">34.5</td><td class="num">8.2</td></tr>
+        <tr><td>CoT</td><td class="num">37.0</td><td class="num">22.0</td><td class="num">79.0</td><td class="num">13.1</td><td class="num">43.0</td><td class="num">52.0</td><td class="num">79.0</td><td class="num">19.0</td><td class="num">0.0</td><td class="num">1.0</td><td class="num">3.0</td><td class="num">22.0</td><td class="num">54.0</td><td class="num">0.0</td><td class="num">2.0</td><td class="num">37.1</td><td class="num">18.4</td></tr>
+        <tr><td>ReAct</td><td class="num">67.0</td><td class="num">6.0</td><td class="num">94.0</td><td class="num">25.4</td><td class="num">70.0</td><td class="num">17.0</td><td class="num">86.0</td><td class="num">17.0</td><td class="num">27.0</td><td class="num">22.0</td><td class="num">6.0</td><td class="num">18.0</td><td class="num">61.0</td><td class="num">0.0</td><td class="num">64.0</td><td class="num">59.5</td><td class="num">15.1</td></tr>
+        <tr><td>TUMS</td><td class="num">64.0</td><td class="num">9.0</td><td class="num">93.0</td><td class="num">22.3</td><td class="num">73.0</td><td class="num">15.0</td><td class="num">91.0</td><td class="num">11.0</td><td class="num">34.0</td><td class="num">30.0</td><td class="num">4.0</td><td class="num">14.0</td><td class="num">59.0</td><td class="num">0.0</td><td class="num">72.0</td><td class="num">61.3</td><td class="num">14.5</td></tr>
+        <tr><td>ART</td><td class="num">73.0</td><td class="num">20.0</td><td class="num">99.0</td><td class="num">33.1</td><td class="num">81.0</td><td class="num">30.0</td><td class="num">94.0</td><td class="num">25.0</td><td class="num">33.0</td><td class="num">33.0</td><td class="num">3.0</td><td class="num">25.0</td><td class="num">1.0</td><td class="num">0.0</td><td class="num">73.0</td><td class="num">57.1</td><td class="num">23.7</td></tr>
+        <tr><td>ExpeL</td><td class="num">81.0</td><td class="num">29.0</td><td class="num">92.0</td><td class="num">34.6</td><td class="num">77.0</td><td class="num">40.0</td><td class="num">88.0</td><td class="num">32.0</td><td class="num">37.0</td><td class="num">29.0</td><td class="num">5.0</td><td class="num">19.0</td><td class="num">57.0</td><td class="num">1.0</td><td class="num">57.0</td><td class="num">61.8</td><td class="num">26.4</td></tr>
+        <tr class="best"><td>SEER (Ours)</td><td class="num">82.0</td><td class="num">25.0</td><td class="num">87.0</td><td class="num">41.5</td><td class="num">90.0</td><td class="num">58.0</td><td class="num">94.0</td><td class="num">33.0</td><td class="num">37.0</td><td class="num">35.0</td><td class="num">6.0</td><td class="num">23.0</td><td class="num">68.0</td><td class="num">2.0</td><td class="num">79.0</td><td class="num">67.9</td><td class="num">31.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ul>
+    <li><strong>Easy 高 6.1 个百分点</strong>（67.9 − 61.8），<strong>Hard 高 4.7 个百分点</strong>（31.1 − 26.4）。原文 Table 3 的 caption 与摘要把这两个点差写成 6.1% / 4.7%；页面按表值统一写「个百分点」。</li>
+    <li><strong>域级不是全胜。</strong>SEER 在 Yelp、Airbnb、DBLP、Agenda 的 Easy 与 Hard 两个子集都取到表内最高；但 Flight-Hard 为 25.0，低于 ExpeL 的 29.0；Coffee-Easy 为 87.0，低于 ART 的 99.0 和 ReAct 的 94.0；SciREX-Hard 为 23.0，低于 ART 的 25.0。论文 §4.2 也写明 Flight-Hard 与 SciREX-Hard 略降、Coffee-Easy 下降更明显。</li>
+    <li><strong>Coffee-Easy 的下降有解释。</strong>论文归因于「suboptimal and cumbersome examples」导致模型 overthinking；加入 reflection 后，SEER+Reflection 的 Easy/Hard 为 69.0 / 32.0（Table 6），比 SEER 高 1.1 / 0.9 个百分点。</li>
+  </ul>
+
+  <p>τ-bench 的结果更能看出上限。Table 4 里，SEER(72B) 的平均为 <span data-src="Table 4">51.84</span>，比底座 Qwen2.5-72B 的 <span data-src="Table 4">28.46</span> 高 23.38 个百分点；但 GPT-4o 是 <span data-src="Table 4">54.76</span>，还高 2.92 个百分点；Claude 3.5 Sonnet 59.58、DeepSeek-v3 57.24 也都更高。论文 Table 4 的 caption 写的是「approaching the performance of GPT-4o at 54.76%」。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 4 · τ-bench 主结果（pass^1 / 平均成功率 %）；默认指标为 pass^1（§4.1）</caption>
+      <thead>
+        <tr><th>Methods</th><th>Airline</th><th>Retail</th><th>Avg</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Claude 3.5 Sonnet</td><td class="num">48.98</td><td class="num">70.18</td><td class="num">59.58</td></tr>
+        <tr><td>GPT-4o</td><td class="num">42.86</td><td class="num">66.67</td><td class="num">54.76</td></tr>
+        <tr><td>GPT-4o-mini</td><td class="num">22.45</td><td class="num">47.37</td><td class="num">34.91</td></tr>
+        <tr><td>DeepSeek-v3</td><td class="num">46.94</td><td class="num">67.54</td><td class="num">57.24</td></tr>
+        <tr><td>Qwen2.5-72B-Instruct</td><td class="num">30.61</td><td class="num">26.32</td><td class="num">28.46</td></tr>
+        <tr><td>Qwen2.5-7B-Instruct</td><td class="num">8.16</td><td class="num">10.53</td><td class="num">9.34</td></tr>
+        <tr><td>SEER(7B)</td><td class="num">20.41</td><td class="num">13.16</td><td class="num">16.78</td></tr>
+        <tr class="best"><td>SEER(72B)</td><td class="num">38.78</td><td class="num">64.91</td><td class="num">51.84</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>7B 模型的提升是 7.44 个百分点（16.78 − 9.34），72B 是 23.38 个百分点（51.84 − 28.46）。两个数字在摘要里都写作「accuracy gains of 7.44% and 23.38%」；按 Table 4 复算是点差。</p>
+
+  <h3>自改进：第 1 批 37.7，第 5 批 52.3，第 10 批 54.9</h3>
+  <p>实验把 ToolQA 的 <span data-src="§4.3">1530</span> 道题随机打乱，分成 <span data-src="§4.3">10</span> 批、每批 153 道；每批评估完后，把答对的实例全部加入经验池，供下一批检索（§4.3）。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">第 1 批</span><h4>37.7%</h4></div>
+      <p>冷启动：经验池只有初始示例，准确率低于后续批次；论文没有单独报告这一批的池大小。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">第 5 批</span><h4>52.3%</h4></div>
+      <p>论文称此时已超过基线方法；比第 1 批高 14.6 个百分点。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">第 10 批</span><h4>54.9%</h4></div>
+      <p>最终批次；比第 1 批高 17.2 个百分点。Figure 2 的逐批曲线本页未转录，只转录正文给出的这三个点。</p>
+    </div>
+  </div>
+
+  <h3>消融：s3 更影响 Easy，s2 更影响 Hard</h3>
+  <p>Table 6 的 Avg 两列如下。Query-based 指 s1 只比较初始 query；w/o s2、w/o s3 分别去掉工具链覆盖和意图匹配。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 6 · 消融（Avg Accuracy %）；仅转录消融相关行的 Avg E/H 两列，其余行与 8 个域的明细列未转录</caption>
+      <thead>
+        <tr><th>Variant</th><th>Avg E</th><th>Avg H</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>SEER</td><td class="num">67.9</td><td class="num">31.1</td></tr>
+        <tr><td>SEER (w/o s2)</td><td class="num">64.3</td><td class="num">25.5</td></tr>
+        <tr><td>SEER (w/o s3)</td><td class="num">56.1</td><td class="num">30.1</td></tr>
+        <tr><td>SEER (query-based)</td><td class="num">67.5</td><td class="num">30.5</td></tr>
+        <tr><td>SEER + Reflection</td><td class="num">69.0</td><td class="num">32.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ul>
+    <li><strong>w/o s2：</strong>Easy 降 3.6 个百分点（67.9 − 64.3），Hard 降 5.6 个百分点（31.1 − 25.5）。论文的解读是：工具链覆盖对复杂任务更重要。</li>
+    <li><strong>w/o s3：</strong>Easy 降 11.8 个百分点（67.9 − 56.1），Hard 只降 1.0 个百分点（31.1 − 30.1）。论文的解读是：意图对齐对简单任务更有帮助。</li>
+    <li><strong>query-based：</strong>Easy 只降 0.4 个百分点（67.9 − 67.5），Hard 只降 0.6 个百分点（31.1 − 30.5）。论文说这是预期内的，因为 ToolQA 是单轮多步，初始 query 不随轮次变化，全轨迹与仅查询的表示差异较小（§4.4）。</li>
+  </ul>
+
+  <h3>top-k：4 条最好，但不是单调曲线</h3>
+  <p>Table 5 扫了 k=0 到 8。下面只转录 Avg 两列；8 个域的明细列未转录。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 5 · top-k 对 Avg 的影响（Accuracy %）；仅转录 Avg E/H 两列，域级明细未转录；SEER(Q) 即 query-based</caption>
+      <thead>
+        <tr><th>Variant</th><th>k</th><th>Avg E</th><th>Avg H</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>SEER(Q)</td><td class="num">0</td><td class="num">37.13</td><td class="num">18.49</td></tr>
+        <tr><td>SEER(Q)</td><td class="num">2</td><td class="num">66.38</td><td class="num">27.95</td></tr>
+        <tr><td>SEER(Q)</td><td class="num">4</td><td class="num">67.5</td><td class="num">31.51</td></tr>
+        <tr><td>SEER(Q)</td><td class="num">6</td><td class="num">67.13</td><td class="num">33.56</td></tr>
+        <tr><td>SEER(Q)</td><td class="num">8</td><td class="num">66.75</td><td class="num">31.23</td></tr>
+        <tr><td>SEER</td><td class="num">0</td><td class="num">37.63</td><td class="num">19.04</td></tr>
+        <tr><td>SEER</td><td class="num">2</td><td class="num">58.88</td><td class="num">27.26</td></tr>
+        <tr class="best"><td>SEER</td><td class="num">4</td><td class="num">67.88</td><td class="num">31.51</td></tr>
+        <tr><td>SEER</td><td class="num">6</td><td class="num">65.88</td><td class="num">27.12</td></tr>
+        <tr><td>SEER</td><td class="num">8</td><td class="num">67.13</td><td class="num">30.14</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ul>
+    <li><strong>从 0 到 4 的提升最大：</strong>SEER 的 Easy 从 37.63 升到 67.88（+30.25 个百分点），Hard 从 19.04 升到 31.51（+12.47 个百分点）。</li>
+    <li><strong>4 到 6 反而下降：</strong>Easy 67.88 → 65.88（−2.0 个百分点），Hard 31.51 → 27.12（−4.39 个百分点）。论文的解释是示例过多会淹没模型。</li>
+    <li><strong>不是逐点下降：</strong>Easy 在 k=8 回到 67.13，高于 k=6 的 65.88。正文只概括为「先升后降」；Table 5 的数值照录，页面不替它平滑。</li>
+    <li><strong>query-based 的 Hard 峰值在 k=6：</strong>33.56，高于 k=4 的 31.51。Appendix D 却写 query-based「best with 4 demonstrations … 33.56 hard」——33.56 对应 Table 5 的 k=6 行，并列在此。</li>
+  </ul>
+
+  <details>
+    <summary>读表时先看这几处：原文数值并列<span class="sum-sub">不替原文合并，也不替它选一个定论</span></summary>
+    <div class="details-body">
+      <p><strong>1. query-based 的 Hard 平均出现三个数：</strong>Table 6 写 30.5；Table 5 的 k=4 行写 31.51；Appendix D 写「best with 4 demonstrations … 33.56 hard」，而 33.56 对应 Table 5 的 k=6 行。三处出处并列，页面不选取其中一个当定论。</p>
+      <p><strong>2. τ-bench 的域规模：</strong>§4.1 写「airline (115 tasks, 15 tools) and retail (50 tasks, 13 tools)」；Table 2 写 τ-retail 115 questions / 15 tools、τ-airline 50 questions / 13 tools。两处把域与规模对调，本页在正文引用时以 Table 2 为准。</p>
+      <p><strong>3. 点差写成百分比：</strong>摘要与 §4.2 的 6.1% / 4.7%，以及摘要的 7.44% / 23.38%，按表值复算都是百分点差（67.9−61.8、31.1−26.4、16.78−9.34、51.84−28.46）。页面保留原文引述，但在数字旁统一写「个百分点」。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它优化的是「复用成功」，不是「学会失败」</h2></div>
+  <p class="sec-sub">四条边界直接来自方法本身与论文自述的 limitations；它们决定了什么时候不该用 SEER。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>只收成功轨迹，失败没有入口</h4></div>
+    <p>Algorithm 2 只在评估器判定成功时入池；失败轨迹直接丢弃。因此 SEER 无法从「什么不能做」中学习，也没有失败归因、反事实修正或负例检索。经验池的多样性只会沿着成功路径扩张。</p>
+    <p><span class="infer">推断</span>（依据：§3.4 与 Algorithm 2 的入池条件）如果评估器把失败误判为成功，污染会直接进入检索候选，且没有机制自动清除。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>冷启动与池上限</h4></div>
+    <p>第 1 批只有 37.7%，需要初始示例托底：ToolQA 初始池 8 条，τ-bench 初始池 2 条（§4.1）。池子上限 1000 条；论文没有说明池满后的淘汰策略，也没有报告检索延迟。池越大，每步对全部候选打分的成本越高。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>三个 λ 固定为 1/3</h4></div>
+    <p>论文 Limitations 明确写：SEER 在所有任务上用 fixed retrieval weighting scheme，对异质领域或任务类型可能不是最优；动态调整检索策略（task-aware weighting、不确定性估计）留作未来工作。页面交互里的权重变化是演示，不是论文的方法。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>上限由底座模型与评估器决定</h4></div>
+    <p>论文 Limitations 的第一条是：经验记忆的多样性受底座 LLM 能力约束；超出 in-context learning 能覆盖的复杂或边缘 query，会遇到瓶颈。评估器是二分类 LLM，论文没有报告它自身的准确率；裁判质量直接决定入池质量。</p>
+  </div>
+
+  <p>Benchmark 范围也要算进边界：ToolQA 是单轮多步（T=6），τ-bench 是两个真实域（airline / retail，T=30）；没有覆盖更长的 horizon、工具 API 变更或需要从失败中修正的场景。</p>
+
+  <p><span class="infer">推断</span>（依据：方法只收成功轨迹、权重固定、池上限 1000）如果场景没有可靠参考答案/评估器，或工具集频繁变化、对每步检索延迟敏感，SEER 的收益会先被这些条件吃掉；这时它不是「更聪明的 agent」，只是「更贵的 RAG」。</p>
+</section>
+
+<footer>
+  <div>Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall · Sijia Cui, Aiyao He, Shuai Xu, Hongming Zhang, Yanna Wang, Qingyang Zhang, Yajing Wang, Bo Xu · EMNLP 2025</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.15214v3" target="_blank" rel="noopener">arXiv 2508.15214v3</a>（本页所有表号、图号以 v3 为准）<br>
+    代码：<a href="https://github.com/AI-Research-TeamX/SEER" target="_blank" rel="noopener">AI-Research-TeamX/SEER</a><br>
+    笔记：<a href="/self-guided-function-calling-in-large-language-models-via-stepwise-experience-recall/">Self-Guided Function Calling in Large Language Models via Stepwise Experience Recall</a>
+  </div>
+
+  <div class="errata">
+    <h4>笔记勘误（不改笔记原文）</h4>
+    <ul>
+      <li>笔记多处把 τ-bench 写成「T-bench」；论文与 Table 2 / Table 4 使用 τ-bench（tau-bench）。</li>
+      <li>笔记称 SEER 在 ToolQA 与 τ-bench 上「取得 SOTA 级别」；Table 4 中 Claude 3.5 Sonnet 59.58、DeepSeek-v3 57.24、GPT-4o 54.76 都高于 SEER(72B) 51.84，τ-bench 上 SEER 并非最高。ToolQA 上 Table 3 的平均 Easy/Hard 高于所列基线。</li>
+      <li>笔记称 SEER 在 ToolQA 上「全面超越了所有基线方法」；Table 3 的域级列里，Flight-Hard 25.0 低于 ExpeL 29.0，Coffee-Easy 87.0 低于 ART 99.0 / ReAct 94.0，SciREX-Hard 23.0 低于 ART 25.0。论文 §4.2 也写明 Flight-Hard / SciREX-Hard 略降、Coffee-Easy 下降更明显。</li>
+      <li>笔记把 6.1% / 4.7% 直接写成提升百分比；按 Table 3 的数值是百分点差（67.9−61.8、31.1−26.4）。原文摘要同样写作 6.1% / 4.7%，本页按点差表述。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   检索排序模拟：候选为示意输入，公式与权重来自 §3.3 / §4.1
+   ============================================================ */
+(function () {
+  var CURRENT_TOOLS = ['flight_search', 'hotel_search', 'hotel_book'];
+  var CURRENT_INTENT = 'travel_booking';
+
+  var CAND = [
+    { id: 'A', cosT: 0.64, cosQ: 0.80, tools: ['flight_search', 'hotel_search', 'hotel_book'], intent: 'travel_booking' },
+    { id: 'B', cosT: 0.91, cosQ: 0.92, tools: ['flight_search', 'hotel_search'], intent: 'weather_lookup' },
+    { id: 'C', cosT: 0.40, cosQ: 0.95, tools: ['hotel_search', 'hotel_book'], intent: 'travel_booking' },
+    { id: 'D', cosT: 0.75, cosQ: 0.70, tools: ['flight_search'], intent: 'travel_booking' },
+    { id: 'E', cosT: 0.86, cosQ: 0.60, tools: ['flight_search', 'hotel_search'], intent: 'travel_booking' }
+  ];
+
+  var MODE = 'full';
+  var K = 4;
+
+  function $(id) { return document.getElementById(id); }
+
+  function s1(c) {
+    var cos = (MODE === 'query') ? c.cosQ : c.cosT;
+    return (1 + cos) / 2;
+  }
+
+  function s2(c) {
+    var hit = 0;
+    for (var i = 0; i < c.tools.length; i++) {
+      if (CURRENT_TOOLS.indexOf(c.tools[i]) !== -1) hit++;
+    }
+    return hit / CURRENT_TOOLS.length;
+  }
+
+  function s3(c) {
+    return c.intent === CURRENT_INTENT ? 1 : 0;
+  }
+
+  function weights() {
+    if (MODE === 'nos2') return [0.5, 0, 0.5];
+    if (MODE === 'nos3') return [0.5, 0.5, 0];
+    return [1 / 3, 1 / 3, 1 / 3];
+  }
+
+  function compute() {
+    var w = weights();
+    var rows = CAND.map(function (c) {
+      var a = s1(c), b = s2(c), d = s3(c);
+      var score = w[0] * a + w[1] * b + w[2] * d;
+      return { id: c.id, a: a, b: b, d: d, score: score };
+    });
+    rows.sort(function (x, y) { return y.score - x.score; });
+    return rows;
+  }
+
+  var MODE_TEXT = {
+    full: '完整 SEER：三轴等权。A 排第 1；B 因意图不同且工具只覆盖 2/3，排末位。',
+    nos2: 'w/o s2：工具链覆盖权重置 0，其余两轴等权。D（工具只覆盖 1/3）从第 4 升到第 2；B 仍因意图不同垫底。',
+    nos3: 'w/o s3：意图权重置 0，s1 与 s2 等权。B（轨迹最像、工具覆盖 2/3、但意图不同）从末位升到第 2；D 跌出前 4。',
+    query: 'query-based：s1 改用初始查询余弦。C 升到第 2；整体变化不大——ToolQA 是单轮多步，查询不随轮次变化（§4.4）。'
+  };
+
+  function render() {
+    var host = $('cand-slots');
+    var msg = $('rank-msg');
+    if (!host || !msg) return;
+
+    var rows = compute();
+    host.innerHTML = '';
+
+    rows.forEach(function (r, i) {
+      var slot = document.createElement('div');
+      slot.className = 'slot' + (i === 0 ? ' hit' : '') + (i < K ? ' sel' : '');
+
+      var rank = document.createElement('div');
+      rank.className = 'slot-rank';
+      rank.textContent = '#' + (i + 1);
+
+      var name = document.createElement('div');
+      name.className = 'slot-name';
+      name.textContent = r.id;
+
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.textContent = r.score.toFixed(3);
+
+      var sub = document.createElement('div');
+      sub.className = 'slot-sub';
+      sub.textContent = 's1 ' + r.a.toFixed(2) + ' · s2 ' + r.b.toFixed(2) + ' · s3 ' + r.d;
+
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var b1 = document.createElement('i');
+      b1.className = 'b1';
+      b1.style.width = Math.round(r.a * 100) + '%';
+      var b2 = document.createElement('i');
+      b2.className = 'b2';
+      b2.style.width = Math.round(r.b * 100) + '%';
+      var b3 = document.createElement('i');
+      b3.className = 'b3';
+      b3.style.width = Math.round(r.d * 100) + '%';
+      bar.appendChild(b1);
+      bar.appendChild(b2);
+      bar.appendChild(b3);
+
+      slot.appendChild(rank);
+      slot.appendChild(name);
+      slot.appendChild(val);
+      slot.appendChild(sub);
+      slot.appendChild(bar);
+      host.appendChild(slot);
+    });
+
+    var order = rows.map(function (r) { return r.id + ' ' + r.score.toFixed(3); }).join(' > ');
+    var picked = rows.slice(0, K).map(function (r) { return r.id; }).join('、');
+    var dropped = rows.slice(K).map(function (r) { return r.id; }).join('、') || '无';
+    msg.innerHTML = '<strong>' + MODE_TEXT[MODE] + '</strong><br>排序：' + order
+      + '<br>top-' + K + ' 入选：' + picked + '；落选：' + dropped + '。';
+  }
+
+  var btns = document.querySelectorAll('#mode-btns .rule-btn');
+  if (btns.length) {
+    btns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        btns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        MODE = btn.dataset.mode || 'full';
+        render();
+      });
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

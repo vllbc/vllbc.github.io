@@ -1,0 +1,886 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 28.9 | Table 1（简单平均口径） | 66.6-37.7 |
+| 76.7 | Table 1（简单平均口径） | (66.6-37.7)/37.7*100 |
+| 37.2 | Table 1（简单平均口径） | 80.4-43.2 |
+| 1.77 | Table 1（简单平均口径） | 66.6/37.7 |
+| 26.51 | Table 1（加权口径复算） | 64.23-37.72 |
+| 70.3 | Table 1（加权口径复算） | (64.23-37.72)/37.72*100 |
+| 35.75 | Table 1（加权口径复算） | 78.90-43.15 |
+| 1.70 | Table 1（加权口径复算） | 64.23/37.72 |
+| 0.61 | Table 2 | 87.88-87.27 |
+| 18.0 | Table 5c | 48.8-30.8 |
+| 2.1 | Table 5c | 62.8-60.7 |
+| 4.5 | Table 5a | 26.7-22.2 |
+| 7.0 | Table 5a | 24.4-17.4 |
+| 3.7 | Table 5b | 84.7-81.0 |
+| 5.3 | Table 5b | 95.0-89.7 |
+| 6.7 | Table 5c | 66.6-59.9 |
+| 8.2 | Table 5c | 80.4-72.2 |
+| 4.98 | Table 4 | 85.44-80.46 |
+| 5.82 | Table 4 | 84.47-78.65 |
+| 5.01 | Table 4 | 84.85-79.84 |
+| 1.81 | Table 4 | 80.46-78.65 |
+| 0.97 | Table 4 | 85.44-84.47 |
+| 4.6 | Table 3 | 64.5-59.9 |
+| 6.3 | Table 3 | 78.5-72.2 |
+| 0.6 | Table 3 | 64.5-63.9 |
+| 0.4 | Table 3 | 78.5-78.1 |
+| 0.92 | §5.4 | 25.32-24.4 |
+| 7.88 | Table 6 | 70.91-63.03 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memento · 不微调 LLM，靠案例库让 Agent 持续学习</title>
+<meta name="description" content="Memento 冻结 LLM，用案例库 (s,a,r) 加两层 MLP Q 函数做在线 CBR：GAIA validation 87.88% Pass@3，DeepResearcher 平均 F1 66.6 / PM 80.4。本页以 arXiv 2508.16153v2 为准。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.tbl-note{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);margin:22px 0 8px;letter-spacing:.02em}
+.tbl-note b{color:var(--text-muted);font-weight:600}
+.fig-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.case-query{font-size:13.5px;color:var(--text-muted);background:var(--bg-soft);border-left:3px solid var(--c1);border-radius:0 var(--radius) var(--radius) 0;padding:10px 14px;margin:0 0 14px}
+.case-query b{color:var(--text)}
+.slot .slot-val{font-size:12px;line-height:1.65}
+.slot .slot-val .rank{color:var(--text-soft);font-weight:400}
+.kchart .crow{grid-template-columns:64px 1fr;padding:5px 8px;border-radius:8px;transition:background .2s}
+.kchart .crow.active{background:var(--accent-soft)}
+.kchart .cbar .track{height:22px}
+.kchart .cbar .fill{top:0;bottom:auto;height:100%;border-radius:0 5px 5px 0;transition:width .35s ease}
+.kchart .cbar .num{font-size:10.5px;margin-top:2px}
+.kchart .cname{font-size:12px}
+.arch-note{font-size:12.5px;color:var(--text-soft);line-height:1.8}
+@media (max-width:600px){
+  .fig-scroll svg{min-width:680px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Memento</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2508.16153v2 · 2025</span>
+  <h1>Memento：不微调 LLM，让 Agent 靠案例库持续学习</h1>
+  <p class="hero-sub">
+    静态工作流部署后就停止学习；微调 LLM 又要付出算力、数据与灾难性遗忘的代价。
+    Memento 把「学习」从模型参数挪到外部案例库：成功与失败轨迹都写成 <code>(state, action, reward)</code>，
+    规划时检索相似或高价值的案例，只在线训练一个轻量 Q 函数。代价是推理链路更长、案例库会饱和。
+  </p>
+  <div class="meta">
+    <span>Huichi Zhou 等 · UCL / Huawei Noah's Ark Lab</span>
+    <a href="https://arxiv.org/abs/2508.16153v2" target="_blank" rel="noopener">arXiv 2508.16153v2（以 v2 为准）↗</a>
+    <a href="https://github.com/Agent-on-the-Fly/Memento" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文要回答的是：Agent 能不能在部署后继续变强，但不更新底层 LLM？它的答案是 <strong>M-MDP</strong>：
+    把案例库 <code>M</code> 作为状态的一部分，策略同时依赖当前状态 <code>s</code> 和记忆 <code>M</code>；
+    写操作追加 <code>(s,a,r)</code>，读操作决定参考哪条旧经验。
+  </p>
+  <p>
+    两种读法对应两种记忆。<strong>非参数化 CBR</strong> 按 SimCSE 语义相似度做 TopK；
+    <strong>参数化 CBR</strong> 用 <code>Q(s,c;θ)</code> 预测「这条案例对当前任务有多有用」，再做 TopK。
+    Q 是两层 MLP，用二分类交叉熵在线更新，LLM 始终冻结。
+  </p>
+  <p>
+    在 DeepResearcher 的七个 QA 数据集上，Memento 平均 F1 <strong>66.6</strong> / PM <strong>80.4</strong>，
+    CoT+RAG 是 <strong>37.7</strong> / <strong>43.2</strong>：F1 绝对高 <strong>28.9 个百分点</strong>（66.6 − 37.7），
+    相对提升 <strong>76.7%</strong>（28.9 / 37.7）。但 §5.5.3 说案例库约 <span class="mono" data-src="§5.5.3">3k</span> 数据就饱和，
+    Table 4 的后续迭代收益递减；推理侧 token 成本也随任务难度上升。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">87.88<small>%</small></div>
+      <div class="k">GAIA validation Pass@3<br>Alita 87.27</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">66.6<small> / 80.4</small></div>
+      <div class="k">DeepResearcher 平均 F1 / PM<br>CoT+RAG 37.7 / 43.2</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 1d">4.7–9.6<small> pp</small></div>
+      <div class="k">OOD 任务绝对提升<br>论文 §5.5.4 给的范围</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>部署之后，Agent 的学习就停住了</h2></div>
+  <p class="sec-sub">先分清两种「不会学」：工作流不会更新，微调更新的是模型而不是经验。</p>
+
+  <p>
+    很多 Agent 的能力来自固定的提示、工具编排和反射流程。它们在窄任务上可用，但部署后是静态的：
+    既不会把新环境的信息写回系统，也不会从失败轨迹里改进行为。论文把这类方法归为
+    「fixed workflows and hard-coded reasoning」（§1）。
+  </p>
+
+  <p>
+    另一条路是更新 LLM 本身：SFT 或 RL。它更灵活，但需要大量算力、数据和长程 rollout；
+    论文还点名灾难性遗忘的风险（§2.1）。对需要持续上线的 Agent 来说，每次环境变化都重训一遍并不现实。
+  </p>
+
+  <p>
+    RAG 也不是答案。RAG 检索的是静态文档语料，缺少「从自己的成功/失败中持续适应」的机制（§2.1）。
+    Memento 要检索的是 Agent 自己的经历：一条案例是 <code>(s,a,r)</code>，<code>s</code> 是任务/状态，
+    <code>a</code> 是计划，<code>r</code> 是成功或失败。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的中心问题</span><h4>能不能只学经验，不动权重？</h4></div>
+    <p style="font-family:'JetBrains Mono',monospace;font-size:13.5px;line-height:1.8;color:var(--text-muted)">
+      “How can we build LLM agents that learn continuously from a changing environment without the prohibitive cost of fine-tuning the underlying LLMs?”（§1）
+    </p>
+    <p>论文的回答不是「更好的 prompt」，而是把记忆做成决策过程的一部分。</p>
+  </div>
+
+  <p>
+    一个具体的场景是 deep research：任务需要多步搜索、爬取、读文件和写代码，单步答案对不对很难提前判断。
+    如果每次失败都只留在上下文里，下一次还要重新踩坑；案例库把失败也存下来，下一次规划可以直接避开。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条路：工作流不学、微调太贵、RAG 只读静态文档</h2></div>
+  <p class="sec-sub">论文的定位不是「又一个 Agent 框架」，而是换掉学习发生的位置。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>固定工作流 / 反射提示</h4></div>
+      <p>ReAct、Reflexion 一类方法靠预定义启发式改进行为；它们能在单次任务内反思，但没有真正的持续学习。</p>
+      <p>论文的措辞是 “pre-defined heuristics and do not achieve true lifelong learning”（§2.3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>参数微调 / Agentic RL</h4></div>
+      <p>SFT、RL、GRPO 一类方法更新 LLM 参数；任务保真度高，但计算、数据、灾难性遗忘的代价高（§2.1）。</p>
+      <p>长程任务还要大量 rollout 和人工标注问题。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">路线 C</span><h4>RAG / 静态知识库</h4></div>
+      <p>RAG 从静态文档里取事实；CBR 从动态经验库里取「过程」。</p>
+      <p>论文把两者在 §2.1 明确区分：RAG “query static document corpora and lack mechanisms for continual adaptation”。</p>
+    </div>
+  </div>
+
+  <p>
+    Memento 走的是另一条路（不是 RAG）：LLM 冻结，学习发生在外部记忆的写入与读取上。
+    它借的是 Case-Based Reasoning：从旧案例检索、复用、修正、保留，再把这次的结果写回库（§3）。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把「学什么」变成「读哪条案例」</h2></div>
+  <p class="sec-sub">M-MDP 定义问题，两种 Read 定义方法；真正的区别是「相似」还是「有用」。</p>
+
+  <p>
+    M-MDP 在标准 MDP 上加了一个记忆空间 <code>M = (S × A × R)*</code>。时刻 <code>t</code> 的案例库是
+    <code>M<sub>t</sub> = {c<sub>i</sub>}</code>，每条 <code>c<sub>i</sub> = (s<sub>i</sub>, a<sub>i</sub>, r<sub>i</sub>)</code>。
+    执行一步后，新案例被追加：<code>M<sub>t+1</sub> = M<sub>t</sub> ∪ {(s<sub>t</sub>, a<sub>t</sub>, r<sub>t</sub>)}</code>（Eq.12）。
+  </p>
+
+  <div class="eq">
+    π(a | s, M) = <span class="hl-c">Σ<sub>c∈M</sub> μ(c | s, M)</span> · p<sub>LLM</sub>(a | s, c)
+  </div>
+  <div class="eq-cap">Eq.1 · 整体策略 = 检索策略 μ 对 LLM 动作似然的加权和；LLM 本身不更新</div>
+
+  <p>
+    检索策略 <code>μ</code> 是唯一要学的东西。论文用最大熵 RL 推出最优检索策略是 Q 值的 softmax（Eq.7）：
+  </p>
+
+  <div class="eq">
+    μ*(c | s, M) = exp(Q*(s, M, c) / α) / <span class="hl-b">Σ<sub>c'∈M</sub> exp(Q*(s, M, c') / α)</span>
+  </div>
+  <div class="eq-cap">Eq.7 · α 是熵温度；α→0 退化为贪心选 Q 最高的案例</div>
+
+  <p>但直接学 Q 很难，因为状态和案例都是自然语言。论文给了两条实现路径：</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Non-Parametric</span><h4>按「像不像」读</h4></div>
+      <p>Read 直接用冻结编码器的余弦相似度做 TopK（Eq.13）。它假设「相似的问题有相似的解」，不学任何检索参数。</p>
+      <p><code>Read<sub>NP</sub>(s<sub>t</sub>, M<sub>t</sub>) = TopK<sub>c<sub>i</sub>∈M<sub>t</sub></sub> sim(enc(s<sub>t</sub>), enc(s<sub>i</sub>))</code></p>
+      <p>编码器用 SimCSE，相似度是余弦（§5.3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Parametric</span><h4>按「有没有用」读</h4></div>
+      <p>Read 用 <code>Q(s,c;θ)</code> 做 TopK（Eq.16）。Q 预测「在当前状态下参考案例 c，最终成功的概率」，因此可以选出表面不像、但结构上有用的案例。</p>
+      <p><code>Read<sub>P</sub>(s<sub>t</sub>, M<sub>t</sub>) = TopK<sub>c<sub>i</sub>∈M<sub>t</sub></sub> Q(s<sub>t</sub>, c<sub>i</sub>; θ)</code></p>
+      <p>Q 是两层 MLP，用 SimCSE 初始化句子表示（§5.3）。</p>
+    </div>
+  </div>
+
+  <p>
+    在 deep research 实现里，CBR 只用于规划，所以整个 M-MDP 被简化成单步：TD 目标坍缩为即时奖励，
+    Q 直接用二分类交叉熵训练（Eq.15）。这是论文明确说的简化，不是页面替它补的（§4.2）。
+  </p>
+
+  <div class="eq">
+    L(θ) = E<sub>(s,c,r)</sub>[ <span class="hl-c">−r log Q(s,c;θ)</span> − (1−r) log(1−Q(s,c;θ)) ]
+  </div>
+  <div class="eq-cap">Eq.15 · r∈{0,1}；Q 被当作「案例 c 对状态 s 有用」的概率</div>
+
+  <p>
+    注意：Eq.7 的 softmax 是理论上的最优检索分布；实际 Read 用 TopK 取 Q 最高的 K 条，以减少随机性（§4.2）。
+  </p>
+
+  <h3>同一题库，两种读法选出不同案例</h3>
+  <p>
+    下面只保留排序：5 条案例，分别给出「相似度排名」和「Q 排名」。切换读法、拖动 K，看两种 CBR 选中的案例何时重合。
+    排序是页面构造的示意，不是论文实验数据；机制对应 Eq.13 与 Eq.16。
+  </p>
+
+  <div class="sim" id="cbr-sim">
+    <div class="case-query"><b>查询：</b>某公司 2024 年营收是多少？需要交叉核对官网与年报。</div>
+    <div class="sim-top">
+      <button class="rule-btn active" id="cbr-mode-np">非参数化 CBR<span class="r-sub">相似度 TopK · Eq.13</span></button>
+      <button class="rule-btn" id="cbr-mode-p">参数化 CBR<span class="r-sub">Q 值 TopK · Eq.16</span></button>
+    </div>
+    <div class="ctrl" style="margin:0 0 14px">
+      <label>K 检索案例数 <span class="v" id="cbr-k-val">2</span></label>
+      <input type="range" id="cbr-k" min="1" max="5" step="1" value="2">
+    </div>
+    <div class="slots s5" id="cbr-slots"></div>
+    <div class="readout" data-src="§3">
+      <div class="r-head">当前选择</div>
+      <div id="cbr-readout"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对照（2 组）<span class="sum-sub">K=2 与 K=4 的排序、选择与交集</span></summary>
+    <div class="details-body">
+      <p><strong>排序（页面示意）：</strong>相似度 A &gt; B &gt; C &gt; D &gt; E；Q 值 D &gt; E &gt; C &gt; B &gt; A。</p>
+      <p><strong>第 1 组，K=2：</strong>非参数化取相似度前二 = {A, B}；参数化取 Q 前二 = {D, E}。两组交集为空。</p>
+      <p><strong>第 2 组，K=4：</strong>非参数化取 {A, B, C, D}；参数化取 {D, E, C, B}。交集为 {B, C, D}，两组已经大部分重合。</p>
+      <p><strong>这个模拟覆盖了什么：</strong>只覆盖 Eq.13 / Eq.16 的 TopK 排序与选择。未覆盖 Eq.7 的 softmax 采样、Eq.15 的 Q 训练、真实 SimCSE 编码器，以及案例库的写入与增长；它是机制示意，不是论文实验复现。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练只发生在一个两层 MLP 上</h2></div>
+  <p class="sec-sub">LLM 冻结；要学的只有 Q(s,c;θ)，而且每条轨迹只写最后一步。</p>
+
+  <p>
+    实现细节在 §5.3：非参数化 CBR 用 SimCSE 编码句子、余弦相似度排序；参数化 CBR 也用 SimCSE 初始化句子表示，
+    Q 函数是一个两层 MLP。整个训练过程不更新 GPT-4.1 / o3 / o4-mini 的参数。
+  </p>
+
+  <p>
+    案例写入不是把整条轨迹塞进库。论文只保留每条轨迹最后一步的 <code>(s,a,r)</code>，
+    避免状态里继承的前文造成冗余（§5.3）。这让案例库保持紧凑，但也意味着中间步骤的过程信息不会单独成为案例<span class="infer">推断</span>（依据：§5.3 只写 final step 的 (s,a,r) 入库）。
+  </p>
+
+  <p>
+    参数化 CBR 的 Write 同时做两件事：追加案例，和用 Eq.15 更新 Q。因为 deep research 的奖励是二元的
+    <code>r∈{0,1}</code>，论文把 MSE 换成交叉熵，理由是 MSE 在 0/1 附近梯度会消失（§4.2）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">实现边界</span><h4>Algorithm 1 是多步版，落地走单步版</h4></div>
+    <p>
+      Algorithm 1 给的是完整 M-MDP 版本：TD 目标、目标网络、kernel-based episodic control。
+      实际 deep research 实现走的是单步简化版：CBR 只在规划时用，TD 目标坍缩为即时奖励，kernel 估计被去掉（§4.2）；单步设定下目标网络也不需要<span class="infer">推断</span>（依据：没有 bootstrap，TD 目标不含下一状态 Q）。
+    </p>
+    <p>
+      页面按 §4.2 的单步实现讲；Algorithm 1 的多步分支未被这个实现覆盖。
+    </p>
+  </div>
+
+  <p>
+    成本账要分开看。训练侧只更新两层 MLP 和写案例库，没有 LLM 梯度；推理侧每个规划步都要检索，
+    planner-executor 交替调用工具，token 消耗随难度上升（Figure 6）。论文报告的是 token 成本，不是 wall-clock 时延。
+  </p>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Planner 读案例，Executor 调工具</h2></div>
+  <p class="sec-sub">Figure 3 的主循环：规划阶段查 Case Memory，执行阶段查 Tool Memory，完成后写回案例。</p>
+
+  <p>
+    Memento 是 planner-executor 架构。Planner（GPT-4.1）负责把任务拆成子任务；
+    Executor（GAIA 用 o3，其他数据集用 o4-mini）通过 MCP 协议调用搜索、爬取、代码、文件处理等工具。
+    两者交替，直到 planner 判断任务完成。
+  </p>
+
+  <p>
+    三类记忆分工不同：<strong>Case Memory</strong> 存向量化的 <code>(s,a,r)</code>，供规划检索；
+    <strong>Subtask Memory</strong> 存当前子任务与执行结果；<strong>Tool Memory</strong> 存每个子任务的工具调用日志。
+    只有 Case Memory 是跨任务持续增长的。
+  </p>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 880 440" role="img" aria-label="Memento planner-executor 架构图" style="width:100%;height:auto;display:block" font-family="Inter, 'Noto Sans SC', sans-serif">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--text-soft)"></path>
+          </marker>
+          <marker id="ar-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"></path>
+          </marker>
+          <marker id="ar-c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--c1)"></path>
+          </marker>
+          <marker id="ar-c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--c2)"></path>
+          </marker>
+        </defs>
+
+        <rect x="20" y="40" width="150" height="70" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+        <text x="95" y="68" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">任务指令</text>
+        <text x="95" y="88" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">当前状态 s_t</text>
+
+        <rect x="220" y="30" width="210" height="90" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"></rect>
+        <text x="325" y="60" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-deep)">Planner</text>
+        <text x="325" y="80" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">GPT-4.1 · CBR agent</text>
+        <text x="325" y="99" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">任务分解</text>
+
+        <rect x="480" y="30" width="170" height="90" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+        <text x="565" y="60" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Subtask Memory</text>
+        <text x="565" y="80" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">子任务 + 执行结果</text>
+
+        <rect x="220" y="180" width="210" height="90" rx="10" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="6 4"></rect>
+        <text x="325" y="210" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-deep)">Case Memory</text>
+        <text x="325" y="230" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">M_t = {(s, a, r)}</text>
+        <text x="325" y="249" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">SimCSE 向量</text>
+
+        <rect x="480" y="180" width="210" height="90" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.4"></rect>
+        <text x="585" y="210" text-anchor="middle" font-size="14" font-weight="700" fill="var(--c1)">Executor</text>
+        <text x="585" y="230" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">o3 / o4-mini</text>
+        <text x="585" y="249" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">MCP client</text>
+
+        <rect x="480" y="330" width="210" height="70" rx="10" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+        <text x="585" y="355" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Tool Memory</text>
+        <text x="585" y="375" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">每个子任务的工具日志</text>
+
+        <rect x="20" y="180" width="150" height="90" rx="10" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.4"></rect>
+        <text x="95" y="210" text-anchor="middle" font-size="13" font-weight="600" fill="var(--c2)">MCP 工具</text>
+        <text x="95" y="230" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">search / crawl</text>
+        <text x="95" y="249" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">code / file</text>
+
+        <path d="M170 65 H215" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#ar)"></path>
+        <text x="192" y="56" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">任务</text>
+
+        <path d="M430 65 H475" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#ar)"></path>
+        <text x="453" y="56" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">子任务</text>
+
+        <path d="M565 120 V175" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#ar)"></path>
+        <text x="573" y="150" text-anchor="start" font-size="10.5" fill="var(--text-soft)">执行</text>
+
+        <path d="M325 120 V175" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="5 4" marker-start="url(#ar-a)" marker-end="url(#ar-a)"></path>
+        <text x="335" y="152" text-anchor="start" font-size="10.5" fill="var(--accent-deep)">Read / Write</text>
+
+        <path d="M480 250 H435" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ar-a)"></path>
+        <text x="457" y="242" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">Write</text>
+
+        <path d="M585 270 V325" fill="none" stroke="var(--c1)" stroke-width="1.4" marker-start="url(#ar-c1)" marker-end="url(#ar-c1)"></path>
+        <text x="595" y="300" text-anchor="start" font-size="10.5" fill="var(--c1)">工具日志</text>
+
+        <path d="M480 270 H460 V420 H95 V275" fill="none" stroke="var(--c2)" stroke-width="1.4" marker-start="url(#ar-c2)" marker-end="url(#ar-c2)"></path>
+        <text x="300" y="412" text-anchor="middle" font-size="10.5" fill="var(--c2)">调用 / 返回</text>
+
+        <path d="M690 225 H840 V10 H190 V100 H215" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#ar)"></path>
+        <text x="560" y="24" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">执行结果 / 是否完成</text>
+
+        <text x="870" y="432" text-anchor="end" font-size="10.5" fill="var(--text-soft)">实线：执行流 · 虚线：记忆读写</text>
+      </svg>
+    </div>
+    <figcaption>Figure 3 的简化重绘：Planner-Executor 主循环与三类记忆。原图还包含多模态处理与具体 MCP server 分支，本图未展开；小屏可左右滑动查看右侧 Executor 与 Tool Memory。</figcaption>
+    <details>
+      <summary>这张图覆盖了什么、没覆盖什么<span class="sum-sub">对应 §4.1 与 §4.3</span></summary>
+      <div class="details-body">
+        <p>
+          覆盖：§4.1 的 planner / executor 交替、Case Memory 的 Read / Write、Subtask Memory 与 Tool Memory 的层级，
+          以及 §4.3 的 MCP 工具入口。
+        </p>
+        <p>
+          未覆盖：§4.3 的多模态处理细节（VLM 图像描述、ASR 音频转写、PDF fallback 等），
+          Figure 3 中每个 MCP server 的具体连接，以及案例库内部的向量索引实现。图是简化重绘，不是原图逐像素复制。
+        </p>
+      </div>
+    </details>
+  </figure>
+
+  <p>
+    一个容易忽略的点：planner 的「规划」不是一次性输出完整计划，而是每轮根据 Subtask Memory 里的执行结果重新评估；
+    任务完成后才写案例（§4.1）。所以案例库记录的是完整任务的最终状态-计划-奖励，而不是每个子任务的中间步骤。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>小案例库赢过大而全，但增益会饱和</h2></div>
+  <p class="sec-sub">先看 DeepResearcher 和 GAIA 的主表，再看消融、K 与五轮迭代。</p>
+
+  <h3>DeepResearcher：平均 F1 从 37.7 到 66.6</h3>
+  <p>
+    Table 1 的七个开放域 QA 数据集（NQ、TQ、HotpotQA、2Wiki、Musique、Bamboogle、PopQA）上，
+    Memento 用 GPT-4.1 planner + o4-mini executor，平均 F1 66.6、PM 80.4。
+    CoT+RAG 是 37.7 / 43.2；训练式的 DeepResearcher 是 51.8 / 60.5。
+  </p>
+
+  <p class="tbl-note"><b>Table 1（节选）</b> · DeepResearcher 七个数据集的平均；表注称最后两列为 weighted average（Bamboogle 125 条，其余各 512 条）。基线 CoT / CoT+RAG / Search-r1 / DeepResearcher 均为 Qwen 2.5 (7B) backbone，Memento 用 GPT-4.1 planner + o4-mini executor，属跨 backbone 比较</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>Avg F1</th><th>Avg PM</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CoT</td><td class="num">23.6</td><td class="num">26.1</td></tr>
+        <tr><td>CoT + RAG</td><td class="num">37.7</td><td class="num">43.2</td></tr>
+        <tr><td>Search-r1-base</td><td class="num">48.3</td><td class="num">53.8</td></tr>
+        <tr><td>DeepResearcher</td><td class="num">51.8</td><td class="num">60.5</td></tr>
+        <tr class="best"><td>Memento（GPT-4.1 + o4-mini）</td><td class="num">66.6</td><td class="num">80.4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    相对 CoT+RAG，按表内数字直接相减，F1 绝对高 <strong>28.9 个百分点</strong>（66.6 − 37.7），相对提升 <strong>76.7%</strong>（28.9 / 37.7）；
+    PM 绝对高 <strong>37.2 个百分点</strong>（80.4 − 43.2）。论文用 “nearly doubling” 描述这个差距；
+    按原表算是 <strong>1.77 倍</strong>（66.6 / 37.7），严格说不是 2 倍。
+  </p>
+  <p>
+    但这组比较有一个口径问题：Table 1 表注称最后两列是 weighted average，而 Memento 的 66.6 / 80.4 是七个数据集的<strong>简单平均</strong>（F1 七项之和 466.2 ÷ 7 = 66.6；PM 562.8 ÷ 7 = 80.4），按 Bamboogle 125 条、其余 512 条加权复算应为 <strong>64.23 / 78.90</strong>；CoT+RAG 的 37.7 / 43.2 则是加权值（37.72 / 43.15）。按统一加权口径，F1 差 <strong>26.51</strong> 个百分点、相对提升 <strong>70.3%</strong>，PM 差 <strong>35.75</strong> 个百分点，F1 比值 <strong>1.70</strong>。两种口径并列，本页不替原文选择；引用时应说明用的是哪一种。
+  </p>
+
+  <h3>GAIA：validation 第一，但 Level 3 不是</h3>
+  <p>
+    Table 2 是 2025-06-26 的 GAIA leaderboard。Validation 上 Memento 87.88%，Alita 87.27%，
+    差 <strong>0.61 个百分点</strong>（87.88 − 87.27）；test 上 Memento 79.40%。
+    注意两件事：其一，Pass@3 只标在 validation 的 Memento 行，Alita 与 test 各行都没有这个标注，所以 0.61 的差值不是严格同口径；其二，test 的案例库不是从 test 学出来的——论文说 test 只用 validation 期间积累的案例库（§5.4）。
+  </p>
+
+  <p class="tbl-note"><b>Table 2（节选）</b> · GAIA validation / test；仅 validation 的 Memento 行标 Pass@3，其余行未标</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Split</th><th>Agent</th><th>Avg (%)</th><th>Level 1 (%)</th><th>Level 2 (%)</th><th>Level 3 (%)</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>Validation</td><td>Memento（Pass@3）</td><td class="num">87.88</td><td class="num">96.23</td><td class="num">90.70</td><td class="num">61.54</td></tr>
+        <tr><td>Validation</td><td>Alita</td><td class="num">87.27</td><td class="num">88.68</td><td class="num">89.53</td><td class="num">76.92</td></tr>
+        <tr><td>Test</td><td>Su Zero Ultra</td><td class="num">80.40</td><td class="num">93.55</td><td class="num">77.36</td><td class="num">65.31</td></tr>
+        <tr><td>Test</td><td>h2oGPTe Agent v1.6.33</td><td class="num">79.73</td><td class="num">89.25</td><td class="num">79.87</td><td class="num">61.22</td></tr>
+        <tr><td>Test</td><td>Memento</td><td class="num">79.40</td><td class="num">90.32</td><td class="num">75.47</td><td class="num">71.43</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">原文并列</span><h4>test set 是第 4，还是 open-source 里的 top-1？</h4></div>
+    <p>
+      §5.4 写 Memento 在 test set 是 “4th place”；Table 2 表注写 “Top-1 performance on the validation set and the test set
+      in open-source agent frameworks”。Table 2 可见行里，Su Zero Ultra 80.40、h2oGPTe v1.6.33 79.73 都高于 Memento 79.40。
+    </p>
+    <p>这两句可能同时成立：第 4 名是总榜名次，top-1 限定在 open-source agent frameworks。但本页看不到完整榜单，无法确认 79.40 之上是否还有闭源系统，也无法确认 Su Zero Ultra / h2oGPTe 是否算 open-source。两处并列呈现，本页不替原文合并口径。</p>
+  </div>
+
+  <p>
+    Validation 的 Level 3 是另一个边界：Memento 61.54，Alita 76.92。总体第一不等于每一层都第一。
+  </p>
+
+  <h3>消融：工具不一定加分，案例记忆是叠加的</h3>
+  <p>
+    Table 5 把系统拆成四层：Offline Executor（只有 LLM）→ Online Executor（接工具，无 planner/记忆）→
+    Memento w/o CBR（加 planner，无案例记忆）→ Memento（完整）。
+  </p>
+
+  <p class="tbl-note"><b>Table 5（Average 行）</b> · 每格 F1 / PM；planner GPT-4.1，executor o4-mini</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>设置</th><th>HLE</th><th>SimpleQA</th><th>DeepResearcher</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Offline Executor</td><td class="num">6.4 / 8.7</td><td class="num">19.7 / 21.5</td><td class="num">48.8 / 62.8</td></tr>
+        <tr><td>Online Executor</td><td class="num">11.2 / 15.8</td><td class="num">48.5 / 84.8</td><td class="num">30.8 / 60.7</td></tr>
+        <tr><td>Memento w/o CBR</td><td class="num">22.2 / 17.4</td><td class="num">81.0 / 89.7</td><td class="num">59.9 / 72.2</td></tr>
+        <tr class="best"><td>Memento</td><td class="num">26.7 / 24.4</td><td class="num">84.7 / 95.0</td><td class="num">66.6 / 80.4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    两个反直觉点。第一，接上实时工具不一定更好：DeepResearcher 从 Offline 到 Online，F1 从 48.8 掉到 30.8
+    （下降 <strong>18.0 个百分点</strong>，48.8 − 30.8），PM 从 62.8 掉到 60.7（下降 <strong>2.1 个百分点</strong>，62.8 − 60.7）。
+    论文把它归因于数据污染（§5.5.2），并说外部知识有时会负面影响模型。
+  </p>
+  <p>
+    第二，案例记忆的增益是叠加的：在 w/o CBR 之上，HLE 高 <strong>4.5</strong> F1 / <strong>7.0</strong> PM
+    （26.7 − 22.2 / 24.4 − 17.4），SimpleQA 高 <strong>3.7</strong> / <strong>5.3</strong>
+    （84.7 − 81.0 / 95.0 − 89.7），DeepResearcher 高 <strong>6.7</strong> / <strong>8.2</strong>
+    （66.6 − 59.9 / 80.4 − 72.2）。
+  </p>
+
+  <h3>五轮迭代：三条线都在涨</h3>
+  <p>
+    Table 4 是 DeepResearcher 上五轮迭代的曲线。三条线都在上升：w/o CBR 78.65→84.47（+5.82），
+    非参数化 79.84→84.85（+5.01），参数化 80.46→85.44（+4.98）。但三条线同时上升不能直接归因于案例库：w/o CBR 按 §5.3 是禁用 episodic memory 的设置，它的 +5.82 甚至高于参数化 CBR 的 +4.98，与「案例记忆带来持续学习」的叙事存在张力。参数化 CBR 的差别是每轮水平更高，但它相对 w/o CBR 的领先并不单调收窄：Iter 1 是 <strong>1.81</strong>（80.46 − 78.65），Iter 2 升到 <strong>1.91</strong>（82.84 − 80.93），之后才降到 Iter 5 的 <strong>0.97</strong>（85.44 − 84.47）。端点确实从 1.81 缩到 0.97，但中间有回升。
+  </p>
+
+  <p class="tbl-note"><b>Table 4</b> · DeepResearcher 五轮迭代；表注未标注指标定义，正文称其为 accuracy（§5.5.3）。表中三行全量转录</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>Iter 1</th><th>Iter 2</th><th>Iter 3</th><th>Iter 4</th><th>Iter 5</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Memento w/o CBR</td><td class="num">78.65</td><td class="num">80.93</td><td class="num">82.62</td><td class="num">83.53</td><td class="num">84.47</td></tr>
+        <tr><td>Memento w/ Non-Parametric CBR</td><td class="num">79.84</td><td class="num">81.87</td><td class="num">83.09</td><td class="num">84.03</td><td class="num">84.85</td></tr>
+        <tr class="best"><td>Memento w/ Parametric CBR</td><td class="num">80.46</td><td class="num">82.84</td><td class="num">84.10</td><td class="num">84.85</td><td class="num">85.44</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    论文也承认饱和：约 <span class="mono" data-src="§5.5.3">3k</span> 训练数据后 Case Bank 很快饱和，
+    后面每轮的新案例越来越少，增益递减（§5.5.3）。
+  </p>
+
+  <h3>检索多少条？K=4 最好，多了反而略降</h3>
+  <p>
+    Table 3 扫 K=0,1,2,4,8,16,32。Average F1 在 K=4 最高（64.5），PM 也在 K=4 最高（78.5）；
+    K=0 是 59.9 / 72.2，K=32 是 63.9 / 78.1。也就是说，从 K=0 到 K=4，
+    F1 绝对高 <strong>4.6 个百分点</strong>（64.5 − 59.9）、PM 高 <strong>6.3 个百分点</strong>（78.5 − 72.2）；
+    再往上加，F1 反而低 <strong>0.6 个百分点</strong>（64.5 − 63.9）、PM 低 <strong>0.4 个百分点</strong>（78.5 − 78.1）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的解释</span><h4>小的高质量记忆，比大而全更好</h4></div>
+    <p style="font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.8;color:var(--text-muted)">
+      “CBR benefits from a small, high-quality memory, unlike few-shot prompting, where more examples often help.”（§5.5.1）
+    </p>
+    <p>论文接着说，仔细的案例选择与记忆管理因此很关键。</p>
+  </div>
+
+  <div class="sim" id="k-sim">
+    <div class="ctrl" style="margin:0 0 8px">
+      <label>K 检索案例数 <span class="v" id="k-val">4</span></label>
+      <input type="range" id="k-range" min="0" max="6" step="1" value="3">
+    </div>
+    <div class="chart kchart" id="k-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>F1</span>
+      <span><i style="background:var(--c2)"></i>PM</span>
+      <span style="margin-left:auto">横轴 55–80，放大差异；数值标签为准</span>
+    </div>
+    <div class="readout" data-src="Table 3">
+      <div class="r-head">当前 K</div>
+      <div id="k-readout"></div>
+    </div>
+  </div>
+
+  <p class="tbl-note"><b>Table 3（Average 行，转置）</b> · K 与平均 F1 / PM；7 个数据集的分项未转录</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>K</th><th>0</th><th>1</th><th>2</th><th>4</th><th>8</th><th>16</th><th>32</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Avg F1</td><td class="num">59.9</td><td class="num">63.6</td><td class="num">63.7</td><td class="num">64.5</td><td class="num">64.1</td><td class="num">63.9</td><td class="num">63.9</td></tr>
+        <tr><td>Avg PM</td><td class="num">72.2</td><td class="num">77.9</td><td class="num">78.1</td><td class="num">78.5</td><td class="num">78.2</td><td class="num">78.1</td><td class="num">78.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <details>
+    <summary>手算对照（2 组）<span class="sum-sub">K=0 与 K=32 分别对照 K=4</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组，K=0 → K=4：</strong>F1 59.9 → 64.5，差 64.5 − 59.9 = 4.6 个百分点；PM 72.2 → 78.5，差 78.5 − 72.2 = 6.3 个百分点。</p>
+      <p><strong>第 2 组，K=32 → K=4：</strong>F1 63.9 → 64.5，差 64.5 − 63.9 = 0.6 个百分点；PM 78.1 → 78.5，差 78.5 − 78.1 = 0.4 个百分点。</p>
+      <p><strong>这个交互覆盖了什么：</strong>只复现 Table 3 Average 行的数值切换与高亮；未实现真实检索、SimCSE 编码、Q 训练或案例库写入，是简化示意。</p>
+    </div>
+  </details>
+
+  <h3>另外两个基准与一个反直觉结果</h3>
+  <p>
+    SimpleQA 上 Memento 95.0% accuracy（Figure 4）；HLE 上 24.4% PM，比 GPT-5 的 25.32% 低
+    <strong>0.92 个百分点</strong>（25.32 − 24.40），排第二（§5.4）。
+    这两个数字的条件是 GPT-4.1 planner + o4-mini executor；不要和 GAIA 的 o3 executor / Pass@3 直接比。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>慢思考 planner 反而更差</h4></div>
+    <p>
+      Table 6 的 GAIA validation pass@1：GPT-4.1 planner + o3 executor 70.91，o3 planner + o3 executor 63.03，
+      差 <strong>7.88 个百分点</strong>（70.91 − 63.03）。这里只转录这两行；原表还有 Qwen3-32B 等配置（如 53.94 / 40.61），未转录。
+    </p>
+    <p>
+      论文的解释是 o3 planner 有时直接答题、跳过规划，或生成过长的计划，反而误导 executor（§6.3）。
+      在模块化系统里，简洁、结构化的规划比「想得更久」更重要。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它省的是梯度，不是推理</h2></div>
+  <p class="sec-sub">案例库会饱和、工具会引入噪声、不同基准的条件不能混着比。</p>
+
+  <p>
+    第一，记忆规模。论文自己说 Case Bank 在约 <span class="mono" data-src="§5.5.3">3k</span> 训练数据后很快饱和（§5.5.3）；
+    Table 4 的五轮曲线也在 Iter 3 后趋缓（§5.5.3 称 rapid convergence）。论文的实验规模停留在约 3k 训练数据，百万级案例下的检索效率不在本文实验范围内。
+  </p>
+
+  <p>
+    第二，推理成本。Figure 6 的 token 统计：GAIA Level 1 平均 26k 输入 / 4.7k 输出，Level 2 48k / 6.9k，
+    Level 3 121k / 9.8k。论文的结论是主要负担来自整合多步工具输出，而不是生成长回答（§6.2）。
+    但论文报告的是 token 成本，不是端到端时延；检索、planner-executor 交替和工具调用的 wall-clock 开销不在 Figure 6 的范围内。
+  </p>
+
+  <p>
+    第三，奖励假设。实现里 reward 是二元的 <code>r∈{0,1}</code>，CBR 只用于规划，所以 M-MDP 被简化成单步（§4.2）。
+    论文的实验都建立在二元奖励上；概率化 reward 与 memory update 被列为 future work（§3）。
+  </p>
+
+  <p>
+    第四，工具不是越多越好。DeepResearcher 的 Offline→Online 反而掉了 18.0 F1 个百分点（Table 5c），
+    论文归因于数据污染。这条对「多接工具总没坏处」的直觉是一个反例。
+  </p>
+
+  <p>
+    第五，条件不能混。GAIA 的 87.88 是 validation 的 Memento 行、标了 Pass@3，同表其余行未标 Pass@3；
+    Table 6 的 fast/slow 对比是 pass@1；DeepResearcher / SimpleQA / HLE 用 o4-mini；Table 4 的表注未标注指标定义。
+    把 87.88、70.91、66.6 放在一起比较会混淆口径。
+  </p>
+
+  <p>
+    最后，GAIA Level 3 仍是短板：validation 上 Memento 61.54，Alita 76.92；test 上 Memento 71.43。
+    总体排名靠前，不代表长程任务已经解决。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">什么时候别用</span><h4>先确认你的场景满足这些前提</h4></div>
+    <ul style="margin-bottom:0">
+      <li>如果任务分布固定、案例极少，且可以接受离线批处理，固定工作流或一次性 RAG 更简单。</li>
+      <li>如果奖励不是二元、或者你需要严格的端到端低延迟，先别把 Memento 当成即插即用方案。</li>
+      <li>如果你需要模型内化的新能力（而不是检索经验），参数微调仍是另一条路。</li>
+    </ul>
+    <p style="margin-top:12px"><span class="infer">推断</span>（依据：论文只验证了二元奖励、deep research 场景与约 3k 案例的规模；以上是工程判断，不是论文结论。）</p>
+  </div>
+</section>
+
+<footer>
+  <div>Memento: Fine-tuning LLM Agents without Fine-tuning LLMs</div>
+  <div class="src">
+    作者：Huichi Zhou, Yihang Chen, Siyuan Guo, Xue Yan, Kin Hei Lee, Zihan Wang, Ka Yiu Lee, Guchun Zhang, Kun Shao, Linyi Yang, Jun Wang<br>
+    原文：<a href="https://arxiv.org/abs/2508.16153v2" target="_blank" rel="noopener">https://arxiv.org/abs/2508.16153v2</a>（本页所有表号、图号以 v2 为准）<br>
+    代码：<a href="https://github.com/Agent-on-the-Fly/Memento" target="_blank" rel="noopener">https://github.com/Agent-on-the-Fly/Memento</a><br>
+    笔记：<a href="/mementofine-tuning-llm-agents-without-fine-tuning-llms/">Memento：Fine-tuning LLM Agents without Fine-tuning LLMs</a>
+  </div>
+
+  <details>
+    <summary>笔记勘误（3 条）<span class="sum-sub">只改页面，不动 content/posts/ 原文</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>1. Table 4 表注未标单位。</strong>笔记把 80.46→85.44 写成「性能从 80.46% 提升到 85.44%」。
+        原文 Table 4 表注未标注指标定义，也没有百分号；正文只称其为 accuracy（§5.5.3）。补 % 是合理简化，但不等于原表已标单位。
+      </p>
+      <p>
+        <strong>2. 「越用越聪明」不能单独归给参数化 CBR。</strong>笔记用参数化 CBR 的 80.46→85.44 证明持续学习；
+        但同表 w/o CBR 也从 78.65→84.47（+5.82），三条线都在涨，且 w/o CBR 按 §5.3 是禁用 episodic memory 的设置。参数化 CBR 的领先端点从 Iter 1 的 1.81 缩到 Iter 5 的 0.97，但 Iter 2 曾升到 1.91，不是单调收窄。
+      </p>
+      <p>
+        <strong>3. Q 网络结构已给，缺的是结构消融。</strong>笔记说论文对 Q 函数网络结构讨论较少；
+        §5.3 明确写了 Q 是 two-layer MLP、用 SimCSE 初始化。论文未做的是 Q 结构消融与稳定性分析，不是结构本身没交代。
+      </p>
+      <p>
+        <strong>4. GAIA test 名次有两处并列。</strong>笔记没提 §5.4 的 test set「4th place」与 Table 2 表注
+        「Top-1 ... in open-source agent frameworks」的并列。页面在 06 节并列呈现，未替原文合并。
+      </p>
+      <p>
+        <strong>5. Planner 型号。</strong>笔记在建议部分写「如 GPT-4 作为 Planner」，是举例而非声称论文配置；原文实际用 GPT-4.1（§5.3）。
+      </p>
+      <p>
+        核对通过的部分：Table 1 的 37.7 / 43.2、51.8 / 60.5、66.6 / 80.4；Table 3 的 K=4 64.5 / 78.5；
+        Table 4 的 80.46→85.44；GAIA validation 87.88% Pass@3；DeepResearcher 66.6 / 80.4。这些与原文一致。
+      </p>
+    </div>
+  </details>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ---------- 交互 1：两种 CBR 读法的差异 ---------- */
+  var sim = document.getElementById('cbr-sim');
+  if (sim) {
+    var cases = [
+      { id: 'A', name: '查公司财报', sim: 1, q: 5 },
+      { id: 'B', name: '查年报营收', sim: 2, q: 4 },
+      { id: 'C', name: 'PDF 提数', sim: 3, q: 3 },
+      { id: 'D', name: '多跳网页核验', sim: 4, q: 1 },
+      { id: 'E', name: '写代码核对口径', sim: 5, q: 2 }
+    ];
+    var mode = 'np';
+    var k = 2;
+    var slotsEl = document.getElementById('cbr-slots');
+    var readoutEl = document.getElementById('cbr-readout');
+    var kEl = document.getElementById('cbr-k');
+    var kValEl = document.getElementById('cbr-k-val');
+    var npBtn = document.getElementById('cbr-mode-np');
+    var pBtn = document.getElementById('cbr-mode-p');
+
+    function ranked(metric) {
+      return cases.slice().sort(function (a, b) { return a[metric] - b[metric]; });
+    }
+
+    function selected(metric) {
+      return ranked(metric).slice(0, k);
+    }
+
+    function render() {
+      if (!slotsEl || !readoutEl) return;
+      var npSel = selected('sim');
+      var pSel = selected('q');
+      var active = mode === 'np' ? npSel : pSel;
+      var activeIds = active.map(function (c) { return c.id; });
+      slotsEl.innerHTML = '';
+      cases.forEach(function (c) {
+        var d = document.createElement('div');
+        d.className = 'slot' + (activeIds.indexOf(c.id) !== -1 ? ' hit' : '');
+        var n = document.createElement('div');
+        n.className = 'slot-name';
+        n.textContent = '案例 ' + c.id;
+        var v = document.createElement('div');
+        v.className = 'slot-val';
+        v.innerHTML = c.name + '<br><span class="rank">相似度 #' + c.sim + ' · Q #' + c.q + '</span>';
+        d.appendChild(n);
+        d.appendChild(v);
+        slotsEl.appendChild(d);
+      });
+
+      var npNames = npSel.map(function (c) { return c.id; }).join('、');
+      var pNames = pSel.map(function (c) { return c.id; }).join('、');
+      var activeNames = mode === 'np' ? npNames : pNames;
+      var otherNames = mode === 'np' ? pNames : npNames;
+      var overlap = npSel.filter(function (c) {
+        return pSel.some(function (d) { return d.id === c.id; });
+      }).map(function (c) { return c.id; });
+      var overlapText = overlap.length ? '两组重合：' + overlap.join('、') + '。' : '两组不重合。';
+      readoutEl.innerHTML = '当前：<strong>' + (mode === 'np' ? '非参数化 CBR（相似度 TopK）' : '参数化 CBR（Q 值 TopK）') +
+        '</strong>，K=' + k + ' → 选中 <strong>' + activeNames + '</strong>。另一种读法在同样 K 下选 ' +
+        otherNames + '；' + overlapText;
+    }
+
+    function setMode(next) {
+      mode = next;
+      if (npBtn) npBtn.classList.toggle('active', mode === 'np');
+      if (pBtn) pBtn.classList.toggle('active', mode === 'p');
+      render();
+    }
+
+    if (npBtn) npBtn.addEventListener('click', function () { setMode('np'); });
+    if (pBtn) pBtn.addEventListener('click', function () { setMode('p'); });
+    if (kEl) {
+      kEl.addEventListener('input', function () {
+        k = parseInt(kEl.value, 10) || 1;
+        if (kValEl) kValEl.textContent = String(k);
+        render();
+      });
+    }
+    render();
+  }
+
+  /* ---------- 交互 2：K 与 Table 3 的 Average 行 ---------- */
+  var kSim = document.getElementById('k-sim');
+  if (kSim) {
+    var kData = [
+      { k: 0, f1: 59.9, pm: 72.2 },
+      { k: 1, f1: 63.6, pm: 77.9 },
+      { k: 2, f1: 63.7, pm: 78.1 },
+      { k: 4, f1: 64.5, pm: 78.5 },
+      { k: 8, f1: 64.1, pm: 78.2 },
+      { k: 16, f1: 63.9, pm: 78.1 },
+      { k: 32, f1: 63.9, pm: 78.1 }
+    ];
+    var kRange = document.getElementById('k-range');
+    var kChart = document.getElementById('k-chart');
+    var kReadout = document.getElementById('k-readout');
+    var kVal = document.getElementById('k-val');
+    var axisMin = 55;
+    var axisSpan = 25;
+
+    function widthPct(v) {
+      var w = (v - axisMin) / axisSpan * 100;
+      if (w < 2) w = 2;
+      if (w > 100) w = 100;
+      return w;
+    }
+
+    function renderKChart() {
+      if (!kChart) return;
+      var html = '';
+      kData.forEach(function (row, i) {
+        html += '<div class="crow' + (i === 3 ? ' active' : '') + '" data-idx="' + i + '">';
+        html += '<div class="cname">K=' + row.k + '</div>';
+        html += '<div class="cbars">';
+        html += '<div class="cbar"><div class="track"><div class="fill" style="width:' + widthPct(row.f1).toFixed(1) + '%;background:var(--c1)"></div></div><div class="num">F1 ' + row.f1.toFixed(1) + '</div></div>';
+        html += '<div class="cbar"><div class="track"><div class="fill" style="width:' + widthPct(row.pm).toFixed(1) + '%;background:var(--c2)"></div></div><div class="num">PM ' + row.pm.toFixed(1) + '</div></div>';
+        html += '</div></div>';
+      });
+      kChart.innerHTML = html;
+    }
+
+    function updateK() {
+      if (!kRange || !kReadout) return;
+      var idx = parseInt(kRange.value, 10) || 0;
+      var row = kData[idx];
+      if (!row) return;
+      if (kVal) kVal.textContent = String(row.k);
+      if (kChart) {
+        var rows = kChart.querySelectorAll('.crow');
+        for (var i = 0; i < rows.length; i++) {
+          rows[i].classList.toggle('active', i === idx);
+        }
+      }
+      var best = row.k === 4 ? '这是 Table 3 的最高点。' : '最高点是 K=4（F1 64.5 / PM 78.5）。';
+      kReadout.innerHTML = 'K=' + row.k + '：平均 <strong>F1 ' + row.f1.toFixed(1) +
+        '</strong>，<strong>PM ' + row.pm.toFixed(1) + '</strong>。' + best;
+    }
+
+    if (kRange) {
+      kRange.addEventListener('input', updateK);
+    }
+    renderKChart();
+    updateK();
+  }
+})();
+</script>
+</body>
+</html>

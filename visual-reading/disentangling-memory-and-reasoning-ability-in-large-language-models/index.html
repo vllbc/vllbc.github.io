@@ -1,0 +1,712 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.2 | Table 1 | 86.6-85.4 |
+| 1.8 | Table 1 | 86.6-84.8 |
+| 1.9 | Table 1 | 84.2-82.3 |
+| -1.9 | Table 1 | 82.3-84.2 |
+| 1.3 | Table 1 | 78.0-76.7 |
+| 5.4 | Table 1 | 82.3-76.9 |
+| 8.6 | Table 1 | 78.0-69.4 |
+| 11.7 | Table 1 | 82.3-70.6 |
+| 3.6 | Table 1 | 82.3-78.7 |
+| 15.9 | Table 1 | 72.6-56.7 |
+| 6.6 | Table 2 | 73.4-66.8 |
+| 2.5 | Table 2 | 82.3-79.8 |
+| 20.0 | Table 5 | 78.0-58.0 |
+| 26.3 | Table 5 | 82.3-56.0 |
+| 32.6 | Table 5 | 86.6-54.0 |
+| 1 | Figure 2 | 94-93 |
+| 4 | Figure 2 | 71-67 |
+| 8 | Figure 2 | 91-83 |
+| 4 | Figure 2 | 78-74 |
+| 1 | Figure 2 | 89-88 |
+| 12 | Figure 2 | 74-62 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Disentangling Memory and Reasoning · 把「回忆」和「推演」拆成两种可训练动作</title>
+<meta name="description" content="论文用 ⟨memory⟩ 和 ⟨reason⟩ 两个可训练 token 把 LLM 的记忆召回与逻辑推演拆开，以 GPT-4o 造标注数据、LoRA 微调学生模型；TruthfulQA 86.6%，但三数据集平均仍低于 GPT-4o CoT 1.9 个点。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+blockquote{
+  margin:18px 0;padding:14px 18px;border-left:3px solid var(--c1);
+  background:var(--bg-surface);border-radius:var(--radius);
+  font-size:14px;line-height:1.8;color:var(--text-muted);
+}
+.fig-scroll{overflow-x:auto;}
+.fig-scroll svg{min-width:640px;}
+.pipe-tokens{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.pipe-token{
+  font-family:"JetBrains Mono",monospace;font-size:12px;line-height:1.5;
+  background:var(--bg-surface);border:1px solid var(--border);
+  border-radius:6px;padding:4px 8px;
+}
+.pipe-token.mem{border-color:var(--c1);color:var(--c1);}
+.pipe-token.rea{border-color:var(--accent);color:var(--accent-deep);}
+.pipe-panel p{margin-bottom:8px;}
+footer .src a{overflow-wrap:anywhere;}
+.erratum{
+  margin-top:18px;padding:14px 18px;background:var(--bg-soft);
+  border-left:3px solid var(--accent);border-radius:var(--radius);
+  font-size:13px;line-height:1.8;
+}
+.erratum ul{margin:8px 0 0;padding-left:20px;}
+.erratum li{margin-bottom:7px;}
+@media (max-width:520px){
+  .sim{padding:16px;}
+  .fig-scroll svg{min-width:600px;}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Memory × Reasoning</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">两条路</a>
+      <a href="#method">核心</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2411.13504v3 · 2025</span>
+  <h1>Disentangling Memory and Reasoning：把 LLM 的「回忆」和「推演」拆成两种可训练动作</h1>
+  <p class="hero-sub">
+    LLM 回答多跳问题时，既在回忆事实，也在做逻辑推演。现有 CoT 把两者混在一段连续文本里，答错了很难判断是「记错」还是「想错」。
+    论文给每一步加一个控制 token——<code>⟨memory⟩</code> 或 <code>⟨reason⟩</code>——用 GPT-4o 造带标签的数据，再用 LoRA 把这两个 token 教给学生模型。
+  </p>
+  <div class="meta">
+    <span>Mingyu Jin 等 8 人 · Rutgers / Ohio State / UCSB</span>
+    <a href="https://arxiv.org/abs/2411.13504v3" target="_blank" rel="noopener">arXiv 2411.13504v3 ↗</a>
+    <a href="https://github.com/MingyuJ666/Disentangling-Memory-and-Reasoning" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    LLM 在多跳问答里既要回忆事实，又要做逻辑推演。现有 CoT 把两者混在一段连续文本里，答错了很难判断是「记错」还是「想错」。
+  </p>
+  <p>
+    论文的做法是给每步加一个控制 token：<strong><code>⟨memory⟩</code> 后面跟回忆出的事实</strong>，<strong><code>⟨reason⟩</code> 后面跟推演</strong>。教师模型 GPT-4o 生成带标签的 CoT，并把 memory 步改写成事实问题交给知识模型作答；学生模型用 LoRA 学这套序列。
+  </p>
+  <p>
+    LLaMA-3.1-8B 在 TruthfulQA 上达到 <strong>86.6%</strong>，比 GPT-4o CoT 的 85.4% 高 <em>1.2 个百分点</em>；但三数据集平均 82.3%，比 GPT-4o CoT 的 84.2% 低 <em>1.9 个百分点</em>。
+  </p>
+  <p>
+    更值得带走的是错误归因：StrategyQA 有 <strong>98.3%</strong> 的错误来自推理，CommonsenseQA 和 TruthfulQA 约 78% 来自推理——模型多数时候「知道」，但「用不对」。
+  </p>
+  <div class="metrics">
+    <div class="metric" data-src="Table 1">
+      <div class="v" data-src="Table 1">86.6<small>%</small></div>
+      <div class="k">TruthfulQA 准确率（LLaMA-3.1-8B）<br>GPT-4o CoT 85.4%</div>
+    </div>
+    <div class="metric" data-src="Table 7">
+      <div class="v" data-src="Table 7">98.3<small>%</small></div>
+      <div class="k">StrategyQA 错误中归因于推理的比例（LLaMA-3.1-8B）<br>记忆仅 1.7%</div>
+    </div>
+    <div class="metric" data-src="Table 1">
+      <div class="v" data-src="Table 1">82.3<small>%</small></div>
+      <div class="k">三数据集平均（LLaMA-3.1-8B）<br>GPT-4o CoT 84.2%，差 1.9 点</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>问题：一段 CoT 里，「查知识」和「做推理」没有边界</h2></div>
+  <p class="sec-sub">先建立共同认知：不是模型不知道，也不是模型不会推，而是两者混在一起，错了无法归因。</p>
+
+  <p>多跳问答要求模型在每一步先回忆相关事实，再基于事实做推演。论文在 Appendix C.1（Dataset）用 StrategyQA 的「亚里士多德用过笔记本电脑吗」举例：模型得先回忆亚里士多德生活的年代、笔记本电脑发明的时间，再比较两者。任何一步出错，最终答案都可能错。</p>
+
+  <p>问题在于，现有 LLM 的输出是一条连续 token 流。模型可以在同一段 CoT 里既回忆又推演，但没有任何显式标记说明哪一段是回忆、哪一段是推演。论文在 §1 把这种状态称为「不透明的过程」：</p>
+
+  <blockquote>“However, despite these advancements, existing inference frameworks often operate as an opaque process without explicit separation between knowledge retrieval and reasoning steps.”（§1）</blockquote>
+
+  <p>这会带来两类失败：一类是<strong>记忆错误</strong>——模型回忆出错误或过时的事实；另一类是<strong>推理错误</strong>——事实是对的，但推演链断了。没有步骤标签，错误分析只能看最终答案，无法区分这两类。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">失败 A</span><h4>记错了</h4></div>
+      <p>模型 recall 出的事实本身不对，后面推得再顺也会错。论文把这类问题归到 memory。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">失败 B</span><h4>想错了</h4></div>
+      <p>事实 recall 对了，但模型在比较、归纳或多步传递时出错。论文把这类问题归到 reason。</p>
+    </div>
+  </div>
+
+  <p>论文要回答的两个问题因此很具体：<strong>能不能让模型在生成时显式区分 memory 和 reason？</strong>以及<strong>这种区分能不能同时带来准确率和可解释性？</strong>后面的两个 token、数据合成和消融，都是围绕这两个问题展开的。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有两条路线，各修一半</h2></div>
+  <p class="sec-sub">一条路补知识，一条路补结构；论文认为两者都没有把「知识召回」和「逻辑推演」分开。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Memory-based</span><h4>RAG：把外部知识取进来</h4></div>
+      <p>RAG 等方法重点解决「模型参数里的知识不够或过时」：先检索，再把检索结果放进上下文。</p>
+      <p><strong>强项：</strong>能补外部事实，尤其是长尾知识。</p>
+      <p><strong>没解决：</strong>检索是独立模块；取回来的知识怎么进入推理、什么时候该取，仍然混在模型的连续生成里。<span class="infer">推断</span>（依据：§1 把 RAG 归为 memory-based 路线，重点是补外部知识；§4 指出参数记忆研究没有回答「how to better elicit the parametric knowledge」，本页把这一点推广到 RAG 属于推断。）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Reasoning-based</span><h4>CoT / Planning token：把步骤结构起来</h4></div>
+      <p>CoT、ToT 和 planning token 等方法重点解决「推理步骤怎么组织」：让模型分步想，或用可训练 token 标记任务阶段。</p>
+      <p><strong>强项：</strong>把长链条拆成短步骤，提升可读性。</p>
+      <p><strong>没解决：</strong>步骤结构有了，但每一步仍然同时包含事实召回和逻辑推演；planning token 规划的是任务阶段，不是「这一步在回忆还是在推理」。</p>
+      <blockquote>“Despite the effectiveness, these methods intertwine reasoning and memory usage, which may limit the full potential of the models.”（§4；these methods 指引入可训练 token 的 tuning-based 方法）</blockquote>
+    </div>
+  </div>
+
+  <p>§4 对 prompt-based 方法的判断则更直接：“the models might not know when to reason or use their memory.” 两条路都没有把「这一步在回忆还是在推理」变成训练信号；上面那句批评针对的是 tuning-based 方法，不是 RAG。</p>
+
+  <p>论文的切入点不是再做一个检索器，也不是再设计一种提示词，而是<strong>把「这一步在做什么」变成训练信号</strong>：每一步要么是 memory，要么是 reason。这样模型在生成时就必须先选动作，再写内容。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心：把每一步标成 ⟨memory⟩ 或 ⟨reason⟩</h2></div>
+  <p class="sec-sub">不是改模型结构，而是改训练序列的格式：两个特殊 token 把「回忆」和「推演」变成两种可学习的动作。</p>
+
+  <p>论文把一条训练实例写成三段：问题、带标签的中间步骤、答案。中间步骤里，memory 段以 <code>⟨memory⟩</code> 开头，后面跟回忆出的事实 token；reason 段以 <code>⟨reason⟩</code> 开头，后面跟推演 token。</p>
+
+  <div class="eq">
+    <code>T = Q ⊕ ⟨memory⟩ K ⊕ ⟨reason⟩ S ⊕ A</code>
+  </div>
+  <div class="eq-cap">§2.2 的序列结构：Q 是问题，K 是事实知识 token 序列，S 是推理 token 序列，A 是答案；为便于阅读，这里把交错的多个 memory/reason 块各合并成一项</div>
+
+  <p>两个 token 不是普通文本，而是<strong>可训练的 out-of-vocabulary token</strong>。论文在 §2.2 明确说，模型用标准自回归方式做 LoRA 微调；训练目标仍是 next-token prediction。论文没有为 memory/reason 另设一个分类 loss。<span class="infer">推断</span>（依据：§2.2 只描述标准自回归 LoRA 目标，全文未出现额外的分类损失。）token 的作用是给模型一个可学习的「动作开关」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键细节</span><h4>memory 后面跟的是「事实」，不是「问题」</h4></div>
+    <p>数据合成时，教师模型先把 memory 步里的知识改写成事实问题，让知识模型作答；答案再回填到原步骤。所以训练序列里的 <code>⟨memory⟩</code> 后面是陈述性事实 K，而不是问题本身（§2.1）。</p>
+  </div>
+
+  <p>这套格式把「模型知不知道」和「模型会不会用」拆成两个可观察的量：memory 段对应知识召回，reason 段对应逻辑推演。后面的错误分析之所以能把错误归因到 memory 或 reason，前提就是这两个标签在训练时已经进入了序列。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">1</span><h4>生成</h4></div>
+      <p>推理 LLM 写 CoT，并给每一步打上 <code>⟨memory⟩</code> 或 <code>⟨reason⟩</code>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">2</span><h4>补知识</h4></div>
+      <p>memory 步改写成事实问题，知识 LLM 作答，答案回填。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">3</span><h4>微调</h4></div>
+      <p>学生模型在标准自回归目标下学整条序列，两个 token 参与训练。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么训：LoRA + int8，一张 RTX 6000 Ada</h2></div>
+  <p class="sec-sub">训练配置不复杂；真正的成本在造数据，以及推理时 retrieval-based processing 带来的额外计算时间（§6 / Appendix F.2）。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">模型</span><h4>三个学生模型</h4></div>
+      <p>LLaMA-2-7B-chat、LLaMA-3.1-8B-Instruct、Qwen2.5-7B-Instruct（§3.1）。</p>
+      <p>教师与评估器：GPT-4o 负责推理和知识生成，并完成错误归因（§3.4.3、Appendix E.2）；GPT-4o-mini 负责准确率/解耦评估（§3.1、§3.4.1）。Appendix E.2 正文有一处把 Figure 17 的 prompt 误写成 GPT-4o-mini，图题本身写的是 GPT-4o。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">配置</span><h4>LoRA + int8</h4></div>
+      <p>learning rate <code>2e-4</code>，warmup <code>1000</code>，cosine schedule，<code>adamw_torch</code>，gradient accumulation <code>16</code>，int8 训练（Appendix D.1，Training Configuration）。</p>
+      <p>特殊 token：<code>N_PREFIX=3</code>、<code>N_SPECIAL=4</code>；全部微调在单张 RTX 6000 Ada 上完成（Appendix D.1）。</p>
+    </div>
+  </div>
+
+  <p>训练轮数按数据集不同：StrategyQA 通常 10 个 epoch，CommonsenseQA 约 5 个 epoch 收敛，TruthfulQA 需要 15 个或更多（Appendix D.2 / Figure 14）。数据生成阶段需要两个 GPT-4o 角色多次调用（§2.1）；§6 / Appendix F.2 还指出，retrieval-based processing 会增加推理时的计算时间。</p>
+
+  <h3>特殊 token 数量：4–6 个效果较好</h3>
+  <p>论文额外扫了每句前面的特殊 token 数量（0/2/4/6），在 CommonsenseQA 和 TruthfulQA 上各测了三个模型。Table 3 / Table 4 的原始数值如下：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 3 / Table 4：特殊 token 数量对准确率的影响（原文为 0–1 小数）</caption>
+      <thead>
+        <tr><th>模型</th><th>数据集</th><th class="num">0</th><th class="num">2</th><th class="num">4</th><th class="num">6</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>LLaMA-2-7B</td><td>CommonsenseQA</td><td class="num">0.682</td><td class="num">0.704</td><td class="num">0.710</td><td class="num">0.711</td></tr>
+        <tr><td>LLaMA-2-7B</td><td>TruthfulQA</td><td class="num">0.701</td><td class="num">0.762</td><td class="num">0.768</td><td class="num">0.786</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td>CommonsenseQA</td><td class="num">0.783</td><td class="num">0.816</td><td class="num">0.823</td><td class="num">0.820</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td>TruthfulQA</td><td class="num">0.826</td><td class="num">0.865</td><td class="num">0.866</td><td class="num">0.859</td></tr>
+        <tr><td>Qwen2.5-7B</td><td>CommonsenseQA</td><td class="num">0.799</td><td class="num">0.813</td><td class="num">0.832</td><td class="num">0.813</td></tr>
+        <tr><td>Qwen2.5-7B</td><td>TruthfulQA</td><td class="num">0.807</td><td class="num">0.756</td><td class="num">0.812</td><td class="num">0.799</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>论文的概括是「4 到 6 个特殊 token 时性能提升」（§3.3.2）；表中 4 或 6 个 token 的格点普遍高于 0/2，但不同模型、不同数据集的峰值并不完全一致。比如 LLaMA-2-7B 在 TruthfulQA 上 6 个 token 最高（0.786），LLaMA-3.1-8B 在 4 个 token 最高（0.866）。</p>
+
+  <h3>memory : reason 的步数比随数据集变化</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 6：memory : reason 步数比（原文按模型和数据集报告）</caption>
+      <thead>
+        <tr><th>数据集</th><th class="num">LLaMA-2-7B</th><th class="num">LLaMA-3.1-8B</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>StrategyQA</td><td class="num">4:5</td><td class="num">1:1</td></tr>
+        <tr><td>CommonsenseQA</td><td class="num">1:5</td><td class="num">1:5</td></tr>
+        <tr><td>TruthfulQA</td><td class="num">3:7</td><td class="num">1:2</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>CommonsenseQA 的 1:5 表示 memory 步明显少于 reason 步；StrategyQA 和 TruthfulQA 的比例更接近。比例本身不解释错误率，本页不把它当作因果证据。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>流程：教师模型造数据，学生模型学动作</h2></div>
+  <p class="sec-sub">Figure 1 的流程可以拆成两段：先用两个 GPT-4o 角色合成带标签数据，再用 LoRA 让学生模型学会这套序列。</p>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 700 380" role="img" aria-label="两阶段流程：教师模型生成带标签数据，学生模型用 LoRA 学习序列">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#8C857B"/>
+          </marker>
+        </defs>
+
+        <text x="20" y="38" font-size="15" font-weight="700" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">① 数据生成（教师）</text>
+        <text x="180" y="218" font-size="15" font-weight="700" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">② 训练与推理（学生）</text>
+        <path d="M 20 195 L 680 195" stroke="#E8DCC7" stroke-dasharray="4 4" fill="none"/>
+
+        <rect x="20" y="55" width="130" height="100" rx="10" fill="#FFFFFF" stroke="#D4C4A6"/>
+        <text x="85" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">问题 Q</text>
+        <text x="85" y="102" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">StrategyQA</text>
+        <text x="85" y="118" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">CommonsenseQA</text>
+        <text x="85" y="134" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">TruthfulQA</text>
+
+        <rect x="180" y="55" width="170" height="100" rx="10" fill="#DDE9EE" stroke="#D4C4A6"/>
+        <text x="265" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">推理 LLM</text>
+        <text x="265" y="100" text-anchor="middle" font-size="11" fill="#2E5A6B" font-family="JetBrains Mono, monospace">GPT-4o</text>
+        <text x="265" y="118" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">写 CoT，逐步打标</text>
+        <text x="265" y="136" text-anchor="middle" font-size="11" fill="#2E5A6B" font-family="JetBrains Mono, monospace">⟨memory⟩ / ⟨reason⟩</text>
+
+        <rect x="380" y="55" width="160" height="100" rx="10" fill="#DDE9EE" stroke="#D4C4A6"/>
+        <text x="460" y="80" text-anchor="middle" font-size="14" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">memory 步</text>
+        <text x="460" y="102" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">改写成事实问题</text>
+        <text x="460" y="120" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">知识 LLM 作答</text>
+        <text x="460" y="138" text-anchor="middle" font-size="11" fill="#2E5A6B" font-family="JetBrains Mono, monospace">GPT-4o</text>
+
+        <rect x="570" y="55" width="110" height="100" rx="10" fill="#FFFFFF" stroke="#D4C4A6"/>
+        <text x="625" y="82" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">答案回填</text>
+        <text x="625" y="104" text-anchor="middle" font-size="10" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">拼成训练序列</text>
+
+        <path d="M 150 105 L 180 105" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M 350 105 L 380 105" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M 540 105 L 570 105" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M 625 155 L 625 235" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <text x="635" y="200" font-size="10" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">训练</text>
+
+        <rect x="570" y="235" width="110" height="100" rx="10" fill="#F4DCD0" stroke="#D4C4A6"/>
+        <text x="625" y="262" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">训练序列 T</text>
+        <text x="625" y="284" text-anchor="middle" font-size="10" fill="#7A2E16" font-family="JetBrains Mono, monospace">Q ⊕ K ⊕ S ⊕ A</text>
+
+        <rect x="380" y="235" width="160" height="100" rx="10" fill="#F4DCD0" stroke="#D4C4A6"/>
+        <text x="460" y="262" text-anchor="middle" font-size="14" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">LoRA 学生</text>
+        <text x="460" y="282" text-anchor="middle" font-size="10" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">LLaMA-3.1-8B</text>
+        <text x="460" y="298" text-anchor="middle" font-size="10" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">Qwen2.5-7B</text>
+        <text x="460" y="316" text-anchor="middle" font-size="10" fill="#7A2E16" font-family="JetBrains Mono, monospace">学 ⟨memory⟩ / ⟨reason⟩</text>
+
+        <rect x="180" y="235" width="170" height="100" rx="10" fill="#FFFFFF" stroke="#D4C4A6"/>
+        <text x="265" y="262" text-anchor="middle" font-size="14" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">推理</text>
+        <text x="265" y="282" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">先 memory</text>
+        <text x="265" y="298" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">再 reason</text>
+        <text x="265" y="316" text-anchor="middle" font-size="11" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">最后 answer</text>
+
+        <rect x="20" y="235" width="130" height="100" rx="10" fill="#FFFFFF" stroke="#D4C4A6"/>
+        <text x="85" y="262" text-anchor="middle" font-size="13" font-weight="600" fill="#1A1816" font-family="Inter, Noto Sans SC, sans-serif">输出</text>
+        <text x="85" y="284" text-anchor="middle" font-size="10" fill="#6B6660" font-family="Inter, Noto Sans SC, sans-serif">答案 + 可读步骤</text>
+
+        <path d="M 570 285 L 540 285" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M 380 285 L 350 285" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+        <path d="M 180 285 L 150 285" stroke="#8C857B" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+      </svg>
+    </div>
+    <figcaption>Figure 1（按 §2.1 重绘）：上排是数据生成，下排是训练与推理。教师模型负责写 CoT、补事实；学生模型只学序列，不调用教师。</figcaption>
+  </figure>
+
+  <p>下面用论文 Appendix A.2 / Figure 7 的 MMA 例子走一遍。每一步都对应 §2.1 的一个动作；这是流程级示意，不是论文 prompts 的逐字复现。</p>
+
+  <div class="sim">
+    <div class="sim-top" id="pipe-btns">
+      <button class="rule-btn active" data-step="0">1 原始问题<span class="r-sub">StrategyQA</span></button>
+      <button class="rule-btn" data-step="1">2 打标<span class="r-sub">memory / reason</span></button>
+      <button class="rule-btn" data-step="2">3 补知识<span class="r-sub">改写成问题</span></button>
+      <button class="rule-btn" data-step="3">4 组序列<span class="r-sub">答案回填</span></button>
+      <button class="rule-btn" data-step="4">5 微调<span class="r-sub">LoRA 学生</span></button>
+    </div>
+    <div class="readout pipe-panel" data-src="§2.1 / Appendix A.2">
+      <div class="r-head" id="pipe-head">原始问题</div>
+      <div id="pipe-body">
+        <p>StrategyQA：<strong>Is MMA totally original from the Roman Colosseum games?</strong></p>
+        <p>正确答案：<strong>False</strong>。要回答它，模型得先回忆 MMA 和罗马角斗，再比较两者的关系。</p>
+      </div>
+    </div>
+  </div>
+
+  <details>
+    <summary>流程里哪些是原文，哪些是页面简化<span class="sum-sub">覆盖 / 未覆盖分支</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>推理 LLM 生成 CoT 并逐步打标；memory 步改写成事实问题；知识 LLM 作答；答案回填；训练序列由 Q + memory/reason 块 + A 组成；学生模型用 LoRA 学标准自回归目标（§2.1、§2.2）。</p>
+      <p><strong>未覆盖：</strong>原文附录（A.1、C.2、E.1/E.2）的具体 prompt 文本；每个句子前特殊 token 的精确插入规则（<code>N_PREFIX=3</code>、<code>N_SPECIAL=4</code> 只在训练配置里出现）；数据生成的数量、过滤与人工检查；Figure 1 的图示细节。页面用 MMA 例子做单条流程示意，不声称复现论文的完整数据管线。</p>
+      <p><strong>简化：</strong>交互里把 memory/reason 块画成连续卡片，省略了同一句里多个特殊 token 的重复；这不影响「先标记、再回填、再训练」的流程理解。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：TruthfulQA 反超 GPT-4o CoT，平均分仍差 1.9 点</h2></div>
+  <p class="sec-sub">主表看整体，消融看 token 是否真的有用，解耦图和错误表看「分开」是否成立。</p>
+
+  <p>先看 Table 1 的节选。原文是 0–1 小数；正文百分比是同一数值。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 节选：主实验结果（原文为 0–1 小数）</caption>
+      <thead>
+        <tr><th>模型</th><th>方法</th><th class="num">StrategyQA</th><th class="num">CommonsenseQA</th><th class="num">TruthfulQA</th><th class="num">Average</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-4o</td><td>Zero-shot</td><td class="num">0.699</td><td class="num">0.834</td><td class="num">0.848</td><td class="num">0.794</td></tr>
+        <tr><td>GPT-4o</td><td>CoT</td><td class="num">0.808</td><td class="num">0.865</td><td class="num">0.854</td><td class="num">0.842</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td>Zero-shot</td><td class="num">0.659</td><td class="num">0.635</td><td class="num">0.616</td><td class="num">0.637</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td>CoT</td><td class="num">0.694</td><td class="num">0.706</td><td class="num">0.506</td><td class="num">0.635</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td>LoRA</td><td class="num">0.701</td><td class="num">0.754</td><td class="num">0.798</td><td class="num">0.737</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td>Planning-token</td><td class="num">0.767</td><td class="num">0.769</td><td class="num">0.825</td><td class="num">0.787</td></tr>
+        <tr class="best"><td>LLaMA-3.1-8B</td><td>Ours</td><td class="num">0.780</td><td class="num">0.823</td><td class="num">0.866</td><td class="num">0.823</td></tr>
+        <tr><td>Qwen2.5-7B</td><td>Zero-shot</td><td class="num">0.640</td><td class="num">0.789</td><td class="num">0.726</td><td class="num">0.718</td></tr>
+        <tr><td>Qwen2.5-7B</td><td>CoT</td><td class="num">0.696</td><td class="num">0.784</td><td class="num">0.567</td><td class="num">0.682</td></tr>
+        <tr><td>Qwen2.5-7B</td><td>Planning-token</td><td class="num">0.774</td><td class="num">0.801</td><td class="num">0.762</td><td class="num">0.779</td></tr>
+        <tr class="best"><td>Qwen2.5-7B</td><td>Ours</td><td class="num">0.786</td><td class="num">0.832</td><td class="num">0.812</td><td class="num">0.810</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>未转录的行：LLaMA-2-7B、LLaMA-2-13B、LLaMA-3.1-70B，以及 Qwen2.5-7B 的 LoRA 行；完整表见原文 Table 1。</p>
+
+  <h3>关键差值：单点反超和整体差距要分开说</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>关键差值：本页按 Table 1 的 LLaMA-3.1-8B 行相减，单位百分点</caption>
+      <thead>
+        <tr><th>对比</th><th>数据集</th><th class="num">Ours</th><th class="num">对照</th><th class="num">点差</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>vs GPT-4o CoT</td><td>TruthfulQA</td><td class="num">86.6</td><td class="num">85.4</td><td class="num">+1.2</td></tr>
+        <tr><td>vs GPT-4o Zero-shot</td><td>TruthfulQA</td><td class="num">86.6</td><td class="num">84.8</td><td class="num">+1.8</td></tr>
+        <tr><td>vs Planning-token</td><td>StrategyQA</td><td class="num">78.0</td><td class="num">76.7</td><td class="num">+1.3</td></tr>
+        <tr><td>vs Planning-token</td><td>CommonsenseQA</td><td class="num">82.3</td><td class="num">76.9</td><td class="num">+5.4</td></tr>
+        <tr><td>vs CoT</td><td>StrategyQA</td><td class="num">78.0</td><td class="num">69.4</td><td class="num">+8.6</td></tr>
+        <tr><td>vs CoT</td><td>CommonsenseQA</td><td class="num">82.3</td><td class="num">70.6</td><td class="num">+11.7</td></tr>
+        <tr><td>vs Planning-token</td><td>Average</td><td class="num">82.3</td><td class="num">78.7</td><td class="num">+3.6</td></tr>
+        <tr><td>vs GPT-4o CoT</td><td>Average</td><td class="num">82.3</td><td class="num">84.2</td><td class="num">−1.9</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>TruthfulQA 的 86.6% 对 85.4% 是 LLaMA-3.1-8B 的结果；同一个 TruthfulQA 上，Qwen2.5-7B 的 Ours 是 81.2%，低于 GPT-4o 的 84.8%（zero-shot）和 85.4%（CoT）（Table 1）。所以「反超 GPT-4o」有模型和数据集条件，不能外推成所有设置。</p>
+
+  <p>另一个反直觉点是 CoT 在 Qwen2.5-7B 的 TruthfulQA 上掉了 15.9 个百分点：zero-shot 72.6%，CoT 56.7%（Table 1）。论文在 §3.2 把 Qwen2.5 在这个数据集上的整体弱势归因于 instruction tuning（“likely due to instruction tuning in Qwen2.5, resulting in average performance and unstable training”），这是对模型整体水平的解释，不是对 CoT 掉点的解释。CoT 掉点另有一句观察：“adding a CoT can decrease performance for some models in some datasets”，论文转引 Sprague et al. (2024)，没有把它归因于 instruction tuning。</p>
+
+  <h3>消融：把 token 换成随机会掉点</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2：把 ⟨memory⟩/⟨reason⟩ 换成随机 token 的消融（原文为 0–1 小数）</caption>
+      <thead>
+        <tr><th>模型</th><th class="num">真 token</th><th class="num">随机 token</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>LLaMA-2-7B</td><td class="num">0.734</td><td class="num">0.668</td></tr>
+        <tr><td>LLaMA-3.1-8B</td><td class="num">0.823</td><td class="num">0.798</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>换成随机 token 后，LLaMA-2-7B 从 73.4% 掉到 66.8%（−6.6 点），LLaMA-3.1-8B 从 82.3% 掉到 79.8%（−2.5 点）（Table 2）。这组消融（§3.3.1）只说明 token 的身份/分配有作用：训练时打乱 ⟨memory⟩ 与 ⟨reason⟩ 的分配，整体性能的 decline rate 为 2.1%–6.6%（原文未说明是相对还是绝对口径）。论文另用 §3.3.2 的 0-token 标准训练对照来论证提升不只是知识蒸馏——在相同推理步骤下，加 token 比 0 token 明显更好。</p>
+
+  <h3>解耦：Ours 的记忆/推理识别率更高，但记忆项的差距很小</h3>
+  <p>Figure 2 / §3.4.1 用 GPT-4o-mini 评估每一步是否真的是记忆或推理。切换数据集看四组数值：</p>
+
+  <div class="sim decouple">
+    <div class="tabs" id="decouple-tabs">
+      <button class="tab active" data-ds="0">StrategyQA</button>
+      <button class="tab" data-ds="1">CommonsenseQA</button>
+      <button class="tab" data-ds="2">TruthfulQA</button>
+    </div>
+    <div class="chart" id="decouple-chart"></div>
+    <div class="cx" id="decouple-x"><span>Memory 步</span><span>Reason 步</span></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>Ours</span>
+      <span><i style="background:var(--c1)"></i>One-shot CoT</span>
+    </div>
+    <div class="readout" id="decouple-readout" data-src="§3.4.1 / Figure 2">
+      <div class="r-head">当前数据集</div>
+      <div id="decouple-msg"></div>
+    </div>
+    <details>
+      <summary>手算块：两组数值怎么对上<span class="sum-sub">无标准差；只做百分点差</span></summary>
+      <div class="details-body">
+        <p><strong>StrategyQA</strong>：Ours 记忆 94 − CoT 93 = <code>1</code>；Ours 推理 71 − CoT 67 = <code>4</code>。</p>
+        <p><strong>TruthfulQA</strong>：Ours 记忆 89 − CoT 88 = <code>1</code>；Ours 推理 74 − CoT 62 = <code>12</code>。</p>
+        <p>口径：两个准确率都是百分数，差值单位是百分点；原图没有给标准差，页面也未计算方差或标准误。</p>
+      </div>
+    </details>
+  </div>
+
+  <p>解耦评估的分项数值见 Figure 2（§3.4.1）：StrategyQA 上 Ours 的记忆/推理识别率是 94%/71%，One-shot CoT 是 93%/67%；CommonsenseQA 是 91%/78% 对 83%/74%；TruthfulQA 是 89%/74% 对 88%/62%。StrategyQA 的记忆项 94% 对 93%、TruthfulQA 的记忆项 89% 对 88%，都只差 1 个百分点；推理项的差距更大（StrategyQA 4 点、TruthfulQA 12 点）。</p>
+
+  <h3>错误归因：推理错误占多数</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 7：错误归因（%），LLaMA-3.1-8B；两列互补</caption>
+      <thead>
+        <tr><th>数据集</th><th class="num">Memory</th><th class="num">Reason</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>StrategyQA</td><td class="num">1.7</td><td class="num">98.3</td></tr>
+        <tr><td>CommonsenseQA</td><td class="num">21.6</td><td class="num">78.4</td></tr>
+        <tr><td>TruthfulQA</td><td class="num">21.1</td><td class="num">78.9</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>StrategyQA 有 98.3% 的错误归因于推理，只有 1.7% 归因于记忆；CommonsenseQA 和 TruthfulQA 的推理错误分别是 78.4% 和 78.9%。三组中最低的是 78.4%。论文的结论是：模型多数时候能 recall 出知识，问题更多出在如何使用知识（§3.4.3）。</p>
+
+  <details>
+    <summary>口径核对：原文的 「20%」「26.3%」「32.6%」是百分点<span class="sum-sub">Table 5 与 Table 1 的 CoT 行不是同一设置</span></summary>
+    <div class="details-body">
+      <p>Table 5 的 One-shot CoT 是带结构化 one-shot 示例的提示设置；它的准确率是 58.0 / 56.0 / 54.0，Ours 是 78.0 / 82.3 / 86.6。</p>
+      <div class="tbl-scroll">
+        <table>
+          <caption>Table 5（原文为 %）；点差为本页按表相减</caption>
+          <thead>
+            <tr><th>数据集</th><th class="num">One-shot CoT</th><th class="num">Ours</th><th class="num">点差</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>StrategyQA</td><td class="num">58.0</td><td class="num">78.0</td><td class="num">20.0</td></tr>
+            <tr><td>CommonsenseQA</td><td class="num">56.0</td><td class="num">82.3</td><td class="num">26.3</td></tr>
+            <tr><td>TruthfulQA</td><td class="num">54.0</td><td class="num">86.6</td><td class="num">32.6</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>按表算：78.0 − 58.0 = 20.0；82.3 − 56.0 = 26.3；86.6 − 54.0 = 32.6，单位都是百分点。原文正文把这几个数写成「20%」「26.3%」「32.6%」；这里按原文引用，同时标明口径。</p>
+      <p>Table 5 的 One-shot CoT 不能和 Table 1 的 CoT 行（69.4 / 70.6 / 50.6）混用：前者是 one-shot 结构化提示，后者是普通 CoT 提示（§3.1 vs §3.4.1）。</p>
+    </div>
+  </details>
+
+  <p>怎么读这些数：TruthfulQA 的单点反超是 LLaMA-3.1-8B 的结果，不是所有模型都成立；三数据集平均仍低于 GPT-4o CoT 1.9 个点；Table 5 的 one-shot CoT 又是另一套提示设置。表号和条件必须跟着数字走，否则很容易把「单点最高」读成「整体最好」。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：标签分开了能力，但没有替你补上能力</h2></div>
+  <p class="sec-sub">论文自己列了限制；结合实验范围还能看出几条适用边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>教师和标注质量是上限</h4></div>
+    <p>训练数据由 GPT-4o 生成：它写 CoT、打标签、回答 memory 问题。教师模型的知识盲点或错误标签会被学生继承。<span class="infer">推断</span>（依据：Appendix F.2 指出训练数据中缺失或代表性不足的知识会导致回答不准确或不完整；论文未直接量化教师标签错误向学生的传播。）论文在 §6 说，方法依赖训练数据的质量与覆盖面，知识在训练数据中缺失或代表性不足时，检索可能不完整（Appendix F.2 同样指出这一点）。Appendix B.1 用 Jaccard 相似度低于 10% 论证提升不只是知识蒸馏，但这仍是间接证据，不消除对教师的依赖。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>二元标签对复杂推理可能不够</h4></div>
+    <p>论文在 §6 承认，多跳或深层嵌套逻辑不一定能干净地拆成离散的 memory/reason 步；这种情况下，两个标签的边界会变模糊。论文未报告这类任务的定量结果。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>步骤越多，计算开销越大</h4></div>
+    <p>§6 / Appendix F.2 指出，把 memory recall 与 reasoning 拆开、引入 retrieval-based processing 会增加计算时间，这对实时应用是限制；原文没有报告序列长度或显存占用的具体测量。数据生成阶段还需要两个 GPT-4o 角色多次调用（§2.1）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界四</span><h4>评测范围只有三类 QA</h4></div>
+    <p>实验覆盖 StrategyQA、CommonsenseQA、TruthfulQA 三个数据集，指标是准确率，评估由 GPT-4o-mini 完成（§3.1、Appendix C.2，Evaluation Metric）。没有数学、代码、长文本生成或开放式对话任务；论文也未报告显著性检验。<span class="infer">推断</span>（由 §3.1 的实验设置与 Table 1–7 的覆盖范围归纳）</p>
+  </div>
+
+  <p>一句话：这套方法买的是<strong>可检查的中间步骤</strong>，不是无条件的准确率提升。当任务能自然拆成「事实召回 + 逻辑推演」，并且你愿意承担教师模型造数据的成本时，它最合适；如果任务本身不可分解，或者你需要的是一次调用、低延迟的答案，两个标签可能帮不上忙。<span class="infer">推断</span>（依据：§2.1 的流程要求每步可标为 memory 或 reason；§6 / Appendix F.2 指出 decomposition 会增加计算时间。）</p>
+</section>
+
+<footer>
+  <div>Disentangling Memory and Reasoning Ability in Large Language Models</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2411.13504v3" target="_blank" rel="noopener">arXiv 2411.13504v3</a> · Mingyu Jin, Weidi Luo, Sitao Cheng, Xinyi Wang, Wenyue Hua, Ruixiang Tang, William Yang Wang, Yongfeng Zhang<br>
+    代码：<a href="https://github.com/MingyuJ666/Disentangling-Memory-and-Reasoning" target="_blank" rel="noopener">MingyuJ666/Disentangling-Memory-and-Reasoning</a><br>
+    笔记：<a href="/disentangling-memory-and-reasoning-ability-in-large-language-models/">Disentangling Memory and Reasoning Ability in Large Language Models</a>
+  </div>
+
+  <div class="erratum">
+    <strong>笔记勘误</strong>
+    <ul>
+      <li>笔记称训练为「指令微调（Instruction Fine-tuning）」；原文 §2.2 写的是标准自回归 LoRA 微调，两个特殊 token 是可训练的 OOV token。</li>
+      <li>笔记多处用「显著优于」「显著地优于」，但原文只给准确率点估计，未报告显著性检验；解耦分析里 StrategyQA 的记忆识别 94% vs 93%、TruthfulQA 89% vs 88%，只差 1 个百分点。</li>
+      <li>笔记称 GPT-4o「体量远大于」学生模型；论文没有给出 GPT-4o 参数量，本页不采用这个比较。</li>
+    </ul>
+  </div>
+
+  <div class="src" style="margin-top:12px">
+    原文内部不一致：§3.1 写 CommonsenseQA 有 12,102 题，Appendix C.1（Dataset）写 12,247 题；本页未采用该数字。Table 5 的 One-shot CoT 与 Table 1 的 CoT 是两套提示设置，不能混用。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 数据生成流程：逐步展开
+   ============================================================ */
+(function () {
+  var PIPE = [
+    {
+      t: "原始问题",
+      b: '<p>StrategyQA：<strong>Is MMA totally original from the Roman Colosseum games?</strong></p>'
+        + '<p>正确答案：<strong>False</strong>。要回答它，模型得先回忆 MMA 和罗马角斗，再比较两者的关系。</p>'
+    },
+    {
+      t: "推理 LLM 写 CoT，并逐步打标",
+      b: '<p>每一步前面加 <code>⟨memory⟩</code> 或 <code>⟨reason⟩</code>：memory 步写事实，reason 步写推演。</p>'
+        + '<div class="pipe-tokens">'
+        + '<span class="pipe-token mem">⟨memory⟩ MMA is a full-contact combat sport...</span>'
+        + '<span class="pipe-token mem">⟨memory⟩ The Roman Colosseum games were violent contests...</span>'
+        + '<span class="pipe-token mem">⟨memory⟩ Modern MMA has regulated rules, weight classes...</span>'
+        + '<span class="pipe-token rea">⟨reason⟩ Both share hand-to-hand combat but differ in purpose...</span>'
+        + '<span class="pipe-token rea">⟨reason⟩ MMA is not totally original from the Roman Colosseum games...</span>'
+        + '</div>'
+    },
+    {
+      t: "memory 步改写成事实问题，知识 LLM 作答",
+      b: '<p>推理 LLM 把每条 memory 知识改写成问题，强调其事实性；知识 LLM（同样是 GPT-4o）回答这些问题。</p>'
+        + '<div class="pipe-tokens">'
+        + '<span class="pipe-token mem">What is mixed martial arts?</span>'
+        + '<span class="pipe-token mem">What are the Roman Colosseum games?</span>'
+        + '<span class="pipe-token mem">What are the rules of modern MMA?</span>'
+        + '</div>'
+        + '<p>答案随后回填到原来的 memory 步骤。</p>'
+    },
+    {
+      t: "答案回填，拼成训练序列",
+      b: '<p>问题 + 带标签的 memory/reason 步骤 + 答案，组成一条训练实例。</p>'
+        + '<div class="pipe-tokens">'
+        + '<span class="pipe-token">Q</span>'
+        + '<span class="pipe-token mem">⟨memory⟩ K1</span>'
+        + '<span class="pipe-token mem">⟨memory⟩ K2</span>'
+        + '<span class="pipe-token mem">⟨memory⟩ K3</span>'
+        + '<span class="pipe-token rea">⟨reason⟩ S1</span>'
+        + '<span class="pipe-token rea">⟨reason⟩ S2</span>'
+        + '<span class="pipe-token">A: False</span>'
+        + '</div>'
+        + '<p>两个特殊 token 是可训练的 OOV token，参与 LoRA 微调（§2.2）。</p>'
+    },
+    {
+      t: "LoRA 学生模型学习这套动作",
+      b: '<p>学生模型在标准自回归目标下学习：先输出 memory 回忆，再输出 reason 推演，最后给答案。</p>'
+        + '<p>推理时不需要教师模型，但需要模型自己生成这些标签；训练数据的质量与覆盖面会影响 memory recall，缺失或代表性不足时回答可能不准确或不完整（§6 / Appendix F.2）。</p>'
+    }
+  ];
+
+  var btns = document.querySelectorAll("#pipe-btns .rule-btn");
+  var head = document.getElementById("pipe-head");
+  var body = document.getElementById("pipe-body");
+  if (!btns.length || !head || !body) return;
+
+  function showPipe(i) {
+    var d = PIPE[i];
+    if (!d) return;
+    head.textContent = d.t;
+    body.innerHTML = d.b;
+    btns.forEach(function (b, j) {
+      b.classList.toggle("active", j === i);
+    });
+  }
+
+  btns.forEach(function (b, i) {
+    b.addEventListener("click", function () { showPipe(i); });
+  });
+  showPipe(0);
+})();
+
+/* ============================================================
+   2) 解耦评分：按数据集切换
+   ============================================================ */
+(function () {
+  var DEC = [
+    { name: "StrategyQA", ours: [94, 71], cot: [93, 67] },
+    { name: "CommonsenseQA", ours: [91, 78], cot: [83, 74] },
+    { name: "TruthfulQA", ours: [89, 74], cot: [88, 62] }
+  ];
+
+  var tabs = document.querySelectorAll("#decouple-tabs .tab");
+  var chart = document.getElementById("decouple-chart");
+  var msg = document.getElementById("decouple-msg");
+  if (!tabs.length || !chart || !msg) return;
+
+  function makeRow(label, vals, color) {
+    var row = document.createElement("div");
+    row.className = "crow";
+    var name = document.createElement("div");
+    name.className = "cname";
+    name.textContent = label;
+    var bars = document.createElement("div");
+    bars.className = "cbars";
+    vals.forEach(function (v) {
+      var bar = document.createElement("div");
+      bar.className = "cbar";
+      var track = document.createElement("div");
+      track.className = "track";
+      var fill = document.createElement("div");
+      fill.className = "fill";
+      fill.style.background = color;
+      fill.style.height = Math.max(2, v) + "%";
+      track.appendChild(fill);
+      var num = document.createElement("div");
+      num.className = "num";
+      num.textContent = v + "%";
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+    });
+    row.appendChild(name);
+    row.appendChild(bars);
+    return row;
+  }
+
+  function showDec(i) {
+    var d = DEC[i];
+    if (!d) return;
+    chart.innerHTML = "";
+    chart.appendChild(makeRow("Ours", d.ours, "var(--accent)"));
+    chart.appendChild(makeRow("One-shot CoT", d.cot, "var(--c1)"));
+    msg.innerHTML = d.name + "：Ours 记忆 <strong>" + d.ours[0] + "</strong> / 推理 <strong>"
+      + d.ours[1] + "</strong>；One-shot CoT 记忆 <strong>" + d.cot[0] + "</strong> / 推理 <strong>"
+      + d.cot[1] + "</strong>。记忆差 <strong>" + (d.ours[0] - d.cot[0])
+      + "</strong> 点，推理差 <strong>" + (d.ours[1] - d.cot[1]) + "</strong> 点。";
+    tabs.forEach(function (t, j) {
+      t.classList.toggle("active", j === i);
+    });
+  }
+
+  tabs.forEach(function (t, i) {
+    t.addEventListener("click", function () { showDec(i); });
+  });
+  showDec(0);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,467 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 30.37 | Table 1 | 63.24-32.87 |
+| 0.77 | Table 1 | 65.53-64.76 |
+| 34.69 | Table 1 | 73.57-38.88 |
+| 8.93 | Table 1 | 33.14-24.21 |
+| 15.17 | Table 2 | 65.11-49.94 |
+| 30.4 | Table 2 | (65.11-49.94)/49.94*100 |
+| 2.23 | Table 2 | 14.29-12.06 |
+| 18.5 | Table 2 | (14.29-12.06)/12.06*100 |
+| 1.4 | Table 3 | 14.8-13.4 |
+| 1.5 | Table 3 | 82.4-80.9 |
+| 38.7 | Table 3 | 48.6-9.9 |
+| 79.6 | Table 3 | (48.6-9.9)/48.6*100 |
+| 0.020 | Table 3 | 0.506-0.486 |
+| 750 | §6.2 / Appendix B | 150000/200 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLVR-World：用可验证指标直接后训练世界模型</title>
+<meta name="description" content="RLVR-World 把世界模型的解码预测指标当作可验证奖励，用 GRPO 后训练。文本游戏（1.5B + task-specific）准确率 32.87→63.24，网页 F1 49.94→65.11，视频多步重复率 48.6%→9.9%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.cbar .fill.b1{background:var(--c1)}
+.cbar .fill.b2{background:var(--c2)}
+.cbar .fill.b3{background:var(--c3)}
+.cbar .fill.b4{background:var(--accent)}
+.cbar .num{color:var(--text-muted)}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.4}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.5;fill:none}
+.svg-dash{stroke:var(--c1);stroke-width:1.5;fill:none;stroke-dasharray:6 4}
+.arrow-head{fill:var(--text-soft)}
+.arrow-c1{fill:var(--c1)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:15px;font-weight:600;fill:var(--text)}
+.svg-tt{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+.svg-s{font-family:"Noto Sans SC",sans-serif;font-size:12px;fill:var(--text-muted)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:11.5px;fill:var(--text-muted)}
+.svg-note{font-family:"Noto Sans SC",sans-serif;font-size:12.5px;font-weight:600;fill:var(--accent-deep)}
+.svg-scroll{overflow-x:auto;margin:18px 0 8px}
+.svg-scroll svg{min-width:800px;width:100%;height:auto;display:block}
+.tbl-scroll .tbl-wide{min-width:880px}
+.tbl-scroll .tbl-mid{min-width:700px}
+.tbl-center td,.tbl-center th{text-align:center}
+@media(max-width:560px){.svg-s{font-size:13px}.svg-l{font-size:13px}.svg-note{font-size:13px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">RLVR-World</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">怎么算</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>世界模型 · NeurIPS 2025 · arXiv 2505.13934v2</span>
+  <h1>RLVR-World：用可验证指标直接后训练世界模型</h1>
+  <p class="hero-sub">世界模型的目标是预测“动作之后世界会变成什么”，但标准训练用的是 MLE：最大化真实下一个状态的似然。这个目标和真正关心的指标——状态是否完全正确、视频是否清晰——并不对齐。RLVR-World 把<strong>解码后的预测指标</strong>直接当奖励，用 GRPO 后训练；语言与视频统一成 token 序列。文本游戏（1.5B + task-specific）整体准确率 <span data-src="Table 1">32.87→63.24</span>，网页 F1 <span data-src="Table 2">49.94→65.11</span>，视频多步重复率 <span data-src="Table 3">48.6→9.9</span>。</p>
+  <div class="meta">
+    <span>Jialong Wu、Shaofeng Yin、Ningya Feng、Mingsheng Long · 清华大学 THUML</span>
+    <a href="https://arxiv.org/abs/2505.13934v2" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://thuml.github.io/RLVR-World/" target="_blank" rel="noopener">项目页 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>论文把世界模型统一成自回归序列预测：状态与动作都 token 化，模型输入 <code>q(s, a)</code>，输出 <code>o(s′)</code>。后训练时，对同一输入采样一组预测，解码成状态后用一个可验证指标 <code>D</code> 与真实下一个状态比较，奖励是 <code>sign(D)·D</code>；再用 GRPO 更新。MLE 优化的是 token 似然，RLVR 优化的是任务指标。</p>
+  <p>语言侧，文本游戏用二元准确率或“全属性 + 变化属性 + 完全正确”的任务奖励；网页用预测变化的 F1。视频侧，奖励是逐帧 <code>−[L1 + LPIPS]</code> 的和，指标包括 MSE、PSNR、SSIM、LPIPS 与重复率。</p>
+  <p>结果：1.5B 文本游戏从 SFT 的 32.87 提到 63.24（任务奖励），7B 二元奖励 65.53，略高于 GPT-4 的 64.76；网页 F1 从 49.94 到 65.11，下游网页 agent 成功率从 12.06 到 14.29；视频多步重复率从 48.6% 降到 9.9%。RLVR 只跑几百步，而 MLE 预训练是数十万步。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">63.24<small>%</small></div><div class="k">1.5B 文本游戏整体准确率（任务奖励）；SFT 32.87%</div></div>
+    <div class="metric"><div class="v" data-src="Table 2">65.11<small>%</small></div><div class="k">网页状态预测 F1；SFT 49.94%</div></div>
+    <div class="metric"><div class="v" data-src="Table 3">9.9<small>%</small></div><div class="k">视频多步预测重复率；Base 48.6%</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>MLE 让模型学会“像数据”，却没学会“预测对”</h2></div>
+  <p class="sec-sub">读完这节应该知道：为什么世界模型的训练目标与使用目标会错位。</p>
+  <p>世界模型要近似状态转移 <code>p(s′ | s, a)</code>：给定当前状态与动作，预测下一个状态。论文把状态空间扩展到语言、图像、视频与低维连续信号，并统一用 decoder-only Transformer 做 next-token prediction（§4.2）。标准做法是 MLE：最大化真实下一个状态序列的似然（Eq. 2）。</p>
+  <p>问题在于，MLE 奖励的是“每个 token 的概率”，而使用世界模型时关心的是“解码后的状态是否正确”或“画面是否清晰”。两者并不等价。论文举了两个表现：视频多步预测会出现重复帧——因为每帧约 20% 的 token 与上一帧相同，模型可以利用这个捷径；语言侧则可能生成格式正确但事实错误的状态。Abstract / 摘要 把这种错位写成 “standard training objectives such as maximum likelihood estimation (MLE) often misalign with task-specific goals of world models”。</p>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心判断</span><h4>奖励必须作用在解码后的状态上</h4></div>
+    <p>RLVR-World 不把 reward 加在 token 概率上，而是先把模型输出解码成状态 <code>ŝ′</code>，再与真实状态 <code>s′</code> 用任务指标比较。这样奖励与评测口径一致；代价是解码与指标计算必须可执行、可验证，且通常不可微，只能走 RL。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条已有路线 + 一条本文路线：MLE 预训练、偏好对齐、可验证奖励</h2></div>
+  <p class="sec-sub">页面按训练目标把已有做法归为三类<span class="infer">推断</span>；原文 §2 是相关工作总结，没有这张分类表。</p>
+  <p><strong>MLE 预训练 + SFT</strong> 是语言与视频世界模型的主线：先最大化真实序列似然，再用少量示范微调。它的优点是稳定、可扩展；缺点是目标与任务指标错位。论文的 Base 与 SFT 行就是这条路线。<strong>偏好对齐</strong>（RLHF 一类）用学习出来的人类偏好模型做奖励，但论文选择“可验证奖励”，因为状态是否正确、F1 多少可以直接算，不需要再训练奖励模型。<strong>任务专用模拟器</strong>（如 SIMPLER）用手工模拟器做策略评估，是本文视频实验的对照，不在这张三段式卡片里；本文的视频世界模型走学习式模拟器路线，并在 Real2Sim 评估中与 SIMPLER 比较（§6.4）。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>MLE / SFT</h4></div>
+      <p>优化 token 似然；稳定，但与准确率、感知质量不对齐。视频里会放大重复帧捷径。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>偏好对齐</h4></div>
+      <p>用人类偏好或学习奖励模型；适合主观目标，但需要额外奖励模型，且可能被 reward hacking。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">本文路线</span><h4>可验证奖励</h4></div>
+      <p>直接用任务指标当奖励；客观、可复算，但要求指标可程序化计算，且覆盖的任务范围有限。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把“预测下一个状态”当成一道可判分的题</h2></div>
+  <p class="sec-sub">读完这节应知道：输入输出怎么构造、奖励怎么算、GRPO 在哪里介入。</p>
+  <p><strong>序列化。</strong>对每个转移 <code>(s, a, s′)</code>，用模板把 <code>(s, a)</code> 拼成问题 <code>q(s, a)</code>，把 <code>s′</code> 拼成回答 <code>o(s′)</code>。文本游戏状态是 JSON 文本；视频帧经视觉 tokenizer 编码；连续动作按取值范围离散成 256 个均匀 bin（§4.2、§6.1）。这样语言与视频共享同一个 next-token prediction 接口。</p>
+  <p><strong>奖励。</strong>给定 <code>q</code>，旧策略采样一组输出 <code>{o_i}</code>，解码成 <code>{ŝ′_i}</code>，与真实 <code>s′</code> 比较：</p>
+  <div class="eq">
+    R<sub>i</sub> = sign(D) · D(ŝ′<sub>i</sub>, s′)
+  </div>
+  <p class="eq-cap">Eq. 3。D 是任务指标；若 D 越小越好（MSE、LPIPS），sign(D) = −1，否则为 +1。</p>
+  <p><strong>优化。</strong>用 GRPO（Eq. 1）：组内归一化优势 <code>Â</code>，加上 PPO 式 clip 与 KL 惩罚；不需要 value function。论文说框架兼容其他 RL 算法，但实验都用 GRPO（§4.3；GRPO 见 §3）。</p>
+  <p><strong>三种任务的 D。</strong>文本游戏有两种奖励：二元奖励只在三元组 <code>(状态, 奖励, 完成标志)</code> 完全正确时给 1；任务奖励是 <code>α₁·acc_all + α₂·acc_changed + α₃·I(correct)</code>，权重 0.1 / 1 / 0.2（Appendix A.1）。网页用预测变化集合与真实变化集合的 F1（§5.2）。视频用逐帧 <code>−[L1 + LPIPS]</code> 的和（Appendix A.4，Eq. 9–10）——注意不只是 LPIPS。</p>
+  <div class="card">
+    <div class="card-head"><span class="pill p2">口径</span><h4>论文里的 “+34.7%” 是百分点</h4></div>
+    <p>§5.1 写 RLVR 在 1.5B 上带来 “+34.7% accuracy for unchanged and +8.9% for changed”。按 Table 1 的显示值，73.57−38.88=34.69、33.14−24.21=8.93，都是百分点。页面在引用时写“34.7 个百分点”，不把它当成相对提升。</p>
+  </div>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么算：LoRA + GRPO，语言与视频两套超参</h2></div>
+  <p class="sec-sub">读完这节应知道：模型、数据、超参与 GPU 小时；这也是“几百步 vs 几十万步”说法的来源。</p>
+  <p>语言世界模型用 DeepSeek-R1-Distill-Qwen-1.5B 与 7B 作基座；文本游戏先用 DeepSeek-R1 生成的 4,237 条 SFT 数据微调（约 $40），再跑 RLVR。LoRA rank 32、α 16；文本游戏 SFT 10 epoch、网页 4 epoch；RLVR 学习率 1e−6、KL 系数 1e−3、group size 5、文本游戏 batch 128、网页 batch 64（Table 5、Appendix A.1–A.2）。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <caption style="caption-side:top;text-align:left;font-size:13px;color:var(--text-soft);padding:0 0 8px">表 1 · 语言世界模型的训练配置（原文 Table 5 与 Appendix A.1–A.2；页面整理）</caption>
+      <thead>
+        <tr><th>项目</th><th>文本游戏</th><th>网页</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>基座</td><td>R1-Distill-Qwen-1.5B / 7B</td><td>R1-Distill-Qwen-1.5B</td></tr>
+        <tr><td>SFT 数据</td><td>4,237 条 R1 生成轨迹</td><td>WMA 提供的 CoT 数据</td></tr>
+        <tr><td>SFT batch / epoch / LoRA</td><td>16 / 10 / rank 32, α 16</td><td>8 / 4 / rank 32, α 16</td></tr>
+        <tr><td>RLVR batch / mini batch</td><td>128 / 64</td><td>64 / 16</td></tr>
+        <tr><td>学习率 / KL / group size</td><td>1e−6 / 1e−3 / 5</td><td>1e−6 / 1e−3 / 5</td></tr>
+        <tr><td>最大回答长度</td><td>4,096</td><td>7,288</td></tr>
+        <tr><td>算力</td><td>SFT 4×80G A100 6.5h；RLVR 8×80G A100 22.5h</td><td>SFT 8×40G A100 17h；RLVR 8×80G H100 25h</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>视频世界模型是自己预训练的 iVideoGPT 变体：视觉 tokenizer + LLaMA 架构的 138M Transformer（12 层、hidden 768、12 头）。单步与多步分别预训练；RLVR 用 GRPO，group size 16、学习率 5e−5、KL 1e−3、batch 128，只跑 200 步（Appendix B）。单步 200 步用 4×40G A100 约 3.5 小时，多步约 10 小时；tokenizer 预训练 360/480 GPU 小时，Transformer 预训练 530/500 GPU 小时（Appendix B）。</p>
+  <p>“几百步 vs 几十万步”不是修辞：视频 Transformer 单步预训练 9.9×10<sup>5</sup> 步、多步 4.5×10<sup>5</sup> 步，而 RLVR 只跑 200 步（Appendix B）。论文还做了延长预训练对照：多步再预训练 150k 步；原文 §6.2 写 nearly 1000×，按 Appendix B 的 200 步折算为 750×，两处口径不同，并列呈现。延长后 LPIPS 仍是 14.5，仍高于 RLVR 的 13.4（LPIPS 越低越好，即仍差于 RLVR；§6.2）。<span class="infer">推断</span>（依据：Appendix B 的 200 步与 §6.2 的 150k 步）这个对照说明收益不只来自“多训练”。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条流水线，两种模态：token 化 → 采样 → 解码 → 判分 → GRPO</h2></div>
+  <p class="sec-sub">下图按 Figure 2 与 §4 重绘。语言与视频只在 tokenizer/decoder 与奖励指标上分叉，RL 循环相同。</p>
+  <figure>
+  <div class="svg-scroll">
+    <svg viewBox="0 0 860 430" role="img" aria-label="RLVR-World 训练流水线">
+      <rect class="svg-box" x="20" y="42" width="170" height="82" rx="10"/>
+      <text class="svg-t" x="105" y="70" text-anchor="middle">状态 + 动作</text>
+      <text class="svg-tt" x="105" y="90" text-anchor="middle">(s, a)</text>
+      <text class="svg-s" x="105" y="110" text-anchor="middle">模板拼成问题 q</text>
+
+      <rect class="svg-hot" x="232" y="42" width="170" height="82" rx="10"/>
+      <text class="svg-t" x="317" y="70" text-anchor="middle">世界模型</text>
+      <text class="svg-tt" x="317" y="90" text-anchor="middle">采样 G 个输出</text>
+      <text class="svg-s" x="317" y="110" text-anchor="middle">old policy</text>
+
+      <rect class="svg-box" x="444" y="42" width="170" height="82" rx="10"/>
+      <text class="svg-t" x="529" y="70" text-anchor="middle">解码</text>
+      <text class="svg-tt" x="529" y="90" text-anchor="middle">文本 / 视觉 tokenizer</text>
+      <text class="svg-s" x="529" y="110" text-anchor="middle">得到 ŝ′</text>
+
+      <rect class="svg-hot" x="656" y="42" width="180" height="82" rx="10"/>
+      <text class="svg-t" x="746" y="70" text-anchor="middle">可验证奖励</text>
+      <text class="svg-tt" x="746" y="90" text-anchor="middle">sign(D)·D(ŝ′, s′)</text>
+      <text class="svg-s" x="746" y="110" text-anchor="middle">准确率 / F1 / L1+LPIPS</text>
+
+      <path class="svg-ln" d="M190 83 H228"/>
+      <path class="arrow-head" d="M228 78 L238 83 L228 88 Z"/>
+      <path class="svg-ln" d="M402 83 H440"/>
+      <path class="arrow-head" d="M440 78 L450 83 L440 88 Z"/>
+      <path class="svg-ln" d="M614 83 H652"/>
+      <path class="arrow-head" d="M652 78 L662 83 L652 88 Z"/>
+      <path class="svg-dash" d="M746 124 V166 Q746 178 734 178 H329 Q317 178 317 166 V128"/>
+      <path class="arrow-c1" d="M312 128 L317 138 L322 128 Z"/>
+
+      <text class="svg-l" x="20" y="210">GRPO · Eq. 1：组内归一化优势 + clip + KL；不需要 value function</text>
+
+      <rect class="svg-c1" x="20" y="240" width="250" height="92" rx="10"/>
+      <text class="svg-t" x="145" y="268" text-anchor="middle">语言分支</text>
+      <text class="svg-tt" x="145" y="288" text-anchor="middle">文本游戏 · 网页</text>
+      <text class="svg-s" x="145" y="308" text-anchor="middle">奖励：二元 / 任务式 / F1</text>
+
+      <rect class="svg-c1" x="310" y="240" width="250" height="92" rx="10"/>
+      <text class="svg-t" x="435" y="268" text-anchor="middle">视频分支</text>
+      <text class="svg-tt" x="435" y="288" text-anchor="middle">iVideoGPT + 视觉 tokenizer</text>
+      <text class="svg-s" x="435" y="308" text-anchor="middle">奖励：−Σ[L1 + LPIPS]</text>
+
+      <rect class="svg-hot" x="600" y="240" width="236" height="92" rx="10"/>
+      <text class="svg-t" x="718" y="268" text-anchor="middle">下游使用</text>
+      <text class="svg-tt" x="718" y="288" text-anchor="middle">网页 MPC · 视频 Real2Sim</text>
+      <text class="svg-s" x="718" y="308" text-anchor="middle">策略评估 / 动作选择</text>
+
+      <text class="svg-note" x="20" y="370">同一套 RL 循环；模态差异只在 tokenizer、decoder 与奖励 D</text>
+      <text class="svg-s" x="20" y="394">论文 Figure 2 画出语言/视频两条并行分支；RLVR 只更新 Transformer，不更新 tokenizer</text>
+      <text class="svg-l" x="20" y="418">依据：§4.2–§4.3、Figure 2、Eq. 1/3/9/10</text>
+    </svg>
+  </div>
+  <figcaption>图 1 · RLVR-World 训练流水线（按 Figure 2 与 §4 重绘）。语言与视频只在 tokenizer/decoder 与奖励指标上分叉，RL 循环相同。依据：§4.2–§4.3、Figure 2、Eq. 1/3/9/10。</figcaption>
+  </figure>
+  <p>图里没有画“多步预测”的上下文窗口与 7 帧预测长度。§6.1 定义单步 <code>p(s_{t+1} | s_{t−T+1:t}, a_{t−T+1:t})</code> 与多步 <code>p(s_{t+1:t+T} | s_t, a_{t:t+T−1})</code>；多步用压缩 tokenizer 控制序列长度（Appendix A.4）。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>语言涨点、网页下游涨点、视频重复率大跌</h2></div>
+  <p class="sec-sub">读完这节应知道：三个模态各提升了多少，以及哪些提升是相对的、哪些是绝对的。</p>
+  <p><strong>文本游戏（Table 1）。</strong>1.5B 的 SFT 整体 32.87%，二元奖励 RLVR 57.01%，任务奖励 63.24%；相对 SFT 高 <span data-src="Table 1">30.37</span> 个百分点。7B 二元奖励 65.53%，比 GPT-4 的 64.76 高 <span data-src="Table 1">0.77</span> 个百分点。论文同时指出，changed 子集上 7B RLVR 仍低于 GPT-4（40.33 对 51.60），差距来自基座容量。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-wide tbl-center">
+      <caption style="caption-side:top;text-align:left;font-size:13px;color:var(--text-soft);padding:0 0 8px">表 2 · 文本游戏状态预测（原文 Table 1；数据集 ByteSized32-State-Prediction；Acc. 为准确率）</caption>
+      <thead>
+        <tr><th>模型</th><th>Unchanged</th><th>Changed</th><th>Overall</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base (R1-Distill-Qwen-1.5B)</td><td class="num">11.98%</td><td class="num">0.08%</td><td class="num">7.11%</td></tr>
+        <tr><td>SFT</td><td class="num">38.88%</td><td class="num">24.21%</td><td class="num">32.87%</td></tr>
+        <tr><td>RLVR-World (binary)</td><td class="num">73.57%</td><td class="num">33.14%</td><td class="num">57.01%</td></tr>
+        <tr class="best"><td>RLVR-World (task-specific)</td><td class="num">83.66%</td><td class="num">33.80%</td><td class="num">63.24%</td></tr>
+        <tr><td>Base (R1-Distill-Qwen-7B)</td><td class="num">46.90%</td><td class="num">5.53%</td><td class="num">29.92%</td></tr>
+        <tr><td>SFT</td><td class="num">65.94%</td><td class="num">31.32%</td><td class="num">51.76%</td></tr>
+        <tr><td>RLVR-World (binary, 7B)</td><td class="num">83.08%</td><td class="num">40.33%</td><td class="num">65.53%</td></tr>
+        <tr><td>GPT-4</td><td class="num">73.90%</td><td class="num">51.60%</td><td class="num">64.76%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sim" id="modSim">
+    <div class="sim-top" id="modTabs" role="group" aria-label="选择模态">
+      <button type="button" class="rule-btn active" data-mod="text">文本游戏<span class="r-sub">Overall Acc. · Table 1</span></button>
+      <button type="button" class="rule-btn" data-mod="web">网页<span class="r-sub">F1 · Table 2</span></button>
+      <button type="button" class="rule-btn" data-mod="video">视频<span class="r-sub">多步重复率 · Table 3</span></button>
+    </div>
+    <div class="slots s3" id="modSlots"></div>
+    <div class="chart" id="modChart"></div>
+    <div class="readout" id="modReadout" data-src="Table 1">
+      <div class="r-head">当前读数</div>
+      <div id="modText">正在初始化…</div>
+    </div>
+  </div>
+  <details class="handcalc">
+    <summary>手算：Table 1 的 63.24 − 32.87 <span class="sum-sub">与交互读数同源</span></summary>
+    <div class="details-body">
+      <p>文本游戏、1.5B + task-specific：Overall Acc. 63.24 − SFT 32.87 = <span data-src="Table 1">30.37</span> 个百分点。页面把它写成绝对点差，不写成相对提升。</p>
+      <p>0.77 也是绝对点差：7B 二元奖励 65.53 − GPT-4 64.76 = <span data-src="Table 1">0.77</span> 个百分点；changed 子集上 7B 是 40.33，GPT-4 是 51.60，RLVR 仍落后。</p>
+    </div>
+  </details>
+
+  <p><strong>网页状态预测与网页 agent（Table 2）。</strong>1.5B 的 F1 从 SFT 的 49.94 到 65.11，绝对高 <span data-src="Table 2">15.17</span> 个百分点；原文写相对 +30.3%，按表值复算为 <span data-src="Table 2">30.4</span>%（原文按未舍入值）。把世界模型接进 MPC 后，网页 agent 成功率从 12.06 到 14.29，绝对高 <span data-src="Table 2">2.23</span> 个百分点；原文写相对 +18.4%，按表值复算为 <span data-src="Table 2">18.5</span>%。注意 Table 2 只与自己的 Base/SFT 比：§5.2 脚注说，因为预测的是精确 item change 而不是自然语言描述，无法与 WMA 直接比较。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-mid tbl-center">
+      <caption style="caption-side:top;text-align:left;font-size:13px;color:var(--text-soft);padding:0 0 8px">表 3 · 网页状态预测与网页 agent（原文 Table 2；Δ 为原文相对提升，页面保留原文写法）</caption>
+      <thead>
+        <tr><th>模型</th><th>Precision</th><th>Recall</th><th>F1</th><th>Agent SR</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Base (R1-Distill-Qwen-1.5B)</td><td class="num">15.59%</td><td class="num">15.70%</td><td class="num">11.83%</td><td class="num">n/a</td></tr>
+        <tr><td>SFT</td><td class="num">48.99%</td><td class="num">56.05%</td><td class="num">49.94%</td><td class="num">12.06%</td></tr>
+        <tr class="best"><td>RLVR-World</td><td class="num">72.77%</td><td class="num">64.55%</td><td class="num">65.11%</td><td class="num">14.29%</td></tr>
+        <tr><td>Δ（原文）</td><td class="num">+48.5%</td><td class="num">+15.1%</td><td class="num">+30.3%</td><td class="num">+18.4%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>视频（Table 3）。</strong>多步预测的重复率从 48.6% 降到 9.9%，绝对降 <span data-src="Table 3">38.7</span> 个百分点，原文写相对降低 79.6%（按表值复算 <span data-src="Table 3">79.6</span>%）。LPIPS（×100 口径）从 14.8 降到 13.4，绝对降 <span data-src="Table 3">1.4</span>；SSIM（×100 口径）从 80.9 升到 82.4，绝对升 <span data-src="Table 3">1.5</span>。再加 repetition penalty 奖励可以把重复率压到 0.0%，但 MSE 从 0.486 升到 0.506（差 <span data-src="Table 3">0.020</span>），是质量与重复之间的交换。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-wide tbl-center">
+      <caption style="caption-side:top;text-align:left;font-size:13px;color:var(--text-soft);padding:0 0 8px">表 4 · RT-1 视频世界模型（原文 Table 3；MSE/LPIPS/SSIM 已乘 100；Δ 为原文相对提升，↓ 越小越好）</caption>
+      <thead>
+        <tr><th>设置</th><th>模型</th><th>Repetition↓</th><th>MSE↓</th><th>PSNR↑</th><th>SSIM↑</th><th>LPIPS↓</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="3">单步</td><td>Base</td><td class="num">n/a</td><td class="num">0.336</td><td class="num">25.3</td><td class="num">81.7</td><td class="num">13.0</td></tr>
+        <tr><td>RLVR-World</td><td class="num">n/a</td><td class="num">0.287</td><td class="num">25.9</td><td class="num">83.1</td><td class="num">12.2</td></tr>
+        <tr><td>Δ</td><td class="num">n/a</td><td class="num">+14.3%</td><td class="num">+2.6%</td><td class="num">+1.6%</td><td class="num">+6.0%</td></tr>
+        <tr><td rowspan="5">多步</td><td>Base</td><td class="num">48.6%</td><td class="num">0.659</td><td class="num">23.1</td><td class="num">80.9</td><td class="num">14.8</td></tr>
+        <tr><td>Base (w/ repetition rejection)</td><td class="num">0.0%</td><td class="num">0.593</td><td class="num">23.3</td><td class="num">81.0</td><td class="num">14.4</td></tr>
+        <tr class="best"><td>RLVR-World</td><td class="num">9.9%</td><td class="num">0.486</td><td class="num">24.1</td><td class="num">82.4</td><td class="num">13.4</td></tr>
+        <tr><td>RLVR-World (w/ rep. penalty)</td><td class="num">0.0%</td><td class="num">0.506</td><td class="num">24.0</td><td class="num">82.2</td><td class="num">13.7</td></tr>
+        <tr><td>Δ（原文）</td><td>相对提升</td><td class="num">+79.6%</td><td class="num">+26.1%</td><td class="num">+4.5%</td><td class="num">+1.9%</td><td class="num">+9.2%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sim" id="vSim">
+    <div class="sim-top" id="vTabs" role="group" aria-label="选择视频指标">
+      <button type="button" class="rule-btn active" data-met="rep">Repetition ↓<span class="r-sub">越低越好</span></button>
+      <button type="button" class="rule-btn" data-met="mse">MSE ↓<span class="r-sub">越低越好</span></button>
+      <button type="button" class="rule-btn" data-met="psnr">PSNR ↑<span class="r-sub">越高越好</span></button>
+      <button type="button" class="rule-btn" data-met="ssim">SSIM ↑<span class="r-sub">×100 口径</span></button>
+      <button type="button" class="rule-btn" data-met="lpips">LPIPS ↓<span class="r-sub">×100 口径</span></button>
+    </div>
+    <div class="slots s3" id="vSlots"></div>
+    <div class="chart" id="vChart"></div>
+    <div class="readout" id="vReadout" data-src="Table 3">
+      <div class="r-head">当前读数</div>
+      <div id="vText">正在初始化…</div>
+    </div>
+  </div>
+  <details class="handcalc">
+    <summary>手算：Table 3 的 48.6 − 9.9 <span class="sum-sub">与交互读数同源</span></summary>
+    <div class="details-body">
+      <p>视频多步重复率：48.6 − 9.9 = <span data-src="Table 3">38.7</span> 个百分点（下降）。原文 Table 3 的 Δ 行写 +79.6%，是相对口径；页面并列绝对 38.7 与相对 79.6%。</p>
+      <p>网页 F1：65.11 − 49.94 = <span data-src="Table 2">15.17</span> 个百分点；相对口径按表值复算 (65.11−49.94)/49.94 = <span data-src="Table 2">30.4</span>%，原文写 +30.3%（按未舍入值）。</p>
+      <p>SSIM/LPIPS 是 ×100 口径：SSIM 82.4 − 80.9 = <span data-src="Table 3">1.5</span>，LPIPS 14.8 − 13.4 = <span data-src="Table 3">1.4</span>，都是绝对点差。</p>
+    </div>
+  </details>
+
+  <p><strong>与 SOTA 比（Table 4）。</strong>在 PushT/Rope/Granular 的单步预测上，RLVR-World 的 LPIPS/SSIM 是 0.70/98.46、2.08/98.14、2.42/95.42；DINO-WM（报告值）是 0.7/98.5、0.9/98.5、3.5/94.0。论文说整体与最强基线 DINO-WM 相当，在 Granular 上明显更好；但在 Rope 上 LPIPS 2.08 高于 DINO-WM 的 0.9。<span class="infer">推断</span>（依据：Table 4 三列）这不是“全面超过”，而是“部分指标相当、Granular 更好、Rope 更差”。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是“指标对齐”，不是“世界模型的一切”</h2></div>
+  <p class="sec-sub">§7 讨论五类挑战（算法 2 + 基础模型 3）；与本页边界最相关的三类，加两条页面补充。</p>
+  <p>§7 讨论五类挑战：算法侧 2 项——(1) 性能屏障：RLVR 通常几百步就收敛，如何继续提升需要分析模型、数据与算法瓶颈；(2) OOD 泛化：RLVR 在语言模型上能泛化到训练域外，但世界模型在反事实动作上的表现还没验证。基础模型侧 3 项——(1) 通用世界模型后训练：当前视频模型是“每个数据集单独预训练”的 138M 模型，不是通用视频世界模型；论文说等社区有了通用视频世界模型，才能走“多样域预训练 → SFT → RLVR”的完整范式；(2) 跨模型类别应用：RLVR-World 的核心洞察与模型类别无关，但扩散模型的 GRPO 工作超出本文范围；(3) 任务对齐奖励：MSE/LPIPS 这类指标比 MLE 更贴近任务，但仍不能完全刻画用户想要的质量，物理规则与时间一致性需要更复杂的奖励。与本页边界最相关的三类是性能屏障、OOD 泛化与任务对齐奖励。</p>
+  <p>页面补两点。第一，网页与文本游戏的比较对象主要是自己的 Base/SFT；网页侧因评测口径不同，没有与 WMA 直接比（§5.2 脚注）。第二，RLVR 不是万能的测试时放大器：Figure 4 显示，采样数增加到 100 时，Base 模型会追上并反超 RLVR 模型；论文把这列为当前 RLVR 方法的局限。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">别用 1</span><h4>想要通用视频模拟器</h4></div>
+      <p>当前视频模型按数据集单独预训练（RT-1 / PushT / Rope / Granular），没有跨域通用性。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">别用 2</span><h4>奖励无法程序化</h4></div>
+      <p>RLVR 要求 D 可计算、可验证；主观质量、物理规则、长期一致性目前没有可靠指标。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">别用 3</span><h4>靠大量采样取胜</h4></div>
+      <p>测试时采样到 100 个，Base 会追上；RLVR 的优势主要在单次/少样本与训练效率。</p>
+    </div>
+  </div>
+  <p>读表注意。第一，Table 3 的 Δ 表注已定义 relative performance gains from RLVR；Repetition、MSE、LPIPS 越低越好，Δ 的“+”表示改善，读者仍要按箭头方向读。第二，Table 4 里 DINO-WM 的 Rope LPIPS 是 0.9，而 RLVR-World 是 2.08；论文说“整体相当、Granular 更好”，Appendix A.4.2 也明确 “Our model underperforms DINO-WM on the Rope dataset”，不是每个数据集都更好。</p>
+</section>
+
+<footer>
+  <div><strong>RLVR-World: Training World Models with Reinforcement Learning</strong></div>
+  <div class="src">
+    作者：Jialong Wu、Shaofeng Yin、Ningya Feng、Mingsheng Long（清华大学 THUML）<br>
+    会议：NeurIPS 2025 · arXiv:2505.13934v2（32 页）<br>
+    原文：<a href="https://arxiv.org/abs/2505.13934v2" target="_blank" rel="noopener">https://arxiv.org/abs/2505.13934v2</a>（本页以 v2 为准）<br>
+    项目页：<a href="https://thuml.github.io/RLVR-World/" target="_blank" rel="noopener">https://thuml.github.io/RLVR-World/</a><br>
+    笔记：<a href="/rlvr-world/">RLVR-World</a>
+  </div>
+  <div class="errata" style="margin-top:18px">
+    <div style="font-weight:600;color:var(--text);margin-bottom:8px">笔记勘误与说明（不改笔记原文）</div>
+    <ul>
+      <li>笔记说视频任务的奖励“可以是 LPIPS 这种指标”。原文的奖励是逐帧 <code>−[L1 + LPIPS]</code> 的和（Appendix A.4，Eq. 9–10），不只是 LPIPS；页面按原文写全。</li>
+      <li>笔记说文本游戏“整体准确率从 32.87% 升到 63.24%”。这个数字对应 1.5B + task-specific 奖励；二元奖励是 57.01%，7B 二元奖励是 65.53%。补上模型与奖励口径，才能和 GPT-4 的 64.76 对齐比较。</li>
+      <li>笔记说 RLVR“达到与 GPT-4 相媲美”的水平。1.5B task-specific 是 63.24 对 64.76；7B 二元奖励 65.53 已经略高于 GPT-4，但 changed 子集仍是 40.33 对 51.60。两个口径要分开说。</li>
+      <li>笔记说视频的 LPIPS 相对提升 9.2%、SSIM 相对提升 1.9%。这两个都是 RT-1 多步预测的相对提升；绝对差是 LPIPS 1.4、SSIM 1.5（Table 3）。页面同时写相对与绝对。</li>
+      <li>笔记说“重复率从 48.6% 降到 9.9%”。准确；但如果加 repetition penalty 奖励，重复率可到 0.0%，代价是 MSE 从 0.486 升到 0.506。笔记没有提这个交换。</li>
+      <li>笔记说最终策略评估依赖“单个人类标注员”。§6.4 写的是 “we rely on human annotators”（复数），但 Appendix A.5 明确 “a single annotator is tasked with labeling success or failure”；笔记的“单个人类标注员”有 A.5 依据，两处需并读。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var modal = {
+    text: { label: '文本游戏 Overall Acc.', src: 'Table 1', max: 70, hi: 3, slots: [['指标', 'Overall Acc.'], ['SFT 1.5B', '32.87%'], ['RLVR task', '63.24%']], rows: [['Base 1.5B', 7.11], ['SFT 1.5B', 32.87], ['RLVR binary', 57.01], ['RLVR task', 63.24], ['GPT-4', 64.76], ['RLVR 7B', 65.53]], note: '1.5B task-specific 63.24%，SFT 32.87%，差 30.37 个百分点；7B binary 65.53%，高于 GPT-4 的 64.76（高 0.77 点）。' },
+    web: { label: '网页状态 F1', src: 'Table 2', max: 70, hi: 2, slots: [['指标', '网页 F1'], ['SFT', '49.94%'], ['RLVR', '65.11%']], rows: [['Base', 11.83], ['SFT', 49.94], ['RLVR', 65.11]], note: 'F1 从 49.94 到 65.11，绝对高 15.17 个百分点；原文写相对 +30.3%，按表值复算为 30.4%。' },
+    video: { label: '视频多步重复率', src: 'Table 3', max: 50, hi: 2, slots: [['指标', '多步重复率'], ['Base', '48.6%'], ['RLVR', '9.9%']], rows: [['Base', 48.6], ['Base + rejection', 0.0], ['RLVR', 9.9], ['RLVR + penalty', 0.0]], note: '重复率 48.6%→9.9%，绝对降 38.7 个百分点；加 repetition penalty 可到 0.0%。' }
+  };
+  var chart = document.getElementById('modChart');
+  var text = document.getElementById('modText');
+  var readout = document.getElementById('modReadout');
+  var tabs = document.getElementById('modTabs');
+  var slots = document.getElementById('modSlots');
+  function render(key) {
+    var m = modal[key];
+    if (!m || !chart) return;
+    chart.innerHTML = m.rows.map(function (r, i) {
+      var pct = Math.round(r[1] / m.max * 1000) / 10;
+      var cls = i === m.hi ? 'b4' : (i === 0 ? 'b1' : 'b2');
+      return '<div class="crow"><div class="cname">' + r[0] + '</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill ' + cls + '" style="height:' + pct + '%"></div></div><div class="num">' + r[1] + '%</div></div></div></div>';
+    }).join('');
+    if (slots) slots.innerHTML = m.slots.map(function (s, i) {
+      return '<div class="slot' + (i === 2 ? ' hit' : '') + '"><div class="slot-name">' + s[0] + '</div><div class="slot-val">' + s[1] + '</div></div>';
+    }).join('');
+    if (text) text.textContent = m.note;
+    if (readout) readout.setAttribute('data-src', m.src);
+  }
+  if (tabs) {
+    tabs.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      var all = tabs.querySelectorAll('.rule-btn');
+      for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+      btn.classList.add('active');
+      render(btn.getAttribute('data-mod'));
+    });
+    render('text');
+  }
+
+  var vmet = {
+    rep: { label: 'Repetition Rate ↓', src: 'Table 3', max: 50, slots: [['指标', 'Repetition'], ['Base', '48.6%'], ['RLVR', '9.9%']], rows: [['Base', 48.6], ['Base + reject', 0.0], ['RLVR', 9.9], ['RLVR + penalty', 0.0]], note: 'Base 48.6%，RLVR 9.9%，加惩罚 0.0%。' },
+    mse: { label: 'MSE ↓', src: 'Table 3', max: 0.7, slots: [['指标', 'MSE'], ['Base', '0.659'], ['RLVR', '0.486']], rows: [['Base', 0.659], ['Base + reject', 0.593], ['RLVR', 0.486], ['RLVR + penalty', 0.506]], note: 'MSE 从 0.659 到 0.486；加重复惩罚后回升到 0.506。' },
+    psnr: { label: 'PSNR ↑', src: 'Table 3', max: 26, slots: [['指标', 'PSNR'], ['Base', '23.1'], ['RLVR', '24.1']], rows: [['Base', 23.1], ['Base + reject', 23.3], ['RLVR', 24.1], ['RLVR + penalty', 24.0]], note: 'PSNR 从 23.1 到 24.1；加惩罚 24.0。' },
+    ssim: { label: 'SSIM ↑', src: 'Table 3', max: 83, slots: [['指标', 'SSIM ×100'], ['Base', '80.9'], ['RLVR', '82.4']], rows: [['Base', 80.9], ['Base + reject', 81.0], ['RLVR', 82.4], ['RLVR + penalty', 82.2]], note: 'SSIM（×100）从 80.9 到 82.4；加惩罚 82.2。' },
+    lpips: { label: 'LPIPS ↓', src: 'Table 3', max: 15, slots: [['指标', 'LPIPS ×100'], ['Base', '14.8'], ['RLVR', '13.4']], rows: [['Base', 14.8], ['Base + reject', 14.4], ['RLVR', 13.4], ['RLVR + penalty', 13.7]], note: 'LPIPS（×100）从 14.8 到 13.4；加惩罚 13.7。' }
+  };
+  var vchart = document.getElementById('vChart');
+  var vtext = document.getElementById('vText');
+  var vreadout = document.getElementById('vReadout');
+  var vtabs = document.getElementById('vTabs');
+  var vslots = document.getElementById('vSlots');
+  function renderV(key) {
+    var m = vmet[key];
+    if (!m || !vchart) return;
+    vchart.innerHTML = m.rows.map(function (r, i) {
+      var pct = Math.round(r[1] / m.max * 1000) / 10;
+      var cls = i === 2 ? 'b4' : (i === 0 ? 'b1' : 'b2');
+      return '<div class="crow"><div class="cname">' + r[0] + '</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill ' + cls + '" style="height:' + pct + '%"></div></div><div class="num">' + r[1] + '</div></div></div></div>';
+    }).join('');
+    if (vslots) vslots.innerHTML = m.slots.map(function (s, i) {
+      return '<div class="slot' + (i === 2 ? ' hit' : '') + '"><div class="slot-name">' + s[0] + '</div><div class="slot-val">' + s[1] + '</div></div>';
+    }).join('');
+    if (vtext) vtext.textContent = m.note;
+    if (vreadout) vreadout.setAttribute('data-src', m.src);
+  }
+  if (vtabs) {
+    vtabs.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      var all = vtabs.querySelectorAll('.rule-btn');
+      for (var j = 0; j < all.length; j++) all[j].classList.remove('active');
+      btn.classList.add('active');
+      renderV(btn.getAttribute('data-met'));
+    });
+    renderV('rep');
+  }
+})();
+</script>
+</body>
+</html>

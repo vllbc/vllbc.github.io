@@ -1,0 +1,735 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 2.61 | Table 2 | (76.82-74.86)/74.86*100 |
+| 1.26 | Table 2 | (99.27-98.03)/98.03*100 |
+| 3.28 | Table 2 | (91.85-88.93)/88.93*100 |
+| 2.24 | Table 2 | (71.95-70.37)/70.37*100 |
+| 1.82 | Table 2 | (42.02-41.27)/41.27*100 |
+| 1.96 | Table 2 | 76.82-74.86 |
+| 1.24 | Table 2 | 99.27-98.03 |
+| 1.58 | Table 2 | 71.95-70.37 |
+| 3.22 | Table 2 | (99.27-96.17)/96.17*100 |
+| 3.38 | Table 2 | (99.27-96.02)/96.02*100 |
+| 2.92 | Table 2 | 91.85-88.93 |
+| 0.75 | Table 2 | 42.02-41.27 |
+| 21.42 | Table 3 / Table 2 | 76.82-55.40 |
+| 38.7 | Table 3 / Table 2 | (76.82-55.40)/55.40*100 |
+| 3.71 | Table 3 | 55.40-51.69 |
+| 99.03 | Table 4 | 0.9903*100 |
+| 92.33 | Table 4 | 0.9233*100 |
+| 0.41 | §4.4.1 Eq.3 | 0.5-0.01*(3*3) |
+| -0.0122 | §4.4.1 Eq.3 | (0-0.01*(3*3))*2.718281828**(-0.05*40) |
+| 0.1353 | §4.4.1 Eq.3 | 2.718281828**(-0.05*40) |
+| 0.09 | §4.4.1 Eq.3 | 0.01*(3*3) |
+| 0.5 | §4.4.1 Eq.3 | 0.5*1 |
+| 1.5 | §4.4.2 Eq.6-7 | (1+0.5)*1 |
+| 1 | §4.4.2 Eq.6-7 | 1*1 |
+| -1.5 | §4.4.2 Eq.6-7 | (1+0.5)*(-1) |
+| -1 | §4.4.2 Eq.6-7 | 1*(-1) |
+| 2 | §4.4.2 Eq.6-7 | (1+1)*1 |
+| -2 | §4.4.2 Eq.6-7 | (1+1)*(-1) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v4">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TableMind · 把「计划—行动—反思」训进一个 8B 表格智能体</title>
+<meta name="description" content="TableMind 用两阶段训练把计划、写代码、执行、反思的内循环训进 Qwen3-8B，并用 RAPO 对齐置信度与奖励；五个表格推理基准都取得该列最高分。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.sim-note{font-size:12.5px;color:var(--text-soft);margin:10px 0 0;line-height:1.7}
+.eq.fit{font-size:13px;line-height:1.9}
+.slot-val small{display:block;color:var(--text-soft);font-size:11px;margin-top:2px}
+.state-line{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--text-muted);margin:6px 0 0}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">TableMind</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">训练</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2509.06278v4 · WSDM 2026 投稿</span>
+  <h1>TableMind：把「计划—行动—反思」训进一个 8B 表格智能体</h1>
+  <p class="hero-sub">
+    单轮把整张表拍平成文本，既可能撑爆上下文，也算不准连续数值；固定的 plan-then-execute 工作流又不会读报错、改计划。
+    TableMind 让模型自己在多轮循环里<strong>写 Python、执行、看观察、再反思</strong>，并用一套排序感知的优势加权，把「自信」与「答对」对齐。
+  </p>
+  <div class="meta">
+    <span>Chuang Jiang, Mingyue Cheng, Xiaoyu Tao, Qingyang Mao, Jie Ouyang, Qi Liu</span>
+    <a href="https://arxiv.org/abs/2509.06278v4" target="_blank" rel="noopener">arXiv 2509.06278v4 ↗</a>
+    <a href="https://github.com/lennendd/TableMind" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    单轮范式把整张表压进一次前向。论文列了三条结构性硬伤：大表<strong>上下文溢出</strong>、对连续数值<strong>不敏感</strong>、缺少显式的<strong>工具调用与反思</strong>（§1）。
+  </p>
+  <p>
+    已有的两条路都不解决「边做边改」：training-free 工作流（PoTable、Chain-of-Table）把计划与执行拆成固定流程，缺少动态纠错，还要多次调用外部模型；tuning-based 表格模型（TableLlama、TableGPT2、Table-R1）会模仿或做 RL，但没有把自主多轮工具调用训进轻量模型（§2、§3.2）。
+  </p>
+  <p>
+    TableMind 的办法是两段训练：先用教师模型的多轮<em>正确</em>轨迹做 SFT 热启动，再用多视角奖励加 <strong>RAPO</strong> 做 RFT。推理时模型自己 <em>plan → 写代码 → 执行 → 看观察 → reflect</em>，最多 3 轮（§4.5 定义循环；上限 3 见 §5.1.3）。
+  </p>
+  <p>
+    论文报告的结果是五个基准都取得该列最高分；但增益并不均匀——TabFact 的相对增益最高，FinQA 的绝对分仍只有 42.02，单表与短循环是它明确的边界。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">76.82<small>EM</small></div>
+      <div class="k">WikiTQ<br>次优 Table-R1 74.86<br>相对 +2.61%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">99.27<small>EM</small></div>
+      <div class="k">TabMWP<br>次优 DeepSeek-R1 98.03<br>相对 +1.26%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">91.85<small>Acc</small></div>
+      <div class="k">TabFact<br>次优 PoTable 88.93<br>相对 +3.28%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>单轮读完整张表，三件事同时做不好</h2></div>
+  <p class="sec-sub">论文把失败模式归到同一个范式：把表格拍平成文本，一次前向直接给答案。</p>
+
+  <p>表格推理同时要求两类能力：理解表头、单元格与查询之间的语义关系，以及对数字做<strong>精确运算</strong>。单轮范式把整张表序列化进上下文，让模型在一次生成里完成理解、筛选、计算和作答——这三类错误会叠在同一次输出里。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">硬伤一</span><h4>上下文溢出</h4></div>
+      <p>宽表或长表被拍平后超出上下文窗口，模型只能对<strong>不完整信息</strong>推理。论文的原话是「vulnerable to context overflow for large tables」（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">硬伤二</span><h4>数值不敏感</h4></div>
+      <p>数字被当作普通 token，算术、比较、聚合都容易出错。论文称 LLM「inherently insensitive to continuous numerical values」（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">硬伤三</span><h4>没有工具与反思</h4></div>
+      <p>缺少显式的代码生成、执行与回读错误的机制。模型只能靠内部推理「硬算」，算错了也没有外部信号把它拉回来（§1）。</p>
+    </div>
+  </div>
+
+  <p>论文的对照是人类分析师的做法：先分析查询并拆成子任务，定位相关行列，执行显式数值操作，检查中间结果，最后给出经过验证的答案（§1，Figure 1 左）。关键差别不是「想得更久」，而是<strong>有外部动作，并对动作结果反复校验</strong>。</p>
+
+  <p>于是任务被形式化成一个结构化决策过程：给定表 <code>T</code> 和查询 <code>Q</code>，学习一个策略 π，生成中间步骤序列 {s<sub>k</sub>}，每个步骤可以包含代码生成、执行和基于反馈的修正，最终由聚合或终止函数给出答案（§3.1）。这为后面的多轮循环定下了目标。</p>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条现成路：工作流太硬，微调模型只会模仿</h2></div>
+  <p class="sec-sub">一边把计划外包给固定流程，一边把行为压进静态轨迹；两者都没有回答「执行出错之后怎么办」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Training-free</span><h4>固定工作流</h4></div>
+      <p>Tab-CoT 让模型生成一张「推理表」；PoTable 先计划再执行；Chain-of-Table 每步更新表格，把表本身当作推理状态（§2.1）。</p>
+      <p><strong>强项：</strong>把计算从语言模型里拿出来交给外部工具，减少算术错误。Table 2 里 PoTable 在 TabFact 拿到 88.93、Chain-of-Table 拿到 87.78，都高于纯文本推理的 Tab-CoT 79.05（§5.2）。</p>
+      <p><strong>盲区：</strong>流程预定义，遇到代码报错或中间结果不符预期时不能动态改计划；多次 LLM 调用与外部执行环境带来开销，还要把表数据暴露给外部模型（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Tuning-based</span><h4>微调表格模型</h4></div>
+      <p>TableLlama 在 TableInstruct 上微调 Llama 2；TableGPT2 加语义表编码器；Table-R1 用可验证奖励做 RL（§5.1.2）。</p>
+      <p><strong>强项：</strong>把表格能力写进参数，推理时不必走一条很长的外部工作流。</p>
+      <p><strong>盲区：</strong>SFT 路线在模仿静态推理路径（§5.2 原话）；RL 路线里 Table-R1 用的是 rule-based RL（§2.1），论文没有把它列为多轮工具调用方案。Table-R1 在 WikiTQ 74.86、FinQA 41.27，仍是强基线。</p>
+    </div>
+  </div>
+
+  <p>论文把研究空白定义得很窄：「the absence of systems that combine autonomous tool invocation and reflection with lightweight, accessible models」（§3.2）。也就是说，缺的不是工具，也不是 RL，而是<strong>把两者放进同一个轻量模型，让它自己决定何时调用、出错后怎么改</strong>。</p>
+
+  <p>这个定位也解释了 TableMind 的选择：把多轮交互行为训练进 Qwen3-8B 的参数里，而不是在推理时依赖一条外部工作流（§5.1.3）。</p>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心不是 workflow，而是把循环训进参数里</h2></div>
+  <p class="sec-sub">推理循环给出行为骨架；三项奖励和 RAPO 决定模型往哪个方向学。</p>
+
+  <h3>推理时到底循环什么</h3>
+  <p>§4.5 把一次迭代拆成四步：模型先结合查询与当前状态<strong>制定下一步策略</strong>；再生成可执行的 Python 代码；代码在解释器里<strong>安全执行</strong>并返回输出；输出作为 observation 回给模型，模型据此<strong>反思</strong>——进度到哪、结果对不对、是继续还是收尾。循环在模型判定已解决或达到最大轮数时停止，最后综合所有中间信息给出答案。</p>
+
+  <div class="eq">
+    (T, Q) → <span class="hl-a">Plan</span> → <span class="hl-b">Action：写 Python</span> → Exec → Observation → <span class="hl-c">Reflect</span> ↺
+  </div>
+  <div class="eq-cap">§4.5 的 plan–action–reflection 循环；论文实现里最多 3 个 tool-calling turns（§5.1.3）</div>
+
+  <h3>三项奖励：格式、答案、工具使用</h3>
+  <p>格式奖励与答案奖励都是二值的：格式合法给 1，答案匹配给 1，否则为 0。问答任务用 exact match 判答案，事实核查任务用 label accuracy（§4.4.1）。</p>
+
+  <div class="eq">
+    R<sub>format</sub> = 1 if 输出格式合法 else 0 &nbsp;&nbsp;&nbsp; R<sub>acc</sub> = 1 if 答案匹配 else 0
+  </div>
+  <div class="eq-cap">Eq. 1–2 · 两个二值奖励</div>
+
+  <p>第三项是工具奖励，带一个「隐式课程」：</p>
+
+  <div class="eq">
+    R<sub>tool</sub> = e<sup>−ρs</sup> · ( β·I<sub>success</sub> − C·(N<sub>turns</sub>)<sup>2</sup> )
+  </div>
+  <div class="eq-cap">Eq. 3 · ρ = 0.05、β = 0.5、C = 0.01、G = 8（§5.1.3）</div>
+
+  <p><code>s</code> 是全局训练步数。<code>e<sup>−ρs</sup></code> 随训练衰减：<strong>早期放大工具探索的收益，后期把注意力转向效率</strong>；<code>N<sub>turns</sub></code> 的平方惩罚让冗长的工具链越来越贵。总奖励是三项之和（§4.4.1）。</p>
+
+  <h3>RAPO：把「置信度—奖励」错位的样本拎出来加权重</h3>
+  <p>RAPO 建在 GRPO 上，改了三处工程做法：去掉 KL 约束、用 token 级策略梯度损失、用 clip-higher 防熵塌（§4.4.2）。目标函数沿用 PPO 式截断，但优势项换成了下面这个：</p>
+
+  <div class="eq fit">
+    J<sub>RAPO</sub>(θ) = E<sub>q, {o<sub>i</sub>}∼π<sub>old</sub></sub>[ (1 / Σ<sub>i</sub>|o<sub>i</sub>|) · Σ<sub>i</sub> Σ<sub>t</sub> min( r<sub>i,t</sub>(θ)·A′<sub>i</sub>, clip(r<sub>i,t</sub>(θ), 1−ε<sub>low</sub>, 1+ε<sub>high</sub>)·A′<sub>i</sub> ) ]
+  </div>
+  <div class="eq-cap">Eq. 4 · 与 GRPO 的差别集中在 A′<sub>i</sub>，以及去 KL、token 级损失、clip-higher 三项改动</div>
+
+  <p>组内标准化优势仍是 <code>(R<sub>i</sub> − mean)/std</code>，但前面乘了一个 <code>γ<sub>i</sub></code>：</p>
+
+  <div class="eq">
+    A′<sub>i</sub> = γ<sub>i</sub> · ( R<sub>i</sub> − mean({R<sub>j</sub>}) ) / std({R<sub>j</sub>})
+  </div>
+  <div class="eq-cap">Eq. 6</div>
+
+  <p>γ 的来源是配对比较。同一组里，奖励更高的轨迹记为 winner（<code>o<sub>w</sub></code>），更低的记为 loser（<code>o<sub>l</sub></code>）；如果 winner 的序列对数概率反而更低——也就是模型更「自信」地选了错的那条——这对样本被判为<strong>错位</strong>，γ 抬到 1+α：</p>
+
+  <div class="eq">
+    γ<sub>w,l</sub> = 1 + α · I[ log P(o<sub>w</sub>) &lt; log P(o<sub>l</sub>) ]
+  </div>
+  <div class="eq-cap">Eq. 7 · log P 是长度归一化后的序列对数概率；α 控制加权强度</div>
+
+  <p>把 Eq. 6 与 Eq. 7 合起来看：正优势乘上 γ 会更大，负优势乘上 γ 会更负。论文只给了<strong>配对级</strong> γ<sub>w,l</sub>；Eq. 6 里的 γ<sub>i</sub> 如何由配对聚合，原文没有说明。下面的模拟用一条页面自定规则补齐，并在折叠块里逐条标出覆盖与未覆盖的分支。</p>
+
+  <div class="sim" id="rapo-sim">
+    <div class="sim-top" id="rapo-mode">
+      <button class="rule-btn active" data-mode="rapo">RAPO<span class="r-sub">错位配对乘 1+α</span></button>
+      <button class="rule-btn" data-mode="grpo">GRPO<span class="r-sub">γ ≡ 1</span></button>
+    </div>
+
+    <div class="slots" id="rapo-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>α 错位加权 <span class="v" id="rapo-alpha-v" data-src="§4.4.2 Eq.7">0.50</span></label>
+        <input type="range" id="rapo-alpha" min="0" max="1" step="0.05" value="0.5">
+      </div>
+    </div>
+
+    <div class="readout" id="rapo-readout" data-src="§4.4.2 Eq.6–7">
+      <div class="r-head">RAPO · α = 0.50</div>
+      错位配对只有 <strong>A（R=1, logP=−0.90）与 C（R=0, logP=−0.20）</strong>：正确但低置信的 A 拿到了 1+α 的正优势，错误但高置信的 C 拿到了 1+α 的负优势。B、D 不在错位配对里，γ=1。
+    </div>
+
+    <p class="sim-note">示例轨迹组为页面构造，不是论文数据；α 的 0.50 是页面默认值，论文正文没有给出 α 取值。论文的实际组大小 G=8（§5.1.3）；这里缩到 4 条，只为让配对关系看得清。</p>
+  </div>
+
+  <details>
+    <summary>手算对账：α=0.5 与 α=1.0<span class="sum-sub">两组参数 → γ 与 A′</span></summary>
+    <div class="details-body">
+      <p>四条示例轨迹：A（R=1, logP=−0.90）、B（R=1, logP=−0.10）、C（R=0, logP=−0.20）、D（R=0, logP=−1.00）。</p>
+      <p><strong>均值与标准差：</strong>奖励 [1, 1, 0, 0]，均值 = 0.5；本模拟取<strong>总体标准差（÷N，N=4）</strong>，标准差 = 0.5。标准化优势 = (R − 0.5) / 0.5 = [+1, +1, −1, −1]。论文 Eq. 6 未说明 std 用 ÷N 还是 ÷(N−1)。</p>
+      <p><strong>错位配对：</strong>逐对比较奖励高者（winner）与奖励低者（loser）。只有 A 与 C 满足 logP(A) = −0.90 &lt; logP(C) = −0.20，因此 A、C 被标记为错位；B 与 C、A 与 D、B 与 D 都不满足指示函数。</p>
+      <p><strong>α = 0.50：</strong>γ<sub>A</sub> = γ<sub>C</sub> = 1.50，γ<sub>B</sub> = γ<sub>D</sub> = 1.00；A′ = [1.50, 1.00, −1.50, −1.00]。</p>
+      <p><strong>α = 1.00：</strong>γ<sub>A</sub> = γ<sub>C</sub> = 2.00，γ<sub>B</sub> = γ<sub>D</sub> = 1.00；A′ = [2.00, 1.00, −2.00, −1.00]。</p>
+      <p><strong>覆盖：</strong>Eq. 6 的组内标准化优势（本页用总体 std）、Eq. 7 的配对指示函数与 γ<sub>w,l</sub>。未覆盖：Eq. 4 的 token 级截断目标、去 KL、clip-higher、实际组采样（G=8）。<strong>γ<sub>i</sub> 的聚合规则是页面自定的</strong>：轨迹只要参与任一错位配对，就取 γ<sub>i</sub> = 1+α；原文没有给出这条规则。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>SFT 只给 200 条轨迹，RFT 才是主战场</h2></div>
+  <p class="sec-sub">先把循环的语法教会，再让模型在奖励里自己试错；论文的多数提升发生在第二阶段<span class="infer">推断</span>（依据：Table 2 的最终分数相对 SFT-only 的差距主要来自 RFT，但原文没有做逐阶段归因消融）。</p>
+
+  <h3>第一段：用教师模型的正确轨迹热启动</h3>
+  <p>数据不是人工写的。论文让一个「expert model」生成计划与第一条可执行动作，在本地环境执行，把输出或报错作为 observation 回传，模型据此反思、改计划、再生成下一条动作；循环到任务完成。随后<strong>逐条比对最终答案与标准答案，只保留答对的轨迹</strong>（§4.3.1）。</p>
+
+  <p>这些轨迹用于 SFT：论文在 §5.1.3 写的是 <strong>200 条合成样本、学习率 1×10<sup>−6</sup>、训练 1 个 epoch</strong>，两阶段都在 4 卡 A800 上完成。SFT 的作用是让模型掌握 plan–action–reflect 的输出格式与代码语法，给 RFT 一个可用的初始策略（§4.3.2）。</p>
+
+  <p>论文自己给 SFT 泼了冷水：SFT 学到的推理「primarily reflects pattern memorization from the training data and exhibits limited generalization to out-of-distribution tasks」，因此把这段能力称为「non-generalizable memory」（§4.3.2）。数字上也看得到——Table 3 里最优的 SFT-only checkpoint 在 WikiTQ 只有 55.40，而 Table 2 的最终模型是 76.82，相差 21.42 个百分点（相对提升 38.7%，21.42/55.40）。这是跨 Table 3 与 Table 2 的比较，不是同一张表的消融行。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.72;padding-bottom:6px">Table 3（转录）· SFT 阶段的数据量与 epoch 扫描；WikiTQ / TabMWP / TabFact 均为百分比</caption>
+      <thead>
+        <tr><th>Epoch</th><th>Sample Size</th><th style="text-align:right">WikiTQ</th><th style="text-align:right">TabMWP</th><th style="text-align:right">TabFact</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="3">1</td><td>100</td><td class="num">52.52</td><td class="num">62.49</td><td class="num">70.16</td></tr>
+        <tr><td>150</td><td class="num">53.65</td><td class="num">62.63</td><td class="num">71.32</td></tr>
+        <tr class="best"><td>200</td><td class="num">55.40</td><td class="num">68.42</td><td class="num">77.15</td></tr>
+        <tr><td rowspan="3">2</td><td>100</td><td class="num">50.12</td><td class="num">60.62</td><td class="num">70.12</td></tr>
+        <tr><td>150</td><td class="num">50.42</td><td class="num">61.48</td><td class="num">70.29</td></tr>
+        <tr><td>200</td><td class="num">51.69</td><td class="num">62.28</td><td class="num">73.62</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>同一数据量下，训 2 个 epoch 反而更差：200 条样本时 WikiTQ 从 55.40 掉到 51.69（低 3.71 个百分点），论文归因于小数据上的过拟合（§5.3.1）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">原文两处并列</span><h4>训练集到底是 3,500 还是 200</h4></div>
+    <p>Table 1 记训练集 <strong>TabFact 3,500 / TabMWP 3,500 / WTQ 1,000</strong>；§5.1.3 又写 SFT 阶段只训 <strong>200 synthetic samples</strong>，Table 3 也按 100 / 150 / 200 扫参。200 是子采样、还是每个任务的样本数，原文没有说明。两处按原位置并列，本页不替它选一个。</p>
+  </div>
+
+  <h3>第二段：多视角奖励 + RAPO</h3>
+  <p>RFT 用 Agent-R1 框架实现，生成侧用 vLLM。关键设置：组大小 G=8、batch size 128、学习率 1×10<sup>−6</sup>、策略温度 1、每条 prompt 最多 3 个 tool-calling turns、每轮最长 2048 tokens（§5.1.3）。</p>
+
+  <p>下面这个计算器只算 Eq. 3 的 <code>R<sub>tool</sub></code> 一项，不含 <code>R<sub>format</sub></code> 与 <code>R<sub>acc</sub></code>。拖动训练步 <code>s</code> 与工具轮数 <code>N<sub>turns</sub></code>，可以看衰减包络与二次惩罚怎么相互作用。</p>
+
+  <div class="sim" id="tool-sim">
+    <div class="sim-top" id="tool-mode">
+      <button class="rule-btn active" data-success="1">工具调用成功<span class="r-sub">I_success = 1</span></button>
+      <button class="rule-btn" data-success="0">工具调用失败<span class="r-sub">I_success = 0</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>训练步 s <span class="v" id="tool-s-v" data-src="§4.4.1 Eq.3">0</span></label>
+        <input type="range" id="tool-s" min="0" max="120" step="1" value="0">
+      </div>
+      <div class="ctrl">
+        <label>工具轮数 N<sub>turns</sub> <span class="v" id="tool-turns-v" data-src="§4.4.1 Eq.3">3</span></label>
+        <input type="range" id="tool-turns" min="1" max="5" step="1" value="3">
+      </div>
+    </div>
+
+    <div class="readout" id="tool-readout" data-src="§4.4.1 Eq.3">
+      <div class="r-head">R_tool · s=0 · N=3 · 成功</div>
+      e<sup>−ρs</sup> = 1.0000；β·I<sub>success</sub> = 0.50；C·N² = 0.09。<br><strong>R_tool = 0.4100</strong>。总奖励还要加上 R<sub>format</sub> 与 R<sub>acc</sub>。
+    </div>
+
+    <p class="sim-note">常量逐字取自 §5.1.3：ρ=0.05、β=0.5、C=0.01。s 的 0–120 范围对应 Figure 5 讨论的 120 步训练窗口。</p>
+  </div>
+
+  <details>
+    <summary>手算对账：s=0 与 s=40<span class="sum-sub">两组参数 → R_tool</span></summary>
+    <div class="details-body">
+      <p>公式：<code>R_tool = e^(−0.05s) × (0.5·I_success − 0.01·N²)</code>。</p>
+      <p><strong>组 1：s=0、N=3、成功。</strong>e<sup>0</sup> = 1.0000；0.5×1 = 0.50；0.01×9 = 0.09；R_tool = 1.0000 × (0.50 − 0.09) = <strong>0.4100</strong>。</p>
+      <p><strong>组 2：s=40、N=3、失败。</strong>e<sup>−2</sup> = 0.1353；0.5×0 = 0；0.01×9 = 0.09；R_tool = 0.1353 × (0 − 0.09) = <strong>−0.0122</strong>。</p>
+      <p>覆盖：Eq. 3 的整式与 §5.1.3 的三个常量。未覆盖：R<sub>format</sub>、R<sub>acc</sub>、总奖励求和，以及 agent 实际执行环境。计算器按 4 位小数显示。</p>
+    </div>
+  </details>
+
+  <h3>模型规模与指令微调</h3>
+  <p>Figure 3(c) 比较 Instruct 模型与 base 模型：Instruct 起点更高，整个训练过程保持优势，收敛到更高的奖励平台。Figure 3(d) 把同一套流程套到 Qwen3 的 1.7B / 4B / 8B 三个规模，奖励随规模单调上升；主实验用 8B（§5.4）。</p>
+</section>
+
+<!-- ================= 05 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一张图看懂：推理循环与两段训练</h2></div>
+  <p class="sec-sub">左边是推理时的 plan–action–reflect；右边是从教师轨迹到 RAPO 的训练流水线。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 560" role="img" aria-label="TableMind 推理循环与训练流程示意图" style="width:100%;height:auto">
+      <defs>
+        <marker id="tm-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
+        </marker>
+        <marker id="tm-arrow-c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--c1)"></path>
+        </marker>
+        <marker id="tm-arrow-c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--c2)"></path>
+        </marker>
+      </defs>
+
+      <text x="0" y="26" font-size="20" font-weight="700" fill="var(--text)">推理时：plan → action → reflect（§4.5）</text>
+
+      <rect x="20" y="70" width="160" height="68" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="100" y="100" text-anchor="middle" font-size="16" fill="var(--text)">表格 T + 查询 Q</text>
+      <text x="100" y="122" text-anchor="middle" font-size="13" fill="var(--text-muted)">输入</text>
+
+      <rect x="220" y="70" width="140" height="68" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="290" y="100" text-anchor="middle" font-size="16" fill="var(--accent-deep)">Plan</text>
+      <text x="290" y="122" text-anchor="middle" font-size="13" fill="var(--text-muted)">定下一步策略</text>
+
+      <rect x="400" y="70" width="170" height="68" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="485" y="100" text-anchor="middle" font-size="16" fill="var(--c2)">Action</text>
+      <text x="485" y="122" text-anchor="middle" font-size="13" fill="var(--text-muted)">生成 Python 代码</text>
+
+      <rect x="610" y="70" width="180" height="68" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="700" y="100" text-anchor="middle" font-size="16" fill="var(--text)">沙箱执行</text>
+      <text x="700" y="122" text-anchor="middle" font-size="13" fill="var(--text-muted)">code interpreter</text>
+
+      <rect x="610" y="200" width="180" height="68" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="700" y="230" text-anchor="middle" font-size="16" fill="var(--text)">Observation</text>
+      <text x="700" y="252" text-anchor="middle" font-size="13" fill="var(--text-muted)">输出 / 报错</text>
+
+      <rect x="330" y="200" width="220" height="68" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="440" y="230" text-anchor="middle" font-size="16" fill="var(--c1)">Reflect</text>
+      <text x="440" y="252" text-anchor="middle" font-size="13" fill="var(--text-muted)">检查中间结果，决定继续或收尾</text>
+
+      <rect x="20" y="200" width="160" height="68" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="100" y="230" text-anchor="middle" font-size="16" fill="var(--accent-deep)">Final answer</text>
+      <text x="100" y="252" text-anchor="middle" font-size="13" fill="var(--text-muted)">综合全部中间信息</text>
+
+      <line x1="180" y1="104" x2="220" y2="104" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+      <line x1="360" y1="104" x2="400" y2="104" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+      <line x1="570" y1="104" x2="610" y2="104" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+      <line x1="700" y1="138" x2="700" y2="200" stroke="var(--c1)" stroke-width="1.6" marker-end="url(#tm-arrow-c1)"></line>
+      <line x1="610" y1="234" x2="550" y2="234" stroke="var(--c1)" stroke-width="1.6" marker-end="url(#tm-arrow-c1)"></line>
+      <line x1="330" y1="234" x2="180" y2="234" stroke="var(--c1)" stroke-width="1.6" marker-end="url(#tm-arrow-c1)"></line>
+      <path d="M 440 200 C 440 165 290 165 290 138" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></path>
+      <text x="365" y="182" text-anchor="middle" font-size="13" fill="var(--accent-deep)">未完成，继续循环</text>
+
+      <text x="0" y="326" font-size="20" font-weight="700" fill="var(--text)">训练时：SFT 热启动 → RFT（§4.3–§4.4）</text>
+
+      <rect x="20" y="360" width="180" height="68" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="110" y="390" text-anchor="middle" font-size="16" fill="var(--text)">教师模型多轮轨迹</text>
+      <text x="110" y="412" text-anchor="middle" font-size="13" fill="var(--text-muted)">plan / action / reflect</text>
+
+      <rect x="240" y="360" width="170" height="68" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="325" y="390" text-anchor="middle" font-size="16" fill="var(--c1)">只保留答对轨迹</text>
+      <text x="325" y="412" text-anchor="middle" font-size="13" fill="var(--text-muted)">逐条比对标准答案</text>
+
+      <rect x="450" y="360" width="170" height="68" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="535" y="386" text-anchor="middle" font-size="16" fill="var(--c2)">SFT 热启动</text>
+      <text x="535" y="408" text-anchor="middle" font-size="13" fill="var(--text-muted)">200 条 · 1 epoch</text>
+      <text x="535" y="428" text-anchor="middle" font-size="12" fill="var(--text-soft)">lr 1e-6</text>
+
+      <rect x="660" y="360" width="180" height="68" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="750" y="386" text-anchor="middle" font-size="16" fill="var(--accent-deep)">RFT：三项奖励 + RAPO</text>
+      <text x="750" y="408" text-anchor="middle" font-size="13" fill="var(--text-muted)">G=8 · max 3 turns</text>
+      <text x="750" y="428" text-anchor="middle" font-size="12" fill="var(--text-soft)">Agent-R1 + vLLM</text>
+
+      <rect x="660" y="474" width="180" height="60" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="750" y="510" text-anchor="middle" font-size="16" fill="var(--text)">推理部署</text>
+
+      <line x1="200" y1="394" x2="240" y2="394" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+      <line x1="410" y1="394" x2="450" y2="394" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+      <line x1="620" y1="394" x2="660" y2="394" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+      <line x1="750" y1="428" x2="750" y2="474" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#tm-arrow-a)"></line>
+    </svg>
+    <figcaption>
+      据 §4.3–§4.5 的文字与 Figure 2 的流程示意重绘，不是原文截图。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <p><strong>覆盖的分支：</strong>推理侧的 plan → action → 执行 → observation → reflect 回环，以及「未完成则继续、完成则给答案」这两个出口；训练侧的教师轨迹采集、按最终答案过滤、SFT、RFT + RAPO、部署。</p>
+        <p><strong>未覆盖的分支：</strong>提示模板的具体块结构（§4.2 只说明有 Instruction 与 Table Task 两块，未给全文）；沙箱的具体实现与安全边界；教师模型的身份（§4.3.1 只写「expert model」，未标注名称与规模）；RFT 内部的奖励计算与采样细节。</p>
+        <p>图中的「最多 3 轮」来自 §5.1.3 的 max tool-calling turns=3；「200 条 / 1 epoch」来自同节的 SFT 设置；「G=8」来自同节。它们不是从 Figure 2 的图像里读出来的。</p>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>五个基准都拿该列最高分，但增益来源并不一样</h2></div>
+  <p class="sec-sub">先看每一列的次优是谁，再看 Table 4 的轮次与温度；表间的三处口径差异单独并列。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.72;padding-bottom:6px">Table 2（转录）· 主结果，均为百分比；相对提升按原表逐列对「次优」计算。粗体为 TableMind，次优可由各行对照读出。</caption>
+      <thead>
+        <tr><th rowspan="2">模型</th><th colspan="3" style="text-align:center">In-domain</th><th colspan="2" style="text-align:center">Out-of-domain</th></tr>
+        <tr><th style="text-align:right">WikiTQ</th><th style="text-align:right">TabMWP</th><th style="text-align:right">TabFact</th><th style="text-align:right">HiTab</th><th style="text-align:right">FinQA</th></tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="6"><span class="pill p1">Open-source</span></td></tr>
+        <tr><td>Qwen2.5-72B-Instruct</td><td class="num">68.56</td><td class="num">97.45</td><td class="num">87.34</td><td class="num">68.02</td><td class="num">35.83</td></tr>
+        <tr><td>DeepSeek-R1</td><td class="num">74.63</td><td class="num">98.03</td><td class="num">86.25</td><td class="num">70.37</td><td class="num">37.42</td></tr>
+        <tr><td colspan="6"><span class="pill p1">Training-free</span></td></tr>
+        <tr><td>Tab-CoT</td><td class="num">60.43</td><td class="num">92.21</td><td class="num">79.05</td><td class="num">60.64</td><td class="num">27.81</td></tr>
+        <tr><td>PoTable</td><td class="num">69.56</td><td class="num">95.76</td><td class="num">88.93</td><td class="num">61.96</td><td class="num">24.93</td></tr>
+        <tr><td>Chain-of-Table</td><td class="num">68.31</td><td class="num">96.17</td><td class="num">87.78</td><td class="num">64.76</td><td class="num">29.47</td></tr>
+        <tr><td colspan="6"><span class="pill p1">Tuning-based</span></td></tr>
+        <tr><td>TableLlama-7B</td><td class="num">53.32</td><td class="num">83.88</td><td class="num">82.53</td><td class="num">58.73</td><td class="num">15.73</td></tr>
+        <tr><td>TableGPT2-7B</td><td class="num">62.46</td><td class="num">80.43</td><td class="num">78.87</td><td class="num">65.42</td><td class="num">17.69</td></tr>
+        <tr><td>Table-R1</td><td class="num">74.86</td><td class="num">96.02</td><td class="num">87.17</td><td class="num">69.24</td><td class="num">41.27</td></tr>
+        <tr class="best"><td>TableMind</td><td class="num">76.82</td><td class="num">99.27</td><td class="num">91.85</td><td class="num">71.95</td><td class="num">42.02</td></tr>
+        <tr><td><strong>相对提升（%）</strong></td><td class="num">+2.61</td><td class="num">+1.26</td><td class="num">+3.28</td><td class="num">+2.24</td><td class="num">+1.82</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>读这张表最容易犯的一个错，是以为「相对提升」都对同一个基线算。原表每一列的次优不同：</p>
+  <ul>
+    <li><strong>WikiTQ：</strong>次优是 Table-R1 74.86，TableMind 高 1.96 个百分点，相对提升 2.61%（1.96/74.86）。</li>
+    <li><strong>TabMWP：</strong>次优是 DeepSeek-R1 98.03，TableMind 高 1.24 个百分点，相对提升 1.26%（1.24/98.03）。</li>
+    <li><strong>TabFact：</strong>次优是 PoTable 88.93（不是 Chain-of-Table 87.78），TableMind 高 2.92 个百分点，相对提升 3.28%（2.92/88.93）。</li>
+    <li><strong>HiTab：</strong>次优是 DeepSeek-R1 70.37，相对提升 2.24%（1.58/70.37）。</li>
+    <li><strong>FinQA：</strong>次优是 Table-R1 41.27，TableMind 只高 0.75 个百分点，相对提升 1.82%（0.75/41.27）。</li>
+  </ul>
+
+  <p>原表的相对提升列有两处是截断值：WikiTQ 记 2.61（按表中值复算 1.96/74.86 = 2.62）、HiTab 记 2.24（1.58/70.37 = 2.25）。差异来自舍入方式，本页按原表引用，不代改。</p>
+
+  <p>因此「五个基准都第一」是真的，但<strong>增益最大的那格是 TabFact，不是参数量最大的对比</strong>；FinQA 的绝对分 42.02 也说明专家级财务推理仍有一半以上问题没有 exact match 命中。交叉表和单列冠军要分开看。</p>
+
+  <h3>轮次与温度：3 轮最好，5 轮反而掉</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.72;padding-bottom:6px">Table 4（转录）· 超参数敏感性；原表用 0–1 的小数表示准确率，这里照原样转录</caption>
+      <thead>
+        <tr><th>Hyperparameter</th><th>Value</th><th style="text-align:right">WikiTQ</th><th style="text-align:right">TabMWP</th><th style="text-align:right">TabFact</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="3">Max Turns</td><td>1</td><td class="num">0.7435</td><td class="num">0.9723</td><td class="num">0.8983</td></tr>
+        <tr class="best"><td>3</td><td class="num">0.7682</td><td class="num">0.9903</td><td class="num">0.9233</td></tr>
+        <tr><td>5</td><td class="num">0.7565</td><td class="num">0.9856</td><td class="num">0.9055</td></tr>
+        <tr><td rowspan="3">Temperature</td><td>0.6</td><td class="num">0.7335</td><td class="num">0.9658</td><td class="num">0.8843</td></tr>
+        <tr><td>0.8</td><td class="num">0.7551</td><td class="num">0.9884</td><td class="num">0.9125</td></tr>
+        <tr><td>1</td><td class="num">0.7682</td><td class="num">0.9903</td><td class="num">0.9233</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>论文的读法：最大轮次从 1 提到 3，三个数据集都变好——单轮不足以完成多步推理；从 3 提到 5 则轻微回落，论文把原因写成「excessive turns can increase the risk of error propagation or the generation of redundant, unhelpful steps」（§5.6）。温度在 0.6–1 的测试范围内与性能正相关，1 最好。</p>
+
+  <h3>训练过程中，工具使用与代码通过率怎么变</h3>
+  <p>Figure 5 左：前 40 步是探索期，工具调用比例来回波动；41–70 步快速上升；71–120 步收敛到接近 100%。Figure 5 右：代码执行通过率从 SFT 后的约 60% 稳步升到接近 90%（§5.5）。Figure 5 的曲线没有逐点数值，本节只转述正文给出的近似值，未转录图内数据。</p>
+
+  <details>
+    <summary>原文内部三处口径并列<span class="sum-sub">不做消解，按位置原样列出</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>训练集规模：</strong>Table 1 记 Training 为 TabFact 3,500 / TabMWP 3,500 / WTQ 1,000；§5.1.3 记 SFT 只用 200 synthetic samples；Table 3 又按 100 / 150 / 200 扫参。原文没有说明 200 与 3,500 的关系。</li>
+        <li><strong>in-domain 名单：</strong>Table 1 标题把 TabFact、TabMWP、WTQ 列为 in-domain，HiTab、FinQA 列为 out-of-domain；§5.1.1 第一段却写「We employ three in-domain datasets for training and evaluation: WikiTQ, HiTab, and FinQA」，同节下一段又写 in-domain 是 WikiTQ、TabMWP、TabFact。两处并列。</li>
+        <li><strong>默认设置下的分数：</strong>Table 2 记 TabMWP 99.27、TabFact 91.85；Table 4 在 Max Turns=3、Temperature=1 的那一行记 0.9903、0.9233（即 99.03、92.33）。WikiTQ 两处都是 76.82。原文没有说明这两组数为何不同。</li>
+      </ul>
+      <p>本页不替原文选一个口径；引用时按所在表格/章节原样标注。</p>
+    </div>
+  </details>
+
+  <h3>消融：方向清楚，数值没有逐格给出</h3>
+  <p>Figure 4 报告去掉 SFT、去掉 RFT、去掉 R<sub>tool</sub>、去掉 RAPO 后的性能下降，但正文只给方向性描述，没有给出逐柱数值；因此本节<strong>未转录 Figure 4 的具体数值</strong>。可核对的原句包括：去掉 R<sub>tool</sub> 后「the agent tended to generate less efficient and often erroneous reasoning chains」（§5.3.3）；去掉 RAPO 后 WikiTQ 的 exact match 与 TabFact 的 accuracy 都下降（§5.3.4）。</p>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>单表、三步、200 条：它没解决的那些事</h2></div>
+  <p class="sec-sub">论文自己把多表推理、更丰富的工具生态和样本效率留给了未来；数据也显示绝对分仍有天花板。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>只验证了单表；轮次扫到 5</h4></div>
+    <p>结论明确写「While TableMind focuses on single-table scenarios, extending it to multi-table reasoning, richer tool ecosystems, and improving the sample efficiency of reinforcement fine-tuning remain important directions for future research」（§6）。</p>
+    <p>轮次上，Table 4 只比较了 1 / 3 / 5，3 最好、5 回落；超过 5 轮没有测。§5.6 把 5 轮的回落归因于错误传播与冗余步骤——这说明「多轮」不是越多越好，但没有给出长程任务的上限。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>绝对分仍有明显天花板</h4></div>
+    <p>FinQA 的 42.02 只比 Table-R1 的 41.27 高 0.75 个百分点；HiTab 的 71.95 也只比 DeepSeek-R1 的 70.37 高 1.58 个百分点。相对提升 1.82% 与 2.24% 看着不小，但绝对空间仍大——专家级财务推理与层级表统计问答远未解决（Table 2）。</p>
+    <p>论文没有报告推理延迟、token 成本或每次查询的 API 费用；训练侧只给了 4 卡 A800。对「AI 数据分析师」这类成本敏感场景，这部分是空白。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>教师与关键超参不透明</h4></div>
+    <p>§4.3.1 只写从「expert model」蒸馏轨迹，没有给教师模型的名称、规模或版本；§5.1.3 列了 ρ、C、β、G，却没有给 RAPO 的 α 取值，正文也没有 α 的敏感性分析。复现时要自己猜 α。</p>
+    <p>SFT 数据只保留最终答对的轨迹（§4.3.1）。但轨迹内部并不排除失败步骤：§4.3.1 明说把 expert model 的输出或报错作为 observation 回传，模型据此反思、改计划，所以报错与恢复可以出现在一条最终答对的轨迹里。被过滤掉的是「最终答错」的整条轨迹，不是中间步骤。失败后的恢复行为有多少来自 SFT、多少来自 RFT 的在线探索，原文没有拆分。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话总结：<strong>TableMind 解决的是「单表上的短循环，怎么让小模型自己写代码并纠错」，不是「任意表格上的通用数据分析」。</strong>多表推理、更丰富的工具生态、提升强化微调的样本效率，论文在结论里都列为 future work（§6）；「长程规划」是本页对多轮循环的延伸说法，不是 §6 原文列出的条目。</p>
+</section>
+
+<footer>
+  <div>TableMind: An Autonomous Programmatic Agent for Tool-Augmented Table Reasoning · Chuang Jiang, Mingyue Cheng, Xiaoyu Tao, Qingyang Mao, Jie Ouyang, Qi Liu</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.06278v4" target="_blank" rel="noopener">arXiv 2509.06278v4</a> · 2025-09 初版，2026-07-26 更新到 v4 · 本页只引 v4，表号/图号以 v4 为准<br>
+    代码：<a href="https://github.com/lennendd/TableMind" target="_blank" rel="noopener">github.com/lennendd/TableMind</a><br>
+    笔记：<a href="/tablemindan-autonomous-programmatic-agent-for-tool-augmented-table-reasoning/">TableMind：An Autonomous Programmatic Agent for Tool-Augmented Table Reasoning</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    <strong>笔记勘误（不改笔记原文）：</strong><br>
+    ① 笔记 Table 1 的相对提升列混用了不同对照：WikiTQ 的 +2.61 对应 Table-R1，TabFact 的 +3.28 对应 PoTable（笔记表中没有列 PoTable），TabMWP 的 +3.22 是对 Chain-of-Table 96.17 算出来的（(99.27 − 96.17)/96.17 × 100 = 3.22%，复算一致）；但 96.17 不是次优——v4 Table 2 的 TabMWP 次优是 DeepSeek-R1 98.03，官方相对提升 +1.26%。笔记把「对某个基线的提升」当成了「对次优的提升」，这才是错处，对 Table-R1 96.02 算则是 +3.38%。<br>
+    ② 笔记称「实验基于 Qwen3-8B」；v4 的 Figure 3(d) 还报告了 1.7B / 4B / 8B 的规模对比，主实验是 8B，但规模对比不止 8B。<br>
+    ③ 笔记称论文未讨论 α 的敏感性；这一点成立——v4 未给 RAPO 的 α 取值，也没有 α 的敏感性分析（§5.6 与 Table 4 讨论的是 max turns 与 temperature，是另外两个超参数）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ============================================================
+     1) RAPO 优势加权模拟
+     ============================================================ */
+  var GROUP = [
+    { name: 'A', R: 1, logp: -0.9, tag: '答对 · 低置信' },
+    { name: 'B', R: 1, logp: -0.1, tag: '答对 · 高置信' },
+    { name: 'C', R: 0, logp: -0.2, tag: '答错 · 高置信' },
+    { name: 'D', R: 0, logp: -1.0, tag: '答错 · 低置信' }
+  ];
+  var mode = 'rapo';
+
+  function mean(arr) {
+    var s = 0;
+    for (var i = 0; i < arr.length; i++) { s += arr[i]; }
+    return s / arr.length;
+  }
+
+  function pstd(arr) {
+    var m = mean(arr);
+    var s = 0;
+    for (var i = 0; i < arr.length; i++) {
+      var d = arr[i] - m;
+      s += d * d;
+    }
+    return Math.sqrt(s / arr.length);
+  }
+
+  function updateRapo() {
+    var host = document.getElementById('rapo-slots');
+    if (!host) { return; }
+    var alphaEl = document.getElementById('rapo-alpha');
+    var alpha = alphaEl ? parseFloat(alphaEl.value) : 0.5;
+    if (isNaN(alpha)) { alpha = 0.5; }
+
+    var rewards = [];
+    for (var i = 0; i < GROUP.length; i++) { rewards.push(GROUP[i].R); }
+    var m = mean(rewards);
+    var sd = pstd(rewards);
+    if (sd === 0) { return; }
+
+    var misaligned = {};
+    for (var a = 0; a < GROUP.length; a++) {
+      for (var b = 0; b < GROUP.length; b++) {
+        if (GROUP[a].R > GROUP[b].R && GROUP[a].logp < GROUP[b].logp) {
+          misaligned[a] = true;
+          misaligned[b] = true;
+        }
+      }
+    }
+
+    host.innerHTML = '';
+    var parts = [];
+    for (var k = 0; k < GROUP.length; k++) {
+      var g = GROUP[k];
+      var gamma = (mode === 'rapo' && misaligned[k]) ? 1 + alpha : 1;
+      var adv = (g.R - m) / sd;
+      var ap = gamma * adv;
+
+      var slot = document.createElement('div');
+      slot.className = 'slot' + ((mode === 'rapo' && misaligned[k]) ? ' hit' : '');
+
+      var nm = document.createElement('div');
+      nm.className = 'slot-name';
+      nm.textContent = g.name + ' · ' + g.tag;
+
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.innerHTML = 'R ' + g.R.toFixed(1) + ' · logP ' + g.logp.toFixed(2) +
+        '<small>γ ' + gamma.toFixed(2) + ' · A′ ' + ap.toFixed(2) + '</small>';
+
+      slot.appendChild(nm);
+      slot.appendChild(val);
+      host.appendChild(slot);
+
+      parts.push(g.name + ' = ' + (ap >= 0 ? '+' : '') + ap.toFixed(2));
+    }
+
+    var rd = document.getElementById('rapo-readout');
+    if (!rd) { return; }
+    if (mode === 'rapo') {
+      rd.innerHTML = '<div class="r-head">RAPO · α = ' + alpha.toFixed(2) + '</div>' +
+        '错位配对只有 <strong>A（R=1, logP=−0.90）与 C（R=0, logP=−0.20）</strong>：正确但低置信的 A 拿到 1+α 的正优势，错误但高置信的 C 拿到 1+α 的负优势。B、D 不在错位配对里，γ=1。<br>当前 A′：' + parts.join('、') + '。';
+    } else {
+      rd.innerHTML = '<div class="r-head">GRPO · γ ≡ 1</div>' +
+        '标准组内优势只看奖励：A 与 B 都是 +1.00，C 与 D 都是 −1.00。模型对 C 的高置信、对 A 的低置信，<strong>完全不进入梯度</strong>。<br>当前 A′：' + parts.join('、') + '。';
+    }
+  }
+
+  var rapoBtns = document.querySelectorAll('#rapo-mode .rule-btn');
+  for (var r = 0; r < rapoBtns.length; r++) {
+    rapoBtns[r].addEventListener('click', function () {
+      for (var q = 0; q < rapoBtns.length; q++) { rapoBtns[q].classList.remove('active'); }
+      this.classList.add('active');
+      mode = this.getAttribute('data-mode');
+      updateRapo();
+    });
+  }
+
+  var alphaInput = document.getElementById('rapo-alpha');
+  if (alphaInput) {
+    alphaInput.addEventListener('input', function () {
+      var label = document.getElementById('rapo-alpha-v');
+      if (label) { label.textContent = parseFloat(this.value).toFixed(2); }
+      updateRapo();
+    });
+  }
+  updateRapo();
+
+  /* ============================================================
+     2) R_tool 计算器
+     ============================================================ */
+  var toolSuccess = true;
+  var RHO = 0.05;
+  var BETA = 0.5;
+  var PEN = 0.01;
+
+  function updateTool() {
+    var sEl = document.getElementById('tool-s');
+    var nEl = document.getElementById('tool-turns');
+    if (!sEl || !nEl) { return; }
+    var s = parseFloat(sEl.value);
+    var n = parseFloat(nEl.value);
+    if (isNaN(s) || isNaN(n)) { return; }
+
+    var decay = Math.exp(-RHO * s);
+    var base = BETA * (toolSuccess ? 1 : 0);
+    var penalty = PEN * n * n;
+    var reward = decay * (base - penalty);
+
+    var sv = document.getElementById('tool-s-v');
+    if (sv) { sv.textContent = s.toFixed(0); }
+    var nv = document.getElementById('tool-turns-v');
+    if (nv) { nv.textContent = n.toFixed(0); }
+
+    var rd = document.getElementById('tool-readout');
+    if (!rd) { return; }
+    rd.innerHTML = '<div class="r-head">R_tool · s=' + s.toFixed(0) + ' · N=' + n.toFixed(0) +
+      ' · ' + (toolSuccess ? '成功' : '失败') + '</div>' +
+      'e<sup>−ρs</sup> = ' + decay.toFixed(4) +
+      '；β·I<sub>success</sub> = ' + base.toFixed(2) +
+      '；C·N² = ' + penalty.toFixed(2) + '。<br>' +
+      '<strong>R_tool = ' + reward.toFixed(4) + '</strong>。总奖励还要加上 R<sub>format</sub> 与 R<sub>acc</sub>。';
+  }
+
+  var toolBtns = document.querySelectorAll('#tool-mode .rule-btn');
+  for (var t = 0; t < toolBtns.length; t++) {
+    toolBtns[t].addEventListener('click', function () {
+      for (var u = 0; u < toolBtns.length; u++) { toolBtns[u].classList.remove('active'); }
+      this.classList.add('active');
+      toolSuccess = this.getAttribute('data-success') === '1';
+      updateTool();
+    });
+  }
+
+  var toolS = document.getElementById('tool-s');
+  var toolN = document.getElementById('tool-turns');
+  if (toolS) { toolS.addEventListener('input', updateTool); }
+  if (toolN) { toolN.addEventListener('input', updateTool); }
+  updateTool();
+
+  /* ============================================================
+     3) 图注展开
+     ============================================================ */
+  window.toggleFig = function (el) {
+    var detail = el.closest('figure').querySelector('.figure-detail');
+    if (!detail) { return; }
+    var open = detail.classList.toggle('active');
+    el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+  };
+})();
+</script>
+</body>
+</html>

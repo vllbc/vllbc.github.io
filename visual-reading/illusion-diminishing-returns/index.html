@@ -1,0 +1,684 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 544 | Figure 7(a)(b) | 2176/4 |
+| 5.04 | Figure 7 | 2176/432 |
+| 18.1 | Figure 7 | 2176/120 |
+| 28 | Appendix A | 48-20 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Illusion of Diminishing Returns · 单步准确率如何复利成长程执行</title>
+<meta name="description" content="论文用字典求和任务隔离执行：Qwen3-32B 第一步接近满分，却在 15 轮内跌破 50%；self-conditioning 让历史错误推高后续错误；无 CoT 的 DeepSeek-V3 只到 4 步，thinking 组最高 2176 步（GPT-5）。本页以 arXiv 2509.09677v3 为准。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共组件样式全部来自 base.css */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.note{font-size:13px;line-height:1.8;color:var(--text-soft);background:var(--bg-soft);border-left:3px solid var(--border-strong);border-radius:0 var(--radius) var(--radius) 0;padding:10px 14px;margin:16px 0}
+.note strong{color:var(--text-muted)}
+.tbl-cap{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);letter-spacing:.02em;margin:22px 0 8px}
+.tbl-cap b{color:var(--text-muted);font-weight:600}
+
+/* 交互一：Horizon Length 标尺 */
+.hnum{font-family:"JetBrains Mono",monospace;font-size:40px;font-weight:600;color:var(--accent);line-height:1.1}
+.hunit{font-size:13px;color:var(--text-muted);margin-top:2px}
+.hformula{font-family:"JetBrains Mono",monospace;font-size:13px;color:var(--text-muted);margin-top:14px;overflow-x:auto;white-space:nowrap}
+.hscale{position:relative;height:14px;background:var(--bg-soft);border:1px solid var(--border);border-radius:100px;margin:20px 0 6px}
+.hfill{position:absolute;left:0;top:0;bottom:0;background:var(--accent);border-radius:100px;transition:width .25s ease}
+.hticks{display:flex;justify-content:space-between;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft)}
+
+/* 交互二：Figure 7 横向条形 */
+.fig7{display:flex;flex-direction:column;gap:9px;margin:16px 0}
+.f7row{display:grid;grid-template-columns:130px 1fr 56px;gap:10px;align-items:center}
+.f7name{font-family:"JetBrains Mono",monospace;font-size:11.5px;line-height:1.4;color:var(--text-muted);overflow-wrap:anywhere}
+.f7track{height:16px;background:var(--bg-soft);border-radius:100px;overflow:hidden}
+.f7fill{height:100%;border-radius:100px;transition:width .3s ease}
+.f7val{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);text-align:right}
+@media (max-width:600px){.f7row{grid-template-columns:1fr 48px}.f7name{grid-column:1 / -1;font-size:11px}}
+
+/* 流程图 SVG */
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-soft{fill:var(--bg-soft);stroke:var(--border)}
+.flow-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.3}
+.flow-line{stroke:var(--border-strong);stroke-width:1.3;fill:none}
+.flow-red{stroke:var(--accent);stroke-width:1.4;fill:none}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:14px;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11.5px;fill:var(--text-muted)}
+.flow-m{font-family:"JetBrains Mono",monospace}
+.flow-dash{stroke:var(--text-soft);stroke-width:1;stroke-dasharray:4 4;fill:none}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Illusion of Diminishing Returns</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#protocol">怎么算</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · ICLR 2026 · arXiv 2509.09677v3</span>
+  <h1>回报递减是错觉：单步的几个百分点，会放大成长程执行的数倍长度</h1>
+  <p class="hero-sub">
+    短基准上的单步准确率提升看起来越来越小，但如果任务要求连续做对很多步，这些提升会复利。
+    论文把<strong>规划</strong>和<strong>知识</strong>都显式喂给模型，只留下 retrieve-then-compose 的执行，发现执行本身就会随步数崩掉；
+    进一步把长上下文与 <strong>self-conditioning</strong> 分开，并观察到 thinking 能修复后者。
+  </p>
+  <div class="meta">
+    <span>Akshit Sinha 等 · Cambridge / U. Stuttgart / MPI-IS / Southampton / ELLIS Tübingen / Tübingen AI Center</span>
+    <a href="https://arxiv.org/abs/2509.09677v3" target="_blank" rel="noopener">arXiv 2509.09677v3（以 v3 为准）↗</a>
+    <a href="https://github.com/long-horizon-execution/measuring-execution" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    如果每步独立、成功率为 <code>p</code>、出错就失败，长度 <code>H</code> 的任务成功率是 <code>p<sup>H</sup></code>；把成功率固定为 <code>s</code>，可执行长度是 <code>H<sub>s</sub>(p) = ln(s) / ln(p)</code>。
+    按这条公式，<code>p</code> 从 0.95 到 0.99 的变化，会让 <code>H<sub>0.5</sub></code> 从约 <span data-src="Proposition 1（§2.1）/Figure 2">13.5 轮</span>变成约 <span data-src="Proposition 1（§2.1）/Figure 2">69.0 轮</span>——短基准上的「边际递减」因此可能只是尺子选错了。
+  </p>
+  <p>
+    论文把知识（上下文字典）和计划（每轮要查的 key）都给出，只测执行。即使这样，除 Gemma3-4B 和 Qwen3-4B 外，所有模型第一步都接近满分；但 <strong>Qwen3-32B 仍在 <span data-src="§3.1">15 轮</span>内跌破 50%</strong>。更大的模型能在更高准确率上维持更多回合，Figure 4(b) 给出清晰的规模趋势。
+  </p>
+  <p>
+    每步准确率不是常数：固定第 100 轮、只改变前 99 轮历史中的错误率，错误率越高，第 100 轮越容易错。这是 <strong>self-conditioning</strong>。r=0 时仍低于第一轮，是长上下文效应；两者可分离。扩大模型能大幅缓解长上下文退化，却缓解不了 self-conditioning——Figure 5 图注甚至写的是“increases”（§3.2）。
+  </p>
+  <p>
+    Qwen3 thinking 模型在同样设定下，第 100 轮准确率不随历史错误率下降（Figure 6）。单轮任务里，这个差别更直观：无 CoT 的最大执行步数是 <span data-src="Figure 7(a)">2–6 步</span>；thinking / CoT 组从 <span data-src="Figure 7(b)">72 步</span>到 <strong><span data-src="Figure 7(b)">2176 步</span></strong>（GPT-5），而 DeepSeek-V3 无 CoT 只有 <span data-src="Figure 7(a)">4 步</span>（Figure 7）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Figure 7(b)">2176<small>步</small></div>
+      <div class="k">GPT-5 单轮最大 K<br>要求该 K 下准确率 ≥80%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§3.1">15<small>轮</small></div>
+      <div class="k">Qwen3-32B 跌破 50% 的轮数上限<br>K=1，100 条 rollout</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Appendix A">48<small>%</small></div>
+      <div class="k">ALFWorld 失败轨迹中<br>疑似 self-conditioning 的比例</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>短基准上的「回报递减」，可能是尺子选错了</h2></div>
+  <p class="sec-sub">先把两个量分开：单步准确率 <code>p</code>，和模型能连续做对的步数 <code>H</code>。</p>
+
+  <p>
+    论文的起点是一个简单事实：如果每一步独立、每步成功率都是 <code>p</code>，且一次错误就让整个任务失败，那么长度 <code>H</code> 的任务成功率是 <code>p<sup>H</sup></code>。
+    把目标成功率固定为 <code>s</code>，反解 <code>H</code>，就得到 Proposition 1：
+  </p>
+
+  <div class="eq">
+    P(success, H) = p<sup>H</sup>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    H<sub>s</sub>(p) = ⌈ ln(s) / ln(p) ⌉ ≈ ln(s) / ln(p)
+  </div>
+  <div class="eq-cap">§2.1 · Proposition 1；推导见 Appendix J。假设每步独立、<code>p</code> 恒定、无自我纠正。</div>
+
+  <p>
+    这条曲线在 <code>p</code> 接近 1 时非常陡。按连续近似，<code>p=0.95</code> 时 <code>H<sub>0.5</sub></code> 约为
+    <span data-src="Proposition 1（§2.1）/Figure 2">13.5 轮</span>；<code>p=0.99</code> 时约为 <span data-src="Proposition 1（§2.1）/Figure 2">69.0 轮</span>。
+    短基准上只是从 0.95 到 0.99 的变化，换成长度就是十几轮与近七十轮的区别——这就是标题里的 “illusion”。
+  </p>
+
+  <p>
+    但这条公式只是分析用的简化。论文在 §2.1 明确说，这两个假设只用于建立直觉；实测中模型的每步准确率并非常数，也可能自我纠正。
+    于是真正的问题变成：<strong>真实模型的单步准确率，会随着任务变长怎样变化？</strong>
+  </p>
+
+  <p>
+    要测这件事，得先把规划和执行分开。规划是决定查什么信息、用什么工具、按什么顺序做；执行是把这些步骤做出来。
+    现有基准往往把两者混在一起：模型答错时，你无法判断是没想到步骤，还是想到了却做错。论文要补的是后一种失败。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的中心命题</span><h4>即使规划和知识都完美，执行仍会在长程上出错</h4></div>
+    <p style="font-family:'JetBrains Mono',monospace;font-size:13.5px;line-height:1.8;color:var(--text-muted)">
+      “Even if planning and world knowledge are perfected, LLMs will still make mistakes in execution over a long-horizon.”（§2）
+    </p>
+    <p>这句话把「长任务失败」从一个笼统的能力问题，拆成了一个可单独测量的问题。</p>
+  </div>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>把失败归给规划或长上下文，都解释不了同一长度下的差异</h2></div>
+  <p class="sec-sub">论文要排除两个竞争解释：模型不会规划，和模型只是被长上下文拖累。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">解释 A</span><h4>规划 / 推理失败</h4></div>
+      <p>一条常见叙事是：模型在复杂推理基准上进步，但任务一长就暴露「不会想」。论文引用 Shojaee et al. (2025) 的说法：thinking 模型可能只给出 “illusion of thinking”，因为任务变长后终究会失败（§1）。</p>
+      <p>这类解释把失败归给规划或推理；它预测模型从一开始就不知道下一步做什么。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">解释 B</span><h4>长上下文退化</h4></div>
+      <p>另一条解释是：上下文越长，模型越容易丢信息或分心，和内容无关（Zhou et al., 2025a）。它预测只要历史变长，准确率就会下降。</p>
+      <p>问题在于，更长的历史不仅更长，还更可能包含模型自己的错误。长度和错误率被混在了一起。</p>
+    </div>
+  </div>
+
+  <p>
+    论文的拆法很直接：把知识放进上下文（字典），把计划也显式给出（每轮要查的 key），这样规划和参数知识都被拿掉，剩下的就是执行。
+    在这个设定里，如果模型仍然随回合数变差，就不能再用「不会规划」解释。
+  </p>
+
+  <p>
+    对长上下文解释，论文做了一个反事实实验：固定第 100 轮这个位置，把前 99 轮的历史替换成不同错误率的人工输出。历史长度不变，只改变其中错误的比例。
+    如果错误率越高、第 100 轮越差，就说明模型在 <strong>self-condition</strong>，而不只是被长度拖累（§3.2）。
+  </p>
+
+  <p>
+    论文的定位不是否定规划和知识的重要性，而是说：在长程任务里，<strong>执行是一个独立的、可被单独测出的失败来源</strong>。这也是它和「长上下文基准」「规划基准」的分工。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把计划和知识喂给模型，剩下的才是执行</h2></div>
+  <p class="sec-sub">任务简单到多数模型第一步就接近满分（两个 4B 模型例外）；难点只在「连续做对很多步」。</p>
+
+  <p>
+    论文设计了一个键值字典求和任务。字典 <code>D: V → Z</code> 的 key 是常见五字母英文单词，value 从 <code>[−99, 99]</code> 均匀采样。
+    初始状态 <code>S<sub>0</sub> = 0</code>；第 <code>t</code> 轮，模型收到一个计划 <code>P<sub>t</sub> = {k<sub>t,1</sub>, …, k<sub>t,K</sub>}</code>，需要查值并更新运行和：
+  </p>
+
+  <div class="eq">
+    S<sub>t</sub> = S<sub>t−1</sub> + Σ<sub>i=1</sub><sup>K</sup> D[k<sub>t,i</sub>]
+  </div>
+  <div class="eq-cap">§3 · 每一步是 retrieve-then-compose：先检索 <code>D[k]</code>，再把它组合进状态</div>
+
+  <p>
+    任务长度有两条轴：<strong>回合数 T</strong> 和<strong>每轮复杂度 K</strong>。§3.1 固定 <code>K=1</code>，只增加回合数；§3.3 固定单轮，增加 <code>K</code>。
+    两个指标分别是 turn accuracy（该轮状态更新正确的比例，与前一轮状态是否正确无关）和 task accuracy at H（前 <code>H</code> 轮每一步都正确的样本比例）；在论文独立、恒定 <code>p</code> 的分析假设下，后者等于 <code>p<sup>H</sup></code>。Horizon Length <code>H<sub>0.5</sub></code> 定义为 task accuracy 首次跌破 50% 的轮数（§2 Evaluation Metrics）。
+  </p>
+
+  <h3>自己动手：单步准确率如何决定可执行长度</h3>
+  <p>
+    下面的滑块只做一件事：按 Proposition 1 的连续近似，把 <code>p</code> 映射成 <code>H<sub>0.5</sub></code>。
+    它假设 <code>p</code> 恒定、每步独立、无自我纠正——正是论文用来建立直觉的简化条件，不是论文对真实模型的实测结果。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" id="preset-btns">
+      <button class="rule-btn" data-p="0.90">p = 0.90<span class="r-sub">H₀.₅ ≈ 6.6</span></button>
+      <button class="rule-btn" data-p="0.95">p = 0.95<span class="r-sub">H₀.₅ ≈ 13.5</span></button>
+      <button class="rule-btn active" data-p="0.99">p = 0.99<span class="r-sub">H₀.₅ ≈ 69.0</span></button>
+      <button class="rule-btn" data-p="0.999">p = 0.999<span class="r-sub">H₀.₅ ≈ 692.8</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>单步准确率 p <span class="v" id="p-v">0.990</span></label>
+        <input type="range" id="p-range" min="0.80" max="0.999" step="0.001" value="0.99">
+      </div>
+    </div>
+
+    <div style="margin-top:22px">
+      <div class="hnum" id="h-out">69.0</div>
+      <div class="hunit">轮 · 任务成功率降到 50% 时的长度 H<sub>0.5</sub></div>
+      <div class="hscale"><div class="hfill" id="h-fill" style="width:61.3%"></div></div>
+      <div class="hticks"><span>1 轮</span><span>10 轮</span><span>100 轮</span><span>1000 轮</span></div>
+      <div class="hformula" id="h-formula">H₀.₅ = ln(0.5) / ln(0.990) = 69.0</div>
+    </div>
+
+    <div class="readout" data-src="Proposition 1（§2.1）/Figure 2" style="margin-top:18px">
+      <div class="r-head">读数怎么来的</div>
+      公式来自 Proposition 1 的连续近似；横轴按 <code>log10(H)</code> 标尺绘制，1–1000 轮。<span class="infer">推断</span> 以第一轮准确率代入这条曲线时，论文实测的 <code>H<sub>0.5</sub></code> 会低于它，因为真实模型的每步准确率会随回合下降（§3.2）。
+    </div>
+
+    <details>
+      <summary>手算核对：两组参数<span class="sum-sub">与 JS 同口径</span></summary>
+      <div class="details-body">
+        <p><strong>公式：</strong><code>H<sub>0.5</sub> = ln(0.5) / ln(p)</code>，取自然对数，连续近似，不取整。</p>
+        <p><strong>参数一：</strong><code>p = 0.95</code>。ln(0.5) = −0.693147，ln(0.95) = −0.051293，H = 13.513 → <span data-src="Proposition 1（§2.1）/Figure 2">13.5</span>。</p>
+        <p><strong>参数二：</strong><code>p = 0.999</code>。ln(0.5) = −0.693147，ln(0.999) = −0.0010005，H = 692.80 → <span data-src="Proposition 1（§2.1）/Figure 2">692.8</span>。</p>
+        <p>JS 用 <code>Math.log</code>（自然对数），保留一位小数；该交互不做标准差计算。手算与 JS 在相同参数下逐位一致。</p>
+        <p>简化条件：每步独立、<code>p</code> 恒定、无自我纠正（§2.1 明确说这些条件只用于分析；§3.2 的实测显示 <code>p</code> 会随回合下降）。</p>
+      </div>
+    </details>
+  </div>
+
+  <h3>反事实：把历史里的错误率当成自变量</h3>
+  <p>
+    论文固定「第 100 轮」这个位置，人为替换前 99 轮的输出历史，使其中错误答案的比例 <code>r ∈ {0, 25, 50, 75, 100}%</code>。
+    如果 <code>r=0</code> 时第 100 轮准确率仍低于第 1 轮，说明有长上下文效应；如果 <code>r</code> 越高、第 100 轮越差，说明模型在 self-condition。
+    这个设计把「历史长度」和「历史错误率」分开了（§3.2）。
+  </p>
+</section>
+
+<!-- ================= 4. 怎么算 ================= -->
+<section class="block" id="protocol">
+  <div class="sec-head"><span class="sec-num">04</span><h2>不训练新模型，只把执行拆成回合与步数来计数</h2></div>
+  <p class="sec-sub">论文没有提出新架构，也没有训练新策略；它做的是一套可程序化生成、可复现的评测协议。</p>
+
+  <p>
+    多轮实验用 Qwen3（4B / 8B / 14B / 32B）和 Gemma3（4B / 12B / 27B）两个家族，§3.1 固定 <code>K=1</code>，只改变回合数。
+    单轮实验用二分搜索找最大 <code>K</code>，要求该 <code>K</code> 下准确率 ≥80%（§3.3）。
+    论文还报告了温度 0 下趋势不变（Appendix Figure 14），以及 CoT / thinking 下的趋势（Appendix Figure 13）。
+  </p>
+
+  <p class="tbl-cap"><b>Appendix G.1–G.5</b> · 实验设置（按小节转录）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项目</th><th>设置</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>字典</td><td>100 个常见五字母单词；值从 [−99, 99] 均匀采样</td><td>Appendix G.1</td></tr>
+        <tr><td>rollout</td><td>每条 50,000 步；Qwen/Gemma 100 条，frontier 模型 20–50 条</td><td>Appendix G.1</td></tr>
+        <tr><td>轮复杂度 K</td><td>§3.1 固定 K=1；§3.3 二分搜索最大 K</td><td>§3.1 / §3.3</td></tr>
+        <tr><td>单轮成功阈值</td><td>准确率 ≥80%</td><td>§3.3</td></tr>
+        <tr><td>输出格式</td><td><code>&lt;answer&gt;</code> 标签内给整数；few-shot 示例固定格式</td><td>Appendix G.2</td></tr>
+        <tr><td>CoT / thinking token 上限</td><td>10,000 / 32,000</td><td>Appendix G.4</td></tr>
+        <tr><td>采样</td><td>Gemma 与 Qwen thinking：temperature 0.6，top-p 0.95；Qwen non-thinking：temperature 0.7，top-p 0.8</td><td>Appendix G.4</td></tr>
+        <tr><td>计算</td><td>4× NVIDIA A100（40/80GB）；frontier 模型通过 OpenRouter</td><td>Appendix G.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    多轮指标定义在 §2 Evaluation Metrics：task accuracy at <code>H</code> 要求前 <code>H</code> 轮全程无错；Horizon Length <code>H<sub>0.5</sub></code> 是 task accuracy 首次跌破 0.5 的轮数。Appendix J 给出 Proposition 1 的推导：在独立、恒定 <code>p</code>、无自我纠正的假设下，task accuracy at <code>H</code> 为 <code>p<sup>H</sup></code>。单轮指标则是「一次上下文内能连续执行多少步」的最大 <code>K</code>。
+  </p>
+
+  <p>
+    thinking 模型的评测有两个工程细节：其一，CoT 提示下，模型看到历史答案格式后会停止写 CoT，所以论文把 CoT trace 留在历史里，这会<strong>增加</strong>输入上下文；其二，thinking 模型的 <code>&lt;think&gt;</code> 标签内容会从历史中移除，这会<strong>减少</strong>上下文（Appendix G.3）。
+    论文保留 CoT trace 是权衡后的选择：代价是上下文变长，但不这样模型会忘记 CoT 指令（Appendix G.3）。
+  </p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条 retrieve-then-compose 循环，外加一个反事实分支</h2></div>
+  <p class="sec-sub">上面是多轮执行，下面是分离长上下文与 self-conditioning 的实验设计。</p>
+
+  <figure>
+    <svg viewBox="0 0 640 430" role="img" aria-label="论文的执行测量流程：字典与用户给定的计划输入，retrieve-compose 循环，answer 进入历史，历史错误影响后续检索与组合，以及错误率反事实分支">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="arr-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <text x="10" y="24" class="flow-t" style="font-weight:600">A · 多轮执行循环（K=1）</text>
+
+      <rect x="10" y="42" width="150" height="84" rx="9" class="flow-soft"></rect>
+      <text x="24" y="64" class="flow-t">上下文字典 D</text>
+      <text x="24" y="84" class="flow-s">word → integer</text>
+      <text x="24" y="102" class="flow-s">值 ∈ [−99, 99]</text>
+
+      <rect x="190" y="42" width="140" height="84" rx="9" class="flow-box"></rect>
+      <text x="204" y="62" class="flow-t">第 t 轮计划 Pₜ</text>
+      <text x="204" y="82" class="flow-s">K 个 key</text>
+      <text x="204" y="100" class="flow-s">由用户给出</text>
+      <text x="204" y="118" class="flow-s" style="font-size:11px">下一轮仍由用户给出</text>
+
+      <rect x="390" y="42" width="150" height="84" rx="9" class="flow-accent"></rect>
+      <text x="404" y="64" class="flow-t">输出 answer</text>
+      <text x="404" y="84" class="flow-s">当前运行和 Sₜ</text>
+      <text x="404" y="102" class="flow-s">进入历史</text>
+
+      <rect x="10" y="188" width="140" height="70" rx="9" class="flow-box"></rect>
+      <text x="24" y="212" class="flow-t">Retrieve</text>
+      <text x="24" y="232" class="flow-s">查 D[k]</text>
+
+      <rect x="190" y="188" width="190" height="70" rx="9" class="flow-box"></rect>
+      <text x="204" y="212" class="flow-t">Compose</text>
+      <text x="204" y="232" class="flow-s">Sₜ = Sₜ₋₁ + Σ D[k]</text>
+
+      <rect x="420" y="188" width="150" height="70" rx="9" class="flow-soft"></rect>
+      <text x="434" y="212" class="flow-t">历史 Hₜ</text>
+      <text x="434" y="232" class="flow-s">前 t−1 轮输出</text>
+
+      <path d="M85 126 L85 188" class="flow-line" marker-end="url(#arr)"></path>
+      <path d="M240 126 L240 160 L135 160 L135 188" class="flow-line" marker-end="url(#arr)"></path>
+      <path d="M150 223 L190 223" class="flow-line" marker-end="url(#arr)"></path>
+      <path d="M350 188 L350 150 L465 150 L465 126" class="flow-line" marker-end="url(#arr)"></path>
+      <path d="M520 126 L520 188" class="flow-line" marker-end="url(#arr)"></path>
+      <path d="M420 223 L380 223" class="flow-red" marker-end="url(#arr-red)"></path>
+      <path d="M445 258 L445 284 L85 284 L85 258" class="flow-red" marker-end="url(#arr-red)"></path>
+      <text x="150" y="273" class="flow-s" style="fill:var(--accent-deep)">历史中的错误提高后续执行出错概率</text>
+
+      <text x="10" y="300" class="flow-t" style="font-weight:600">B · 反事实：固定历史长度，只改错误率</text>
+
+      <rect x="10" y="318" width="150" height="70" rx="9" class="flow-soft"></rect>
+      <text x="24" y="342" class="flow-t">固定第 100 轮</text>
+      <text x="24" y="362" class="flow-s">历史长度不变</text>
+
+      <rect x="190" y="318" width="210" height="70" rx="9" class="flow-box"></rect>
+      <text x="204" y="342" class="flow-t">注入错误率 r</text>
+      <text x="204" y="362" class="flow-s">r ∈ {0, 25, 50, 75, 100}%</text>
+
+      <rect x="430" y="318" width="200" height="70" rx="9" class="flow-box"></rect>
+      <text x="444" y="342" class="flow-t">测 turn 100</text>
+      <text x="444" y="362" class="flow-s">比较 r 与准确率</text>
+
+      <path d="M160 353 L190 353" class="flow-line" marker-end="url(#arr)"></path>
+      <path d="M400 353 L430 353" class="flow-line" marker-end="url(#arr)"></path>
+
+      <text x="10" y="416" class="flow-s">r=0 仍下降 → 长上下文；r 越高越差 → self-conditioning（§3.2）</text>
+    </svg>
+    <figcaption>
+      图：按 §3、§3.2 与 Figure 3 的实验设计重绘。A 是多轮执行：字典与每轮计划（包括下一轮 <code>P<sub>t+1</sub></code>）都由用户给定，模型只负责 retrieve 与 compose；自己的输出 answer 进入历史，历史中的错误会提高后续 retrieve/compose 的出错概率（红箭头），但下一轮计划不由 answer 生成。B 是反事实分支：把前 99 轮替换成指定错误率的人工历史，再测第 100 轮。
+    </figcaption>
+  </figure>
+
+  <p>
+    单轮版本把循环压成一次上下文：模型一次看到 <code>K</code> 个 key，要在同一个回答里完成 <code>K</code> 次 retrieve-then-compose。
+    论文用二分搜索找最大 <code>K</code>，所以这里的「步数」是<strong>单轮内</strong>的执行长度，不是多轮回合数（§3.3）。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>规模拉长回合数，thinking 拉长单轮步数</h2></div>
+  <p class="sec-sub">两类能力分开看：多轮实验测「能撑多少回合」，单轮实验测「一次能走多少步」。</p>
+
+  <h3>规模：第一步几乎都对，长程却分得开</h3>
+  <p>
+    在 <code>K=1</code> 的多轮设定里，除 Gemma3-4B 和 Qwen3-4B 外，所有模型的第一步准确率都接近满分（§3.1）。这说明字典查找和单次加法不是瓶颈。
+    但 task accuracy 随回合数快速走低：<strong>Qwen3-32B 在 <span data-src="§3.1">15 轮</span>内跌破 50%</strong>（§3.1）。
+  </p>
+  <p>
+    更大的模型能在更高准确率上维持更多回合，Figure 4(b) 因此呈现清晰的 horizon length 规模趋势。论文没有拟合 scaling law：每个家族最多只有 4 个尺寸，作者只描述趋势，不下定律（§3.1）。
+  </p>
+
+  <h3>Self-conditioning：历史里的错误，会提高后续出错概率</h3>
+  <p>
+    固定第 100 轮、替换前 99 轮历史：当诱导错误率 <code>r=0</code> 时，turn 100 准确率仍低于第 1 轮——这部分归因于长上下文；当 <code>r</code> 增大时，turn 100 准确率继续下降——这部分归因于 self-conditioning（§3.2, Figure 5）。
+  </p>
+  <p>
+    前沿非 thinking 模型（Kimi-K2、DeepSeek-V3、Qwen3-235B-Instruct-2507，均 200B+）在 healed history 上接近满分，说明长上下文退化可以被规模大幅缓解；但它们在 <code>r</code> 增大时仍然下降，说明 self-conditioning 没有被规模消除（§3.2）。
+  </p>
+  <div class="note">
+    原文措辞并列：§3.2 Result 4 的标题是 “Unlike long-context, scaling model size does not mitigate self-conditioning.”；Figure 5 图注写的是 “Scaling model size increases self-conditioning, even for frontier non-thinking models.” 两句强度不同，页面保留原文，不替论文统一。
+  </div>
+
+  <h3>Thinking：同一历史压力下，turn 100 不随 r 下降</h3>
+  <p>
+    Qwen3 thinking 模型在 Figure 6 中表现出不同的模式：turn 100 准确率在 <code>r</code> 从 0% 到 100% 的变化中保持稳定（§3.2）。
+    论文给出两个可能原因：RL 训练降低了「续写上下文」的倾向；以及先前回合的 thinking trace 被移除，模型在新回合独立思考（§3.2）。
+  </p>
+  <p>
+    这不是说所有 CoT 都有效。Appendix I 的 CoT 实验仍观察到 self-conditioning；Appendix C.1 的 turn-wise self-verification 只带来混合结果，并明显增加每轮 token、提前耗尽上下文；Appendix C.2 的滑动窗口能缓解，但依赖任务的马尔可夫性质；Appendix D 的并行 majority voting 只带来边际改善。
+  </p>
+
+  <h3>单轮：从个位数到 <span data-src="Figure 7(b)">2176 步</span></h3>
+  <p>
+    §3.3 用二分搜索找最大 <code>K</code>，要求该 <code>K</code> 下准确率 ≥80%。Figure 7(a) 的无 CoT 组里，最大执行步数是 <span data-src="Figure 7(a)">2–6 步</span>；Figure 7(b) 的 thinking / CoT 组里，范围从 <span data-src="Figure 7(b)">72 步到 2176 步</span>。
+  </p>
+
+  <p class="tbl-cap"><b>§3.3 / Figure 7</b> · 单轮最大执行步数（按图中标注转录）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>设定</th><th>模型</th><th style="text-align:right">最大单轮步数 K</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>无 CoT</td><td>Qwen3-32B</td><td class="num">2</td></tr>
+        <tr><td>无 CoT</td><td>Gemma3-27B</td><td class="num">2</td></tr>
+        <tr><td>无 CoT</td><td>DeepSeek-V3</td><td class="num">4</td></tr>
+        <tr><td>无 CoT</td><td>Kimi-K2</td><td class="num">6</td></tr>
+        <tr><td>Thinking / CoT</td><td>Kimi-K2</td><td class="num">72</td></tr>
+        <tr><td>Thinking / CoT</td><td>Qwen3-235B-A22B</td><td class="num">80</td></tr>
+        <tr><td>Thinking / CoT</td><td>DeepSeek-V3</td><td class="num">112</td></tr>
+        <tr><td>Thinking / CoT</td><td>Gemini-2.5-Pro</td><td class="num">120</td></tr>
+        <tr><td>Thinking / CoT</td><td>DeepSeek-R1</td><td class="num">120</td></tr>
+        <tr><td>Thinking / CoT</td><td>Qwen3-Next</td><td class="num">352</td></tr>
+        <tr><td>Thinking / CoT</td><td>Grok-4</td><td class="num">384</td></tr>
+        <tr><td>Thinking / CoT</td><td>Claude-4-Sonnet</td><td class="num">432</td></tr>
+        <tr class="best"><td>Thinking / CoT</td><td>GPT-5</td><td class="num">2176</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">
+    每个数都是二分搜索得到的最大 <code>K</code>，要求该 <code>K</code> 下准确率 ≥80%；同一模型在两组的数值不能相加。
+  </p>
+
+  <div class="sim" style="padding:18px">
+    <div class="tabs" id="fig7-tabs">
+      <button class="tab active" data-set="nocot">无 CoT / thinking 关闭</button>
+      <button class="tab" data-set="think">Thinking / CoT 开启</button>
+    </div>
+    <div class="chart fig7" id="fig7-chart" data-src="Figure 7"></div>
+    <div class="readout" id="fig7-readout" data-src="Figure 7" style="margin-top:6px">
+      <div class="r-head">当前视图</div>
+      <span id="fig7-msg"></span> 条形长度按 <code>log10(K+1)</code> 归一化，数字是原始 <code>K</code>；同一条对数刻度下，两组可直接比较长度。
+    </div>
+  </div>
+
+  <p>
+    在同样单轮、≥80% 的条件下，GPT-5 的 <span data-src="Figure 7(b)">2176 步</span>是 DeepSeek-V3 无 CoT <span data-src="Figure 7(a)">4 步</span>的 <span data-src="Figure 7(a)(b)">544 倍</span>，是 Claude-4 Sonnet <span data-src="Figure 7(b)">432 步</span>的 <span data-src="Figure 7(b)">5.04 倍</span>，是 Gemini-2.5 Pro / DeepSeek-R1 <span data-src="Figure 7(b)">120 步</span>的 <span data-src="Figure 7(b)">18.1 倍</span>。
+    论文还指出，Qwen3-Next 把 Gated DeltaNet 与标准注意力混合，以 <span data-src="Figure 7(b)">352 步</span>高于一些更大的纯注意力模型，提示架构会影响长程执行（§3.3）。
+  </p>
+
+  <div class="note">
+    原文对 DeepSeek-V3 无 CoT 的上限有两处不同表述：§1 写 “DeepSeek-V3 fail at performing even four steps”；Figure 7(a) 标 4。§3.3 的完整句是 “the larger Qwen3 32B, Gemma3 27B, as well as frontier non-thinking models like DeepSeek-V3 (670B), and Kimi K2 (1026B), fail to execute even a turn complexity of more than six.”——“more than six” 是四个模型的组级表述，不是 V3 单独上限（4 ≤ 6）。真正的冲突是 §1 说 4 步就失败 vs Figure 7(a) 标 4。页面并列保留，不替原文统一。
+  </div>
+
+  <h3>真实 agent 轨迹：self-conditioning 的痕迹</h3>
+  <p>
+    Appendix A 人工分析 AgentErrorBench 的失败轨迹，估计 <span data-src="Appendix A">20%</span> 的 GAIA、<span data-src="Appendix A">48%</span> 的 ALFWorld、<span data-src="Appendix A">33%</span> 的 WebShop 失败与 self-conditioning 相似。
+    错误类别包括 <code>inefficient_plan</code>（计划因先前错误变得过长或不合逻辑）、<code>progress_misjudge</code>（基于自己的先前输出误判进度）、<code>causal_misattribution</code>（正确发现失败但归因错误）。
+  </p>
+  <p>
+    ALFWorld 与 GAIA 的估计相差 <span data-src="Appendix A">28 个百分点</span>（48 − 20）。作者也说明，这些任务里「哪一步算错」带主观性，难以做定量控制；这正是他们需要合成任务的原因（Appendix A）。
+  </p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>这套测量能证明必要，不能证明充分</h2></div>
+  <p class="sec-sub">论文自己的 Limitations 已经划出三条边界：任务、可并行性、指标定义。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界一</span><h4>合成任务不是真实 agent</h4></div>
+      <p>字典求和没有真实 agent 的动作空间、副作用和多种正确计划。论文的原话是：“Improvement on our task is necessary, but not sufficient for long-horizon execution on real-world tasks.”（§5 Limitations）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界二</span><h4>单轮任务理论上可并行</h4></div>
+      <p>把一列数相加属于 TC0，transformer 可以用常数深度完成（Appendix B）。作者补了一个 2×2 矩阵连乘任务（一般属于 TC1），趋势相同；它仍是合成任务，用来补上单轮设定可并行性的缺口（Appendix B）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">边界三</span><h4>指标不计算自我纠正</h4></div>
+      <p>task accuracy 要求前 <code>H</code> 轮全程无错；中途犯错即使后来改对也记为失败，因此不奖励自我纠正。论文的分析假设无自我纠正；真实任务里如果错误可撤销、可重试，结论可能不同（§5 Limitations）。</p>
+    </div>
+  </div>
+
+  <p>
+    还有两条覆盖范围的限制。规模分析只覆盖 Qwen3 和 Gemma3 两个家族，每个家族最多 4 个尺寸；前沿模型通过 API 评测，rollout 数为 <span data-src="Appendix G.1">20–50</span>，受成本限制（Appendix G.1）。
+    论文没有给出 scaling law，只描述趋势。真实 agent 的 self-conditioning 比例来自人工标注，步骤正确性带主观性（Appendix A）。
+  </p>
+
+  <p>
+    <strong>什么时候别用这套测量：</strong>如果你想测的是规划、知识或工具选择，这个任务会把它们拿掉；如果任务有副作用、允许多种正确计划、或错误可以撤销，这个任务的成功率不能直接外推。
+    <span class="infer">推断</span>（依据 §2.2 的任务设计与 §5 Limitations：论文只声称该任务是真实长程执行的必要条件）。
+  </p>
+
+  <p>
+    一句话：论文测的是<strong>执行这一层</strong>。它不能替代真实 agent 基准，但给出了一个可程序化生成、可复现的必要条件下界；在这个下界上，规模与 sequential test-time compute 的收益都能被单独看见。
+  </p>
+</section>
+
+<footer>
+  <div>The Illusion of Diminishing Returns: Measuring Long Horizon Execution in LLMs</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.09677v3" target="_blank" rel="noopener">arXiv 2509.09677v3</a> · ICLR 2026 · v3 2026-03-13<br>
+    代码：<a href="https://github.com/long-horizon-execution/measuring-execution" target="_blank" rel="noopener">long-horizon-execution/measuring-execution</a><br>
+    笔记：<a href="/the-illusion-of-diminishing-returnsmeasuring-long-horizon-execution-in-llms/">The Illusion of Diminishing Returns：Measuring Long Horizon Execution in LLMs</a>
+  </div>
+  <div class="note" style="margin-top:16px">
+    <strong>笔记勘误（不改笔记原文）：</strong>
+    <ul style="margin:8px 0 0">
+      <li>笔记称 GPT-5 达到“1024 步”，前文又写“1000 步以上”；原文 §3.3 与 Figure 7(b) 为 2176 步。</li>
+      <li>笔记称 DeepSeek-R1 能执行 200 步；原文 §1 写 “over 100 steps”，Figure 7(b) 标 120 步。</li>
+      <li>笔记称 DeepSeek-V3 “连 K=2 都难以完成”；Figure 7(a) 标 4 步，§1 写 “fail at performing even four steps”（§3.3 的 “more than six” 是四个模型的组级表述）。</li>
+      <li>笔记把 Horizon Length 指向 Figure 4(c)；原文 Figure 4(b) 才是 Horizon Length，Figure 4(c) 是 task accuracy。</li>
+      <li>笔记把 context engineering 指向 Appendix A.2；原文在 Appendix C.2（Appendix A 是真实 agent 轨迹分析）。</li>
+    </ul>
+  </div>
+  <div class="note">
+    本页以 arXiv v3 为准。Figure 7 的数值按图中标注转录；Figure 4 / 5 / 6 只引用正文与图注的结论，未从图中估读。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) Horizon Length 计算器（Proposition 1 连续近似）
+   ============================================================ */
+(function () {
+  var range = document.getElementById('p-range');
+  var out = document.getElementById('h-out');
+  var fill = document.getElementById('h-fill');
+  var pv = document.getElementById('p-v');
+  var formula = document.getElementById('h-formula');
+  var btns = document.querySelectorAll('#preset-btns .rule-btn');
+  if (!range || !out || !fill || !pv || !formula) return;
+
+  function h(p) {
+    return Math.log(0.5) / Math.log(p);
+  }
+
+  function render(p) {
+    var H = h(p);
+    out.textContent = H.toFixed(1);
+    pv.textContent = p.toFixed(3);
+    var w = Math.log(H) / Math.log(1000) * 100;
+    fill.style.width = Math.max(2, Math.min(100, w)) + '%';
+    formula.textContent = 'H₀.₅ = ln(0.5) / ln(' + p.toFixed(3) + ') = ' + H.toFixed(1);
+    btns.forEach(function (b) {
+      b.classList.toggle('active', Math.abs(parseFloat(b.dataset.p) - p) < 1e-9);
+    });
+  }
+
+  range.addEventListener('input', function () {
+    render(parseFloat(range.value));
+  });
+
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var p = parseFloat(b.dataset.p);
+      range.value = p;
+      render(p);
+    });
+  });
+
+  render(parseFloat(range.value));
+})();
+
+/* ============================================================
+   2) Figure 7：单轮最大执行步数（数值逐字转录自 Figure 7）
+   ============================================================ */
+(function () {
+  var HOST = 'fig7-chart';
+  var DATA = {
+    nocot: [
+      ['Qwen3-32B', 2],
+      ['Gemma3-27B', 2],
+      ['DeepSeek-V3', 4],
+      ['Kimi-K2', 6]
+    ],
+    think: [
+      ['Kimi-K2', 72],
+      ['Qwen3-235B-A22B', 80],
+      ['DeepSeek-V3', 112],
+      ['Gemini-2.5-Pro', 120],
+      ['DeepSeek-R1', 120],
+      ['Qwen3-Next', 352],
+      ['Grok-4', 384],
+      ['Claude-4-Sonnet', 432],
+      ['GPT-5', 2176]
+    ]
+  };
+  var MAX = 2176;
+  var host = document.getElementById(HOST);
+  var msg = document.getElementById('fig7-msg');
+  if (!host) return;
+
+  function log10(x) {
+    return Math.log(x) / Math.LN10;
+  }
+
+  function render(key) {
+    host.innerHTML = '';
+    var rows = DATA[key];
+    var best = 0;
+    rows.forEach(function (row) { if (row[1] > best) best = row[1]; });
+
+    rows.forEach(function (row) {
+      var wrap = document.createElement('div');
+      wrap.className = 'f7row';
+
+      var name = document.createElement('div');
+      name.className = 'f7name';
+      name.textContent = row[0];
+
+      var track = document.createElement('div');
+      track.className = 'f7track';
+
+      var fill = document.createElement('div');
+      fill.className = 'f7fill';
+      fill.style.background = key === 'think' ? 'var(--accent)' : 'var(--c1)';
+      fill.style.width = Math.max(1.5, log10(row[1] + 1) / log10(MAX + 1) * 100) + '%';
+      track.appendChild(fill);
+
+      var val = document.createElement('div');
+      val.className = 'f7val';
+      val.textContent = row[1];
+
+      wrap.appendChild(name);
+      wrap.appendChild(track);
+      wrap.appendChild(val);
+      host.appendChild(wrap);
+    });
+
+    if (msg) {
+      msg.textContent = key === 'think'
+        ? 'Thinking / CoT 组：最大 ' + best + ' 步（GPT-5），最小 ' + DATA.think[0][1] + ' 步（Kimi-K2）。'
+        : '无 CoT 组：最大 ' + best + ' 步（Kimi-K2），其余模型 2–4 步。';
+    }
+  }
+
+  var tabs = document.querySelectorAll('#fig7-tabs .tab');
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      render(btn.dataset.set);
+    });
+  });
+
+  render('nocot');
+})();
+</script>
+</body>
+</html>

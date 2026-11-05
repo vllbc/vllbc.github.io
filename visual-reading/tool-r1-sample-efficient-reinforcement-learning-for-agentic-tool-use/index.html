@@ -1,0 +1,547 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 9.09 | Table 2 | 19.39-10.30 |
+| 88.3 | Table 2 | (19.39-10.30)/10.30*100 |
+| 11.52 | Table 1 | 26.67-15.15 |
+| 76.0 | Table 1 | (26.67-15.15)/15.15*100 |
+| 2.42 | Table 1 | 19.39-16.97 |
+| 14.3 | Table 1 | (19.39-16.97)/16.97*100 |
+| 9.70 | Table 1 | 26.67-16.97 |
+| 57.2 | Table 1 | (26.67-16.97)/16.97*100 |
+| 4.85 | Table 1 | 15.15-10.30 |
+| 47.1 | Table 1 | (15.15-10.30)/10.30*100 |
+| 7.28 | Table 1 | 26.67-19.39 |
+| 37.5 | Table 1 | (26.67-19.39)/19.39*100 |
+| 19.2 | Table 2 | 41.5-22.3 |
+| 46.3 | Table 2 | (41.5-22.3)/41.5*100 |
+| 7.27 | Table 2 | 16.36-9.09 |
+| 6.06 | Table 2 | 16.36-10.30 |
+| 2.43 | Table 2 | 18.79-16.36 |
+| 8.49 | Table 2 | 18.79-10.30 |
+| 7.88 | Table 2 | 18.18-10.30 |
+| 1.21 | Table 2 | 19.39-18.18 |
+| 6.5 | Table 1 | 1.3/20*100 |
+| 13.21 | Table 2 | 30.19-16.98 |
+| 8.14 | Table 2 | 17.44-9.30 |
+| 3.84 | Table 2 | 3.84-0 |
+| 9.43 | Table 1 | 33.96-24.53 |
+| 77.8 | Table 1 | 13.21/16.98*100 |
+| 16.28 | Table 1 | 27.91-11.63 |
+| 140.0 | Table 1 | 16.28/11.63*100 |
+| 3.85 | Table 1 | 7.69-3.84 |
+| 3.77 | Table 1 | 30.19-26.42 |
+| 7.54 | Table 1 | 33.96-26.42 |
+| 12.79 | Table 1 | 27.91-15.12 |
+| 10.47 | Table 1 | 27.91-17.44 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tool-R1 · 用可执行 Python 做多步工具调用，再把 RL 采样砍半</title>
+<meta name="description" content="Tool-R1 让模型生成可执行 Python 调用工具，用 LLM-as-Judge 与代码解析/执行奖励训练 GRPO；动态样本队列把 7B 消融训练时间从 41.5h 降到 22.3h，GAIA 上 7B 19.39%、14B 26.67%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.quote{margin:18px 0;padding:14px 18px 14px 20px;border-left:3px solid var(--accent);background:var(--bg-surface);border-radius:0 var(--radius) var(--radius) 0;color:var(--text-muted);font-size:14.5px;line-height:1.8}
+.quote span{display:block;margin-top:6px;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft)}
+.table-cap{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);margin:18px 0 6px;line-height:1.6}
+.src-note{font-size:12px;color:var(--text-soft);margin:10px 0 0;font-family:"JetBrains Mono",monospace;line-height:1.6}
+.errata{margin-top:18px;background:var(--bg-soft);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;color:var(--text-muted);font-size:13px;line-height:1.8}
+.errata strong{color:var(--text)}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:8px}
+svg text{font-family:"Noto Sans SC","Inter",sans-serif;font-size:13px;fill:var(--text)}
+svg text.sub{font-size:11px;fill:var(--text-soft)}
+svg rect.box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+svg rect.hl{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.token{font-family:"JetBrains Mono",monospace;font-size:12.5px;background:var(--bg-soft);padding:1px 5px;border-radius:4px}
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b2{background:var(--c1)}
+.tldr .token{background:rgba(255,255,255,.16);color:var(--bg);border:1px solid rgba(255,255,255,.28)}
+@media(max-width:500px){
+  .chart .crow{grid-template-columns:92px 1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Tool-R1</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">开销</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agentic Tool Use · arXiv 2025 · v1</span>
+  <h1>Tool-R1：把工具调用写成 Python，再用样本队列把 RL 训练砍半</h1>
+  <p class="hero-sub">
+    多步工具调用的两个瓶颈很具体：JSON 形式的调用只能填预定义参数，跨步骤的变量和中间结果传不下去；RL 又要在训练中反复真实调用搜索、网页、文件解析等工具，采样成本高。
+    <strong>Tool-R1</strong> 让模型直接生成可执行 Python，中间变量留在同一个命名空间里；训练用 LLM-as-Judge 判最终答案，再加代码解析/执行奖励，并用 <strong>难度筛选 + 动态样本队列</strong> 复用轨迹。
+  </p>
+  <div class="meta">
+    <span>Yabo Zhang 等 · 哈尔滨工业大学 / 华为诺亚方舟实验室</span>
+    <a href="https://arxiv.org/abs/2509.12867v1" target="_blank" rel="noopener">arXiv 2509.12867v1 ↗</a>
+    <a href="https://github.com/YBYBZhang/Tool-R1" target="_blank" rel="noopener">代码（论文称将开放）↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>用代码替代 JSON，不是为了好看，而是为了状态。</strong> 模型每一步写一段 Python：可以 import 标准库、调用用户自定义工具、把上一步结果存进变量。执行器返回 observation，下一步继续写代码，形成 <span class="token">Thought → Code → Observation</span> 循环（§3.1、Figure 2）。</p>
+  <p><strong>奖励全部自动化：最终答案 + 代码能不能跑。</strong> 轻量 Qwen2.5-3B-Instruct 当裁判，把答案判成 Correct / Partially Correct / Wrong（1 / 0.5 / 0）；代码解析率与执行成功率各乘 0.3 加进奖励（§3.3、Eq.2–4）。没有人工轨迹标注，也没有 cold-start。</p>
+  <p><strong>样本效率靠两件事：先筛中等难度，再复用旧轨迹。</strong> 先用初始策略对每题采样 <strong data-src="§3.2">10</strong> 次，只保留通过率在 <strong data-src="§3.2">0.2–0.8</strong> 的题；训练时每个问题维护 <strong data-src="§4.1">G=16</strong> 的队列，每步只生成 <strong data-src="§4.1">g=8</strong> 条新轨迹，替换最旧的一半（§3.2、§4.1）。</p>
+  <p><strong>收益真实，但口径要拆开。</strong> 7B 的 AnsAcc 从 <strong data-src="Table 2">10.30</strong> 到 <strong data-src="Table 2">19.39</strong>，绝对 <strong data-src="Table 2">+9.09</strong> 个百分点，相对 <strong data-src="Table 2">+88.3%</strong>；14B 从 <strong data-src="Table 1">15.15</strong> 到 <strong data-src="Table 1">26.67</strong>，绝对 <strong data-src="Table 1">+11.52</strong> 个百分点，相对 <strong data-src="Table 1">+76.0%</strong>。摘要说的 “about 10% gain” 没有在同一句交代是绝对百分点还是相对提升；页面并列两个口径，不替作者选。</p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">19.39<small>%</small></div>
+      <div class="k">Tool-R1 + Qwen2.5-7B-Instruct 的 GAIA AnsAcc<br>未 RL 的同一提示基线为 10.30%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">26.67<small>%</small></div>
+      <div class="k">Tool-R1 + Qwen2.5-14B-Instruct<br>开源模型中最高；MAT Agent 为 16.97%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">22.3<small>h</small></div>
+      <div class="k">7B 消融完整配置的训练时间<br>Vanilla GRPO 为 41.5 h；少 19.2 h，相对少 46.3%</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>工具调用的两个瓶颈：参数传不下去，轨迹又太贵</h2></div>
+  <p class="sec-sub">先把「表达能力」和「采样成本」分开看；Tool-R1 的两个设计正好一一对应。</p>
+  <p>LLM 的参数化知识有边界：实时天气、私有数据库、精确计算、复杂文件解析都不在权重里。接外部工具是直接解法，但现有做法各有问题。提示工程（如 ReAct）靠上下文里的示例和指令决定何时调用工具，遇到 API 报错、空结果或页面结构变化时，模型没有从反馈中学习的机制，鲁棒性差（§1）。</p>
+  <p>RL 路线能从环境反馈里学，但论文指出两个可扩展性瓶颈。第一，<strong>调用格式太窄</strong>：JSON 形式的工具调用只能填预定义函数和参数，难以跨步骤共享变量，也不方便组合多个工具。第二，<strong>在线采样太贵</strong>：每一步都要真实调用搜索、网页访问、文件解析或视觉模型，延迟、限流和网络波动都会拖慢训练，成本把研究限制在少数领域（§1）。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">瓶颈 1</span><h4>JSON 调用的表达力上限</h4></div>
+      <p>一个 JSON 调用通常只描述「调用哪个函数、传什么参数」。如果第二步要用第一步的返回值，第三步要用前两步的中间结果，调用之间缺少自然的变量空间；复杂控制流（循环、条件、组合）也很难写进固定 schema（§1、§3.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">瓶颈 2</span><h4>RL 需要反复真实执行</h4></div>
+      <p>GRPO 对每个问题要一组轨迹；每条轨迹都可能触发多次外部调用。训练步数一多，采样开销会超过模型更新本身。论文的消融显示，不做优化的 Vanilla GRPO 训练时间达到 <strong data-src="Table 2">41.5</strong> 小时（Table 2）。</p>
+    </div>
+  </div>
+  <p>论文没有把问题定义成「让模型更会写工具调用格式」，而是定义成「让工具使用成为推理过程的一部分」。这决定了后面的三个设计：代码作为动作、结果驱动奖励、轨迹复用。评测放在 GAIA：<strong data-src="§4.1">446</strong> 个任务、<strong data-src="§4.1">109</strong> 个真实文件，覆盖 PDF、PPTX、XLSX 等格式与网页导航、文档理解、逻辑推理等能力（§4.1）。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条现成路线：提示、JSON 式 RL、监督轨迹</h2></div>
+  <p class="sec-sub">论文的对照不是「有没有工具」，而是「工具调用在训练里占什么位置」。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>提示工程 / ReAct</h4></div>
+      <p>用 few-shot 或系统提示规定「思考—行动—观察」格式，模型按提示调用工具。优点是无需训练；缺点是不会从失败中更新策略，遇到非预期反馈只能靠上下文里再解释一遍（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>JSON 式 RL</h4></div>
+      <p>把工具调用写成 JSON，用 PPO/GRPO 训练。代表工作如 Search-R1 把搜索调用放进 rollout。Tool-R1 认为这类方法受限于预定义工具与参数 schema，跨步骤组合能力弱（§1、§2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">路线 C</span><h4>监督轨迹 / Agent 框架</h4></div>
+      <p>SFT 或 MAT Agent 用人工/GPT-4o 生成的高质量轨迹训练。效果可以很强，但标注成本高、难以规模化；论文特别对比了 MAT Agent 的 20k QA + 轨迹标注（Table 1）。</p>
+    </div>
+  </div>
+  <p>Tool-R1 的切入点是把「动作」从 JSON 换成可执行代码，同时保留 RL 的试错学习。这样既能调用用户自定义工具与标准库，又能把中间结果留在 Python 命名空间里；训练仍然只需要最终答案与代码执行结果，不需要过程标注（§3.1、§3.3）。</p>
+  <p>但「代码动作」本身不解决采样成本。论文的第二个贡献是训练效率：难度筛选减少无效题，动态队列减少重复生成。两者都不是模型结构改动，而是 GRPO 外层的数据与采样流程改动（§3.2）。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>动作是 Python 代码，奖励是答案对错加代码能不能跑</h2></div>
+  <p class="sec-sub">方法有三层：交互协议、样本复用、奖励函数。交互与奖励决定「学什么」，样本复用决定「学得多快」。</p>
+  <h3 style="margin-top:26px">3.1 交互协议：Thought → Code → Observation</h3>
+  <p>每一步，模型先写一段 <span class="token">Thought:</span>，再写一个 <span class="token">Code:</span> 块；执行器运行代码，把标准输出或工具返回值作为 <span class="token">Observation:</span> 追加回上下文。下一步模型可以看到之前所有代码与观察，也可以继续使用之前定义的变量（§3.1、Figure 2）。</p>
+  <div class="eq">
+    τ = (Thought<sub>1</sub>, Code<sub>1</sub>, Obs<sub>1</sub>, …, Thought<sub>T</sub>, Code<sub>T</sub>, Obs<sub>T</sub>, FinalAnswer)<br>
+    Code<sub>t</sub> = π<sub>θ</sub>(· | Question, Thought<sub>&lt;t</sub>, Code<sub>&lt;t</sub>, Obs<sub>&lt;t</sub>)
+  </div>
+  <div class="eq-cap">示意（据 §3.1 整理，原文未给出该轨迹公式）· 最多 10 个交互步（§4.1）；代码在同一个 Python 解释器里顺序执行，变量状态保留</div>
+  <p>论文给的工具包括：<span class="token">inspect_file_as_text</span>（把 PDF/PPTX/XLSX/音频/网页转成可读文本）、<span class="token">wikipedia_qa</span>、<span class="token">web_qa</span>、<span class="token">visit_qa</span>、<span class="token">find_archived_url</span>、<span class="token">local_visualizer</span>，以及提交答案的 <span class="token">final_answer</span>（Appendix A）。系统提示还限制可 import 的模块，排除 <span class="token">os</span>、<span class="token">pip</span> 等高风险库，并保护变量命名空间（Appendix A）。</p>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么是代码</span><h4>跨步骤变量共享，是 JSON 最难补的能力</h4></div>
+    <p>论文 Figure 1 的例子：模型先意识到要比较重量就需要密度，于是调用 <span class="token">wikipedia_qa</span> 查密度；第一次没查到，改用 <span class="token">web_qa</span>；拿到密度后，再用前面定义的变量算一加仑蜂蜜和蛋黄酱的质量，并算出需要移走多少杯。整个过程的数据流留在 Python 变量里，而不是每步重新把 JSON 参数抄一遍（§3.1、Figure 1）。</p>
+  </div>
+
+  <h3 style="margin-top:30px">3.2 样本复用（论文 §3.2）：先筛中等难度，再用队列缓存</h3>
+  <p>难度筛选发生在训练前：用初始策略对每题采样 <strong data-src="§3.2">10</strong> 次，算通过率，只保留 <strong data-src="§3.2">0.2–0.8</strong> 的题。太简单的题几乎全对，组内奖励没有方差；太难的题几乎全错，也没有可学的信号（§3.2）。</p>
+  <p>动态队列发生在训练中：每题一个固定大小 <strong data-src="§4.1">G=16</strong> 的轨迹队列；每步只生成 <strong data-src="§4.1">g=8</strong> 条新轨迹，插入队尾，移除最旧的 8 条；再按通过率 0.2–0.8 过滤缓存轨迹，不合格的替换成同题的其他合格轨迹（§3.2、§4.1）。这样 GRPO 的组内比较仍然有 16 条轨迹，但其中一半来自缓存。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">收益</span><h4>采样次数减半，训练时间接近减半</h4></div>
+      <p>Table 2 的完整配置把训练时间从 <strong data-src="Table 2">41.5</strong> h 降到 <strong data-src="Table 2">22.3</strong> h，少 <strong data-src="Table 2">19.2</strong> h，相对少 <strong data-src="Table 2">46.3%</strong>；AnsAcc 从 Vanilla GRPO 的 <strong data-src="Table 2">9.09</strong> 升到 <strong data-src="Table 2">19.39</strong>（Table 2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">代价</span><h4>缓存轨迹会过期</h4></div>
+      <p>队列里的轨迹来自旧策略；策略更新后，旧轨迹的分布会偏移。论文用「只保留通过率 0.2–0.8 的轨迹」来限制这个偏移，但没有做 G 与 g 的完整扫描，只比较了「w/o resample」与「w/ resample」两种设置（Table 2、§3.2）。</p>
+    </div>
+  </div>
+
+  <h3 style="margin-top:30px">3.3 奖励（论文 §3.3）：答案 0/0.5/1，代码解析与执行各 0.3</h3>
+  <p>最终答案由 Qwen2.5-3B-Instruct 裁判按 accuracy、completeness、relevance、precision 四项评分，输出三档：Correct 得 1，Partially Correct 得 0.5，Wrong 得 0（§3.3、Eq.2、Figure 3）。代码质量另给两个辅助奖励：</p>
+  <div class="eq">
+    R<sub>parse</sub> = N<sub>parsed</sub> / N<sub>total</sub> &nbsp;&nbsp;&nbsp; R<sub>exec</sub> = N<sub>executed</sub> / N<sub>parsed</sub><br>
+    R = R<sub>answer</sub> + 0.3 · R<sub>parse</sub> + 0.3 · R<sub>exec</sub>
+  </div>
+  <div class="eq-cap">§3.3 · Eq.3–4；λ<sub>parse</sub> = λ<sub>exec</sub> = 0.3</div>
+  <p>这三个分量覆盖不同失败模式：答案对但代码不可运行，仍能拿到答案分，但会被辅助奖励拉开差距；代码能跑但答案错，也拿不到主要奖励。论文没有设置额外的答案格式奖励，也没有训练神经奖励模型；R<sub>parse</sub> 只检查代码块能否被解析，裁判是固定的轻量 LLM，不参与策略更新（§3.3）。</p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>1,300 条训练数据、8 张 A100，7B 完整配置 22.3 小时</h2></div>
+  <p class="sec-sub">这套方法的「便宜」是相对在线 RL 的采样开销，不是相对一次 SFT；硬件与时长都要按变体看。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">数据与模型</span><h4>没有 cold-start，没有轨迹标注</h4></div>
+      <p>训练集 <strong data-src="§4.1">1,300</strong> 条高质量问答对；底座是 Qwen2.5-7B-Instruct 与 Qwen2.5-14B-Instruct；不做 cold-start 初始化，也不需要人工轨迹（§4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">优化</span><h4>AdamW，lr 1e-6，有效 batch 256</h4></div>
+      <p>学习率 <strong data-src="§4.1">1e-6</strong>，梯度累积后有效 batch <strong data-src="§4.1">256</strong>，训练 <strong data-src="§4.1">2</strong> 个 epoch，最大序列长度 <strong data-src="§4.1">2,048</strong> token，每题最多 <strong data-src="§4.1">10</strong> 个交互步；KL 惩罚权重 <strong data-src="§4.1">0.001</strong>（§4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">采样队列</span><h4>G=16，每步新增 g=8</h4></div>
+      <p>每题轨迹队列大小 <strong data-src="§4.1">G=16</strong>，每步生成 <strong data-src="§4.1">g=8</strong> 条新轨迹，FIFO 替换最旧条目；训练时推理温度 <strong data-src="§4.1">0.6</strong>（§4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">硬件</span><h4>8×A100，训练/采样各 4 张</h4></div>
+      <p>全部实验在 <strong data-src="§4.1">8</strong> 张 A100 上完成：<strong data-src="§4.1">4</strong> 张训练、<strong data-src="§4.1">4</strong> 张在线采样；裁判与 Web QA 工具都用 Qwen2.5-3B-Instruct（§4.1）。</p>
+    </div>
+  </div>
+  <p>论文报告的训练时间是 Table 2 中 7B 消融的 <strong data-src="Table 2">41.5</strong> h 与 <strong data-src="Table 2">22.3</strong> h，不是 14B 的时长；14B 只给评测结果（Level 1/2/3 与 AnsAcc），没有给训练小时（Table 1）。论文也没有报告每个变体的 GPU 小时、API 费用或多次运行的方差。页面因此不把 22.3 h 当成「14B 也能这个成本」的证据。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹：写代码 → 执行 → 看 observation → 再写，直到提交答案</h2></div>
+  <p class="sec-sub">右侧是训练侧：答案裁判与代码奖励合成标量，GRPO 更新策略，动态队列把缓存轨迹送回 GRPO。</p>
+  <div class="card" style="padding:10px 8px 4px">
+    <svg viewBox="0 0 900 390" role="img" aria-label="Tool-R1 训练闭环：问题进入策略，策略生成思考与代码，执行器调用工具并返回观察；观察作为下一轮上下文回到策略；任务完成后策略提交最终答案，最终答案进入答案裁判，与代码奖励合成标量奖励交给 GRPO；动态样本队列把缓存轨迹送回 GRPO，GRPO 更新策略">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+      <rect class="box" x="20" y="30" width="140" height="54" rx="8"></rect>
+      <text x="90" y="53" text-anchor="middle">问题 / 文件</text>
+      <text class="sub" x="90" y="70" text-anchor="middle">GAIA task</text>
+
+      <rect class="box" x="200" y="30" width="160" height="54" rx="8"></rect>
+      <text x="280" y="53" text-anchor="middle">策略 πθ</text>
+      <text class="sub" x="280" y="70" text-anchor="middle">Qwen2.5 + GRPO</text>
+
+      <rect class="hl" x="400" y="30" width="200" height="54" rx="8"></rect>
+      <text x="500" y="53" text-anchor="middle">Thought + Code</text>
+      <text class="sub" x="500" y="70" text-anchor="middle">可执行 Python</text>
+
+      <rect class="box" x="640" y="30" width="230" height="54" rx="8"></rect>
+      <text x="755" y="53" text-anchor="middle">代码执行器 / 工具链</text>
+      <text class="sub" x="755" y="70" text-anchor="middle">搜索 · 网页 · 文件 · 视觉</text>
+
+      <rect class="box" x="200" y="145" width="160" height="54" rx="8"></rect>
+      <text x="280" y="168" text-anchor="middle">Final Answer</text>
+      <text class="sub" x="280" y="185" text-anchor="middle">final_answer()</text>
+
+      <rect class="box" x="640" y="145" width="230" height="54" rx="8"></rect>
+      <text x="755" y="168" text-anchor="middle">Observation</text>
+      <text class="sub" x="755" y="185" text-anchor="middle">stdout / 工具返回值</text>
+
+      <rect class="box" x="20" y="270" width="150" height="54" rx="8"></rect>
+      <text x="95" y="293" text-anchor="middle">答案裁判</text>
+      <text class="sub" x="95" y="310" text-anchor="middle">1 / 0.5 / 0</text>
+
+      <rect class="box" x="190" y="270" width="150" height="54" rx="8"></rect>
+      <text x="265" y="293" text-anchor="middle">代码奖励</text>
+      <text class="sub" x="265" y="310" text-anchor="middle">parse · exec × 0.3</text>
+
+      <rect class="hl" x="380" y="270" width="200" height="54" rx="8"></rect>
+      <text x="480" y="293" text-anchor="middle">GRPO 更新</text>
+      <text class="sub" x="480" y="310" text-anchor="middle">组内优势 + KL</text>
+
+      <rect class="box" x="640" y="270" width="230" height="54" rx="8"></rect>
+      <text x="755" y="293" text-anchor="middle">动态样本队列</text>
+      <text class="sub" x="755" y="310" text-anchor="middle">G=16 · 每步换入 g=8</text>
+
+      <path d="M160 57 L200 57" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M360 57 L400 57" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M600 57 L640 57" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M755 84 L755 145" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M280 84 L280 145" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <text class="sub" x="272" y="112" text-anchor="end">任务完成时 final_answer()</text>
+
+      <path d="M870 172 L890 172 L890 10 L280 10 L280 30" stroke="var(--accent)" stroke-width="1.6" fill="none" marker-end="url(#ar2)"></path>
+      <text class="sub" x="585" y="26" text-anchor="middle" fill="var(--accent)">下一轮上下文</text>
+
+      <path d="M280 199 L280 235 L95 235 L95 270" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <text class="sub" x="108" y="228">R_answer</text>
+
+      <path d="M340 297 L380 297" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <path d="M95 324 L95 350 L480 350 L480 324" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ar)"></path>
+      <text class="sub" x="287" y="343" text-anchor="middle">合成标量奖励</text>
+
+      <path d="M380 283 L370 283 L370 105 L330 105 L330 84" stroke="var(--accent)" stroke-width="1.6" fill="none" marker-end="url(#ar2)"></path>
+      <text class="sub" x="360" y="215" text-anchor="end" fill="var(--accent)">更新策略</text>
+
+      <path d="M640 297 L580 297" stroke="var(--accent)" stroke-width="1.6" fill="none" marker-end="url(#ar2)"></path>
+      <text class="sub" x="610" y="290" text-anchor="middle" fill="var(--accent)">缓存轨迹</text>
+    </svg>
+  </div>
+  <p>这张图有三条回边：Observation 回到策略，形成下一轮上下文；Final Answer 进入答案裁判，与代码奖励合成标量奖励后交给 GRPO；动态样本队列把缓存轨迹送回 GRPO 组。前一条是交互，后两条是奖励与样本复用；它们都不是模型参数的一部分。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>7B 19.39%，14B 26.67%；训练时间 41.5 → 22.3 小时</h2></div>
+  <p class="sec-sub">先看 GAIA 主表，再看消融；所有指标都是 Answer Accuracy，不是 F1，也不是 pass@k。</p>
+  <p>Table 1 的 GAIA validation 结果里，Tool-R1 7B 的 AnsAcc 是 <strong data-src="Table 1">19.39</strong>，比未 RL 的同一提示基线 <strong data-src="Table 1">10.30</strong> 高 <strong data-src="Table 1">9.09</strong> 个百分点，相对 <strong data-src="Table 1">88.3%</strong>；14B 从 <strong data-src="Table 1">15.15</strong> 到 <strong data-src="Table 1">26.67</strong>，高 <strong data-src="Table 1">11.52</strong> 个百分点，相对 <strong data-src="Table 1">76.0%</strong>。两个规模都提升，但 14B 的绝对增益更大、相对增益更小。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>底座</th><th>训练数据</th><th class="num">Level 1</th><th class="num">Level 2</th><th class="num">Level 3</th><th class="num">AnsAcc</th></tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="7"><strong>闭源模型</strong></td></tr>
+        <tr><td>Warm-up Act</td><td>GPT-4-turbo</td><td>None</td><td class="num">30.20</td><td class="num">15.10</td><td class="num">0.00</td><td class="num">17.60</td></tr>
+        <tr><td>Sibyl Agent</td><td>GPT-4-turbo</td><td>None</td><td class="num">43.40</td><td class="num">27.90</td><td class="num">7.70</td><td class="num">29.70</td></tr>
+        <tr><td>HF Agent</td><td>GPT-4o</td><td>None</td><td class="num">47.17</td><td class="num">31.40</td><td class="num">11.54</td><td class="num">33.40</td></tr>
+        <tr><td>HF Agent</td><td>GPT-4o mini</td><td>None</td><td class="num">33.96</td><td class="num">27.91</td><td class="num">3.84</td><td class="num">26.06</td></tr>
+        <tr><td colspan="7"><strong>开源模型 · 不做微调</strong></td></tr>
+        <tr><td>HF Agent</td><td>LLaVA-NeXT-8B</td><td>None</td><td class="num">9.43</td><td class="num">1.16</td><td class="num">0.00</td><td class="num">3.64</td></tr>
+        <tr><td>HF Agent</td><td>InternVL2-8B</td><td>None</td><td class="num">7.55</td><td class="num">4.65</td><td class="num">0.00</td><td class="num">4.85</td></tr>
+        <tr><td>HF Agent</td><td>MiniCPM-V-8.5B</td><td>None</td><td class="num">13.21</td><td class="num">5.81</td><td class="num">0.00</td><td class="num">7.27</td></tr>
+        <tr><td>HF Agent</td><td>Qwen2-VL-7B</td><td>None</td><td class="num">16.98</td><td class="num">8.14</td><td class="num">0.00</td><td class="num">9.70</td></tr>
+        <tr><td>Tool-R1（未 RL）</td><td>Qwen2.5-7B-Instruct</td><td>None</td><td class="num">16.98</td><td class="num">9.30</td><td class="num">0.00</td><td class="num">10.30</td></tr>
+        <tr><td>Tool-R1（未 RL）</td><td>Qwen2.5-14B-Instruct</td><td>None</td><td class="num">24.53</td><td class="num">11.63</td><td class="num">3.84</td><td class="num">15.15</td></tr>
+        <tr><td colspan="7"><strong>开源模型 · 微调</strong></td></tr>
+        <tr><td>MAT Agent</td><td>MiniCPM-V-8.5B</td><td>20k QA + Trajectories</td><td class="num">26.42</td><td class="num">11.63</td><td class="num">3.84</td><td class="num">15.15</td></tr>
+        <tr><td>MAT Agent</td><td>Qwen2-VL-7B</td><td>20k QA + Trajectories</td><td class="num">26.42</td><td class="num">15.12</td><td class="num">3.84</td><td class="num">16.97</td></tr>
+        <tr><td>Tool-R1</td><td>Qwen2.5-7B-Instruct</td><td>1.3k QA pairs</td><td class="num">30.19</td><td class="num">17.44</td><td class="num">3.84</td><td class="num">19.39</td></tr>
+        <tr><td><strong>Tool-R1</strong></td><td>Qwen2.5-14B-Instruct</td><td>1.3k QA pairs</td><td class="num"><strong>33.96</strong></td><td class="num"><strong>27.91</strong></td><td class="num"><strong>7.69</strong></td><td class="num"><strong>26.67</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">Table 1 · GAIA validation set；原文只加粗 14B 行，页面照此复刻。Level 3 的 7B 行与 MAT Agent 同为 3.84，是并列，不是超过。</div>
+  <p>和最强的开源微调基线 MAT Agent（<strong data-src="Table 1">16.97</strong>）比，Tool-R1 7B 高 <strong data-src="Table 1">2.42</strong> 个百分点（相对 <strong data-src="Table 1">14.3%</strong>），14B 高 <strong data-src="Table 1">9.70</strong> 个百分点（相对 <strong data-src="Table 1">57.2%</strong>）。数据量上，Tool-R1 用 <strong data-src="§4.1">1,300</strong> 条，MAT Agent 用 <strong data-src="Table 1">20k</strong> 条；论文说前者不到后者的 <strong data-src="§4.2">7%</strong>，按表内数字复算为 <strong data-src="Table 1">6.5%</strong>。这个对比同时混着「数据量」与「是否使用 GPT-4o 轨迹」两个变量，不能单独归因于数据量。</p>
+  <p>14B 相对 7B 的增益也要拆开：AnsAcc 从 <strong data-src="Table 1">19.39</strong> 到 <strong data-src="Table 1">26.67</strong>，高 <strong data-src="Table 1">7.28</strong> 个百分点，相对 <strong data-src="Table 1">37.5%</strong>。分难度看，Level 2 的绝对差最大（<strong data-src="Table 1">27.91</strong> vs <strong data-src="Table 1">17.44</strong>，高 <strong data-src="Table 1">10.47</strong> 个百分点），Level 1 差 <strong data-src="Table 1">3.77</strong> 个百分点，Level 3 差 <strong data-src="Table 1">3.85</strong> 个百分点。这不是受控的缩放实验，只是 7B 与 14B 两个点的比较。</p>
+
+  <h3 style="margin-top:34px">消融：难度筛选贡献最大，队列主要省时间</h3>
+  <p>Table 2 从 7B 的 10.30 基线出发，逐项加组件。Vanilla GRPO 反而降到 <strong data-src="Table 2">9.09</strong>（低 <strong data-src="Table 2">1.21</strong> 个百分点）；加难度筛选后到 <strong data-src="Table 2">16.36</strong>，比 Vanilla 高 <strong data-src="Table 2">7.27</strong> 个百分点（比原始基线高 <strong data-src="Table 2">6.06</strong> 个百分点）；再加辅助奖励到 <strong data-src="Table 2">18.79</strong>，比上一步高 <strong data-src="Table 2">2.43</strong> 个百分点；最后加动态队列（带重采样）到 <strong data-src="Table 2">19.39</strong>，比不带重采样的 <strong data-src="Table 2">18.18</strong> 高 <strong data-src="Table 2">1.21</strong> 个百分点，训练时间保持 <strong data-src="Table 2">22.3</strong> h。</p>
+  <div class="sim">
+    <div class="sim-top" id="abl-tabs">
+      <button class="rule-btn active" data-mode="acc">AnsAcc<span class="r-sub">0–22</span></button>
+      <button class="rule-btn" data-mode="time">训练时间<span class="r-sub">0–45 h</span></button>
+    </div>
+    <div class="chart" id="abl-chart" data-src="Table 2"></div>
+    <div class="readout" id="abl-readout" data-src="Table 2">切换指标，查看每个组件对 AnsAcc 与训练时间的影响。</div>
+  </div>
+  <details>
+    <summary>手算对账 <span class="sum-sub">难度筛选与队列复用</span></summary>
+    <div class="details-body">
+      <p>难度筛选：Vanilla GRPO <strong>9.09</strong> → 加筛选 <strong>16.36</strong>，绝对差 <code>16.36 − 9.09 = 7.27</code> 个百分点；若以 10.30 为基准，则 <code>16.36 − 10.30 = 6.06</code>。论文 Table 2 的括号列用的是后者。</p>
+      <p>队列复用：w/o resample <strong>18.18</strong> → w/ resample <strong>19.39</strong>，绝对差 <code>19.39 − 18.18 = 1.21</code> 个百分点；训练时间 <code>41.5 − 22.3 = 19.2</code> 小时，相对 <code>19.2 / 41.5 × 100 = 46.3%</code>。</p>
+    </div>
+  </details>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法（Qwen2.5-7B-Instruct）</th><th class="num">Level 1</th><th class="num">Level 2</th><th class="num">Level 3</th><th class="num">AnsAcc</th><th class="num">训练时间 (h)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-7B-Instruct</td><td class="num">16.98</td><td class="num">9.30</td><td class="num">0.00</td><td class="num">10.30</td><td class="num">—</td></tr>
+        <tr><td>Vanilla GRPO</td><td class="num">15.09 (-1.89)</td><td class="num">8.14 (-1.16)</td><td class="num">0.00</td><td class="num">9.09 (-1.21)</td><td class="num">41.5</td></tr>
+        <tr><td>+ 难度筛选</td><td class="num">26.41 (+9.43)</td><td class="num">15.12 (+5.82)</td><td class="num">0.00</td><td class="num">16.36 (+6.06)</td><td class="num">41.5</td></tr>
+        <tr><td>+ 辅助奖励</td><td class="num">30.19 (+13.21)</td><td class="num">16.28 (+6.98)</td><td class="num">3.84 (+3.84)</td><td class="num">18.79 (+8.49)</td><td class="num">41.5</td></tr>
+        <tr><td>+ 动态队列（w/o resample）</td><td class="num">28.30 (+11.32)</td><td class="num">16.28 (+6.98)</td><td class="num">3.84 (+3.84)</td><td class="num">18.18 (+7.88)</td><td class="num">22.3</td></tr>
+        <tr><td>+ 动态队列（w/ resample）</td><td class="num">30.19 (+13.21)</td><td class="num">17.44 (+8.14)</td><td class="num">3.84 (+3.84)</td><td class="num"><strong>19.39 (+9.09)</strong></td><td class="num"><strong>22.3</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">Table 2 · 括号内为相对 Qwen2.5-7B-Instruct 基线的绝对百分点差；训练时间只覆盖 7B 消融，论文未给 14B 时长。</div>
+
+  <h3 style="margin-top:34px">分难度：7B 与 14B 的提升不在同一层</h3>
+  <p>7B 的 Level 1 从 <strong data-src="Table 1">16.98</strong> 到 <strong data-src="Table 1">30.19</strong>（高 <strong data-src="Table 1">13.21</strong> 个百分点），Level 2 从 <strong data-src="Table 1">9.30</strong> 到 <strong data-src="Table 1">17.44</strong>（高 <strong data-src="Table 1">8.14</strong> 个百分点），Level 3 从 <strong data-src="Table 1">0.00</strong> 到 <strong data-src="Table 1">3.84</strong>（高 <strong data-src="Table 1">3.84</strong> 个百分点）。14B 的 Level 1 从 <strong data-src="Table 1">24.53</strong> 到 <strong data-src="Table 1">33.96</strong>（高 <strong data-src="Table 1">9.43</strong> 个百分点），Level 2 从 <strong data-src="Table 1">11.63</strong> 到 <strong data-src="Table 1">27.91</strong>（高 <strong data-src="Table 1">16.28</strong> 个百分点），Level 3 从 <strong data-src="Table 1">3.84</strong> 到 <strong data-src="Table 1">7.69</strong>（高 <strong data-src="Table 1">3.85</strong> 个百分点）。</p>
+  <div class="sim">
+    <div class="sim-top" id="lvl-tabs">
+      <button class="rule-btn active" data-model="7b">Qwen2.5-7B-Instruct<span class="r-sub">AnsAcc 10.30 → 19.39</span></button>
+      <button class="rule-btn" data-model="14b">Qwen2.5-14B-Instruct<span class="r-sub">AnsAcc 15.15 → 26.67</span></button>
+    </div>
+    <div class="chart" id="lvl-chart" data-src="Table 1"></div>
+    <div class="readout" id="lvl-readout" data-src="Table 1">选择模型，查看三个难度层级的未 RL 基线与 Tool-R1。</div>
+  </div>
+  <details>
+    <summary>手算对账 <span class="sum-sub">两个难度层级的增益</span></summary>
+    <div class="details-body">
+      <p>7B Level 1：<strong>16.98</strong> → <strong>30.19</strong>，绝对差 <code>30.19 − 16.98 = 13.21</code> 个百分点；相对 <code>13.21 / 16.98 × 100 = 77.8%</code>。</p>
+      <p>14B Level 2：<strong>11.63</strong> → <strong>27.91</strong>，绝对差 <code>27.91 − 11.63 = 16.28</code> 个百分点；相对 <code>16.28 / 11.63 × 100 = 140.0%</code>。这两个百分比的分母都是未 RL 的同一底座，不是跨模型比较。</p>
+    </div>
+  </details>
+  <p>「about 10% gain」这句话需要口径。7B 的绝对提升是 9.09 个百分点，14B 是 11.52 个百分点，都接近 10 个百分点；相对提升则是 <strong data-src="Table 1">88.3%</strong> 与 <strong data-src="Table 1">76.0%</strong>，远高于 10%。论文摘要写的是 “about 10% gain”，没有在同一句说明绝对还是相对；页面并列两个口径，不替作者选。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：单 benchmark、单裁判、单组阈值，成本只报了 7B</h2></div>
+  <p class="sec-sub">这些条件决定了哪些数字可以迁移，哪些只能当成论文设定下的结果。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">评测</span><h4>只有 GAIA</h4></div>
+      <p>主结果全部在 GAIA validation 上，没有第二个 agent benchmark。GAIA 覆盖 PDF/PPTX/XLSX、网页与多步推理，但仍是单一评测环境；论文没有报告跨 benchmark 的迁移（§4.1、Table 1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">裁判</span><h4>奖励依赖 3B 裁判</h4></div>
+      <p>最终答案由 Qwen2.5-3B-Instruct 按四项标准判 0/0.5/1；论文没有报告裁判与人工评分的一致率，也没有做裁判替换实验。裁判偏差会直接进入策略梯度（§3.3、Appendix A）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">阈值</span><h4>0.2–0.8 只给了一组</h4></div>
+      <p>难度筛选与缓存过滤都用 0.2–0.8 的通过率窗口，论文没有扫这个区间，也没有比较更宽/更窄的阈值。队列只比较 w/o 与 w/ resample，没有 G、g 的完整消融（§3.2、Table 2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">成本</span><h4>22.3 h 是 7B 的数</h4></div>
+      <p>41.5/22.3 h 只来自 7B 消融；14B 没有训练时长。论文也没有报告 API 费用、工具调用次数或多次运行方差。不能把 22.3 h 直接外推到 14B 或其他工具集（Table 2）。</p>
+    </div>
+  </div>
+  <p>结果层面的边界还有三条。第一，<strong>Level 3 存在并列</strong>：7B 的 Level 3 是 <strong data-src="Table 1">3.84</strong>，MAT Agent 也是 <strong data-src="Table 1">3.84</strong>；14B 的 Level 3 是 <strong data-src="Table 1">7.69</strong>，才真正高于 3.84。第二，<strong>样本效率的对照不纯</strong>：1.3k vs 20k 的对比同时改变了数据量和是否需要 GPT-4o 轨迹，不能把全部差异归给数据量。第三，<strong>没有统计检验</strong>：论文没有报告置信区间、种子方差或显著性检验，页面也不把任何差值写成「显著」。</p>
+  <p>方法层面的边界是代码执行环境。Tool-R1 依赖一个能顺序执行 Python、保留变量状态、限制 import 的执行器；换到不允许任意代码、或工具调用必须走固定 API 的环境，核心的变量共享优势会削弱。论文的系统提示排除了 <span class="token">os</span>、<span class="token">pip</span> 等库，但没有给出完整的沙箱安全评估（Appendix A）。</p>
+
+  <div class="errata">
+    <strong>笔记勘误（只记录，不修改原笔记）</strong>
+    <ul>
+      <li><strong>「about 10% gain」没有拆分口径：</strong>论文摘要的 about 10% gain 没有在同一句交代口径；页面并列 9.09/11.52 个百分点与 88.3%/76.0% 相对值，不替作者选。</li>
+      <li><strong>难度筛选的 +7.27% 与论文表内 +6.06 不是同一个分母：</strong>笔记写 9.09→16.36（+7.27），这是相对 Vanilla GRPO；论文 Table 2 的括号列以 10.30 为基准，写 +6.06。两者都成立，但引用时必须带分母。</li>
+      <li><strong>「for the first time」与 Table 1 并列冲突：</strong>论文 §4.2 写 “for the first time (3.84% success rate)”，但 Table 1 的 MAT Agent 两行 Level 3 也都是 3.84；3.84 与 MAT Agent 并列，不能据此主张 “first time”；14B 的 Level 3 7.69 才高于 3.84。</li>
+      <li><strong>「训练时间几乎减半」只对 7B 消融成立：</strong>41.5→22.3 h 是 Table 2 的 7B 数据，减少 19.2 h、相对 46.3%；论文没有给 14B 的训练时间，也没有给 14B 的队列消融。</li>
+      <li><strong>「1,300 条 vs 20k 条」不是纯数据量对照：</strong>MAT Agent 的 20k 还包含 GPT-4o 生成的高质量轨迹，Tool-R1 不需要轨迹标注；Tool-R1 的数据量只有 MAT Agent 的 6.5%，这只是其中一个变量。</li>
+      <li><strong>「效果显著」没有统计依据：</strong>论文没有报告显著性检验或置信区间；笔记里的「效果显著」是修辞，不是统计结论。</li>
+      <li><strong>「课程学习」不是论文的术语：</strong>笔记开头写「本文也引入了课程学习」，论文 §3.2 的说法是 difficulty-aware data filtering——按初始策略的通过率 0.2–0.8 筛题，没有课程式的分阶段训练安排。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div>Tool-R1: Sample-Efficient Reinforcement Learning for Agentic Tool Use</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.12867v1">https://arxiv.org/abs/2509.12867v1</a>（arXiv 2025；页面以 v1 为准）<br>
+    代码：<a href="https://github.com/YBYBZhang/Tool-R1">https://github.com/YBYBZhang/Tool-R1</a>（论文称将开放）<br>
+    笔记：<a href="/tool-r1sample-efficient-reinforcement-learning-for-agentic-tool-use/">Tool-R1：Sample-Efficient Reinforcement Learning for Agentic Tool Use</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var ABL = [
+    {name: '7B-Instruct（基线）', acc: 10.30, time: null},
+    {name: 'Vanilla GRPO', acc: 9.09, time: 41.5},
+    {name: '+ 难度筛选', acc: 16.36, time: 41.5},
+    {name: '+ 辅助奖励', acc: 18.79, time: 41.5},
+    {name: '+ 队列（w/o resample）', acc: 18.18, time: 22.3},
+    {name: '+ 队列（w/ resample）', acc: 19.39, time: 22.3}
+  ];
+  var LVL = {
+    '7b': {
+      name: 'Qwen2.5-7B-Instruct',
+      base: [16.98, 9.30, 0.00],
+      rl: [30.19, 17.44, 3.84]
+    },
+    '14b': {
+      name: 'Qwen2.5-14B-Instruct',
+      base: [24.53, 11.63, 3.84],
+      rl: [33.96, 27.91, 7.69]
+    }
+  };
+  var LABELS = ['Level 1', 'Level 2', 'Level 3'];
+
+  function row(label, value, cls, max) {
+    var pct = (value / max) * 100;
+    if (pct < 1.5) pct = 1.5;
+    return '<div class="crow"><div class="cname">' + label + '</div><div class="cbars"><div class="cbar"><div class="track"><span class="fill ' + cls + '" style="height:' + pct.toFixed(1) + '%"></span></div><div class="num">' + value.toFixed(2) + '</div></div></div></div>';
+  }
+
+  function renderAbl(mode) {
+    var chart = document.getElementById('abl-chart');
+    var out = document.getElementById('abl-readout');
+    if (!chart || !out) return;
+    var max = mode === 'time' ? 45 : 22;
+    var html = '';
+    for (var i = 0; i < ABL.length; i++) {
+      var d = ABL[i];
+      if (mode === 'time') {
+        if (d.time === null) {
+          html += '<div class="crow"><div class="cname">' + d.name + '</div><div class="cbars"><div class="cbar"><div class="track"></div><div class="num">—</div></div></div></div>';
+        } else {
+          html += row(d.name, d.time, 'b1', max);
+        }
+      } else {
+        html += row(d.name, d.acc, d.name.indexOf('w/ resample') >= 0 ? 'b1' : 'b2', max);
+      }
+    }
+    chart.innerHTML = html;
+    if (mode === 'time') {
+      out.innerHTML = '训练时间：Vanilla GRPO 41.5 h → 完整配置 22.3 h，少 19.2 h（相对 46.3%）。难度筛选与辅助奖励不改变训练时间，队列把时间砍半。';
+    } else {
+      out.innerHTML = 'AnsAcc：基线 10.30 → Vanilla GRPO 9.09 → 难度筛选 16.36 → 辅助奖励 18.79 → 队列 19.39。难度筛选贡献最大，队列带重采样再补 1.21 个百分点。';
+    }
+  }
+
+  var ablTabs = document.getElementById('abl-tabs');
+  if (ablTabs) {
+    ablTabs.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      Array.prototype.forEach.call(ablTabs.querySelectorAll('.rule-btn'), function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      renderAbl(btn.getAttribute('data-mode'));
+    });
+    renderAbl('acc');
+  }
+
+  function renderLvl(key) {
+    var d = LVL[key];
+    var chart = document.getElementById('lvl-chart');
+    var out = document.getElementById('lvl-readout');
+    if (!chart || !out) return;
+    var html = '';
+    for (var i = 0; i < LABELS.length; i++) {
+      html += '<div class="crow"><div class="cname">' + LABELS[i] + '</div><div class="cbars">' +
+        '<div class="cbar"><div class="track"><span class="fill b2" style="height:' + (Math.max(1.5, d.base[i] / 36 * 100)).toFixed(1) + '%"></span></div><div class="num">' + d.base[i].toFixed(2) + '</div></div>' +
+        '<div class="cbar"><div class="track"><span class="fill b1" style="height:' + (Math.max(1.5, d.rl[i] / 36 * 100)).toFixed(1) + '%"></span></div><div class="num">' + d.rl[i].toFixed(2) + '</div></div>' +
+        '</div></div>';
+    }
+    chart.innerHTML = html;
+    var gains = [];
+    for (var j = 0; j < 3; j++) gains.push((d.rl[j] - d.base[j]).toFixed(2));
+    out.innerHTML = d.name + '：Level 1/2/3 的绝对增益分别为 ' + gains.join(' / ') + ' 个百分点（左柱为未 RL，右柱为 Tool-R1）。';
+  }
+
+  var lvlTabs = document.getElementById('lvl-tabs');
+  if (lvlTabs) {
+    lvlTabs.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      Array.prototype.forEach.call(lvlTabs.querySelectorAll('.rule-btn'), function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      renderLvl(btn.getAttribute('data-model'));
+    });
+    renderLvl('7b');
+  }
+})();
+</script>
+</body>
+</html>

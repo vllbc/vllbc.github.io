@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 3 | Table 1 | 1+1+1 |
+| 2 | Table 1 | 1+1 |
+| 1 | Table 1 | 3-2 |
+| 1 | Table 1 | 1 |
+| 0 | Table 1 | 1-1 |
+| 0.1 | §4.2 | 1-0.9 |
+-->
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Lightning · 把 Agent 执行拆成 transition，RL 训练不用重写 Agent</title>
+<meta name="description" content="Agent Lightning 用 MDP/POMDP 把 Agent 执行拆成 transition，以等值 credit assignment 复用单轮 RL，并用 server/client 解耦 trainer 与 agent runtime；实验覆盖 3 个框架。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+  .slots.s1{grid-template-columns:1fr}
+  .sim-agent{font:inherit;color:inherit;width:100%;display:block;cursor:pointer}
+  .sim-agent.off{opacity:.48;border-style:dashed;background:var(--bg)}
+  .sim-agent .slot-val{font-size:11.5px;line-height:1.5}
+  .sim-agent .slot-reward{display:block;font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.4}
+  .sim-agent.hit .slot-reward{color:var(--accent-deep);font-weight:600}
+  .sim-note{font-size:12.5px;color:var(--text-soft);margin:0 0 2px;line-height:1.65}
+  .sim-sub{font-size:12.5px;color:var(--text-muted);margin-top:7px;line-height:1.65}
+  .sim-warn{font-size:12.5px;color:var(--accent-deep);margin-top:7px;font-weight:600}
+  .sim-actions{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 6px}
+  .flow-list{counter-reset:flow;list-style:none;padding-left:0;margin:18px 0}
+  .flow-list li{counter-increment:flow;position:relative;padding-left:38px;margin-bottom:14px}
+  .flow-list li::before{content:counter(flow);position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:var(--accent-soft);color:var(--accent-deep);font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center}
+  .quote{font-size:13.5px;color:var(--text-muted);border-left:2px solid var(--border-strong);padding-left:14px;margin:14px 0;line-height:1.8}
+  .mini{font-size:12.5px;color:var(--text-soft)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Agent Lightning</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent · RL 训练框架 · arXiv 2508.03680v1</span>
+  <h1>Agent Lightning：把 Agent 执行拆成 transition，RL 训练不用重写 Agent</h1>
+  <p class="hero-sub">
+    Agent 生态的编排逻辑千差万别，现有 RL 训练器却要求把 Agent 搬进训练框架、把多轮轨迹拼成一条长序列再加掩码。
+    Agent Lightning 用 MDP/POMDP 只抽取每次 LLM 调用的 <code>(input, output, reward)</code>，把轨迹分解成 transition，再交给 GRPO / REINFORCE++ 等单轮算法；系统上把 trainer 与 agent runtime 拆成 server/client。
+    代价是 credit assignment 目前只做等值分配，证据也主要是三条奖励曲线。
+  </p>
+  <div class="meta">
+    <span>Xufang Luo, Yuge Zhang, Zhiyuan He 等 · Microsoft Research</span>
+    <a href="https://arxiv.org/abs/2508.03680v1" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/microsoft/agent-lightning" target="_blank" rel="noopener">代码 ↗</a>
+    <a href="/agent-lightningtrain-any-ai-agents-with-reinforcement-learning/">笔记 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    现有 RL 训练器主要面向<strong>静态、单次调用</strong>的任务，比如偏好对齐或数学推理。Agent 却把多次 LLM 调用、不同 prompt、外部工具和动态编排串在一起；想把已有 Agent 接进 RL，通常要在训练器里<strong>重写一遍 Agent</strong>，或者把多轮轨迹拼成长序列再设计掩码。
+  </p>
+  <p>
+    论文的做法是先把 Agent 执行抽象成 POMDP：state 是语义变量快照，action 是一次 LLM 调用生成的完整 token 序列。训练时不解析整张执行图，只保留策略 LLM 的 <code>(input, output, reward)</code>，把一条轨迹拆成若干 <strong>transition</strong>。
+  </p>
+  <p>
+    <strong>LightningRL</strong> 先把轨迹级 return <em>等值</em>分给每个 action——当前实现里每个 action 都拿最终 return <code>R</code>，不是把 <code>R</code> 均分成 <code>R/T</code>；再让现有的单轮 RL 算法在 token 级完成更新。这样一条多轮轨迹就变成了多条可分组、可批处理的单轮样本。
+  </p>
+  <p>
+    系统上，server 管训练、任务分发和 OpenAI-like API，client 跑 Agent、工具与数据采集；两边通过 API 通信，client 不需要和 GPU 同机。论文用 LangChain、OpenAI Agents SDK、AutoGen 各做一个任务，基座均为 <span data-src="§4.1–4.3">Llama-3.2-3B-Instruct</span>（§4.1、§4.2、§4.3 各自写明）；结果以 Figure 5–7 的奖励曲线呈现，正文未标注具体读数，本页<strong>未转录</strong>曲线数值。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">3</div>
+      <div class="k">种 Agent 框架：LangChain / OpenAI Agents SDK / AutoGen，各自对应一个任务</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4.2">0.9 / 0.1</div>
+      <div class="k">RAG 奖励中 correctness 与 format 的权重：<br><code>R = 0.9×R<sub>correctness</sub> + 0.1×R<sub>format</sub></code></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">2 / 3</div>
+      <div class="k">Text-to-SQL 中同时被优化的 agent 数 / 总数；checker 不参与更新</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>Agent 的复杂与多样，正好卡在单轮 RL 的假设外</h2></div>
+  <p class="sec-sub">读完这节应知道：为什么把 Agent 直接塞进现有 RL 训练器，成本不只是「多写几行适配代码」。</p>
+
+  <p>论文先把 Agent 定义得很宽：<strong>一个在执行过程中包含一次或多次 LLM 调用的软件系统</strong>。组件分两类——LLM（或更一般的基础模型）与工具；一个 Agent 可以有多个 LLM endpoint，也可以挂多个工具，编排方式由用户按任务写死或动态决定（§2.1–2.2）。</p>
+
+  <p>麻烦在于，现有 LLM RL 方法主要面向单轮任务：给一个 prompt，生成一个 response，算一个 reward，更新一次。Agent 的一次执行却可能包含多次 LLM 调用，每次的 prompt 和 response 都不同，中间还夹着工具、API 与环境交互；更麻烦的是，不同应用的 Agent 用不同框架写，执行逻辑本身就不统一（§1）。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">耦合</span><h4>训练器要知道 Agent 怎么跑</h4></div>
+      <p>拼接式训练需要知道回合顺序、哪些 token 要 mask；这些信息都在 Agent 代码里。训练器因此和 Agent 执行逻辑绑在一起，迁移时往往要重写 Agent（§5.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">上下文</span><h4>轮次越多，序列越长</h4></div>
+      <p>把多轮交互拼成一条序列，上下文会随工具输出、协议消息和多 Agent 通信累积，容易触及输入长度限制，也会抬高计算与显存开销（§3.3.2、§5.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">掩码</span><h4>位置连续性被打断</h4></div>
+      <p>论文指出，masking 会破坏 RoPE 等位置编码所依赖的 token 连续性，还会给代码验证、调试和 kernel 设计增加复杂度（§3.3.2）；掩码规则往往与应用绑定、难以通用（§5.1）。</p>
+    </div>
+  </div>
+
+  <p>论文的出发点因此不是发明一个新的 PPO 变体，而是换一种<strong>数据组织方式</strong>：只要能把 Agent 执行中真正影响策略的决策点抽出来，训练器就不需要理解完整的编排逻辑。这个判断来自 §3.1 与 §3.2 的整体设计。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条旧路：拼接加掩码、搬进训练器、按应用定制</h2></div>
+  <p class="sec-sub">前人分别从多轮 RL 算法、RL 系统与应用专用 RL 三侧逼近；前两条主线都把 Agent 逻辑和训练逻辑绑在一起，第三条则只针对预设工作流。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>多轮 RL：拼接 + 掩码</h4></div>
+      <p>RAGEN、Trinity-RFT、rLLM、Search-R1 等工作把多轮交互拼成一条长序列，再用掩码控制哪些部分参与优化。</p>
+      <p class="quote">“These methods typically concatenate agent turns into a single, elongated sequence and assigning specific masks to ensure correct optimization.”（§5.1）</p>
+      <p>论文的批评是：这类方法更适合简单、顺序的工作流；上下文会累积，掩码规则要按应用定制，还会打断位置连续性。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>RL 系统：单轮优先</h4></div>
+      <p>verl、OpenRLHF、TRL、ROLL、AReaL 等系统主要优化单轮 LLM 训练；要给 Agent 用，通常得在训练系统里重建 Agent。</p>
+      <p class="quote">“they generally require developers to rebuild agents inside the training system.”（§5.1）</p>
+      <p>论文列出的代价包括：迁移 labor-intensive、error-prone，难以跨异构 Agent 生态扩展；还要求开发者熟悉 Ray 等分布式系统，并处理 MCP server、外部工具与 API 的依赖。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">路线 C · 补充</span><h4>应用专用 RL</h4></div>
+      <p>Search-R1、R1-Searcher、DeepSWE、ReTool、SimpleTIR 等把 RL 用在搜索、代码或工具推理等特定场景。</p>
+      <p class="quote">“they often rely on a predefined workflow in both training and inference. Thus they’re not targeting at general-purpose agent training.”（§5.1）</p>
+      <p>这些工作通常预设训练和推理的工作流，因此不解决「任意 Agent 如何接入 RL」这个问题。</p>
+    </div>
+  </div>
+
+  <p>Agent Lightning 的赌注是：与其标准化 Agent，不如标准化<strong>训练数据接口</strong>。论文的原话是：</p>
+  <p class="quote">“This unified data interface abstracts away the underlying orchestration logic and agent framework details, making it applicable to ANY agent.”（§1）</p>
+  <p>这句话是论文的主张，不是本页对实验覆盖面的判断；实验只覆盖 Table 1 里的三种框架/任务，见 §06 与 §07。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>核心：只抽 LLM 的 input/output/reward，把轨迹拆成单轮样本</h2></div>
+  <p class="sec-sub">读完这节应知道：MDP/POMDP 抽象、transition 的定义，以及 LightningRL 为什么能直接套 GRPO。</p>
+
+  <h3>一次执行 = 一串 component call</h3>
+  <p>论文把 Agent 执行看成有向无环图：节点是组件调用（LLM 或工具），边是依赖或控制流。但训练不需要还原整张图，只需要识别当前状态和影响状态转移的关键调用（§3.1）。一次 component call 写成：</p>
+  <div class="eq">
+    call<sub>i</sub> = ( meta<sub>i</sub>, input<sub>i</sub>, output<sub>i</sub> ), &nbsp; output<sub>i</sub> = C<sub>i</sub>(input<sub>i</sub>)
+  </div>
+  <p class="eq-cap">Eq. (3) · C<sub>i</sub> 可以是 LLM，也可以是工具；meta 记录组件名、类型、版本、endpoint、采样参数等。Figure 2 右栏把同一条 call 记为 <code>(component, input, output, reward)</code>，中间调用的 reward 标为 <code>NA</code>；两种写法并列</p>
+
+  <p>给每次调用附上标量奖励 <code>r<sub>i</sub></code>，一次执行就写成 <code>execution<sup>R</sup>(x,k) = {(call<sub>i</sub>, r<sub>i</sub>)}<sub>i=1..N</sub></code>（Eq. 5）。奖励可以来自中间步骤，也可以只在结束时给一个终止奖励；论文明确指出，很多现实场景只有终止奖励 <code>r<sub>N</sub></code>，这是该形式化的一个特例（§3.1.2）。</p>
+
+  <h3>训练时只保留策略 LLM 的决策</h3>
+  <p>对要优化的策略 <code>π<sub>θ</sub></code>，论文从一次执行中只抽取 LLM 调用的输入、输出与奖励：</p>
+  <div class="eq">
+    execution<sup>RL</sup>(x,k) = { ( input<sub>t</sub>, output<sub>t</sub>, r<sub>t</sub> ) }<sub>t=1..T</sub>, &nbsp; output<sub>t</sub> = π<sub>θ</sub>(input<sub>t</sub>)
+  </div>
+  <p class="eq-cap">Eq. (6)–(7) · T 是该轨迹中策略 LLM 的调用次数；工具调用与编排逻辑不单独成样本，但中间变量若被策略 LLM 读入 input，就随 input 进入样本（§3.1.3 第二次 LLM 调用的 input 是 <code>(U, P)</code>，Passages 即中间变量）；reward 可以为空，Figure 2 中中间调用记为 <code>NA</code></p>
+
+  <p>论文把这一步的形式化写成 POMDP <code>(S, O, A, P, R)</code>：state 是执行快照，observation 是策略 LLM 可见的 input，action 是一次 LLM 调用生成的<strong>整段 token 序列</strong>，return 是 <code>R = Σ<sub>t=1..T</sub> r<sub>t</sub></code>（§3.2.1）。摘要与 §1 用 MDP 作概括，§3.2.1 展开为 POMDP；两处都指向同一个数据接口，本页按 §3.2.1 的形式化写。</p>
+
+  <h3>LightningRL：先分 credit，再交给单轮 RL</h3>
+  <p>LightningRL 是两层机制（§3.3.2）：第一层由 credit assignment 模块把 episode-level return 分给每个 action；第二层由现有单轮 RL 算法把 action-level 信号分解到 token。当前实现的 credit assignment 很简单：</p>
+  <div class="eq">
+    r<sub>t</sub> = R &nbsp;&nbsp;(对轨迹中的每个 action t)
+  </div>
+  <p class="eq-cap">§3.3.2 · “LightningRL simply assumes each action within the episode has the same value, equal to the final return R.”</p>
+
+  <p>注意这不是把 <code>R</code> 均分成 <code>R/T</code>。每个 action 都拿完整的最终 return；后面的 GRPO 再在同任务的多条执行之间做组内归一化。论文把第二层直接交给现有单轮算法，Eq. (8) 是典型的 token-level 目标：</p>
+  <div class="eq">
+    L(θ) = −E<sub>x∼X, output∼π<sub>θ</sub>(·|x)</sub> [ Σ<sub>j=1..N</sub> log π<sub>θ</sub>(y<sub>j</sub> | x, y<sub>&lt;j</sub>) · A<sub>j</sub> ]
+  </div>
+  <p class="eq-cap">Eq. (8) · 原文脚注 3 说明：importance ratio、clipping、KL 等项在公式里省略，但最终算法会采用</p>
+
+  <p>这样做的直接结果是：同一条多轮轨迹被拆成 <code>T</code> 条单轮样本；同一任务多次执行产生的样本再按任务分组，GRPO 就可以在组内估计均值和标准差。论文原话是 “each task x is run multiple times to generate different execution data, each decomposed into individual actions. These samples are then grouped by task for computing statistics in Eq. 8.”（§3.3.2）</p>
+
+  <h3>交互：一条轨迹怎样变成训练样本</h3>
+  <p class="mini">下面的模拟只覆盖论文机制中的「选择哪些调用优化」与「transition 如何成为单轮样本」；每个 agent 在一次执行中被调用一次，是页面简化假设，原文没有给出每次执行的调用次数。它不是实验复现，也不产生性能数字。</p>
+
+  <div class="sim" id="lightning-sim">
+    <div class="sim-top" role="group" aria-label="选择任务">
+      <button type="button" class="rule-btn active" data-task="sql">Text-to-SQL<span class="r-sub">LangChain · 3 agents</span></button>
+      <button type="button" class="rule-btn" data-task="rag">RAG<span class="r-sub">OpenAI Agents SDK · 1 agent</span></button>
+      <button type="button" class="rule-btn" data-task="math">Math QA<span class="r-sub">AutoGen · 1 agent</span></button>
+    </div>
+    <div class="sim-top" role="group" aria-label="选择数据组织方式">
+      <button type="button" class="rule-btn active" data-mode="lightning">LightningRL<span class="r-sub">每条 transition 单独成样本</span></button>
+      <button type="button" class="rule-btn" data-mode="concat">拼接 + 掩码<span class="r-sub">整条轨迹压成一个样本</span></button>
+    </div>
+    <div class="sim-top" role="group" aria-label="选择最终奖励">
+      <button type="button" class="rule-btn active" data-reward="1">成功 · R=1<span class="r-sub">示意用最终 return（非论文参数）</span></button>
+      <button type="button" class="rule-btn" data-reward="0">失败 · R=0<span class="r-sub">示意用最终 return（非论文参数）</span></button>
+    </div>
+    <p class="sim-note">R 是页面示意的最终 return：Text-to-SQL 与 Math QA 的原文奖励为最终答案是否正确；RAG 原文奖励是连续值 <code>R=0.9×R<sub>correctness</sub>+0.1×R<sub>format</sub></code>，本交互的 R=1/0 不是论文设置。</p>
+    <p class="sim-note" id="simNote">论文设置：只优化 SQL writer 与 re-writer；点击 agent 可改，属页面自定对照。</p>
+    <div class="slots s3" id="simSlots"></div>
+    <div class="readout" data-src="Table 1（agent 数）+ 页面假设（每 agent 一次调用，R 取 1/0）" id="simReadout">
+      <div class="r-head">模拟读数</div>
+      <div>正在初始化…</div>
+    </div>
+    <div class="sim-actions">
+      <button type="button" class="act ghost" id="simReset">恢复论文设置</button>
+    </div>
+
+    <details>
+      <summary>手算对账 <span class="sum-sub">2 组参数，逐位复算</span></summary>
+      <div class="details-body">
+        <p><strong>口径：</strong>样本数 = 被优化的 LLM 调用数；拼接模式固定 1 条样本；每条 transition 的 reward 都等于该次执行的最终 return <code>R</code>（§3.3.2 的等值分配，不是 <code>R/T</code>）。</p>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>参数</th><th>中间量</th><th>结果</th></tr></thead>
+            <tbody>
+              <tr><td>Text-to-SQL · LightningRL · R=1</td><td>3 calls = 1+1+1；2 tuned = 1+1；1 excluded = 3−2</td><td>2 条样本；每条 reward = 1</td></tr>
+              <tr><td>RAG · LightningRL · R=0</td><td>1 call；1 tuned；0 excluded = 1−1</td><td>1 条样本；reward = 0</td></tr>
+              <tr><td>Text-to-SQL · 拼接+掩码 · R=1</td><td>1 条拼接样本；1 个调用被 mask</td><td>1 条样本；reward = 1</td></tr>
+              <tr><td>RAG · 拼接+掩码 · R=0</td><td>1 条拼接样本；0 个调用被 mask</td><td>1 条样本；reward = 0</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="mini">拼接模式的「1 条样本」来自 §3.3.2 对 previous methods 的描述：所有回合被拼成一个 response，再用 mask 控制更新范围。表中数字只由 Table 1 的 agent 数与页面假设（每 agent 一次调用）推出；RAG 行的 <code>R=0</code> 也是页面示意的最终 return，不是 §4.2 的连续奖励。JS 对同样参数输出同样的整数。</p>
+      </div>
+    </details>
+  </div>
+
+  <h3>代价：等值分配只是起点</h3>
+  <p>论文自己把更细粒度的 credit assignment 列为 future work：可以引入 high-level value function 来估计每个 action 的期望 return，也可以按启发式或学习到的模型分配 credit（§3.3.2）。当前实现选择等值分配，论文给出的理由是简单、可直接复用单轮 RL，并称实验显示这种简单策略在多个场景和数据集上有效。<span class="infer">推断</span>：这更像工程上的起点，而不是与其它 credit assignment 方法比较后的最优选择（依据：原文把更细粒度方法列为未来工作，§4 只报告等值分配的结果）。对长程任务是否仍然足够，论文没有给出实验。</p>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>怎么训：server 管训练与任务，client 跑 Agent 并回传 trace</h2></div>
+  <p class="sec-sub">读完这节应知道：一次训练循环里，数据从 server 到 client 再回到 trainer 的路径，以及工程上靠什么保证吞吐与容错。</p>
+
+  <p>论文把 RL 训练拆成两个角色：<strong>trainer</strong> 更新模型权重，<strong>rollout</strong> 采集轨迹。单轮任务里 rollout 只是「给 prompt、生成 response」；Agent 任务里 rollout 要完整执行 Agent，包括多次 LLM 生成、工具调用和原生代码。Agent Lightning 的核心系统设计就是把这两侧拆开（§3.4.1）。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Server</span><h4>训练侧</h4></div>
+      <p>集成 RL 框架（论文举例 verl），管理训练过程、任务编排、数据与通信；向 client 暴露 <strong>OpenAI-like API</strong>。server 把数据集切成 batch，用事件驱动系统协调 generation 与 training 阶段（§3.4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Client</span><h4>Agent 运行时</h4></div>
+      <p>跑用户已有的 Agent 代码、工具与环境，采集 trace 和 reward 后回传；不需要和 GPU 资源同机。论文把它称为 agent runtime，强调 <strong>agent-agnostic training / trainer-agnostic agents</strong>（§3.4.1）。</p>
+    </div>
+  </div>
+
+  <h3>一次训练循环</h3>
+  <ol class="flow-list">
+    <li>用户上传 task dataset；server 与 RL 框架一起初始化。</li>
+    <li>server 把数据切成 batch，用事件驱动系统在 generation 与 training 之间切换。</li>
+    <li>task batch 以 <strong>inventory</strong> 方式分发给 client：server 维护可用 task 记录，client 就绪就领任务。</li>
+    <li>每个 task 附带一个<strong>独立的 OpenAI-like endpoint</strong>；client 通过它调用模型，同时完成数据追踪与采集。</li>
+    <li>client 在 agent runtime 中执行 Agent，生成 trace 与 reward，回报 server；server 处理数据并转给 trainer 更新参数。</li>
+  </ol>
+  <p class="mini">以上顺序对应 §3.4.1 的叙述；endpoint per task 是原文明确写的设计，不是本页推断。</p>
+
+  <h3>运行时靠什么撑住大规模 rollout</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">并行</span><h4>两层数据并行</h4></div>
+      <p><strong>intra-node</strong>：一个 client 在一台机器上跑多个 worker，每个 worker 执行一个 Agent 实例；<strong>inter-node</strong>：多个 client 跑在不同机器上，各自管理一组 Agent 实例（§3.4.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">采集</span><h4>两种 tracing</h4></div>
+      <p>首选 OpenTelemetry + AgentOps 自动埋点，捕获执行 trace、LLM 调用和环境交互；对不想依赖 OpenTelemetry 的用户，OpenAI-like API endpoint 内置一套轻量 tracing（§3.4.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">容错</span><h4>失败不拖垮训练</h4></div>
+      <p>检测 Agent 崩溃、网络中断、非法输出、长时间挂起的工具调用；失败 task 可重试或改派给其他 Agent 实例，并保留日志（§3.4.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">奖励</span><h4>AIR 与奖励服务</h4></div>
+      <p>AIR（Automatic Intermediate Rewarding）把系统监控信号（如工具调用返回状态）转成中间奖励；环境与奖励函数可以本地跑，也可以池化成共享服务（§3.4.2）。</p>
+    </div>
+  </div>
+
+  <p>这套设计解释了一个容易忽略的点：Agent Lightning 并没有把 Agent「编译」进训练图，而是让 Agent 继续在自己的进程里跑，训练侧只通过 API 观察和收集。代价是网络通信、序列化与错误处理都变成训练循环的一部分（原文点名网络中断与外部依赖，未点名序列化；序列化是本页的判断 <span class="infer">推断</span>）；论文用 per-task endpoint、重试和日志来兜底（§3.4.1–3.4.2）。</p>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>架构：一条 trace 从 Agent 运行时走到 RL trainer</h2></div>
+  <p class="sec-sub">下图按 Figure 4 简化重绘；重点是 server/client 的边界，以及 per-task endpoint 如何同时承担模型调用与数据采集。</p>
+
+  <figure>
+    <svg viewBox="0 0 800 410" role="img" aria-label="Agent Lightning 的 Training-Agent Disaggregation 架构：server 管理 task 与 trainer，client 运行 agent 与工具，通过 per-task OpenAI-like API 通信并回传 trace。" xmlns="http://www.w3.org/2000/svg">
+      <title>Agent Lightning 的 server / client 架构</title>
+      <desc>server 包含 task manager、OpenAI-like API 与 RL trainer；client 包含 workers、agent code 与 tools。task 与 endpoint 从 server 发往 client，LLM 调用从 client 发往 API，trace 与 reward 从 client 回传 trainer。</desc>
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+      </defs>
+
+      <!-- dataset -->
+      <rect x="18" y="88" width="122" height="68" rx="10" fill="var(--bg-tint)" stroke="var(--border-strong)"></rect>
+      <text x="30" y="112" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12.5" font-weight="600" fill="var(--text)">Task dataset</text>
+      <text x="30" y="132" font-family="'JetBrains Mono', monospace" font-size="10.5" fill="var(--text-muted)">train.jsonl</text>
+      <text x="30" y="147" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">task + reward</text>
+
+      <!-- server -->
+      <rect x="170" y="38" width="286" height="334" rx="16" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="190" y="66" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="700" fill="var(--text)">Lightning Server</text>
+      <text x="190" y="84" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">训练侧 · 可接 verl 等 RL 框架</text>
+
+      <rect x="192" y="100" width="242" height="62" rx="9" fill="var(--bg-tint)" stroke="var(--border)"></rect>
+      <text x="206" y="123" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12" font-weight="600" fill="var(--text)">Task manager</text>
+      <text x="206" y="141" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">切 batch · inventory 分发</text>
+      <text x="206" y="155" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">记录可用 task</text>
+
+      <rect x="192" y="180" width="242" height="76" rx="9" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="206" y="203" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12" font-weight="600" fill="var(--accent-deep)">OpenAI-like API</text>
+      <text x="206" y="222" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">每个 task 独立 endpoint</text>
+      <text x="206" y="238" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">模型调用 + trace 采集</text>
+
+      <rect x="192" y="274" width="242" height="72" rx="9" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="206" y="297" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12" font-weight="600" fill="var(--c1)">RL trainer</text>
+      <text x="206" y="316" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">参数更新</text>
+      <text x="206" y="332" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">消费 transition</text>
+
+      <!-- client -->
+      <rect x="512" y="38" width="270" height="334" rx="16" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="532" y="66" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="700" fill="var(--text)">Lightning Client</text>
+      <text x="532" y="84" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">Agent 运行时 · 无需与 GPU 同机</text>
+
+      <rect x="534" y="100" width="226" height="62" rx="9" fill="var(--bg-tint)" stroke="var(--border)"></rect>
+      <text x="548" y="123" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12" font-weight="600" fill="var(--text)">Workers</text>
+      <text x="548" y="141" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">intra-node 多 worker</text>
+      <text x="548" y="155" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-muted)">inter-node 多 client</text>
+
+      <rect x="534" y="180" width="226" height="76" rx="9" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="548" y="203" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12" font-weight="600" fill="var(--c2)">Agent code</text>
+      <text x="548" y="222" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">LangChain / OpenAI Agents SDK</text>
+      <text x="548" y="238" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">AutoGen / 从零手写</text>
+
+      <rect x="534" y="274" width="226" height="72" rx="9" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="548" y="297" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12" font-weight="600" fill="var(--c3)">Tools &amp; env</text>
+      <text x="548" y="316" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">SQL / retriever / calculator</text>
+      <text x="548" y="332" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text)">环境与奖励服务</text>
+
+      <!-- arrows -->
+      <line x1="140" y1="122" x2="186" y2="122" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <line x1="434" y1="131" x2="528" y2="131" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <text x="458" y="122" font-family="'JetBrains Mono', monospace" font-size="10" fill="var(--text-soft)">task + endpoint</text>
+      <line x1="528" y1="218" x2="440" y2="218" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <text x="458" y="209" font-family="'JetBrains Mono', monospace" font-size="10" fill="var(--text-soft)">LLM call</text>
+      <line x1="528" y1="310" x2="440" y2="310" stroke="#8C857B" stroke-width="1.5" marker-end="url(#arrow)"></line>
+      <text x="452" y="301" font-family="'JetBrains Mono', monospace" font-size="10" fill="var(--text-soft)">trace + reward</text>
+
+      <!-- bottom note -->
+      <text x="192" y="394" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="10.5" fill="var(--text-soft)">server 暴露模型服务；client 执行 Agent 与工具，回传 trace + reward。图中省略多 client 拓扑与 AIR 细节。</text>
+    </svg>
+    <figcaption>
+      Figure 4 简化重绘：task 与 per-task endpoint 从 server 发往 client；client 通过 endpoint 调用模型；执行结束后把 trace/reward 回传 trainer。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">覆盖与未覆盖分支 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>覆盖：</strong>server/client 分离、task dataset → batch/inventory 分发、per-task OpenAI-like endpoint、client 执行 Agent 与工具、trace/reward 回传 trainer（§3.4.1–3.4.2；Figure 4）。</li>
+          <li><strong>未覆盖：</strong>RL 框架内的 LLM Engine、Figure 4 列出的 Semantic Kernel 等其他 Agent 框架、多 client / 多 worker 的完整拓扑、AIR 的具体信号映射、环境与奖励服务的池化部署、server 与 verl 等框架的内部接口。图中为简化重绘，不是逐像素还原。</li>
+          <li><strong>为什么 endpoint 放在 server：</strong>原文说每个 task 的 endpoint 随 task 一起发给 client，既让 client 调到更新后的模型，也让 server 能追踪与采集数据（§3.4.1）。</li>
+          <li><strong>为什么 client 不要求 GPU：</strong>训练与生成由 server 侧的 RL 框架管理，client 只跑 Agent 逻辑和工具；这是论文所说「no need to be collocated with the GPU resource」的意思（§3.4.1）。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：三个框架都跑出上升曲线，但论文没有给出终值表</h2></div>
+  <p class="sec-sub">Table 1 转录实验配置；Figure 5–7 只给奖励曲线，正文未标注具体读数，本页不把读图近似当数字。</p>
+
+  <h3>实验配置（Table 1 全表转录）</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Task</th><th>Framework</th><th>Dataset</th><th>Tool used</th><th>Num. of agents</th><th>Num. of tuned agents</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Text-to-SQL</td><td>LangChain</td><td>Spider</td><td>SQL executor</td><td class="num">3</td><td class="num">2</td></tr>
+        <tr><td>Open domain QA</td><td>OpenAI Agents SDK</td><td>MuSiQue</td><td>Wikipedia retriever</td><td class="num">1</td><td class="num">1</td></tr>
+        <tr><td>Math QA</td><td>AutoGen</td><td>Calc-X</td><td>Calculator</td><td class="num">1</td><td class="num">1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="margin-top:-8px">Table 1 · 三组实验分别用不同 Agent 框架；Text-to-SQL 的 3 个 agent 共用同一个 LLM、用不同 prompt 区分角色，训练只优化其中 2 个（§4.1）</p>
+
+  <h3>数据、基座与奖励</h3>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>任务</th><th>数据规模 / 设置</th><th>奖励</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Text-to-SQL</td><td>Spider：超过 10,000 个问题、200 个数据库、138 个 domain；测试时要求泛化到未见过的数据库（§4.1）</td><td>最终答案是否正确；测试集按 answer accuracy 评估（§4.1）</td></tr>
+        <tr><td>Open domain QA</td><td>MuSiQue；检索库为整份 Wikipedia，约 2,100 万篇文档；BGE embedding + cosine similarity（§4.2）</td><td><code>R = 0.9×R<sub>correctness</sub> + 0.1×R<sub>format</sub></code>；format 为 1 当输出符合指定格式（<code>&lt;think&gt;</code>、<code>&lt;query&gt;</code>、<code>&lt;answer&gt;</code> 等对应内容需被特定 token 包裹）；correctness 为 word-level F1（§4.2）</td></tr>
+        <tr><td>Math QA</td><td>Calc-X：由 GSM8K、Ape210K 等数学数据集改造，要求调用计算器（§4.3）</td><td>最终答案是否正确；测试集按 answer accuracy 评估（§4.3）</td></tr>
+        <tr><td>Base model</td><td colspan="2">三组实验均使用 <span class="mono">Llama-3.2-3B-Instruct</span>（§4.1–4.3）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="margin-top:-8px">§4.1–4.3 正文 · 本表是对正文数字的转录；Calc-X 的改造来源是原文列出的 GSM8K 与 Ape210K</p>
+
+  <h3>论文报告了什么</h3>
+  <p>Figure 5（Text-to-SQL）、Figure 6（RAG）、Figure 7（Math QA）分别给出训练与测试奖励曲线。论文对三组结果的总结是 “Agent Lightning enables continuous and stable performance improvement across diverse scenarios”（§4）；这是作者的定性表述，正文没有给出最终分数的表格。</p>
+  <p>本页因此只转录 Table 1 与 §4 的配置数字，<strong>不转录</strong> Figure 5–7 的曲线读数：曲线没有在正文标注具体数值，读图得到的近似值不适合当作论文数字引用。若需要具体终值，应查原图或作者后续发布的实验记录。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">发现一</span><h4>同一套接口跨了三种框架</h4></div>
+      <p>Text-to-SQL 用 LangChain，RAG 用 OpenAI Agents SDK，Math QA 用 AutoGen；Agent 侧代码保持原框架，训练侧只消费 transition。Text-to-SQL 还展示了多 agent 场景下的选择性优化：3 个 agent 中只更新 SQL writer 与 re-writer（§4.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">发现二</span><h4>RAG 奖励把格式与正确性分开</h4></div>
+      <p>RAG 的奖励是 0.9×correctness + 0.1×format；format 要求输出符合指定格式，即 <code>&lt;think&gt;</code>、<code>&lt;query&gt;</code>、<code>&lt;answer&gt;</code> 等对应内容需被特定 token 包裹，correctness 用 word-level F1。论文没有给这两个分量的单独消融，因此无法从现有结果判断 0.1 的格式权重贡献了多少。</p>
+    </div>
+  </div>
+
+  <p>另一个反直觉的点是：LightningRL 没有设计新的 token-level 目标函数，而是把多轮轨迹拆成多条单轮样本，直接复用 GRPO / REINFORCE++ / PPO。论文称 “the simple identical assignment strategy is effective across multiple scenarios and datasets”（§3.3.2）；这句话是作者对自己实验的总结，不是与其他 credit assignment 方法比较后的结论。</p>
+
+  <h3>主张 → 原文原句 → 位置</h3>
+  <p class="mini">下表只列论文明确写出的主张；没有原句支撑的判断不放进这张表。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>主张</th><th>原文原句</th><th>位置</th></tr></thead>
+      <tbody>
+        <tr><td>几乎零代码修改即可接入已有 Agent</td><td>“allowing seamless integration with existing agents developed via diverse ways … with almost ZERO code modifications”</td><td>Abstract</td></tr>
+        <tr><td>LightningRL 兼容现有单轮 RL</td><td>“LightningRL updates the policy in a manner that is fully compatible with existing single-turn RL methods for LLMs”</td><td>§1</td></tr>
+        <tr><td>等值 credit assignment 在多个场景有效</td><td>“our experimental results demonstrate that the simple identical assignment strategy is effective across multiple scenarios and datasets”</td><td>§3.3.2</td></tr>
+        <tr><td>跨场景持续、稳定改善</td><td>“Agent Lightning enables continuous and stable performance improvement across diverse scenarios”</td><td>§4</td></tr>
+        <tr><td>拼接+掩码限制上下文构建灵活性</td><td>“previous methods often concatenated all turns in a trajectory into a single response and used masking to control which parts were updated–an approach that cannot support such flexible and modular context construction”</td><td>§3.3.2</td></tr>
+        <tr><td>旧 RL 系统要求重建 Agent</td><td>“they generally require developers to rebuild agents inside the training system”</td><td>§5.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap" style="margin-top:-8px">§1 / §3.3.2 / §4 / §5.1 · 引文为英文原句；中文主张是本页对原句的压缩，不替代原句</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：它解耦了系统，但没有证明等值 credit assignment 能走很远</h2></div>
+  <p class="sec-sub">论文自述的限制，加上从实验范围能读出的几条；后者标为推断。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>没有与拼接+掩码方法的同表对比</h4></div>
+    <p>§4 的实验叙述只围绕 Agent Lightning 自己的奖励曲线，没有给出 RAGEN、Trinity-RFT、rLLM、Search-R1 等拼接式方法的同表数字。论文对拼接+掩码的批评主要在机制层面（上下文累积、掩码耦合、位置连续性），不是在同一 benchmark 上的对照实验。因此，<span class="infer">推断</span>：现有结果能说明「能跑、曲线上升」，不足以量化相对拼接式方法的增益。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>只验证了 3B 模型与三个任务</h4></div>
+    <p>三组实验的基座都是 Llama-3.2-3B-Instruct，任务分别是 Text-to-SQL、RAG、Math QA，数据集分别是 Spider、MuSiQue、Calc-X。论文的标题写 ANY，但实验覆盖的是 Table 1 的三种框架/任务；更大模型、更多 Agent 形态、更长流程是否同样成立，论文没有报告。<span class="infer">推断</span>：3B 上的曲线不能直接外推到 70B 或长程 Agent（依据：§4.1–4.3 三组实验均使用同一 3B 基座，且没有规模消融）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>credit assignment 目前是等值分配</h4></div>
+    <p>LightningRL 让每个 action 都拿最终 return <code>R</code>，不区分哪个 action 真正影响结果，也没有与 value function 或基于启发式/学习模型的 credit assignment 做对照（§3.3.2）。论文把 high-level value function 与更细粒度的 credit assignment 列为 future work。对长程、早期决策关键的任务，这种等值分配是否足够，现有实验没有回答。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>依赖可计算、可定义的奖励</h4></div>
+    <p>框架本身不解决「奖励从哪来」。Text-to-SQL 与 Math QA 用最终答案是否正确，RAG 用 F1 + 格式分；这些都是可自动计算的奖励。现实任务里的用户满意度、代码可维护性等模糊目标，论文没有深入。AIR 能用工具调用状态等系统信号补中间奖励，但它仍依赖可观测的监控信号（§3.4.2）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界五</span><h4>多 LLM 联合优化没有实验</h4></div>
+    <p>论文讨论了两种做法：把多个 LLM 各自当成独立 MDP 分别优化，或用 MARL / game theory 联合优化；前者忽略策略间依赖、可能带来次优协调，后者被论文称为 more principled、更能捕捉潜在交互动态（§3.2.2）。原文没有比较两种做法的实现复杂度；实验里的 Text-to-SQL 是同一个 LLM 用不同 prompt 扮演 3 个 agent，不是多个不同参数的 LLM 联合训练。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界六</span><h4>「几乎零代码」仍需要一个训练脚本</h4></div>
+    <p>Appendix A 的示例里，用户仍要写一个 <code>train.py</code>：导入原 Agent 的 <code>agent_function</code>，把执行包进 <code>agent_run(resource, task)</code>，再调用 <code>Client</code>、<code>upload_data</code>、<code>train</code>。Agent 主体代码可以不改，但仍需这个训练脚本与一层 <code>agent_run</code> 包装；论文的 almost ZERO 指对 Agent 代码的修改量（原文是 “almost ZERO code modifications”），不是零接入成本。</p>
+  </div>
+
+  <p style="margin-top:22px">一句话：<strong>Agent Lightning 把「Agent 怎么跑」和「模型怎么训」拆成了两个进程</strong>，这是它最有复用价值的部分；至于等值 credit assignment 在更长、更复杂的任务上是否够用，论文留下的是 future work，而不是实验结论。</p>
+</section>
+
+<footer>
+  <div>本页基于 arXiv 2508.03680v1 整理。Figure 4 为简化重绘；交互为机制示意，不是实验复现；Figure 5–7 的曲线读数未转录。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.03680v1" target="_blank" rel="noopener">Agent Lightning: Train ANY AI Agents with Reinforcement Learning</a> · Xufang Luo, Yuge Zhang, Zhiyuan He, Zilong Wang, Siyun Zhao, Dongsheng Li, Luna K. Qiu, Yuqing Yang · Microsoft Research · arXiv 2508.03680v1 (2025-08-05)<br>
+    代码：<a href="https://github.com/microsoft/agent-lightning" target="_blank" rel="noopener">microsoft/agent-lightning</a><br>
+    笔记：<a href="/agent-lightningtrain-any-ai-agents-with-reinforcement-learning/">Agent Lightning：Train ANY AI Agents with Reinforcement Learning</a>
+  </div>
+  <div class="src" style="color:var(--accent-deep)">
+    笔记核对 / 口径差异（原文未改）：① 笔记称 Text-to-SQL 测试奖励「从初始的不到 0.1 提升并稳定在 0.5 以上」；原文 §4.1 只以 Figure 5 展示奖励曲线，本页未转录曲线读数，也未采用笔记中的 0.1 / 0.5 两个数。② 笔记把每次组件调用记为 <code>(component, input, output, reward)</code>，这不判为勘误：原文 §3.1.3 明确写 “each call comprising the component, its input, output, and the associated reward (typically only available for the final call)”，Figure 2 右栏的 data format 也是 <code>(component, input, output, reward)</code>（中间调用 reward 为 <code>NA</code>）；Eq. (3) 的 call 写作 <code>(meta, input, output)</code>，Eq. (5) 再把 <code>r<sub>i</sub></code> 附到 call 上，两种表述并列，reward 可为空。其余核对项（3 agents / 2 tuned、RAG 0.9/0.1、MuSiQue 约 2,100 万文档、Llama-3.2-3B-Instruct）均已对到原文 Table 1 / §4.1–4.2。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('lightning-sim');
+  if (!root) return;
+  var slotsEl = document.getElementById('simSlots');
+  var readoutEl = document.getElementById('simReadout');
+  var noteEl = document.getElementById('simNote');
+  if (!slotsEl || !readoutEl || !noteEl) return;
+
+  var tasks = {
+    sql: {
+      label: 'Text-to-SQL',
+      framework: 'LangChain',
+      defaultIds: ['writer', 'rewriter'],
+      agents: [
+        { id: 'writer', name: 'SQL writer', io: 'question → SQL', tuned: true },
+        { id: 'checker', name: 'checker', io: 'SQL + rows → verdict', tuned: false },
+        { id: 'rewriter', name: 're-writer', io: 'feedback → answer/SQL', tuned: true }
+      ],
+      note: '论文设置：只优化 SQL writer 与 re-writer；点击 agent 可改，属页面自定对照。'
+    },
+    rag: {
+      label: 'RAG',
+      framework: 'OpenAI Agents SDK',
+      defaultIds: ['rag'],
+      agents: [
+        { id: 'rag', name: 'policy LLM', io: 'question → query/answer', tuned: true }
+      ],
+      note: 'Table 1：1 个 agent、1 个被优化；点击 agent 可改，属页面自定对照。原文 RAG 奖励是连续值 0.9×correctness + 0.1×format，R=1/0 是页面示意参数。'
+    },
+    math: {
+      label: 'Math QA',
+      framework: 'AutoGen',
+      defaultIds: ['math'],
+      agents: [
+        { id: 'math', name: 'policy LLM', io: 'question → tool call/answer', tuned: true }
+      ],
+      note: 'Table 1：1 个 agent、1 个被优化；点击 agent 可改，属页面自定对照。'
+    }
+  };
+
+  var state = { task: 'sql', mode: 'lightning', reward: 1 };
+
+  function currentTask() {
+    return tasks[state.task] || tasks.sql;
+  }
+
+  function countTuned() {
+    var t = currentTask();
+    var n = 0;
+    for (var i = 0; i < t.agents.length; i++) {
+      if (t.agents[i].tuned) n++;
+    }
+    return n;
+  }
+
+  function render() {
+    var t = currentTask();
+    var total = t.agents.length;
+    var tuned = countTuned();
+    var excluded = total - tuned;
+    var isLightning = state.mode === 'lightning';
+    var samples = isLightning ? tuned : 1;
+    var masked = isLightning ? 0 : excluded;
+
+    slotsEl.className = 'slots ' + (total === 1 ? 's1' : total === 2 ? 's2' : 's3');
+    var html = '';
+    for (var i = 0; i < t.agents.length; i++) {
+      var a = t.agents[i];
+      var cls = 'slot sim-agent ' + (a.tuned ? 'hit' : 'off');
+      var rewardText = a.tuned
+        ? (isLightning ? '样本 · R=' + state.reward : '参与更新 · mask 其余')
+        : '不更新';
+      html += '<button type="button" class="' + cls + '" data-agent="' + a.id + '" aria-pressed="' + a.tuned + '">' +
+        '<span class="slot-name">' + a.name + '</span>' +
+        '<span class="slot-val">' + a.io + '</span>' +
+        '<span class="slot-reward">' + rewardText + '</span>' +
+        '</button>';
+    }
+    slotsEl.innerHTML = html;
+
+    var out = '';
+    if (isLightning) {
+      out += '<div><strong>' + samples + '</strong> 条 transition 样本 · <strong>' + tuned + '</strong> 个调用被优化 · <strong>' + excluded + '</strong> 个调用不参与更新</div>';
+      out += '<div class="sim-sub">每条样本的 reward = R = ' + state.reward + '；原文的等值分配是每个 action 都拿最终 return，不是把 R 均分成 R/T（§3.3.2）。</div>';
+      out += '<div class="sim-sub">样本数口径：agent 数取自 Table 1；「每 agent 一次调用」与 R=1/0 为页面假设。</div>';
+      if (state.task === 'rag') {
+        out += '<div class="sim-sub">RAG 原文奖励为连续值 0.9×R<sub>correctness</sub>+0.1×R<sub>format</sub>；此处 R=1/0 只是页面示意。</div>';
+      }
+    } else {
+      out += '<div><strong>1</strong> 条拼接样本 · <strong>' + masked + '</strong> 个调用被 mask · 被优化的调用仍为 <strong>' + tuned + '</strong> 个</div>';
+      out += '<div class="sim-sub">整条轨迹压成一个长序列，非策略 token 用 mask 排除；上下文随轮次累积（§3.3.2 对拼接方式的描述）。</div>';
+      out += '<div class="sim-sub">样本数口径：agent 数取自 Table 1；「每 agent 一次调用」为页面假设。</div>';
+    }
+    if (tuned === 0) {
+      out += '<div class="sim-warn">当前没有可训练调用；这是机制示意，不是论文实验。</div>';
+    }
+    readoutEl.innerHTML = '<div class="r-head">模拟读数</div>' + out;
+
+    var note = t.note;
+    if (tuned !== t.defaultIds.length) {
+      note += ' 当前为页面自定设置，不是论文实验。';
+    }
+    noteEl.textContent = note;
+
+    var taskBtns = root.querySelectorAll('[data-task]');
+    for (var j = 0; j < taskBtns.length; j++) {
+      taskBtns[j].classList.toggle('active', taskBtns[j].getAttribute('data-task') === state.task);
+    }
+    var modeBtns = root.querySelectorAll('[data-mode]');
+    for (var k = 0; k < modeBtns.length; k++) {
+      modeBtns[k].classList.toggle('active', modeBtns[k].getAttribute('data-mode') === state.mode);
+    }
+    var rewardBtns = root.querySelectorAll('[data-reward]');
+    for (var l = 0; l < rewardBtns.length; l++) {
+      rewardBtns[l].classList.toggle('active', rewardBtns[l].getAttribute('data-reward') === String(state.reward));
+    }
+  }
+
+  root.addEventListener('click', function (e) {
+    var el = e.target;
+    while (el && el !== root) {
+      if (el.getAttribute && (
+        el.getAttribute('data-task') ||
+        el.getAttribute('data-mode') ||
+        el.hasAttribute('data-reward') ||
+        el.getAttribute('data-agent')
+      )) break;
+      el = el.parentNode;
+    }
+    if (!el || el === root) return;
+
+    var task = el.getAttribute('data-task');
+    var mode = el.getAttribute('data-mode');
+    var reward = el.getAttribute('data-reward');
+    var agent = el.getAttribute('data-agent');
+
+    if (task) { state.task = task; render(); return; }
+    if (mode) { state.mode = mode; render(); return; }
+    if (reward !== null) { state.reward = Number(reward); render(); return; }
+    if (agent) {
+      var t = currentTask();
+      for (var i = 0; i < t.agents.length; i++) {
+        if (t.agents[i].id === agent) t.agents[i].tuned = !t.agents[i].tuned;
+      }
+      render();
+    }
+  });
+
+  var resetBtn = document.getElementById('simReset');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      state.task = 'sql';
+      state.mode = 'lightning';
+      state.reward = 1;
+      for (var key in tasks) {
+        if (!Object.prototype.hasOwnProperty.call(tasks, key)) continue;
+        var t = tasks[key];
+        for (var i = 0; i < t.agents.length; i++) {
+          t.agents[i].tuned = t.defaultIds.indexOf(t.agents[i].id) >= 0;
+        }
+      }
+      render();
+    });
+  }
+
+  render();
+})();
+
+function toggleFig(el) {
+  var fig = el.closest ? el.closest('figure') : null;
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▾' : '覆盖与未覆盖分支 ▸';
+}
+</script>
+</body>
+</html>

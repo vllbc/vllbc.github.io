@@ -1,0 +1,754 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 6.1 | Table 1 | 40.2-34.1 |
+| 17.9 | Table 1 | (40.2-34.1)/34.1*100 |
+| 1.8 | Table 1 | 60.3-58.5 |
+| 3.0 | Table 1 | 57.3-54.3 |
+| 3.1 | Table 1 | 65.6-62.5 |
+| 7.5 | Table 1 | 67.5-60.0 |
+| 5.0 | Table 1 | 80.0-75.0 |
+| 0.1 | Table 1 | 47.5-47.4 |
+| 5.0 | Table 1 | 67.5-62.5 |
+| 3.5 | Table 1 | 46.5-43.0 |
+| 2.6 | Table 1 | 40.8-38.2 |
+| 2.6 | Table 1 | 67.8-65.2 |
+| 0.6 | Table 1 | 82.2-81.6 |
+| 0.1 | Table 1 | 91.3-91.2 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First Return, Entropy-Eliciting Explore · 先回到高熵岔路口，再重新探索</title>
+<meta name="description" content="FR3E 先跑一条基础推理轨迹，按 token 熵选 top-K 锚点，从中间状态做部分 rollout 估 V(S_j)，再用 α_j=1/exp(ΔV) 调制优势。Qwen2.5-32B AIME24 40.2 vs GRPO++ 34.1。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有：token 条、块标记、流程 SVG */
+.tok-row{display:flex;flex-wrap:wrap;gap:6px;margin:16px 0}
+.tok{flex:1 1 56px;min-width:56px;border:1px solid var(--border);border-radius:8px;padding:7px 4px;text-align:center;background:var(--bg);transition:all .2s ease}
+.tok .tt{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-muted);line-height:1.45}
+.tok .th{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--text-soft);line-height:1.45}
+.tok.hit{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 3px var(--accent-soft)}
+.tok.hit .th{color:var(--accent-deep)}
+.blk-row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
+.blk{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-muted);background:var(--bg-soft);border:1px solid var(--border);border-radius:100px;padding:3px 9px;white-space:nowrap}
+#anchor-slots{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.pipe-svg text{font-family:Inter,"Noto Sans SC",sans-serif}
+.pipe-svg .t-title{font-size:17px;font-weight:700;fill:var(--text)}
+.pipe-svg .t-body{font-size:13.5px;fill:var(--text-muted)}
+.pipe-svg .box{fill:var(--bg-surface);stroke:var(--border-strong)}
+.pipe-svg .box-accent{fill:var(--accent-soft);stroke:var(--accent)}
+.pipe-svg .arrow{stroke:var(--text-soft);stroke-width:1.6;fill:none}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">FR3E</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">怎么训练</a>
+      <a href="#pipeline">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · v1</span>
+  <h1>First Return, Entropy-Eliciting Explore：先回到高熵岔路口，再重新探索</h1>
+  <p class="hero-sub">
+    RLVR 只有最终答案的对错，GRPO 把同一个轨迹级优势摊给所有 token。FR3E 先找出一条推理轨迹里熵最高的 K 个位置，从这些中间状态重放 M 条部分轨迹，用成功率估 <code>V(S<sub>j</sub>)</code>，再据此调制优势。
+    它不需要 critic，也不需要过程标签；代价是部分 rollout 带来的不同计算足迹，论文没有给出定量对比。
+  </p>
+  <div class="meta">
+    <span>Tianyu Zheng 等 · ByteDance / M-A-P / University of Manchester</span>
+    <a href="https://arxiv.org/abs/2507.07017v1" target="_blank" rel="noopener">arXiv 2507.07017v1 ↗</a>
+    <a href="https://huggingface.co/FR3E-Bytedance" target="_blank" rel="noopener">项目页 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    RLVR 的奖励是<strong>最终答案的 0/1 判定</strong>；一条长推理里，哪一步是关键、哪一步是填充，奖励本身不区分。GRPO 的做法是用最终结果估一个轨迹级优势，再把它摊到轨迹里的所有 token。
+  </p>
+  <p>
+    FR3E 把探索起点从 prompt 移到<em>高熵中间状态</em>：先跑一条 base trajectory，算每个 token 的熵，取 top-K 位置作锚点，把轨迹切成 K+1 个块；再从每个前缀状态 <code>S<sub>j</sub></code> 重放 M 条部分轨迹，用成功率估 <code>V(S<sub>j</sub>)</code>。
+  </p>
+  <p>
+    最后用 <code>α<sub>j</sub> = 1 / exp(V(S<sub>j</sub>) − V(S<sub>j−1</sub>))</code> 调制优势：有进步就压低信号，停滞就放大信号。它不训练 critic，也不训练 PRM；中间信号是采样出来的，不是学出来的。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">40.2<small>%</small></div>
+      <div class="k">AIME24 · Qwen2.5-32B · FR3E<br>avg@32；GRPO++ 34.1</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+6.1<small>pp</small></div>
+      <div class="k">AIME24 绝对点差<br>40.2 − 34.1；相对 17.9%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+1.8<small>pp</small></div>
+      <div class="k">Qwen2.5-Math-7B 平均分点差<br>60.3 − 58.5；专精模型增益有限</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>奖励只在终点，信用却要分给每一步</h2></div>
+  <p class="sec-sub">RLVR 的奖励是最终答案的对错；真正的难题是判断哪一步推理值得保留。</p>
+
+  <p>
+    数学推理的轨迹可以很长，但奖励通常只有一个 0/1 的最终判定。于是所有中间步骤共享同一个结果信号：答案错了，前面某一步可能才是罪魁祸首；答案对了，某一步也可能只是碰巧。论文把这件事称为 <strong>granular assignment of credit to intermediate steps</strong>（§1）。
+  </p>
+
+  <p>
+    GRPO 是这条路上常见的基线，也是论文的主要对照。它不训练 critic，而是对同一个 prompt 采样一组完整轨迹，用组内相对奖励估一个轨迹级优势，再把这个优势分配给轨迹里的所有 token。论文的原话是：GRPO 用最终结果奖励去估计所有中间动作的价值，<strong>“incorrectly averages the contribution of each step”</strong>（§1）。关键步骤和填充步骤拿到同样的信用，模型没有动力去强化真正决定成败的那一步。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>奖励稀疏，轨迹很长，信用却要分到 token 级</h4></div>
+    <p>
+      如果只用最终奖励，信用分配不可避免地变粗；如果训练 critic 或 PRM，又引入新的不稳定、偏差或标注成本。论文要做的，是在不训练 critic、不用过程标签的前提下，构造一个语义上站得住的中间信号。
+    </p>
+  </div>
+
+  <div class="eq">
+    E<sub>π</sub>[ Σ<sub>t</sub> γ<sup>t</sup> r(s<sub>t</sub>, a<sub>t</sub>) ]
+  </div>
+  <div class="eq-cap">Eq. 1 · MDP 的目标；在 LLM 的生成过程里，r 通常只在完整 rollout 结束时给出（§3.1）</div>
+
+  <p>
+    PPO 和 VAPO 试图用 critic 估计中间状态的价值，但论文指出：为 LLM 的巨大状态空间训练一个稳定、准确的 critic 很难，常常带来不稳定、偏差和显著的计算开销（§1）。这为后面的两条路——过程奖励与轨迹级比较——埋下了伏笔。
+  </p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条旧路：Critic、过程奖励、轨迹级比较，各缺一块</h2></div>
+  <p class="sec-sub">PPO 有细粒度但难训；PRM 有过程信号但贵；GRPO 简单但把整条轨迹当成一个动作。</p>
+
+  <p>
+    已有方案可以粗分成三条路。它们都能提供某种中间信号，但每条路都留下了一个缺口。
+  </p>
+
+  <p class="eq-cap">本页按 §1–§2 整理的对照，不是论文表格；引文为原文英文句子。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>路线</th><th>论文原句（§）</th><th>留下的缺口（本页概括）</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>PPO / VAPO</strong><br><span class="mono" style="font-size:11px">critic-based</span></td>
+          <td>“training a stable and accurate critic for the vast state space of LLMs is difficult, often leading to instability, bias, and significant computational overhead”（§1）</td>
+          <td>需要额外训练 critic；长程奖励传播仍然困难。</td>
+        </tr>
+        <tr>
+          <td><strong>GRPO</strong><br><span class="mono" style="font-size:11px">trajectory-level</span></td>
+          <td>“use the final outcome reward to estimate the value of all intermediate actions”; “incorrectly averages the contribution of each step”（§1）</td>
+          <td>轨迹级信号，无法区分关键步骤与填充步骤。</td>
+        </tr>
+        <tr>
+          <td><strong>VinePPO / PRM</strong><br><span class="mono" style="font-size:11px">process-level</span></td>
+          <td>VinePPO “segments trajectories heuristically and uses Monte Carlo (MC) sampling for step-level advantages”; PRMs “face challenges with heuristic quality, sampling variance, labeling costs for explicit PRMs, or the granularity of implicitly derived rewards”（§1）</td>
+          <td>依赖启发式分段、过程标签或采样方差。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    FR3E 选择的是第四条路：不训练 critic，不训练 PRM，也不把最终奖励直接摊到所有 token。它先从 base trajectory 里找出高熵位置，再从这些位置重新生成，用部分 rollout 的成功率估一个中间状态的 value。这个 value 不是学出来的，是采样出来的。
+  </p>
+
+  <p>
+    这个思路借自 Go-Explore 的 “First Return, Then Explore”：先回到一个有希望的状态，再从那里探索（§2、§3.4）。论文把「回到」落到 LLM 的自回归生成上：回到高熵前缀，重新采样后续。
+  </p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>先找到高熵岔路口，再从那里分叉</h2></div>
+  <p class="sec-sub">FR3E 把一条完整轨迹切成 K+1 个语义块，在 K 个高熵锚点上做 M 次部分 rollout，用成功率估每个中间状态的价值。</p>
+
+  <h3>First Return：用 token 熵找岔路口</h3>
+  <p>
+    给定 query <code>q</code>，先让当前策略生成一条 base trajectory：
+  </p>
+  <div class="eq">
+    P<sub>base</sub> = (q, t<sub>1</sub>, t<sub>2</sub>, …, t<sub>L</sub>)
+  </div>
+  <div class="eq-cap">Eq. 3 · 一条完整的推理轨迹；后面所有锚点都从这条轨迹上选</div>
+
+  <p>然后在每个位置 <code>k</code> 计算 token 级熵：</p>
+  <div class="eq">
+    H<sub>k</sub> = − Σ<sub>v∈𝒱</sub> π<sub>θ</sub>(v | q, t<sub>&lt;k</sub>) log π<sub>θ</sub>(v | q, t<sub>&lt;k</sub>)
+  </div>
+  <div class="eq-cap">Eq. 5 · 熵高说明模型在这个位置对下一个 token 更「犹豫」</div>
+
+  <p>论文取整条轨迹上熵最高的 K 个位置作为锚点：</p>
+  <div class="eq">
+    𝒦 = TopK({ H<sub>k</sub> }<sub>k=1</sub><sup>L</sup>)
+  </div>
+  <div class="eq-cap">Eq. 7 · 只看熵值排序，不看位置</div>
+
+  <p>这 K 个锚点把轨迹切成 K+1 个块：</p>
+  <div class="eq">
+    P<sub>base</sub> = B<sub>1</sub> ∪ B<sub>2</sub> ∪ … ∪ B<sub>K+1</sub><br>
+    B<sub>n</sub> = (t<sub>k<sub>n−1</sub>+1</sub>, …, t<sub>k<sub>n</sub></sub>),&nbsp;&nbsp; k<sub>0</sub>=0, k<sub>K+1</sub>=L
+  </div>
+  <div class="eq-cap">Eq. 8–9 · 每个块是两个锚点之间的 token 区间</div>
+
+  <p>由这些块定义中间状态 <code>S<sub>j</sub></code>：</p>
+  <div class="eq">
+    S<sub>j</sub> = (q, B<sub>1</sub>, B<sub>2</sub>, …, B<sub>j</sub>)
+  </div>
+  <div class="eq-cap">Eq. 10 · 到第 j 个锚点为止的前缀，用来重置上下文</div>
+
+  <h3>Entropy-Eliciting Explore：从每个 S<sub>j</sub> 重放 M 条</h3>
+  <p>对每个 <code>S<sub>j</sub></code>，重置上下文，从该状态生成 M 条部分轨迹：</p>
+  <div class="eq">
+    Y<sub>j,m</sub> ~ π<sub>θ</sub>(· | S<sub>j</sub>),&nbsp;&nbsp; m = 1, …, M
+  </div>
+  <div class="eq-cap">Eq. 11 · 不是从 prompt 重跑，而是从中间状态续写</div>
+
+  <p>每条轨迹的奖励是二元的：答案正确为 1，否则为 0（Eq. 12）。于是 <code>S<sub>j</sub></code> 的经验价值就是这 M 条轨迹的平均成功率：</p>
+  <div class="eq">
+    V(S<sub>j</sub>) = (1/M) Σ<sub>m=1</sub><sup>M</sup> r<sub>j,m</sub>
+  </div>
+  <div class="eq-cap">Eq. 13 · value 不是网络估的，是采样出来的</div>
+
+  <p>
+    这一步是 FR3E 与 GRPO 的关键差别：GRPO 从 prompt 开始跑完整轨迹，FR3E 从中间状态开始跑部分轨迹。它不需要过程标签，但需要从中间状态做 M 次采样。
+  </p>
+
+  <h3>Adaptive Advantage Modulation：用相邻状态的价值差调学习信号</h3>
+  <p>有了 <code>V(S<sub>j</sub>)</code>，论文定义调制因子：</p>
+  <div class="eq">
+    α<sub>j</sub> = 1 / exp( V(S<sub>j</sub>) − V(S<sub>j−1</sub>) )
+  </div>
+  <div class="eq-cap">Eq. 14 · 进步时 α&lt;1，停滞时 α≥1</div>
+
+  <p>然后把它乘到优势上：</p>
+  <div class="eq">
+    A′(S<sub>j</sub>, P<sub>j,m</sub>) = α<sub>j</sub> · A(S<sub>j</sub>, P<sub>j,m</sub>)
+  </div>
+  <div class="eq-cap">Eq. 15 · 只改学习信号的强度，不改优势的方向</div>
+
+  <p>
+    两个分支的原文是：当 <code>V(S<sub>j</sub>) &gt; V(S<sub>j−1</sub>)</code>，<code>α<sub>j</sub> &lt; 1</code>，“This reduces the influence of the advantage signal for successful paths, preventing premature convergence and preserving exploration diversity”；当 <code>V(S<sub>j</sub>) ≤ V(S<sub>j−1</sub>)</code>，<code>α<sub>j</sub> ≥ 1</code>，“This amplifies the learning signal, encouraging more aggressive exploration to overcome reasoning bottlenecks”（§4.3）。换句话说，进步时踩一点刹车，停滞时踩一点油门。
+  </p>
+
+  <p>
+    论文还给出一个理想化性质：如果同一个块内所有轨迹等长，调制后的优势在整个 batch 上的平均恰为 0（Eq. 16–17）。实际轨迹长度不一，论文说会有偏差，但估计量仍近似无偏（§4.3）。
+  </p>
+
+  <h3>自己动手：拖动 K，看锚点、块和 α 怎么变</h3>
+  <p>
+    下面是一个简化模拟。12 个 token 的熵值是页面设定的示意值，M=8，成功次数也由页面设定；论文没有报告 K、M 的具体取值，也没有给出逐 token 熵表。拖 K 看 top-K 锚点如何改变块划分与调制因子。
+  </p>
+
+  <div class="sim">
+    <div class="tok-row" id="tok-row"></div>
+    <div class="blk-row" id="blk-row"></div>
+
+    <div class="controls" style="grid-template-columns:1fr">
+      <div class="ctrl">
+        <label>K 锚点数 <span class="v" id="k-v">2</span></label>
+        <input type="range" id="k" min="1" max="4" step="1" value="2">
+      </div>
+    </div>
+
+    <div class="slots" id="anchor-slots"></div>
+
+    <div class="readout" data-src="§4.3" id="sim-readout">
+      <div class="r-head">当前状态</div>
+      <div id="sim-msg"></div>
+    </div>
+
+    <div class="actions">
+      <button class="act ghost" id="sim-reset">重置为 K=2</button>
+    </div>
+  </div>
+
+  <p class="eq-cap">
+    示例数据声明：12 个 token 的熵值、每个锚点的成功次数、M=8 都是页面设定的示意值，仅用于演示机制；不是论文实验数据。
+  </p>
+
+  <details>
+    <summary>手算对账：K=2 与 K=4 两组<span class="sum-sub">与上方滑块输出逐位一致</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>共同设定：</strong>12 个 token 的熵值依次为
+        <span class="mono">t1=1.2, t2=3.6, t3=0.8, t4=3.1, t5=1.9, t6=2.9, t7=0.6, t8=2.5, t9=1.4, t10=2.2, t11=0.9, t12=1.7</span>；
+        M=8；成功次数固定为 <span class="mono">t2=3, t4=5, t6=6, t8=2</span>；V = 成功次数 / 8；锚点按位置升序排列。
+      </p>
+      <p>
+        <strong>K=2：</strong>熵值前 2 是 t2=3.6、t4=3.1 → 锚点 {t2, t4} → 块 B1=t1–t2, B2=t3–t4, B3=t5–t12。
+        V(S1)=3/8=0.375，V(S2)=5/8=0.625。
+        α2 = 1/exp(0.625−0.375) = 1/exp(0.25) = 0.7788。
+        α1 不计算：原文未定义 V(S0)。
+      </p>
+      <p>
+        <strong>K=4：</strong>熵值前 4 是 t2=3.6、t4=3.1、t6=2.9、t8=2.5 → 锚点 {t2, t4, t6, t8} → 块 B1=t1–t2, B2=t3–t4, B3=t5–t6, B4=t7–t8, B5=t9–t12。
+        V(S1)=3/8=0.375，V(S2)=5/8=0.625，V(S3)=6/8=0.750，V(S4)=2/8=0.250。
+        α2 = 1/exp(0.625−0.375) = 1/exp(0.25) = 0.7788；
+        α3 = 1/exp(0.750−0.625) = 1/exp(0.125) = 0.8825；
+        α4 = 1/exp(0.250−0.750) = 1/exp(−0.5) = 1.6487。
+        α1 不计算。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么？<span class="sum-sub">简化模拟，不是原文算法复现</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>Eq. 7 的 top-K 选择；Eq. 8–10 的块/状态切分（按位置升序展示）；Eq. 13 的经验价值 V = 成功数 / M；Eq. 14 的 α<sub>j</sub>（仅 j≥2）。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>真实的策略 rollout 与奖励判定；可变轨迹长度；拒绝采样与 PPO / Clip-Higher 目标；V(S<sub>0</sub>)（原文未定义）；优势 A 的具体估计与 Eq. 16–17 的等长假设。页面不声称与原文逐行一致。
+      </p>
+      <p>
+        <strong>两处原文表述并列：</strong>§1 说锚点取自 “correctly completed reasoning trajectories”；§4.1.1 的生成步骤只写从 policy 生成 base trajectory，没有写正确性过滤条件。Eq. 9–10 把 B<sub>j</sub> 定义到 t<sub>k<sub>j</sub></sub> 为止，§4.1.4 的文字却说 S<sub>j</sub> 在 k<sub>j</sub> “just prior to”；本模拟按 Eq. 9–10 的区间（含 k<sub>j</sub>）切分。
+      </p>
+      <p>
+        <strong>示例数据：</strong>12 个熵值、成功次数、M=8 都是页面设定；论文未报告 K 与 M 的取值，也未给出逐 token 熵表。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练能跑，但成本账没有算完</h2></div>
+  <p class="sec-sub">VeRL、512 batch、1e-6、16k 响应、16 rollouts/prompt、KL=0、entropy loss=0；论文没有给出与 GRPO++ 的定量成本对比。</p>
+
+  <p class="eq-cap">训练配置（§5.1）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项目</th><th>设置</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>框架</td><td>VeRL</td></tr>
+        <tr><td>batch size</td><td class="num">512</td></tr>
+        <tr><td>learning rate</td><td class="num">1 × 10<sup>−6</sup></td></tr>
+        <tr><td>clip range</td><td class="num">0.22 – 0.28</td></tr>
+        <tr><td>max response length</td><td class="num">16k tokens</td></tr>
+        <tr><td>rollouts per prompt</td><td class="num">16</td></tr>
+        <tr><td>KL coefficient</td><td class="num">0</td></tr>
+        <tr><td>entropy loss</td><td class="num">0</td></tr>
+        <tr><td>mini-batch size</td><td class="num">128</td></tr>
+        <tr><td>训练数据</td><td>DeepScaler（低难度）+ SimpleRL difficulty 3–5（高难度）</td></tr>
+        <tr><td>评测采样</td><td>greedy；AIME24 用 avg@32</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    拒绝采样：对每个 prompt 先跑多条 rollout；如果奖励全 0 或全 1，这个 prompt 被视为退化，从当前 batch 里剔除（§3.2）。因为剔除后 batch 可能不满，论文采用累积样本直到凑满一个完整 batch 再更新（§5.1）。
+  </p>
+
+  <p>
+    数据设置有一个附录说明：这套 DeepScaler + SimpleRL 的组合是在 Qwen2.5 7B math base 上做初步实验后选定的；作者提醒，这个结论不一定能直接迁移到 Qwen2.5 32B 等其他 base model（Appendix 7）。
+  </p>
+
+  <p>
+    成本：论文明确说，FR3E 与 GRPO++ 的 group size 对齐 “inherently infeasible”；即使匹配 rollout 数，推理成本也会因为部分 rollout 机制而不同。FR3E 只从中间状态生成，而不是从 prompt 跑完整序列；论文称这带来更高效的探索和更好的信用分配，代价是 “a different computational footprint”（§5.2）。论文没有给出与 GRPO++ 的定量成本对比，也没有断言更高或更低。
+  </p>
+
+  <p>
+    K 与 M：§5.1 只写了每个 prompt 16 次 rollout；论文没有说明这 16 次与 §4.2 的 M 是否同一参数，也没有报告 K 的取值。复现时这两个数需要自己定。
+  </p>
+</section>
+
+<!-- ================= 05 架构或流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>两阶段流程 + 优势调制：一条基础轨迹，变成一组可比较的中间状态</h2></div>
+  <p class="sec-sub">Figure 1 只画了 Stage 1 与 Stage 2；③ 是 §4.3 的调制机制，不是第三个阶段，本图把它单列出来以便读公式。</p>
+
+  <figure>
+    <svg class="pipe-svg" viewBox="0 0 520 520" role="img" aria-label="FR3E 两阶段流程图">
+      <defs>
+        <marker id="arrowhead" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 z" style="fill:var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect class="box" x="40" y="20" width="440" height="150" rx="14"></rect>
+      <text class="t-title" x="64" y="52">① First Return（Stage 1）</text>
+      <text class="t-body" x="64" y="80">base trajectory P_base</text>
+      <text class="t-body" x="64" y="104">token entropy H_k</text>
+      <text class="t-body" x="64" y="128">top-K anchors → K 个位置</text>
+      <text class="t-body" x="64" y="152">这些位置即分段点 → blocks B1..B(K+1) → states S_j</text>
+
+      <line class="arrow" x1="260" y1="170" x2="260" y2="200" marker-end="url(#arrowhead)"></line>
+
+      <rect class="box" x="40" y="204" width="440" height="116" rx="14"></rect>
+      <text class="t-title" x="64" y="234">② Entropy-Eliciting Explore（Stage 2）</text>
+      <text class="t-body" x="64" y="262">M partial rollouts from each S_j</text>
+      <text class="t-body" x="64" y="288">binary reward r → V(S_j) = 成功数 / M</text>
+
+      <line class="arrow" x1="260" y1="320" x2="260" y2="356" marker-end="url(#arrowhead)"></line>
+
+      <rect class="box-accent" x="40" y="360" width="440" height="130" rx="14"></rect>
+      <text class="t-title" x="64" y="392">③ Adaptive Advantage Modulation（§4.3，非 Figure 1 的阶段）</text>
+      <text class="t-body" x="64" y="420">α_j = 1 / exp(V(S_j) − V(S_{j−1}))</text>
+      <text class="t-body" x="64" y="444">A′ = α_j · A</text>
+      <text class="t-body" x="64" y="468">→ policy update</text>
+    </svg>
+    <figcaption>
+      按 §4.1–4.3 与 Figure 1 的文字重绘；保留数据流，省略论文图中的模型图标与配色，不是逐像素复制。
+    </figcaption>
+  </figure>
+
+  <details>
+    <summary>图里每一步对应原文哪条式子？<span class="sum-sub">按数据流拆开</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>base trajectory</strong>：Eq. 3，一条从 q 生成的完整推理轨迹。</li>
+        <li><strong>token entropy</strong>：Eq. 5，每个位置的策略熵。</li>
+        <li><strong>top-K anchors</strong>：Eq. 7，熵最高的 K 个位置。</li>
+        <li><strong>blocks / states</strong>：Eq. 8–10，锚点把轨迹切成 K+1 块，前缀状态 S<sub>j</sub> 用于重置上下文。</li>
+        <li><strong>partial rollouts</strong>：Eq. 11–12，每个 S<sub>j</sub> 生成 M 条，奖励为 0/1。</li>
+        <li><strong>V(S<sub>j</sub>)</strong>：Eq. 13，M 条轨迹的平均成功率。</li>
+        <li><strong>α<sub>j</sub></strong>：Eq. 14–15，按相邻状态的价值差调制优势。</li>
+      </ul>
+    </div>
+  </details>
+
+  <p>
+    这个流程的关键在于「重置上下文」：S<sub>j</sub> 是一个真实的前缀，模型可以从它继续生成；因此 FR3E 不需要把整条轨迹重新跑一遍，只需要从锚点续写。论文用这一点解释它的探索效率，也用它解释为什么 inference cost 与 GRPO++ 不同（§5.2）。
+  </p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>通用模型上稳定抬升，数学专精模型上增益有限</h2></div>
+  <p class="sec-sub">Table 1 的 8 个数学基准、3 个 Qwen2.5 模型；AIME24 用 avg@32，其余 greedy。</p>
+
+  <p class="eq-cap">
+    Table 1（Accuracy %）。本页只转录 FR3E 与 GRPO++ 两侧的原始分数；论文表中括号写作 (+6.1%) 等，按同一行两侧分数相减，它们是准确率百分点差，不是相对提升。§5.1 的基准列表没有列 AMC23，但 Table 1 有这一行；本页按表转录。
+  </p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Benchmark</th>
+          <th colspan="2" style="text-align:center">Qwen2.5-Math-7B</th>
+          <th colspan="2" style="text-align:center">Qwen2.5-7B</th>
+          <th colspan="2" style="text-align:center">Qwen2.5-32B</th>
+        </tr>
+        <tr>
+          <th></th>
+          <th style="text-align:right">FR3E</th><th style="text-align:right">GRPO++</th>
+          <th style="text-align:right">FR3E</th><th style="text-align:right">GRPO++</th>
+          <th style="text-align:right">FR3E</th><th style="text-align:right">GRPO++</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>AIME24</td><td class="num">39.1</td><td class="num">39.1</td><td class="num"><strong>25.2</strong></td><td class="num">22.7</td><td class="num"><strong>40.2</strong></td><td class="num">34.1</td></tr>
+        <tr><td>GSM8k</td><td class="num"><strong>91.3</strong></td><td class="num">91.2</td><td class="num"><strong>92.8</strong></td><td class="num">91.2</td><td class="num"><strong>96.1</strong></td><td class="num">95.8</td></tr>
+        <tr><td>Math500</td><td class="num"><strong>82.2</strong></td><td class="num">81.6</td><td class="num"><strong>79.0</strong></td><td class="num">77.8</td><td class="num"><strong>87.4</strong></td><td class="num">85.2</td></tr>
+        <tr><td>Minerva Math</td><td class="num"><strong>40.8</strong></td><td class="num">38.2</td><td class="num"><strong>39.0</strong></td><td class="num">35.3</td><td class="num"><strong>45.6</strong></td><td class="num">43.0</td></tr>
+        <tr><td>Gaokao2023en</td><td class="num"><strong>67.8</strong></td><td class="num">65.2</td><td class="num"><strong>67.3</strong></td><td class="num">63.9</td><td class="num"><strong>75.3</strong></td><td class="num">71.4</td></tr>
+        <tr><td>Olympiadbench</td><td class="num"><strong>46.5</strong></td><td class="num">43.0</td><td class="num"><strong>42.1</strong></td><td class="num">38.8</td><td class="num"><strong>51.7</strong></td><td class="num">48.7</td></tr>
+        <tr><td>College Math</td><td class="num">47.4</td><td class="num">47.5</td><td class="num">45.1</td><td class="num">45.1</td><td class="num"><strong>48.3</strong></td><td class="num">47.0</td></tr>
+        <tr><td>AMC23</td><td class="num"><strong>67.5</strong></td><td class="num">62.5</td><td class="num"><strong>67.5</strong></td><td class="num">60.0</td><td class="num"><strong>80.0</strong></td><td class="num">75.0</td></tr>
+        <tr><td>Avg</td><td class="num"><strong>60.3</strong></td><td class="num">58.5</td><td class="num"><strong>57.3</strong></td><td class="num">54.3</td><td class="num"><strong>65.6</strong></td><td class="num">62.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    先看 AIME24：三个模型的 FR3E / GRPO++ 对比如下（Table 1，avg@32）。
+  </p>
+
+  <div class="sim" style="padding:18px">
+    <div class="chart" data-src="Table 1" aria-label="AIME24 FR3E 与 GRPO++ 对比">
+      <div class="crow">
+        <div class="cname">Math-7B</div>
+        <div class="cbars">
+          <div class="cbar"><div class="track"><div class="fill" style="height:39.1%;background:var(--accent)"></div></div><div class="num">FR3E 39.1</div></div>
+          <div class="cbar"><div class="track"><div class="fill" style="height:39.1%;background:var(--c1)"></div></div><div class="num">GRPO++ 39.1</div></div>
+        </div>
+      </div>
+      <div class="crow">
+        <div class="cname">Qwen2.5-7B</div>
+        <div class="cbars">
+          <div class="cbar"><div class="track"><div class="fill" style="height:25.2%;background:var(--accent)"></div></div><div class="num">FR3E 25.2</div></div>
+          <div class="cbar"><div class="track"><div class="fill" style="height:22.7%;background:var(--c1)"></div></div><div class="num">GRPO++ 22.7</div></div>
+        </div>
+      </div>
+      <div class="crow">
+        <div class="cname">Qwen2.5-32B</div>
+        <div class="cbars">
+          <div class="cbar"><div class="track"><div class="fill" style="height:40.2%;background:var(--accent)"></div></div><div class="num">FR3E 40.2</div></div>
+          <div class="cbar"><div class="track"><div class="fill" style="height:34.1%;background:var(--c1)"></div></div><div class="num">GRPO++ 34.1</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>FR3E</span>
+      <span><i style="background:var(--c1)"></i>GRPO++</span>
+    </div>
+  </div>
+  <p class="eq-cap">柱高按准确率 0–100 线性映射；数值直接来自 Table 1。</p>
+
+  <p>几个值得单独看的点：</p>
+  <ul>
+    <li>
+      <strong>32B 的 AIME24 点差是三个模型里最大的。</strong>FR3E <span class="mono" data-src="Table 1">40.2</span>，GRPO++ <span class="mono" data-src="Table 1">34.1</span>，绝对 <strong data-src="Table 1">+6.1 个百分点</strong>（40.2 − 34.1）；相对 GRPO++ <strong data-src="Table 1">提升 17.9%</strong>（6.1 / 34.1）。
+    </li>
+    <li>
+      <strong>通用 7B 与 32B 的平均分也抬升。</strong>Qwen2.5-7B <span class="mono" data-src="Table 1">57.3</span> vs <span class="mono" data-src="Table 1">54.3</span>，<strong data-src="Table 1">+3.0 个百分点</strong>；Qwen2.5-32B <span class="mono" data-src="Table 1">65.6</span> vs <span class="mono" data-src="Table 1">62.5</span>，<strong data-src="Table 1">+3.1 个百分点</strong>。
+    </li>
+    <li>
+      <strong>数学专精的 Qwen2.5-Math-7B 增益有限，但不是「不动」。</strong>平均 <span class="mono" data-src="Table 1">60.3</span> vs <span class="mono" data-src="Table 1">58.5</span>，<strong data-src="Table 1">+1.8 个百分点</strong>，八项里六项为正：AMC23 <span class="mono" data-src="Table 1">67.5</span> vs <span class="mono" data-src="Table 1">62.5</span>（<strong data-src="Table 1">+5.0</strong>）、OlympiadBench <span class="mono" data-src="Table 1">46.5</span> vs <span class="mono" data-src="Table 1">43.0</span>（<strong data-src="Table 1">+3.5</strong>）、Minerva <span class="mono" data-src="Table 1">40.8</span> vs <span class="mono" data-src="Table 1">38.2</span>（<strong data-src="Table 1">+2.6</strong>）、Gaokao <span class="mono" data-src="Table 1">67.8</span> vs <span class="mono" data-src="Table 1">65.2</span>（<strong data-src="Table 1">+2.6</strong>）、Math500 <span class="mono" data-src="Table 1">82.2</span> vs <span class="mono" data-src="Table 1">81.6</span>（<strong data-src="Table 1">+0.6</strong>）、GSM8k <span class="mono" data-src="Table 1">91.3</span> vs <span class="mono" data-src="Table 1">91.2</span>（<strong data-src="Table 1">+0.1</strong>）；只有 AIME24 <span class="mono" data-src="Table 1">39.1</span> vs <span class="mono" data-src="Table 1">39.1</span> 持平、College Math <span class="mono" data-src="Table 1">47.4</span> vs <span class="mono" data-src="Table 1">47.5</span>（<strong data-src="Table 1">低 0.1 个百分点</strong>）略降。论文的解释是：“applying standard RL strategies to a math-specialized model may not yield significant improvements, possibly due to interference with its fine-tuned knowledge”（§5.2）。
+    </li>
+    <li>
+      <strong>AMC23 的点差值得单独看。</strong>Qwen2.5-7B <span class="mono" data-src="Table 1">67.5</span> vs <span class="mono" data-src="Table 1">60.0</span>，<strong data-src="Table 1">+7.5 个百分点</strong>；Qwen2.5-32B <span class="mono" data-src="Table 1">80.0</span> vs <span class="mono" data-src="Table 1">75.0</span>，<strong data-src="Table 1">+5.0 个百分点</strong>。
+    </li>
+  </ul>
+
+  <h3>训练动态：熵、优势、All-Right / All-Wrong</h3>
+  <p>
+    Figure 3 的熵损失曲线显示：Qwen2.5-7B 和 32B 上 FR3E 维持略高的熵水平；Qwen2.5-Math-7B 上 FR3E 后期熵回升，GRPO++ 更快收敛到低熵。Figure 5 的优势曲线更贴近 0、波动更小。Figure 7 的 All-Wrong 轨迹下降，Figure 8 的 All-Right 轨迹上升。Figure 9 的热图显示 FR3E 从低准确率区域向高准确率区域稳定迁移。这些图在正文中没有逐点数值，本页未转录。
+  </p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它优化的是「怎么探」，不是「奖励从哪来」</h2></div>
+  <p class="sec-sub">四个边界：专精模型增益有限、成本未定量、K/M 未报告、奖励仍是二元的。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>数学专精模型：增益有限</h4></div>
+    <p>
+      Qwen2.5-Math-7B 的平均分只从 <span class="mono" data-src="Table 1">58.5</span> 抬到 <span class="mono" data-src="Table 1">60.3</span>（<strong data-src="Table 1">+1.8 个百分点</strong>），AIME24 <span class="mono" data-src="Table 1">39.1</span> vs <span class="mono" data-src="Table 1">39.1</span>，College Math <span class="mono" data-src="Table 1">47.4</span> vs <span class="mono" data-src="Table 1">47.5</span>（<strong data-src="Table 1">低 0.1 个百分点</strong>）。论文的解释是 fine-tuned knowledge 可能受到干扰（§5.2）。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>成本：只说了 footprint 不同</h4></div>
+    <p>
+      FR3E 从中间状态做部分 rollout，GRPO++ 从 prompt 跑完整轨迹；论文说 group size 对齐不可行，推理成本会不同，但没有给出定量对比（§5.2）。所以「更贵还是更便宜」在这篇论文里没有定量答案。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>K 与 M：没有报告</h4></div>
+    <p>
+      §5.1 只写每个 prompt 16 次 rollout；论文没有说明它与 M 的关系，也没有报告 K 的取值，正文没有 K/M 的消融。复现时需要自己定这两个超参数。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>奖励与范围：仍是 0/1 结果奖励</h4></div>
+    <p>
+      Eq. 12 的奖励是二元的；论文的实验集中在数学基准，没有报告代码、Agent 或开放式任务的结果，也没有使用过程标签。FR3E 改变的是中间信号的来源，不是最终奖励的形式。
+    </p>
+  </div>
+
+  <p style="margin-top:22px">
+    一句话：FR3E 改的是「中间信号怎么来」，不是「最终奖励怎么来」。最终奖励仍是 0/1 的结果判定；它用高熵锚点和部分 rollout 把中间状态的价值采样出来，再把这个价值反馈到优势。这个思路不依赖 critic 或 PRM，但也没有消除稀疏奖励本身。
+  </p>
+</section>
+
+<footer>
+  <div><strong>First Return, Entropy-Eliciting Explore</strong> · Tianyu Zheng, Tianshun Xing, Qingshui Gu, Taoran Liang, Xingwei Qu, Xin Zhou, Yizhi Li, Zhoufutu Wen, Chenghua Lin, Wenhao Huang, Qian Liu, Ge Zhang, Zejun Ma · ByteDance / M-A-P / The University of Manchester</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.07017v1" target="_blank" rel="noopener">https://arxiv.org/abs/2507.07017v1</a>（v1，2025-07-09；本页只引这一版）<br>
+    项目页：<a href="https://huggingface.co/FR3E-Bytedance" target="_blank" rel="noopener">huggingface.co/FR3E-Bytedance</a><br>
+    笔记：<a href="/first-return-entropy-eliciting-explore/">First Return, Entropy-Eliciting Explore</a>
+  </div>
+  <div style="margin-top:18px">
+    <strong>核对与笔记差异：</strong>
+    <ul>
+      <li>笔记没有写 arXiv 号；本页核实为 2507.07017v1。编号 2503.14478 经核实是 Creation-MMBench，不是这篇论文。</li>
+      <li>笔记把 Table 1 的 40.2 vs 34.1 写成「显著」这类限定词；原文没有报告显著性检验，括号里的 +6.1% 按两侧分数是 6.1 个百分点差。本页写「绝对 +6.1 个百分点；相对 17.9%」。</li>
+      <li>笔记写 FR3E「计算开销高于 GRPO」；原文只说 computational footprint 不同，没有给出定量高低对比（§5.2）。</li>
+      <li>笔记把 FR3E 类比为 PRM；原文没有训练过程奖励模型，中间信号来自 M 次部分 rollout 的成功率 V(S<sub>j</sub>)（§4.2）。</li>
+      <li>笔记说 α<sub>j</sub> 与 V(S<sub>j</sub>)−V(S<sub>j−1</sub>)「成反比」；原文是 α<sub>j</sub>=1/exp(ΔV)，差值经过指数映射（Eq. 14）。</li>
+      <li>笔记没有写 AIME24 的 avg@32 条件；本页在表格和图表里标明。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var TOKENS = [
+    { label: 'We',    H: 1.2 },
+    { label: 'wait',  H: 3.6 },
+    { label: 'x',     H: 0.8 },
+    { label: '=',     H: 3.1 },
+    { label: '3',     H: 1.9 },
+    { label: 'so',    H: 2.9 },
+    { label: 'x²',    H: 0.6 },
+    { label: 'check', H: 2.5 },
+    { label: '9',     H: 1.4 },
+    { label: 'x',     H: 2.2 },
+    { label: '=',     H: 0.9 },
+    { label: '±3',    H: 1.7 }
+  ];
+  var M = 8;
+  var SUCCESS = { 2: 3, 4: 5, 6: 6, 8: 2 };
+
+  var kSlider = document.getElementById('k');
+  var kVal = document.getElementById('k-v');
+  var tokenRow = document.getElementById('tok-row');
+  var blockRow = document.getElementById('blk-row');
+  var anchorSlots = document.getElementById('anchor-slots');
+  var readout = document.getElementById('sim-readout');
+  var msg = document.getElementById('sim-msg');
+  var reset = document.getElementById('sim-reset');
+
+  if (!kSlider || !kVal || !tokenRow || !blockRow || !anchorSlots || !readout || !msg || !reset) return;
+
+  function sub(n) {
+    var map = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+    var s = String(n);
+    var out = '';
+    for (var i = 0; i < s.length; i++) out += map[parseInt(s.charAt(i), 10)];
+    return out;
+  }
+
+  function fmt3(x) { return x.toFixed(3); }
+  function fmt4(x) { return x.toFixed(4); }
+
+  function anchorsFor(K) {
+    var arr = [];
+    var i;
+    for (i = 0; i < TOKENS.length; i++) {
+      arr.push({ pos: i + 1, H: TOKENS[i].H });
+    }
+    arr.sort(function (a, b) { return b.H - a.H; });
+    var picked = arr.slice(0, K);
+    picked.sort(function (a, b) { return a.pos - b.pos; });
+    return picked.map(function (x) { return x.pos; });
+  }
+
+  function render(K) {
+    var anchors = anchorsFor(K);
+    var anchorSet = {};
+    var i, j;
+
+    for (i = 0; i < anchors.length; i++) anchorSet[anchors[i]] = true;
+
+    tokenRow.innerHTML = '';
+    for (i = 0; i < TOKENS.length; i++) {
+      var pos = i + 1;
+      var chip = document.createElement('div');
+      chip.className = 'tok' + (anchorSet[pos] ? ' hit' : '');
+      chip.title = 't' + pos + ' · H=' + TOKENS[i].H.toFixed(1) + (anchorSet[pos] ? ' · top-K 锚点' : '');
+
+      var tt = document.createElement('div');
+      tt.className = 'tt';
+      tt.textContent = 't' + sub(pos) + ' ' + TOKENS[i].label;
+
+      var th = document.createElement('div');
+      th.className = 'th';
+      th.textContent = 'H=' + TOKENS[i].H.toFixed(1);
+
+      chip.appendChild(tt);
+      chip.appendChild(th);
+      tokenRow.appendChild(chip);
+    }
+
+    blockRow.innerHTML = '';
+    var prev = 0;
+    for (i = 0; i <= anchors.length; i++) {
+      var end = (i < anchors.length) ? anchors[i] : TOKENS.length;
+      var blk = document.createElement('div');
+      blk.className = 'blk';
+      blk.textContent = 'B' + (i + 1) + ' t' + (prev + 1) + '–t' + end;
+      blockRow.appendChild(blk);
+      prev = end;
+    }
+
+    var V = [];
+    for (i = 0; i < anchors.length; i++) {
+      V.push((SUCCESS[anchors[i]] || 0) / M);
+    }
+
+    anchorSlots.innerHTML = '';
+    for (i = 0; i < anchors.length; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot';
+
+      var name = document.createElement('div');
+      name.className = 'slot-name';
+      name.textContent = 'S' + sub(i + 1) + ' @ t' + sub(anchors[i]);
+
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      var alphaText = 'α=—';
+      if (i >= 1) {
+        var alpha = 1 / Math.exp(V[i] - V[i - 1]);
+        alphaText = 'α=' + fmt4(alpha);
+      }
+      val.textContent = 'V=' + fmt3(V[i]) + ' · ' + alphaText;
+
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var fill = document.createElement('i');
+      fill.className = 'b1';
+      fill.style.width = Math.max(2, V[i] * 100) + '%';
+      bar.appendChild(fill);
+
+      slot.appendChild(name);
+      slot.appendChild(val);
+      slot.appendChild(bar);
+      anchorSlots.appendChild(slot);
+    }
+
+    var parts = [];
+    parts.push('K=' + K + '，锚点 {' + anchors.map(function (p) { return 't' + sub(p); }).join(', ') + '}，切成 ' + (K + 1) + ' 块。');
+    parts.push('V = [' + V.map(fmt3).join(', ') + ']。');
+    if (V.length > 1) {
+      var alphas = [];
+      for (j = 1; j < V.length; j++) {
+        alphas.push('α' + sub(j + 1) + '=' + fmt4(1 / Math.exp(V[j] - V[j - 1])));
+      }
+      parts.push('调制因子：' + alphas.join('，') + '。');
+      parts.push('α₁ 不计算：原文未定义 V(S₀)。');
+    } else {
+      parts.push('只有 S₁，没有 α_j 可算；原文未定义 V(S₀)。');
+    }
+    msg.innerHTML = parts.join(' ');
+  }
+
+  kSlider.addEventListener('input', function (e) {
+    var K = parseInt(e.target.value, 10);
+    kVal.textContent = String(K);
+    render(K);
+  });
+
+  reset.addEventListener('click', function () {
+    kSlider.value = '2';
+    kVal.textContent = '2';
+    render(2);
+  });
+
+  render(2);
+})();
+</script>
+</body>
+</html>

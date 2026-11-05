@@ -1,0 +1,680 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 4.4 | Table 2 | 53.6-49.2 |
+| 27.48 | Table 4 | (3.53-2.56)/3.53*100 |
+| 2.63 | Table 3 | 46.80-44.17 |
+| 3.0 | Table 2 | 44.1-41.1 |
+| 3.1 | Table 2 | 46.3-43.2 |
+| 2.5 | Table 2 | 56.8-54.3 |
+| 2.7 | Table 2 | 52.3-49.6 |
+| 1.3 | Table 2 | 60.4-59.1 |
+| 12.08 | Table 4 | (5.71-5.02)/5.71*100 |
+| 0.71 | Table 4 | (1.41-1.40)/1.41*100 |
+| 0.56 | Table 3 | 46.80-46.24 |
+| 1.00 | Table 3 | 46.80-45.80 |
+| 18 | Table 2 | 3*6 |
+| 1800 | Table 1 | 1300+300+200 |
+| 27000 | Table 1 + §6.3 | 1800*15 |
+| 54000 | Table 1 + §6.3 | 1800*15*2 |
+| 9000 | Table 1 + §7.4 | 1800*5 |
+| 81000 | Table 1 + §6.3 | 1800*15*3 |
+| 10.4 | Table 2 | 33.0-22.6 |
+| 46.0 | Table 2 | (33.0-22.6)/22.6*100 |
+| 12.1 | Table 2 | 34.7-22.6 |
+| 53.5 | Table 2 | (34.7-22.6)/22.6*100 |
+| 10.0 | Table 2 | 32.6-22.6 |
+| 44.2 | Table 2 | (32.6-22.6)/22.6*100 |
+| 41.1 | Table 2 | (46.6+29.9+46.7)/3 |
+| 0.97 | Table 4 | 3.53-2.56 |
+| 0.69 | Table 4 | 5.71-5.02 |
+| 0.01 | Table 4 | 1.41-1.40 |
+| 4.52 | Table 5 | (34.45-32.96)/32.96*100 |
+| 0.3 | Table 2 | 59.0-58.7 |
+| 11.8 | Table 2 | 73.7-61.9 |
+| 5.3 | Table 2 | 52.0-46.7 |
+| 6.7 | Table 2 | 56.0-49.3 |
+| 6.0 | Table 2 | 55.3-49.3 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MOAT · 让 planner 与 grounder 互相迁就的联合对齐</title>
+<meta name="description" content="MOAT 用两段交替训练把 planner 与 grounding agent 拉近：planner 用 grounder 的 PPL 做 DPO，grounder 用 critic 过滤后的自采样数据做 SFT。六基准、三模型；对 Agent Lumos 的 18 个任务格全部更高，但 GPT-4 仍在四个任务上更高。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调，公共样式全部来自 base.css */
+.tbl-cap{font-size:13px;color:var(--text-soft);line-height:1.7;margin:18px 0 8px}
+.tbl-cap strong{color:var(--text)}
+.small-note{font-size:12.5px;color:var(--text-soft);line-height:1.75}
+.svg-flow{width:100%;height:auto;display:block}
+.flow-label{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-box-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.flow-title{font-size:13px;font-weight:600;fill:var(--text)}
+.flow-text{font-size:12px;fill:var(--text-muted)}
+.flow-small{font-size:11px;fill:var(--text-soft)}
+@media (max-width:600px){
+  .slots.s3{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MOAT</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · EMNLP 2025 Findings · arXiv 2509.09629v1</span>
+  <h1>MOAT：先让 planner 学会 grounder 的「口味」，再让 grounder 适应 planner 的输出</h1>
+  <p class="hero-sub">
+    独立训练的两个智能体，各自在自己的数据上刷分：planner 的子目标越写越漂亮，grounder 却未必接得住。
+    MOAT 把训练改成两段交替——planner 用 grounder 的困惑度做 DPO 偏好，grounder 用 planner 真实采样出的子目标做 critic 过滤后的 SFT。
+    代价是每轮要采样 <span data-src="§6.3">K=15</span> 个子目标序列，并让 critic 逐条判定。
+  </p>
+  <div class="meta">
+    <span>Minghang Zhu, Zhengliang Shi, Zhiwei Xu, Shiguang Wu, Lingjie Wang, Pengjie Ren, Zhaochun Ren, Zhumin Chen · Shandong University / Leiden University</span>
+    <a href="https://arxiv.org/abs/2509.09629v1" target="_blank" rel="noopener">arXiv 2509.09629v1 ↗</a>
+    <a href="https://github.com/ZMingHang/MOAT/tree/master" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    能力差距不是「某个智能体不够强」，而是两个智能体的<strong>分布对不上</strong>：planner 在 ground-truth 子目标上训练，grounder 也在 ground-truth 子目标上训练；推理时 grounder 看到的却是 planner 自己采出来的子目标。
+  </p>
+  <p>
+    MOAT 把「谁适应谁」拆成两段。<strong>Stage 1</strong> 让 planner 采样 K 个子目标序列，用 grounder 对正确动作序列的 PPL 排序，最低的当 chosen、最高的当 rejected，做 DPO；<strong>Stage 2</strong> 复用这些子目标，让 grounder 生成动作，critic 判定并修正，再 SFT。
+  </p>
+  <p>
+    在 Llama-2-7B / Mistral-7B-v0.2 / Qwen2.5-14B 上，MOAT 对 Agent Lumos 的 <strong>18 个任务格全部更高</strong>；held-in Avg 分别 <em>+3.0 / +3.1 / +2.5 个百分点</em>，held-out Avg 分别 <em>+2.7 / +4.4 / +1.3 个百分点</em>（Table 2）。
+  </p>
+  <p>
+    但增益不是「全面领先」：GPT-4 仍在 GSM8K、StrategyQA、SVAMP、HotpotQA 四个任务以及两个 Avg 上更高；主实验只跑 2 轮、K=15；理论上的非降/收敛论证依赖「PPL 与真实 reward 负相关」这一前提。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">4.4<small>pp</small></div>
+      <div class="k">Mistral-7B held-out Avg 提升（53.6 − 49.2）<br>同一模型的 held-in Avg 提升 3.1 pp</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">27.48<small>%</small></div>
+      <div class="k">Mistral-7B 的 Math grounding PPL 相对下降<br>3.53 → 2.56（Table 4）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">2.63<small>pp</small></div>
+      <div class="k">Llama-2-7B 上去掉 stage 1 的 Avg 降幅<br>46.80 → 44.17，消融中最大</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>两个各自很强的智能体，凑在一起却会「鸡同鸭讲」</h2></div>
+  <p class="sec-sub">先建立共同认知：能力差距是分布错配，不是单点能力不足。</p>
+
+  <p>
+    论文把多智能体系统拆成三段：规划智能体 <code>π<sub>p</sub></code> 把任务 <code>x</code> 分解成子目标序列 <code>s</code>；接地智能体 <code>π<sub>g</sub></code> 在工具集 <code>I</code> 和子目标 <code>s</code> 的条件下生成工具调用序列 <code>a</code>；执行模块执行 <code>a</code>，得到最终答案（§3）。
+  </p>
+
+  <div class="eq">
+    s = π<sub>p</sub>(x)<br>
+    a = π<sub>g</sub>(x, I, s)
+  </div>
+  <div class="eq-cap">§3 · plan–ground–execute 管线；论文只研究这一种双角色、线性交互的结构 <span class="infer">推断</span>（依据：§1 只声明 “we focus on this plan-ground-execute paradigm”，未实验其他拓扑。）</div>
+
+  <p>
+    问题出在两个方向都可能错位。planner 可能生成「高层但空泛」的子目标，较弱 grounder 不知道怎么把它落成工具调用；反过来，较强的 grounder 也可能被较弱 planner 的模糊子目标拖住，产生错误或低效执行（§1）。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">方向 A</span><h4>planner 太强，grounder 接不住</h4></div>
+      <p>子目标逻辑上成立，但缺少可执行的中间步骤；grounder 只能猜，或者调用错误的工具。</p>
+      <p class="small-note">论文原句：a planning agent might generate high-level subgoals that are difficult for a weaker grounding agent to understand and execute（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">方向 B</span><h4>grounder 太强，planner 给不准</h4></div>
+      <p>grounder 有能力执行，但 planner 的子目标粒度、顺序或措辞与它的工具接口不匹配，能力被浪费。</p>
+      <p class="small-note">论文原句：a strong grounding agent might struggle with subgoals generated by a weaker planning agent（§1）。</p>
+    </div>
+  </div>
+
+  <p>
+    独立训练会把这种错配固化。planner 的训练目标是「生成正确的子目标」，grounder 的训练目标是「在正确子目标下生成正确动作」；两者都以 ground-truth 子目标为条件，但推理时 grounder 的输入来自 planner 的采样分布。这个分布差，论文称为 <strong>capability gap</strong>。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心判断</span><h4>不是把单个模型再训强一点，而是让训练分布对齐推理分布</h4></div>
+    <p>如果 planner 永远只学 ground-truth 子目标，它不会知道自己的输出会被 grounder 怎样消费；如果 grounder 永远只学 ground-truth 子目标，它也不会遇到 planner 真实输出的噪声和风格。MOAT 的两个阶段，分别从两侧补上这个缺口。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人把两个智能体都训好了，但没让它们互相看过对方</h2></div>
+  <p class="sec-sub">AgentTuning / Agent-FLAN 是单智能体；Agent Lumos / α-UMi 是多智能体但独立训练；AutoACT 是自训练。共同缺口是「没有跨智能体的联合优化」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">单智能体 tuning</span><h4>把一个模型训成「多面手」</h4></div>
+      <p>AgentTuning、AgentOhana 用 GPT 系列生成的轨迹微调较小模型（§2）；Agent-FLAN 用模块化参数组训练不同的单智能体能力（§6.2）。</p>
+      <p>它们能提升指令跟随和推理，但论文认为，对需要长期规划和执行的复杂任务仍然有限。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">多智能体独立训练</span><h4>把角色分开，但数据也分开</h4></div>
+      <p>Agent Lumos 和 α-UMi 为不同角色构造专门数据，分别微调；AutoACT 让每个智能体在自己的数据上自训练（§1 的独立训练概括；Agent Lumos 的分角色微调见 §6.2；AutoACT 见 §2）。</p>
+      <p>这里的含义是：每个智能体的训练数据在训练前就固定了，训练过程中没有机制让一方根据另一方的行为调整。<span class="infer">推断</span>（依据：§1 的 “construct specific training data for each agent and train each agent independently”；§6.2 的 Agent Lumos “separately fine-tunes models on datasets to obtain specialized agents”。原文没有逐字写「训练前固定」，这是对独立训练流程的概括。）</p>
+    </div>
+  </div>
+
+  <blockquote>
+    However, existing methods often train agents independently, lacking joint optimization to ensure effective coordination.（§2）
+  </blockquote>
+
+  <p>
+    MOAT 与 Agent Lumos 的差别不在 cold start 数据——MOAT 的 cold start 使用 Lumos 公开的 SFT 数据（§4.3、A.1），Agent Lumos 作为该数据的来源也用同一套数据训练。<span class="infer">推断</span>（依据：§4.3 写 SFT dataset collected in previous work (Yin et al., 2024a)；A.1 写 public datasets provided by Lumos；原文未逐字写两者共用同一份数据。）差别在 cold start 之后：MOAT 让 planner 和 grounder 交替看到对方的输出，并把对方的反馈写进下一轮训练。换言之，Agent Lumos 是「两个专家各自毕业」，MOAT 是「两个专家毕业后继续一起做项目」。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">对照点</span><h4>为什么「各自刷分」不能自动换来协作</h4></div>
+    <p>因为两个模型的损失函数都不包含对方的推理行为。planner 的 DPO 偏好如果只来自人工标注或 ground-truth，它优化的是「人类觉得好的子目标」，不是「当前 grounder 能执行的子目标」。MOAT 把后者的信号显式接进来：用 grounder 的 PPL 当 reward，用 critic 过滤 grounder 的自生成动作。</p>
+  </div>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Stage 1：用 grounder 的困惑度，给 planner 排偏好</h2></div>
+  <p class="sec-sub">PPL 在这里不是评估指标，而是 reward：越低，说明这串子目标越容易被 grounder 转成正确动作。</p>
+
+  <p>
+    给定任务 <code>x</code>，planner 先采样 <code>K</code> 个候选子目标序列，记作 <code>S = {s<sub>1</sub>, …, s<sub>K</sub>}</code>。对每个候选，用 grounder 在<strong>正确动作序列</strong> <code>a</code> 上的困惑度打分：PPL 越低，表示 grounder 越「跟得上」这串子目标（§4.1）。
+  </p>
+
+  <div class="eq">
+    PPL<sub>πg</sub>(a | x, I, s) =
+    exp[ − (1 / |a|) Σ<sub>i=1</sub><sup>|a|</sup>
+    log P<sub>πg</sub>(a<sub>i</sub> | a<sub>1:i−1</sub>, x, I, s) ]
+  </div>
+  <div class="eq-cap">§4.1 · PPL 定义（原文未编号）；越低表示 s 越有助于 grounder 生成正确动作</div>
+
+  <p class="small-note">
+    记号说明：v1 PDF p.3 与 arXiv HTML 的原文都完整显示
+    <code>PPL<sub>πg</sub>(a | x, I, s) := exp{ −(1 / |a|) Σ<sub>i=1</sub><sup>|a|</sup> log P<sub>πg</sub>(s | a<sub>&lt;i</sub>, x, I, s) }</code>——
+    对数项里被预测的变量写的是 <code>s</code>，不是 <code>a<sub>i</sub></code>，疑为排印错误（typo）。本页上面的公式按标准困惑度记号写成 <code>a<sub>i</sub> | a<sub>1:i−1</sub>, x, I, s</code>，属于记号修正，不是逐字复制。
+  </p>
+
+  <p>
+    拿到 K 个 PPL 后，取最低的作为 <code>s<sub>w</sub></code>（chosen），最高的作为 <code>s<sub>l</sub></code>（rejected），构造偏好对，用 DPO 更新 planner。参考模型 <code>π<sub>ref</sub></code> 初始化为优化前的 planner。
+  </p>
+
+  <div class="eq">
+    L<sub>DPO</sub> = − E<sub>(x, (s<sub>w</sub>, s<sub>l</sub>)) ~ D</sub> [
+    log σ( β log( π<sub>p</sub>(s<sub>w</sub>|x) / π<sub>ref</sub>(s<sub>w</sub>|x) )
+    − β log( π<sub>p</sub>(s<sub>l</sub>|x) / π<sub>ref</sub>(s<sub>l</sub>|x) ) ) ]
+  </div>
+  <div class="eq-cap">§4.1 · DPO loss（原文未编号）；β 在原文中只称为 hyperparameter，§6.3 与 A.1 未给出取值</div>
+
+  <p>
+    A.1 还加了一个稳定性过滤：如果 <code>s<sub>w</sub></code> 与 <code>s<sub>l</sub></code> 的 reward 差小于 <code>0.1</code>，这对样本不参与 DPO。也就是说，只有「明显更好」和「明显更差」的候选才被拿来当偏好对。
+  </p>
+
+  <h3>交互：三种任务的 PPL 差距并不一样</h3>
+  <p>切换任务，看 Mistral-7B 上 Agent Lumos 与 MOAT 的 grounding PPL。柱长按两者中的较大值归一化，数值直接取自 Table 4；下方读数给出相对下降。</p>
+
+  <div class="sim" id="ppl-sim">
+    <div class="sim-top" id="ppl-tabs">
+      <button class="rule-btn active" data-task="math">Math<span class="r-sub">GSM8K / SVAMP</span></button>
+      <button class="rule-btn" data-task="qa">QA<span class="r-sub">StrategyQA / HotpotQA</span></button>
+      <button class="rule-btn" data-task="web">Web<span class="r-sub">Mind2Web / WebShop</span></button>
+    </div>
+
+    <div class="slots s2">
+      <div class="slot">
+        <div class="slot-name">Agent Lumos</div>
+        <div class="slot-val" id="ppl-lumos">3.53</div>
+        <div class="bar"><i class="b2" id="bar-lumos" style="width:100%"></i></div>
+      </div>
+      <div class="slot hit">
+        <div class="slot-name">MOAT</div>
+        <div class="slot-val" id="ppl-moat">2.56</div>
+        <div class="bar"><i class="b1" id="bar-moat" style="width:72.5%"></i></div>
+      </div>
+    </div>
+
+    <div class="readout" id="ppl-readout" data-src="Table 4">
+      <div class="r-head">Table 4 · Mistral-7B 的 grounding agent PPL</div>
+      <div id="ppl-msg">Mistral-7B · Math：3.53 → 2.56，相对下降 <strong>27.48%</strong>。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账<span class="sum-sub">与 JS 同口径：相对下降 = (Lumos − MOAT) / Lumos × 100</span></summary>
+    <div class="details-body">
+      <p>Math：(3.53 − 2.56) / 3.53 × 100 = 0.97 / 3.53 × 100 = 27.4787…% → <strong>27.48%</strong>。</p>
+      <p>Web：(5.71 − 5.02) / 5.71 × 100 = 0.69 / 5.71 × 100 = 12.0840…% → <strong>12.08%</strong>。</p>
+      <p>QA 同式：(1.41 − 1.40) / 1.41 × 100 = 0.01 / 1.41 × 100 = 0.7092…% → <strong>0.71%</strong>。</p>
+      <p>三组数值逐字取自 Table 4（Mistral-7B）；页面不引入插值或模拟值。JS 与手算都用同一公式、保留两位小数。</p>
+    </div>
+  </details>
+
+  <p>
+    这张图里最值得注意的是 <strong>QA 只降了 0.71%</strong>：在 Mistral-7B 上，Agent Lumos 的 QA PPL 本来就只有 1.41，MOAT 是 1.40，差距很小。Math 的 27.48% 和 Web 的 12.08% 更明显。PPL 的绝对值和任务类型强相关，不能跨任务直接比较。<span class="infer">推断</span>（依据：Table 4（Mistral-7B）三个任务的基线 PPL 从 1.41 到 5.71，相对降幅从 0.71% 到 27.48%。）
+  </p>
+</section>
+
+<!-- ================= 04 怎么训/怎么算 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Stage 2：让 grounder 在 planner 的真实输出上练，但先过 critic 这一关</h2></div>
+  <p class="sec-sub">自生成数据不能直接用；critic 判定 + 修正，再按 1:1 混入初始数据做 SFT。</p>
+
+  <p>
+    Stage 2 复用 Stage 1 采样出的<strong>全部 K 个子目标序列</strong>，而不是只用 PPL 最低的那一个。对每个 <code>(x, s)</code>，grounder 生成动作序列 <code>a</code>。因为 <code>a</code> 是模型自己生成的，可能出错；直接拿去做 SFT 会导致性能退化甚至训练崩溃（§4.2 引用了 Dohmatob et al. 2024 与 Shumailov et al. 2024）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">Algorithm 1 · Dataset Construction</span><h4>critic 不是只打分，它还会改写</h4></div>
+    <ol>
+      <li>对每个任务 <code>x</code> 和每个候选 <code>s</code>，让 grounder 生成 <code>a</code>。</li>
+      <li>critic 接收 <code>(x, I, s, a, ã)</code>，判断 <code>a</code> 是否能让任务到达最终答案。</li>
+      <li>如果判定失败，critic 参考 ground-truth <code>ã</code> 给出修正后的 <code>â</code>，把 <code>(x, I, s, â)</code> 加入 <code>D<sub>g</sub></code>。</li>
+      <li>如果判定成功，把 <code>(x, I, s, a)</code> 加入 <code>D<sub>g</sub></code>。</li>
+      <li>用 <code>D<sub>g</sub></code> 对 grounder 做 SFT。</li>
+    </ol>
+  </div>
+
+  <p>
+    论文原句：<em>“This filtering and correction process ensures that only reliable supervision signals are used during grounding agent training.”</em>（§4.2）这里的「可靠」指的是动作序列能到达与 ground-truth 相同的最终答案，不是子目标本身一定最优。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">原文并列</span><h4>critic 是否改写子目标，两处写法不同</h4></div>
+    <p>Appendix A.3 的 critic prompt 要求模型在失败时输出 <code>Corrected Subgoals</code> 与 <code>Corrected Actions</code>；Algorithm 1 的失败分支（第 6 行）写入 <code>D<sub>g</sub></code> 的 pair 是 <code>(x, I, s, â)</code>，其中 <code>s</code> 仍是原始子目标，没有替换成 corrected subgoals；成功分支（第 9 行）写入原始 <code>a</code>。</p>
+    <p class="small-note">两处并列：A.3 的 prompt 允许改子目标；Algorithm 1 的伪代码只替换动作。本页按 Algorithm 1 描述数据流，不替原文消解这个差异。</p>
+  </div>
+
+  <h3>训练配置：两轮、K=15、6×A800</h3>
+  <p>
+    Cold start 用 Lumos 的公开 SFT 数据，planner 和 grounder 各训 <span data-src="Appendix A.1">2 epochs</span>，学习率 <span data-src="Appendix A.1">2×10<sup>−5</sup></span>，batch size <span data-src="Appendix A.1">128</span>，最大序列长度 <span data-src="Appendix A.1">1024</span>，线性 warmup 占 <span data-src="Appendix A.1">3%</span>。
+    DPO 阶段用 accelerate + DeepSpeed：batch size <span data-src="Appendix A.1">4</span>，梯度累积 <span data-src="Appendix A.1">8</span>，学习率 <span data-src="Appendix A.1">4×10<sup>−7</sup></span>，cosine scheduler，最大长度 <span data-src="Appendix A.1">1024</span>。
+    Grounding 阶段再训 <span data-src="Appendix A.1">2 epochs</span>，学习率 <span data-src="Appendix A.1">2×10<sup>−5</sup></span>，batch size <span data-src="Appendix A.1">128</span>，并与初始数据按 <span data-src="Appendix A.1">1:1</span> 混合，防止遗忘。
+    全部实验在 <span data-src="Appendix A.1">6×A800 80GB</span> 上完成；主实验 <span data-src="§6.3">K=15</span>、迭代 <span data-src="§6.3">2</span> 轮、采样温度 <span data-src="§6.3">1.0</span>，critic 用 <span data-src="§6.3">DeepSeek-R1-Distill-Qwen-32B</span>。
+    <span class="infer">推断</span>（依据：A.1 只写 initial fine-tuning “train two epochs”，未分角色列出；本页把它理解为 planner 和 grounder 各训 2 epochs。）
+  </p>
+
+  <h3>交互：K 和迭代轮数把训练量推到多大</h3>
+  <p>
+    训练集是三个 held-in 任务，共 <span data-src="Table 1">1800</span> 条（GSM8K 1300 + StrategyQA 300 + Mind2Web 200）。每条任务每轮采 K 个候选，所以 PPL 打分、动作生成、critic 判定都按 <code>1800 × K × N</code> 量级增长。拖动滑块看总量。
+  </p>
+
+  <div class="sim" id="cost-sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>K 候选数 <span class="v" id="k-v">15</span></label>
+        <input type="range" id="k" min="5" max="15" step="1" value="15">
+      </div>
+      <div class="ctrl">
+        <label>迭代轮数 N <span class="v" id="n-v">2</span></label>
+        <input type="range" id="n" min="1" max="3" step="1" value="2">
+      </div>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot">
+        <div class="slot-name">每轮候选</div>
+        <div class="slot-val" id="cost-per-round">27,000</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">总 PPL 打分</div>
+        <div class="slot-val" id="cost-ppl-total">54,000</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">总 critic 判定</div>
+        <div class="slot-val" id="cost-critic-total">54,000</div>
+      </div>
+    </div>
+
+    <div class="readout" id="cost-readout" data-src="Table 1 + §6.3">
+      <div class="r-head">训练量估算</div>
+      <div id="cost-msg">1800 × 15 = 27,000 条/轮；× 2 轮 = 54,000 条。Stage 2 对每条候选生成一次动作，critic 也逐条判定，因此动作生成与 critic 判定同量。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账<span class="sum-sub">假设：每个训练实例每轮都被使用一次</span></summary>
+    <div class="details-body">
+      <p><strong>K=15, N=2：</strong>1800 × 15 = 27,000 条/轮；27,000 × 2 = <strong>54,000</strong> 条。</p>
+      <p><strong>K=5, N=3：</strong>1800 × 5 = 9,000 条/轮；9,000 × 3 = <strong>27,000</strong> 条。</p>
+      <p>论文没有说明每轮是否对训练集做子采样、是否在一个 epoch 内重复使用同一条任务；上面的估算按 Algorithm 2 的「for each task x ∈ D」直接相乘。若实际只取部分数据，数值按比例缩小。</p>
+      <p>这里只估「采样 / 打分 / 判定」的条数，不估 GPU 小时或 token 数——论文没有给出这些开销。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05 架构/流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次迭代，两个阶段，三条数据流</h2></div>
+  <p class="sec-sub">Cold start → Stage 1 更新 planner → Stage 2 更新 grounder → 下一轮；推理时仍是 planner → grounder → executor 的线性管线。</p>
+
+  <figure>
+    <svg class="svg-flow" viewBox="0 0 900 430" role="img" aria-label="MOAT 的推理管线与两阶段训练循环">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8C857B"></path>
+        </marker>
+        <marker id="arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#C04E2D"></path>
+        </marker>
+      </defs>
+
+      <!-- 推理管线 -->
+      <text x="10" y="18" class="flow-label">推理管线（§3）</text>
+      <rect x="10" y="34" width="92" height="44" rx="8" class="flow-box"></rect>
+      <text x="56" y="61" text-anchor="middle" class="flow-title">任务 x</text>
+
+      <line x1="102" y1="56" x2="128" y2="56" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arrow)"></line>
+      <rect x="130" y="34" width="132" height="44" rx="8" class="flow-box"></rect>
+      <text x="196" y="61" text-anchor="middle" class="flow-title">规划智能体 πp</text>
+
+      <line x1="262" y1="56" x2="288" y2="56" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arrow)"></line>
+      <rect x="290" y="34" width="142" height="44" rx="8" class="flow-box"></rect>
+      <text x="361" y="61" text-anchor="middle" class="flow-title">子目标序列 s</text>
+
+      <line x1="432" y1="56" x2="458" y2="56" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arrow)"></line>
+      <rect x="460" y="34" width="132" height="44" rx="8" class="flow-box"></rect>
+      <text x="526" y="61" text-anchor="middle" class="flow-title">接地智能体 πg</text>
+
+      <line x1="592" y1="56" x2="618" y2="56" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arrow)"></line>
+      <rect x="620" y="34" width="122" height="44" rx="8" class="flow-box"></rect>
+      <text x="681" y="61" text-anchor="middle" class="flow-title">动作序列 a</text>
+
+      <line x1="742" y1="56" x2="768" y2="56" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arrow)"></line>
+      <rect x="770" y="34" width="118" height="44" rx="8" class="flow-box"></rect>
+      <text x="829" y="61" text-anchor="middle" class="flow-title">执行器 / 答案</text>
+
+      <!-- Cold start -->
+      <rect x="10" y="180" width="124" height="84" rx="8" class="flow-box"></rect>
+      <text x="72" y="204" text-anchor="middle" class="flow-title">Cold start</text>
+      <text x="72" y="226" text-anchor="middle" class="flow-text">Lumos SFT 数据</text>
+      <text x="72" y="246" text-anchor="middle" class="flow-text">两个 agent 各 2 epochs</text>
+
+      <line x1="134" y1="222" x2="164" y2="222" stroke="#8C857B" stroke-width="1.4" marker-end="url(#arrow)"></line>
+
+      <!-- Stage 1 -->
+      <rect x="166" y="150" width="330" height="150" rx="10" class="flow-box-a"></rect>
+      <text x="182" y="176" class="flow-title">Stage 1 · planner 对齐</text>
+      <text x="182" y="202" class="flow-text">采样 K 个 s；grounder 算 PPL</text>
+      <text x="182" y="224" class="flow-text">PPL 最低 = chosen，最高 = rejected</text>
+      <text x="182" y="246" class="flow-text">DPO 更新 πp</text>
+      <text x="182" y="272" class="flow-small">§4.1 · K=15 · 过滤 reward 差 &lt; 0.1 的对</text>
+
+      <line x1="496" y1="225" x2="532" y2="225" stroke="#C04E2D" stroke-width="1.8" marker-end="url(#arrow-a)"></line>
+
+      <!-- Stage 2 -->
+      <rect x="534" y="150" width="356" height="150" rx="10" class="flow-box"></rect>
+      <text x="550" y="176" class="flow-title">Stage 2 · grounder 改进</text>
+      <text x="550" y="202" class="flow-text">复用全部 K 个 s；πg 生成 a</text>
+      <text x="550" y="224" class="flow-text">critic 判定是否到达最终答案</text>
+      <text x="550" y="246" class="flow-text">失败则参考 ground truth 修正</text>
+      <text x="550" y="272" class="flow-small">§4.2 · SFT · 与初始数据 1:1 混合</text>
+
+      <!-- 循环箭头 -->
+      <path d="M712 300 L712 348 L331 348 L331 300" fill="none" stroke="#C04E2D" stroke-width="1.6" marker-end="url(#arrow-a)"></path>
+      <text x="521" y="340" text-anchor="middle" class="flow-label">下一轮 t+1（默认 N=2）</text>
+    </svg>
+    <figcaption>
+      按 Figure 2 与 Algorithm 1/2 重绘的简化流程图。覆盖：K 候选采样、PPL 排序、DPO 更新 planner、critic 过滤/修正、SFT 更新 grounder、轮次循环；未覆盖：cold start 的 SFT 数据构造细节、DPO reference model 的更新细节、critic prompt 全文、Algorithm 2 中的张量级符号。推理管线是 §3 的三段式，训练循环是 §4 的两阶段交替。
+    </figcaption>
+  </figure>
+
+  <p>
+    这张图里有两个容易被忽略的点。第一，<strong>Stage 2 用的是全部 K 个候选</strong>，不是只把 PPL 最低的那个喂给 grounder；这样 grounder 见到的是 planner 更完整的采样分布（K=15，§6.3），而不是被 planner 自己挑过的「最优样本」。第二，<strong>critic 的修正发生在写数据集之前</strong>：Algorithm 1 的失败分支写入 critic 修正后的 <code>â</code>，成功分支保留原始 <code>a</code>（第 6 / 9 行）；所以 SFT 目标并非一律是校对后的动作。
+  </p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>对 Agent Lumos 全胜，但对 GPT-4 不是</h2></div>
+  <p class="sec-sub">Table 2 的 18 个任务格全部高于 Agent Lumos；换到 GPT-4，MOAT 只在 Mind2Web 和 WebShop 上更高。</p>
+
+  <p class="tbl-cap"><strong>Table 2</strong> · MOAT 与基线在 held-in / held-out 任务上的结果（完整转录）。指标口径按 Table 1 的 Metric 列：GSM8K / SVAMP 为 Accuracy，StrategyQA / HotpotQA 为 Exact Match，Mind2Web 为 Step Success Rate，WebShop 为 Avg. Reward。Avg 可按三个任务指标值的算术平均复算（held-in：GSM8K / Mind2Web / StrategyQA；held-out：SVAMP / WebShop / HotpotQA），不是按样本量加权，也不是同一指标下的统一分数。表头原文把 GSM8K 写作「GSK8K」，本页按 GSM8K 记录。粉色底纹标记 MOAT（本文方法），不是逐列最优标记；原文 Table 2 caption 写「The best results in each group are highlighted in bold」，本页未逐格转录每组最优的加粗。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Method</th><th>Base Model</th><th>GSM8K</th><th>Mind2Web</th><th>StrategyQA</th><th>Held-in Avg</th><th>SVAMP</th><th>WebShop</th><th>HotpotQA</th><th>Held-out Avg</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>GPT-4</td><td>—</td><td class="num">87.0</td><td class="num">22.6</td><td class="num">71.0</td><td class="num">60.2</td><td class="num">90.5</td><td class="num">58.6</td><td class="num">52.1</td><td class="num">67.1</td></tr>
+        <tr><td>GPT-3.5-Turbo</td><td>—</td><td class="num">65.0</td><td class="num">21.7</td><td class="num">58.0</td><td class="num">48.2</td><td class="num">81.0</td><td class="num">62.4</td><td class="num">24.0</td><td class="num">55.8</td></tr>
+        <tr><td>Llama-2-7B-Chat</td><td>Llama-2-7B</td><td class="num">15.0</td><td class="num">11.9</td><td class="num">5.0</td><td class="num">10.6</td><td class="num">20.7</td><td class="num">15.8</td><td class="num">3.0</td><td class="num">13.2</td></tr>
+        <tr><td>Agent Tuning</td><td>Llama-2-7B</td><td class="num">14.0</td><td class="num">10.6</td><td class="num">49.0</td><td class="num">24.5</td><td class="num">35.3</td><td class="num">59.8</td><td class="num">10.0</td><td class="num">35.0</td></tr>
+        <tr><td>Agent Tuning</td><td>Llama-2-13B</td><td class="num">22.3</td><td class="num">11.1</td><td class="num">52.0</td><td class="num">28.5</td><td class="num">56.9</td><td class="num">65.0</td><td class="num">24.0</td><td class="num">48.6</td></tr>
+        <tr><td>Agent-FLAN</td><td>Llama-2-7B</td><td class="num">28.5</td><td class="num">16.9</td><td class="num">48.0</td><td class="num">31.1</td><td class="num">39.2</td><td class="num">55.9</td><td class="num">12.0</td><td class="num">35.7</td></tr>
+        <tr><td>Agent Lumos</td><td>Llama-2-7B</td><td class="num">46.6</td><td class="num">29.9</td><td class="num">46.7</td><td class="num">41.1</td><td class="num">65.5</td><td class="num">58.3</td><td class="num">25.0</td><td class="num">49.6</td></tr>
+        <tr class="best"><td>MOAT</td><td>Llama-2-7B</td><td class="num">47.4</td><td class="num">33.0</td><td class="num">52.0</td><td class="num">44.1</td><td class="num">69.2</td><td class="num">60.6</td><td class="num">27.0</td><td class="num">52.3</td></tr>
+        <tr><td>Agent Lumos</td><td>Mistral-7B-v0.2</td><td class="num">46.4</td><td class="num">33.8</td><td class="num">49.3</td><td class="num">43.2</td><td class="num">61.9</td><td class="num">58.7</td><td class="num">27.0</td><td class="num">49.2</td></tr>
+        <tr class="best"><td>MOAT</td><td>Mistral-7B-v0.2</td><td class="num">48.2</td><td class="num">34.7</td><td class="num">56.0</td><td class="num">46.3</td><td class="num">73.7</td><td class="num">59.0</td><td class="num">28.0</td><td class="num">53.6</td></tr>
+        <tr><td>Agent Lumos</td><td>Qwen2.5-14B</td><td class="num">81.7</td><td class="num">31.8</td><td class="num">49.3</td><td class="num">54.3</td><td class="num">85.5</td><td class="num">64.7</td><td class="num">27.0</td><td class="num">59.1</td></tr>
+        <tr class="best"><td>MOAT</td><td>Qwen2.5-14B</td><td class="num">82.4</td><td class="num">32.6</td><td class="num">55.3</td><td class="num">56.8</td><td class="num">87.4</td><td class="num">65.8</td><td class="num">28.0</td><td class="num">60.4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    先看 MOAT 对 Agent Lumos：三个基座模型 × 六个任务，共 <span data-src="Table 2">18</span> 个格子，MOAT 全部更高。最小的差距是 Mistral 的 WebShop（58.7 → 59.0，<span data-src="Table 2">+0.3</span> 个百分点），最大的是 Mistral 的 SVAMP（61.9 → 73.7，<span data-src="Table 2">+11.8</span> 个百分点）。
+  </p>
+
+  <p>
+    按 held-in / held-out 的 Avg 拆开，三个模型的增益分别是：Llama <span data-src="Table 2">+3.0</span> / <span data-src="Table 2">+2.7</span> 个百分点，Mistral <span data-src="Table 2">+3.1</span> / <span data-src="Table 2">+4.4</span> 个百分点，Qwen <span data-src="Table 2">+2.5</span> / <span data-src="Table 2">+1.3</span> 个百分点。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">口径核对</span><h4>摘要里的 3.1% / 4.4% 不是三模型平均</h4></div>
+    <p>摘要写 “average improvements of 3.1% on held-in tasks and 4.4% on held-out tasks”。按 Table 2 复算，<strong>3.1 = 46.3 − 43.2</strong>、<strong>4.4 = 53.6 − 49.2</strong>，都只对应 Mistral-7B 这一个模型；Llama 是 +3.0 / +2.7，Qwen 是 +2.5 / +1.3。§7.1 也只拿 Mistral 举例说明 4.4%。</p>
+    <p><span class="infer">推断</span>（依据：上述四个差值全部来自 Table 2；摘要没有给平均口径的公式）摘要的 3.1%/4.4% 是 Mistral 单模型的 held-in / held-out 点差，不是三个模型的平均增益。</p>
+  </div>
+
+  <p>
+    再看 GPT-4。Table 2 里 GPT-4 的 held-out Avg 是 <span data-src="Table 2">67.1</span>，高于 MOAT 三个模型的 52.3 / 53.6 / 60.4；held-in Avg 60.2 也高于 MOAT 的 44.1 / 46.3 / 56.8。逐任务看，GPT-4 在 GSM8K、StrategyQA、SVAMP、HotpotQA 上更高，MOAT 在 Mind2Web 和 WebShop 上更高。论文 §7.1 说 MOAT 在 Mind2Web 上「about a 50% performance improvement over GPT-4」；按 Table 2 对 GPT-4 的 22.6 复算三行：Llama 33.0 相对提升 <span data-src="Table 2">46.0%</span>（<span data-src="Table 2">10.4</span> / 22.6）、Mistral 34.7 相对提升 <span data-src="Table 2">53.5%</span>（<span data-src="Table 2">12.1</span> / 22.6）、Qwen 32.6 相对提升 <span data-src="Table 2">44.2%</span>（<span data-src="Table 2">10.0</span> / 22.6）。三行跨度 44.2%–53.5%，「about 50%」是对这组的粗略取整，主要由 Mistral 行支持<span class="infer">推断</span>（依据：Mistral 34.7 / 22.6 = 53.5%，是三者中最接近 50% 的一行）；不能按 Llama 单行断言「不是 50%」。
+  </p>
+
+  <p class="tbl-cap"><strong>Table 3</strong> · 消融实验（Llama-2-7B，两个 web 数据集；指标口径同 Table 1 的 Metric 列：Mind2Web 为 Step Success Rate，WebShop 为 Avg. Reward，Avg 可按两项算术平均复算）。↓ 后的数字是相对 vanilla MOAT 的绝对点差。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Variant</th><th>Mind2Web</th><th>Δ</th><th>WebShop</th><th>Δ</th><th>Avg</th><th>Δ</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Vanilla MOAT</td><td class="num">32.96</td><td class="num">—</td><td class="num">60.63</td><td class="num">—</td><td class="num">46.80</td><td class="num">—</td></tr>
+        <tr><td>w/o stage 1</td><td class="num">29.58</td><td class="num">↓3.38</td><td class="num">58.76</td><td class="num">↓1.87</td><td class="num">44.17</td><td class="num">↓2.63</td></tr>
+        <tr><td>w/o stage 2</td><td class="num">32.19</td><td class="num">↓0.77</td><td class="num">60.29</td><td class="num">↓0.34</td><td class="num">46.24</td><td class="num">↓0.56</td></tr>
+        <tr><td>w/o critic</td><td class="num">31.80</td><td class="num">↓1.16</td><td class="num">59.79</td><td class="num">↓0.84</td><td class="num">45.80</td><td class="num">↓1.00</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    消融的顺序值得注意：去掉 stage 1 的 Avg 降幅是 <span data-src="Table 3">2.63</span> 个百分点，最大；去掉 critic 是 <span data-src="Table 3">1.00</span>，第二；去掉 stage 2 只有 <span data-src="Table 3">0.56</span>。论文据此说，planner 对齐是最关键的一步；critic 的作用（w/o critic）比移除整个 grounding improvement 阶段（w/o stage 2）更重要（§7.2）。
+  </p>
+
+  <p>
+    Table 4 的 Mistral-7B PPL 分析给出了另一面：Math 的 grounding PPL 从 3.53 降到 2.56（相对下降 <span data-src="Table 4">27.48%</span>），Web 从 5.71 降到 5.02（<span data-src="Table 4">12.08%</span>），QA 从 1.41 降到 1.40（<span data-src="Table 4">0.71%</span>）。QA 的 PPL 几乎没动，但 StrategyQA 的 Exact Match 在三个模型上分别提高了 5.3 / 6.7 / 6.0 个百分点（Table 2）。<span class="infer">推断</span>（依据：Table 4 的 QA PPL 差距只有 0.01，Table 2 的 StrategyQA 增益却是六个任务里最大的之一）PPL 与最终指标值并非一一对应，PPL 更适合当同一任务内的相对信号，而不是跨任务的绝对标尺。
+  </p>
+
+  <p>
+    论文还在 Mistral-7B 上报告了两个趋势（§7.4）：Figure 3 显示采样数 K 与性能正相关，K=5 时 GSM8K 和 Mind2Web 会下降；Figure 4 显示性能随迭代轮数上升，但到第 3 轮增益已经边际化。Figure 5 则把 MOAT 与独立训练的同 epoch 数基线对比：MOAT 持续上升，独立训练基线出现退化，论文归因于过拟合（§7.6）。
+  </p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它能补的是「两个智能体的分布差」，不是所有协作问题</h2></div>
+  <p class="sec-sub">文本、两角色、线性管线、固定工具集；多模态、澄清/协商、更多角色都不在覆盖范围内。</p>
+
+  <p>
+    论文的 Limitations 写得很直接：<em>“Our framework is currently developed and evaluated exclusively on text-based scenarios, without exploring multimodal learning settings.”</em> 图像、视频、跨模态工具调用都没有涉及。
+  </p>
+
+  <p>
+    结构上也只覆盖 planner–grounder 这一种线性管线。论文明确说，选择 plan–ground–execute 是因为它在多数多智能体框架里被广泛采用（§1）；但这也意味着，需要 grounder 反问 planner、需要多个 planner 协商、或者需要 reflection / tool retrieval 角色的场景，MOAT 没有给出机制。<span class="infer">推断</span>（依据：§3 的 s → a 单向管线；论文未实验反问或协商。）论文在 Conclusion 里把 tool retrieval / reflection 等更多专用智能体列为 future work，而不是本文已验证的结果。
+  </p>
+
+  <p class="tbl-cap"><strong>Table 5</strong> · 换 critic 模型的影响（Llama-2-7B，Mind2Web / WebShop；指标口径同 Table 1 的 Metric 列：Mind2Web 为 Step Success Rate，WebShop 为 Avg. Reward，Avg 可按两项算术平均复算）。↑/↓ 是相对 DS-Qwen-32B 行的相对变化；按表中数值复算，34.45 / 32.96 − 1 = <span data-src="Table 5">4.52%</span>，与表里的 ↑4.52% 对上。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Critic</th><th>Mind2Web</th><th>WebShop</th><th>Avg</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DS-Qwen-32B（默认）</td><td class="num">32.96</td><td class="num">60.63</td><td class="num">46.80</td></tr>
+        <tr><td>GPT-4o（更强）</td><td class="num">34.45 <small>↑4.52%</small></td><td class="num">60.78 <small>↑0.25%</small></td><td class="num">47.62 <small>↑1.75%</small></td></tr>
+        <tr><td>DS-Qwen-14B（更弱）</td><td class="num">31.80 <small>↓3.52%</small></td><td class="num">60.45 <small>↓0.30%</small></td><td class="num">46.13 <small>↓1.43%</small></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    critic 的依赖是真实的：换成更强的 GPT-4o，Avg 从 46.80 升到 47.62（相对 <span data-src="Table 5">+1.75%</span>）；换成更弱的 DS-Qwen-14B，降到 46.13（相对 <span data-src="Table 5">−1.43%</span>）。论文的论点是：即使弱 critic 也还能超过已有基线，因为「判定动作是否到达最终答案」比生成动作简单（§7.5）。但这条结论仍依赖一个外部 critic，训练成本没有消失。
+  </p>
+
+  <p>
+    理论部分也要加限定。Lemma 5.1 的论证起点是 <em>“Since PPL is negatively correlated with the true reward R(s,a)”</em>；Lemma 5.2 则从「log-likelihood 提升 → PPL 降低 → reward 提高」推到非降。论文没有证明 PPL 与真实 reward 的负相关本身，也没有给出这种相关性的任务范围。<span class="infer">推断</span>（依据：Lemma 5.1/5.2 的原文把这两步当作前提直接使用，未附证明）因此「non-decreasing + 收敛」是建立在该前提上的结论，不是对任意 planner–grounder 组合的无条件保证。
+  </p>
+
+  <p>
+    数据规模也限制了外推。训练集只有三个 held-in 任务共 <span data-src="Table 1">1800</span> 条；held-out 是 SVAMP（1000）、WebShop（500）、HotpotQA（100），仍是数学、网页、问答三类，不是全新的领域。Table 2 的 Avg 可按三个任务指标值的算术平均复算（三个指标口径不同，不是同单位分数），未按样本量加权。<span class="infer">推断</span>（依据：Llama 的 held-in Avg 41.1 = (46.6 + 29.9 + 46.7) / 3；其余 Avg 同样按三项算术平均复算。）因此小样本任务（StrategyQA 300、Mind2Web 200）和大样本任务（GSM8K 1300）在 Avg 里权重相同；跨任务比较时要注意这一点。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">什么时候别用</span><h4>三个明确的边界</h4></div>
+    <ul>
+      <li>需要多模态输入或跨模态工具调用：论文没有覆盖。</li>
+      <li>需要 agent 之间澄清、协商、反问：MOAT 的交互是单向的 s → a，没有回传通道。</li>
+      <li>没有可信 critic 或预算有限：Stage 2 的数据质量依赖 critic，弱 critic 会掉点，强 critic 增加成本。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div><strong>Bridging the Capability Gap: Harmonizing Multi-Agent Systems via Joint Alignment Tuning</strong>（arXiv v1 元数据标题为 “Bridging the Capability Gap: Joint Alignment Tuning for Harmonizing LLM-based Multi-Agent Systems”；ar5iv 正文标题为本页所用标题。两者都指 2509.09629v1。）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.09629v1">https://arxiv.org/abs/2509.09629v1</a>（v1，2025-09-11；EMNLP 2025 Findings）<br>
+    代码：<a href="https://github.com/ZMingHang/MOAT/tree/master">https://github.com/ZMingHang/MOAT/tree/master</a><br>
+    笔记：<a href="/bridging-the-capability-gapharmonizing-multi-agent-systems-via-joint-alignment-tuning/">Bridging the Capability Gap：Harmonizing Multi-Agent Systems via Joint Alignment Tuning</a>
+  </div>
+
+  <div style="margin-top:22px">
+    <strong>笔记勘误（不改笔记原文）</strong>
+    <ul>
+      <li>笔记写 critic 可用「DS-Qwen-32B 或 GPT-4」；Table 5 / §7.5 里更强的 critic 是 <strong>GPT-4o</strong>，GPT-4 是 Table 2 的 API 基线，不是 critic。</li>
+      <li>笔记写 Mistral held-out「平均性能提升了 4.4%（53.6 vs 49.2）」；按 Table 2 这是 <strong>4.4 个百分点</strong>（53.6 − 49.2），不是相对提升 4.4%。论文摘要也用「4.4%」表示这个点差，§7.1 的 4.4% 只对应 Mistral 单模型。</li>
+      <li>笔记写「MOAT 在所有基座模型和任务上均取得了 SOTA 或有竞争力的结果」；Table 2 中 MOAT 对 Agent Lumos 的 18 个任务格全部更高，但 GPT-4 在 GSM8K、StrategyQA、SVAMP、HotpotQA 四个任务以及两个 Avg 上更高；对开源 agent-tuning 基线也不是逐任务全胜——Agent Tuning Llama-2-13B 的 WebShop 65.0 高于 MOAT Llama-2-7B 的 60.6 和 Mistral-7B-v0.2 的 59.0，StrategyQA 52.0 与 MOAT Llama-2-7B 的 52.0 打平。准确说法是「对 Agent Lumos 的 18 个任务格全部更高；对开源 agent-tuning 基线的 Avg 整体领先，但并非逐任务全胜」。</li>
+      <li>笔记写「论文从理论上证明了收敛性」；原文 Lemma 5.1/5.2 的 non-decreasing 论证依赖「PPL 与真实 reward 负相关」这一前提，原文没有证明该前提。</li>
+      <li>笔记写「在 Mistral-7B 上，数学任务 PPL 从 3.53 降至 2.56，降幅 27.48%」——Table 4 的数值与 27.48% 都对；Table 4 的表头只写 Mistral-7B，没有写 v0.2，正文 §6.3 的基座是 Mistral-7B-Instruct-v0.2。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ---------- 交互 1：Table 4 的 PPL 切换 ---------- */
+(function () {
+  var tabs = document.querySelectorAll('#ppl-tabs .rule-btn');
+  if (!tabs.length) return;
+  var DATA = {
+    math: { lumos: 3.53, moat: 2.56, label: 'Math' },
+    qa:   { lumos: 1.41, moat: 1.40, label: 'QA' },
+    web:  { lumos: 5.71, moat: 5.02, label: 'Web' }
+  };
+  var lumosEl = document.getElementById('ppl-lumos');
+  var moatEl = document.getElementById('ppl-moat');
+  var barL = document.getElementById('bar-lumos');
+  var barM = document.getElementById('bar-moat');
+  var msg = document.getElementById('ppl-msg');
+  if (!lumosEl || !moatEl || !barL || !barM || !msg) return;
+
+  function render(key) {
+    var d = DATA[key];
+    if (!d) return;
+    lumosEl.textContent = d.lumos.toFixed(2);
+    moatEl.textContent = d.moat.toFixed(2);
+    var max = Math.max(d.lumos, d.moat);
+    barL.style.width = (d.lumos / max * 100).toFixed(1) + '%';
+    barM.style.width = (d.moat / max * 100).toFixed(1) + '%';
+    var red = (d.lumos - d.moat) / d.lumos * 100;
+    msg.innerHTML = 'Mistral-7B · ' + d.label + '：' + d.lumos.toFixed(2) + ' → ' + d.moat.toFixed(2) +
+      '，相对下降 <strong>' + red.toFixed(2) + '%</strong>。';
+  }
+
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener('click', function () {
+      for (var j = 0; j < tabs.length; j++) tabs[j].classList.remove('active');
+      this.classList.add('active');
+      render(this.getAttribute('data-task'));
+    });
+  }
+  render('math');
+})();
+
+/* ---------- 交互 2：训练量估算 ---------- */
+(function () {
+  var kEl = document.getElementById('k');
+  var nEl = document.getElementById('n');
+  var kVal = document.getElementById('k-v');
+  var nVal = document.getElementById('n-v');
+  var perRound = document.getElementById('cost-per-round');
+  var totalPpl = document.getElementById('cost-ppl-total');
+  var totalCritic = document.getElementById('cost-critic-total');
+  var msg = document.getElementById('cost-msg');
+  if (!kEl || !nEl || !kVal || !nVal || !perRound || !totalPpl || !totalCritic || !msg) return;
+
+  var INST = 1800;
+
+  function fmt(x) {
+    return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function render() {
+    var k = parseInt(kEl.value, 10);
+    var n = parseInt(nEl.value, 10);
+    var per = INST * k;
+    var total = per * n;
+    kVal.textContent = k;
+    nVal.textContent = n;
+    perRound.textContent = fmt(per);
+    totalPpl.textContent = fmt(total);
+    totalCritic.textContent = fmt(total);
+    msg.textContent = INST + ' × ' + k + ' = ' + fmt(per) + ' 条/轮；× ' + n + ' 轮 = ' +
+      fmt(total) + ' 条。Stage 2 对每条候选生成一次动作，critic 也逐条判定，因此动作生成与 critic 判定同量。';
+  }
+
+  kEl.addEventListener('input', render);
+  nEl.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

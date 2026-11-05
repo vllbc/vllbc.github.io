@@ -1,0 +1,616 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 18.75 | Table 3 | 100.00-81.25 |
+| 23.1 | Table 3 | (100.00-81.25)/81.25*100 |
+| 11.33 | Table 3 | 67.58-56.25 |
+| 20.1 | Table 3 | (67.58-56.25)/56.25*100 |
+| 0.39 | Table 3 | 19.92-19.53 |
+| 0.39 | Table 3 | 2.73-2.34 |
+| 0.75 | Table 3 | 21.48-20.73 |
+| 7.42 | Table 3 | 26.17-18.75 |
+| 39.6 | Table 3 | (26.17-18.75)/18.75*100 |
+| 217.6 | Table 4 | 307.1-89.5 |
+| 70.9 | Table 4 | (307.1-89.5)/307.1*100 |
+| 48.4 | Table 4 | 66.0-17.6 |
+| 73.3 | Table 4 | (66.0-17.6)/66.0*100 |
+| 38.1 | Table 4 | 68.8-30.7 |
+| 55.4 | Table 4 | (68.8-30.7)/68.8*100 |
+| 54.3 | Appendix G | 74.6-20.3 |
+| 1.2 | Appendix G | 23.0-21.8 |
+| 5.17 | Table 1 | 25.39-20.22 |
+| 3.51 | Table 1 | 21.48-17.97 |
+| 0.39 | Table 1 | 21.09-20.70 |
+| 11.32 | Table 2 | 33.59-22.27 |
+| 3.12 | Table 2 | 31.64-28.52 |
+| 2.73 | Table 2 | 6.64-3.91 |
+| 1.17 | Table 2 | 19.53-18.36 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAGEN · 多轮 Agent RL 的 Echo Trap 与 prompt 组过滤</title>
+<meta name="description" content="RAGEN 把多轮 Agent RL 写成轨迹级目标 StarPO，诊断出 Echo Trap，并用高方差 prompt 过滤、KL removal、Clip-Higher 稳定训练。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.quote{margin:18px 0;padding:14px 18px 14px 20px;border-left:3px solid var(--accent);background:var(--bg-surface);border-radius:0 var(--radius) var(--radius) 0;color:var(--text-muted);font-size:14.5px;line-height:1.8}
+.quote span{display:block;margin-top:6px;font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft)}
+.table-cap{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-soft);margin:18px 0 6px;line-height:1.6}
+.src-note{font-size:12px;color:var(--text-soft);margin:10px 0 0;font-family:"JetBrains Mono",monospace;line-height:1.6}
+.recipe-chart{display:flex;flex-direction:column;gap:12px;margin:16px 0}
+.recipe-row{display:grid;grid-template-columns:152px 1fr 58px;gap:12px;align-items:center}
+.recipe-name{font-family:"JetBrains Mono",monospace;font-size:12.5px;font-weight:600;color:var(--text-muted)}
+.recipe-track{height:28px;background:var(--bg-soft);border-radius:6px;overflow:hidden}
+.recipe-fill{display:block;height:100%;border-radius:6px;transition:width .35s ease}
+.recipe-val{font-family:"JetBrains Mono",monospace;font-size:12px;text-align:right;color:var(--text-soft)}
+.mini-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 4px}
+.mini-tabs .tab{padding:6px 11px;font-size:12px}
+.errata{margin-top:18px;background:var(--bg-soft);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;color:var(--text-muted);font-size:13px;line-height:1.8}
+.errata strong{color:var(--text)}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:8px}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+svg text{font-family:"Noto Sans SC","Inter",sans-serif;font-size:12.5px;fill:var(--text)}
+svg text.sub{font-size:10.5px;fill:var(--text-soft)}
+svg rect.box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+svg rect.hl{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+@media(max-width:500px){
+  .recipe-row{grid-template-columns:100px 1fr 46px;gap:8px}
+  .recipe-name{font-size:11.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">RAGEN</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">配方</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent RL · arXiv 2025 · v2</span>
+  <h1>RAGEN：多轮 Agent RL 会掉进 Echo Trap，先过滤低方差 prompt 组</h1>
+  <p class="hero-sub">
+    单轮 RL 的 PPO / GRPO 直接搬到多轮 Agent，常见轨迹是「先涨一点，随后崩掉」：策略反复复读曾经带来局部奖励的推理模板，奖励方差、熵和梯度范数同时失控。
+    论文把优化单元从单步动作提升到完整轨迹，提出 <strong>StarPO</strong>；再用高方差 prompt 过滤、KL removal 与 Clip-Higher（<strong>StarPO-S</strong>）延缓崩溃。
+    代价是：推理在多轮稀疏奖励下会退化，专家 SFT 在 Sokoban 上仍远高于这套 RL。
+  </p>
+  <div class="meta">
+    <span>Zihan Wang 等 · Northwestern / UW / Stanford / Microsoft 等</span>
+    <a href="https://arxiv.org/abs/2504.20073v2" target="_blank" rel="noopener">arXiv 2504.20073v2 ↗</a>
+    <a href="https://github.com/RAGEN-AI/RAGEN" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>问题不是「不会多轮」，而是多轮 RL 训练不稳定。</strong> 单轮 PPO / GRPO 把每个输出当成独立样本；多轮环境里，奖励稀疏、延迟、带随机性，同一 prompt 的多次 rollout 方差会先塌，再出现梯度尖峰，最后策略复读（§4.1）。</p>
+  <p><strong>StarPO 把整条轨迹当作优化单元。</strong> 目标从「单步输出奖励」改成「整条交互轨迹的累计奖励」：<code>J = E<sub>M,τ~πθ</sub>[R(τ)]</code>；PPO 与 GRPO 都能挂在这个目标下，区别只在 token 级优势怎么估（§2.2）。</p>
+  <p><strong>StarPO-S 用「不确定性」筛训练样本。</strong> 每个 prompt 生成 N 条 rollout，算组内奖励标准差 <code>U</code>，只保留 top p% 高方差 prompt；默认 <code>p=25%</code>。再加 KL removal 与 Clip-Higher（ε<sub>high</sub>=0.28、ε<sub>low</sub>=0.2；Appendix D）稳定梯度（§4.2；Appendix C.2 说明 KL 只做事后监控）。</p>
+  <p><strong>结果有两面。</strong> 过滤把 FrozenLake-PPO 的稳定训练从 100 步延到 140 步（保留 75%）；保留 50% 时完全不崩。但推理在多轮任务里没有稳定变强，Sokoban 上专家 SFT 的 74.6% 远高于 StarPO-S 的 20.3%（Appendix G）。</p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§4.2">25<small>%</small></div>
+      <div class="k">StarPO-S 默认保留的高方差 prompt 比例<br>按组内奖励标准差排序，不是逐条轨迹打分</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">33.59<small>%</small></div>
+      <div class="k">Sokoban 成功率（每轮最多 6 个动作）<br>7 个动作降到 22.27%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">18.75<small>pp</small></div>
+      <div class="k">Bandit 上「有推理」对「NoThink」的优势<br>100.00 vs 81.25，相对 +23.1%</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>多轮 Agent RL 的失败不是「学不会」，而是「学着学着复读」</h2></div>
+  <p class="sec-sub">先建立共同认知：为什么把单轮 RL 的成功配方直接搬到多轮交互，会得到一个先升后崩的训练曲线。</p>
+  <p>论文把 Agent 任务写成 MDP：状态 <code>s<sub>t</sub></code> 是观察或交互历史，动作 <code>a<sub>t</sub></code> 通常是 token 序列，环境按转移概率返回奖励 <code>r<sub>t</sub></code> 和新状态 <code>s<sub>t+1</sub></code>。一条完整轨迹是 <code>τ = {s<sub>0</sub>, a<sub>0</sub>, r<sub>0</sub>, …, s<sub>K</sub>}</code>；多轮任务的关键是<strong>后面几步的奖励依赖于前面几步的动作</strong>，而单轮 RL 的样本单位只是一个输入-输出对（§2.1、§2.2）。</p>
+  <blockquote class="quote">
+    “Unlike static tasks such as single-turn math problem solving … or coding …, agent settings require models to make sequential decisions, maintain memory across turns, and adapt to stochastic feedback from their environment.”<span>— §1（引用省略）</span>
+  </blockquote>
+  <p>论文在四个环境上做受控研究，分别压不同的能力：<strong>Bandit</strong> 是单轮、随机反馈，考风险敏感推理；<strong>Sokoban</strong> 是多轮、确定性，箱子只能推不能拉，考不可逆规划；<strong>Frozen Lake</strong> 是多轮、随机转移，考不确定性下的规划；<strong>WebShop</strong> 是多轮、开放域，考自然语言 grounding 与长上下文交互（§3.1）。前三个是符号环境，便于观察训练动力学；WebShop 更接近真实网页任务。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">现象 1</span><h4>先涨后崩，且不是某一个算法的问题</h4></div>
+      <p>Figure 3 中，Bandit 与 Sokoban 的基线 StarPO 都出现「早期提升、随后崩溃」；PPO 在这两个任务上比 GRPO 更稳，GRPO 在 Frozen Lake 上更稳。WebShop 上两种方法都能较快提升，论文推测是因为语言先验强、初始奖励高（§4.1 原文 “likely due to strong language prior and high initial rewards”）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">现象 2</span><h4>崩溃前有可观测的早期信号</h4></div>
+      <p>论文监控四个量：平均奖励、梯度范数、组内奖励标准差、输出熵。奖励标准差往往先塌，随后奖励均值才掉；梯度范数尖峰通常标志着不可逆崩溃；熵的快速上升或剧烈波动常伴随推理行为崩坏（§4.1、Figure 4）。</p>
+    </div>
+  </div>
+  <p>论文给这个失败模式起名 <strong>Echo Trap</strong>：模型在训练早期会给出多样的符号推理，后期却收敛到固定措辞，反复复用曾经带来局部奖励的模板。它和「模型在自生成轨迹上训练会多样性崩塌」的观察相似，但论文把它放在多轮 Agent RL 的训练动力学里分析（§4.1）。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条路线：单步 RL 管不住长程信用分配，轨迹级 StarPO 也会崩</h2></div>
+  <p class="sec-sub">论文的对照不是「有没有 RL」，而是「RL 的优化单元是单步还是整条轨迹」。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A · 单步 RL</span><h4>PPO / GRPO 把每个输出当成独立样本</h4></div>
+      <p>单轮目标的写法是 <code>J<sub>step</sub>(θ) = E<sub>s~D, a~πθ</sub>[R(s,a)]</code>：给定输入，优化一次输出。放到多轮环境里，它仍然按 token 或按单步动作分配优势，很难把「第 5 步的成功」归因到「第 1 步的探索」（§2.2）。</p>
+      <p>PPO 用 critic 估 token 级价值，GRPO 用组内归一化奖励替代 critic；两者都能工作，但论文的实验显示它们在多轮任务中仍会崩。作者认为 critic 可能延后不稳定、但不能阻止推理退化（§4.1 原文 “may delay instability, but would not prevent reasoning degradation”）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B · 轨迹级 StarPO</span><h4>把整条交互序列作为优化单元</h4></div>
+      <p>StarPO 的目标是 <code>J<sub>StarPO</sub>(θ) = E<sub>M,τ~πθ</sub>[R(τ)]</code>：一条轨迹包含观察、推理、动作和反馈，整条一起采样、一起更新。策略概率按 token 级似然分解，因此仍可直接套 PPO / GRPO 的 token 级目标（§2.2）。</p>
+      <p>但「轨迹级」本身不解决稳定性：论文的基线 StarPO 仍然出现 Echo Trap，说明问题不只是优化单元，还包括<strong>训练样本的方差</strong>与<strong>梯度塑形</strong>（§4.1、§4.2）。</p>
+    </div>
+  </div>
+  <p>论文还比较了 PPO 与 GRPO 在这四个环境上的差异：PPO 在 Bandit 与 Sokoban 上更强，作者解释为可能因为 critic 提供了更平滑的 token 级奖励信号；GRPO 在 Frozen Lake 上更强，作者推测随机转移让状态价值更难估，可能让 PPO 不稳定；WebShop 上两者都能成功，作者认为语言先验与高初始奖励降低了对 critic 的依赖（§4.1、Appendix I）。这不是「哪个算法更好」的结论，而是「任务结构影响 critic 的收益」。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>StarPO-S：按 prompt 组内方差筛选，再改两处梯度形状</h2></div>
+  <p class="sec-sub">核心不是给每个 token 加奖励，而是决定「哪些 prompt 值得用来更新」。</p>
+  <p>StarPO 的轨迹级目标可以写成：</p>
+  <div class="eq">
+    J<sub>StarPO</sub>(θ) = E<sub>M, τ~π<sub>θ</sub></sub>[ R(τ) ] &nbsp;&nbsp;&nbsp; τ = {s<sub>0</sub>, a<sub>0</sub>, r<sub>0</sub>, …, s<sub>K</sub>}
+  </div>
+  <div class="eq-cap">§2.2 · 整条轨迹的累计奖励；策略概率按 token 级似然分解</div>
+  <p>在这个目标下，PPO 与 GRPO 的差别只在优势估计。GRPO 的组内归一化优势是：</p>
+  <div class="eq">
+    Â<sub>i,t</sub> = ( R(τ<sub>i</sub>) − mean({R(τ<sub>1</sub>), …, R(τ<sub>G</sub>)}) ) / std({R(τ<sub>1</sub>), …, R(τ<sub>G</sub>)})
+  </div>
+  <div class="eq-cap">§2.2.3 · 同一组 G 条轨迹的奖励归一化；PPO 则用 critic 估 token 级价值</div>
+  <p>StarPO-S 的第一个改动是<strong>不确定性过滤</strong>。对每个初始状态 <code>s<sub>0</sub></code>，用同一 prompt 采样多条轨迹，定义组内奖励标准差：</p>
+  <div class="eq">
+    U(π<sub>θ</sub>, M, s<sub>0</sub>) = Std<sub>τ~π<sub>θ</sub>(·|s<sub>0</sub>)</sub>[ R(τ) ]
+  </div>
+  <div class="eq-cap">Eq.7 · 方差太低说明任务太简单或太难，梯度信息量低</div>
+  <p>训练时按 <code>U</code> 对 prompt 排序，只保留 top <code>p%</code> 的高方差 prompt；默认 <code>p=25%</code>（§4.2）。摘要称 “trajectory filtering”，§4.2 的实现则明确写 “sort prompts … retain only the top p% highly-uncertain prompts”。据此<span class="infer">推断</span>，同一 prompt 的 N 条轨迹一起进出，不是逐条轨迹独立打分（依据：§4.2 只定义 prompt 级排序与保留比例，未定义逐条轨迹打分）。论文也用 active learning 的「不确定样本信息量最大」来解释这个选择，而不是用 DAPO 的过滤规则（§4.2）。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">改动 2</span><h4>KL Term Removal：去掉对初始模型的黏性约束</h4></div>
+      <p>PPO 目标里原本有 KL 惩罚，限制策略不要偏离初始模型太远。StarPO-S 去掉这一项，只保留 policy loss 与 entropy bonus，让策略更敢探索；KL 只做事后监控（§4.2；Appendix C.2 明确 “track KL post-hoc”；Appendix D 给出 KL removal 的消融）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">改动 3</span><h4>Clip-Higher：上界比下界宽</h4></div>
+      <p>非对称裁剪把上界设为 <code>ε<sub>high</sub>=0.28</code>、下界设为 <code>ε<sub>low</sub>=0.2</code>（数值见 Appendix D），让模型更大胆地从高奖励轨迹学习，同时保留对低概率 token 的约束（§4.2；Appendix D 给出消融）。</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">口径提醒</span><h4>论文三处概述不一致：critic incorporation / critic baselining / 三项无 critic</h4></div>
+    <p>摘要写 “trajectory filtering, critic incorporation, and gradient stabilization”；§1 写 “variability-based trajectory filtering, critic baselining, and decoupled clipping”；§4.2 展开的三项是「不确定性过滤、KL removal、Clip-Higher」，不含新增 critic，并在同一节用 <code>critic-free design</code> 描述 GRPO。三处不能合并成一个确定清单。若 “critic” 指 PPO 原有的 critic baseline，Appendix A 确实描述了 PPO 的 token 级 critic；但论文没有把这个既有组件与摘要/§1 的 “incorporation / baselining” 对齐。<span class="infer">推断</span>（依据：§4.2 的三项清单与 GRPO 的 critic-free 描述、Appendix A 的 PPO critic；原文未说明三处措辞的对应关系）。页面按 §4.2 的三项展开。</p>
+  </div>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练配方：16 条 rollout 一组、5 轮，5–6 个动作最好，7 个反而下降</h2></div>
+  <p class="sec-sub">这一节回答「怎么训」：在固定算力下，任务多样性、每轮动作数和 rollout 新鲜度怎么影响泛化。</p>
+  <p>主实验用 Qwen2.5-0.5B-Instruct 跑三个符号任务，WebShop 用 3B 变体；训练 100–200 个 rollout-update 迭代，WebShop 因长上下文只跑 100 步。每个 batch 采 <code>P=8</code> 个 prompt，每个 prompt <code>N=16</code> 条 rollout，最多 5 轮交互、每轮最多 5 个动作、每条 episode 最多 10 个动作；更新 batch 为 32，mini-batch 为 4；GAE 用 <code>γ=1.0, λ=1.0</code>，Adam，entropy bonus 0.001，格式惩罚 −0.1（§3.2、Appendix C.2）。评测用每个环境 256 个固定 prompt，温度 0.5，5 轮后截断（§3.3）。</p>
+  <p>论文在固定 batch 大小下研究三个 rollout 维度。第一个是<strong>任务多样性</strong>：每个 prompt 的响应数越少，能覆盖的不同初始状态越多；但每个 prompt 仍需要多条 rollout 来做对比。Table 1 显示，4 条响应/ prompt 在 SokobanNewVocab 与 FrozenLake 上最好，而 32 条响应/ prompt 只在 SingleSokoban 上最高——「多样性」与「同题对比」之间存在权衡（§4.3）。</p>
+  <div class="table-cap">Table 1 · 每个 prompt 的响应数对泛化成功率的影响（%）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Responses / Prompt</th><th class="num">SingleSokoban</th><th class="num">SokobanNewVocab</th><th class="num">FrozenLake</th></tr></thead>
+      <tbody>
+        <tr><td>32</td><td class="num">21.09</td><td class="num">20.22</td><td class="num">17.97</td></tr>
+        <tr><td>16</td><td class="num">20.31</td><td class="num">21.48</td><td class="num">19.53</td></tr>
+        <tr><td>8</td><td class="num">20.31</td><td class="num">19.53</td><td class="num">17.19</td></tr>
+        <tr><td><strong>4</strong></td><td class="num"><strong>20.70</strong></td><td class="num"><strong>25.39</strong></td><td class="num"><strong>21.48</strong></td></tr>
+        <tr><td>2</td><td class="num">19.92</td><td class="num">25.00</td><td class="num">12.50</td></tr>
+        <tr><td>1</td><td class="num">19.53</td><td class="num">22.27</td><td class="num">12.50</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src-note">逐格转录自 Table 1；该表只报告三个环境的成功率，没有报告方差或置信区间。</p>
+
+  <p>第二个维度是<strong>每轮动作预算</strong>。Table 2 显示，预算从 1 增到 6 时多数环境成功率上升，6 个动作在 Sokoban 上达到 33.59%、SokobanNewVocab 上 31.64%；继续增到 7 反而降到 22.27% 与 28.52%，论文推测是因为过长的 rollout 引入噪声、稀释奖励反馈（§4.3 原文 “likely due to noisy transitions and diluted reward feedback”）。</p>
+  <div class="table-cap">Table 2 · 每轮最大动作数对成功率的影响（%）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Max Actions / Turn</th><th class="num">Sokoban</th><th class="num">SokobanNewVocab</th><th class="num">LargeSokoban</th><th class="num">FrozenLake</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td class="num">12.11</td><td class="num">13.67</td><td class="num">1.17</td><td class="num">11.72</td></tr>
+        <tr><td>2</td><td class="num">16.41</td><td class="num">21.09</td><td class="num">3.52</td><td class="num">18.36</td></tr>
+        <tr><td>3</td><td class="num">19.53</td><td class="num">19.53</td><td class="num">1.95</td><td class="num">20.88</td></tr>
+        <tr><td>4</td><td class="num">26.95</td><td class="num">26.95</td><td class="num">5.08</td><td class="num">20.70</td></tr>
+        <tr><td>5</td><td class="num">28.13</td><td class="num">25.78</td><td class="num">6.25</td><td class="num">21.09</td></tr>
+        <tr><td><strong>6</strong></td><td class="num"><strong>33.59</strong></td><td class="num"><strong>31.64</strong></td><td class="num"><strong>6.64</strong></td><td class="num">18.36</td></tr>
+        <tr><td>7</td><td class="num">22.27</td><td class="num">28.52</td><td class="num">3.91</td><td class="num">19.53</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src-note">逐格转录自 Table 2；加粗行为论文推荐区间（5–6 个动作）中的 6 动作设置。</p>
+
+  <p>第三个维度是<strong>rollout 新鲜度</strong>。论文用 <code>Online-k</code> 表示同一组 rollout 被连续复用 k 次更新；k 越大，策略与数据越不同步。Figure 7 显示 Online-1（每次更新都重新采样）收敛更快、跨任务泛化更好；论文据此把「rollout 要反映当前策略」列为多轮 RL 的设计原则（§4.3）。</p>
+
+  <div class="sim" id="recipe-sim">
+    <div class="sim-top" id="recipe-tabs">
+      <button class="rule-btn active" data-panel="diversity">任务多样性<span class="r-sub">Table 1</span></button>
+      <button class="rule-btn" data-panel="budget">每轮动作预算<span class="r-sub">Table 2</span></button>
+    </div>
+
+    <div id="diversity-panel">
+      <div class="mini-tabs" id="div-btns">
+        <button class="tab" data-r="32">32</button>
+        <button class="tab" data-r="16">16</button>
+        <button class="tab" data-r="8">8</button>
+        <button class="tab active" data-r="4">4</button>
+        <button class="tab" data-r="2">2</button>
+        <button class="tab" data-r="1">1</button>
+      </div>
+      <div class="recipe-chart" id="div-chart" data-src="Table 1"></div>
+      <div class="readout" id="div-readout" data-src="Table 1">4 条响应/ prompt：SokobanNewVocab 25.39，FrozenLake 21.48；SingleSokoban 20.70，比 32 条时低 0.39 个百分点。</div>
+    </div>
+
+    <div id="budget-panel" style="display:none">
+      <div class="mini-tabs" id="budget-btns">
+        <button class="tab" data-a="1">1</button>
+        <button class="tab" data-a="2">2</button>
+        <button class="tab" data-a="3">3</button>
+        <button class="tab" data-a="4">4</button>
+        <button class="tab" data-a="5">5</button>
+        <button class="tab active" data-a="6">6</button>
+        <button class="tab" data-a="7">7</button>
+      </div>
+      <div class="recipe-chart" id="budget-chart" data-src="Table 2"></div>
+      <div class="readout" id="budget-readout" data-src="Table 2">6 个动作：Sokoban 33.59，SokobanNewVocab 31.64；比 7 个动作高 11.32 和 3.12 个百分点。</div>
+    </div>
+
+    <details>
+      <summary>手算：代表条目的成功率、条宽与差值<span class="sum-sub">Table 1 / Table 2 · 仅列代表条目</span></summary>
+      <div class="details-body">
+        <p><strong>Table 1 · 4 vs 32 条响应：</strong>SokobanNewVocab 25.39 vs 20.22，差 5.17 个百分点；FrozenLake 21.48 vs 17.97，差 3.51 个百分点；SingleSokoban 20.70 vs 21.09，低 0.39 个百分点。条宽按 <code>value / 40 × 100%</code>：25.39 → 63.5%，20.22 → 50.6%，21.48 → 53.7%，17.97 → 44.9%；此处只列代表条目，其余条宽由 JS 按同一公式计算。</p>
+        <p><strong>Table 2 · 6 vs 7 个动作：</strong>Sokoban 33.59 vs 22.27，差 11.32 个百分点；SokobanNewVocab 31.64 vs 28.52，差 3.12 个百分点；LargeSokoban 6.64 vs 3.91，差 2.73 个百分点；FrozenLake 18.36 vs 19.53，低 1.17 个百分点。条宽按 <code>value / 40 × 100%</code>：33.59 → 84.0%，22.27 → 55.7%，31.64 → 79.1%，28.52 → 71.3%；同样只列代表条目。</p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹从 rollout 到更新，StarPO-S 在中间插一道组内筛选</h2></div>
+  <p class="sec-sub">把图 2 的循环拆成两段：采样一整条轨迹，和决定哪些 prompt 的轨迹进入更新。</p>
+  <p>下图按 §2.2 与 §4.2 重绘，不是论文原图。它覆盖「prompt → 多轮 rollout → 轨迹奖励 → PPO/GRPO 更新」的主循环，以及 StarPO-S 的组内方差筛选；没有画出 critic 的具体结构、PPO 的 GAE 细节与 WebShop 的环境接口。</p>
+  <figure>
+    <svg viewBox="0 0 960 330" role="img" aria-label="StarPO 的多轮 rollout 与 StarPO-S 过滤流程">
+      <defs>
+        <marker id="rg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border-strong)"/>
+        </marker>
+      </defs>
+      <rect class="box" x="20" y="30" width="120" height="60" rx="8"/>
+      <text x="80" y="56" text-anchor="middle">初始状态 s₀</text>
+      <text class="sub" x="80" y="75" text-anchor="middle">一个 prompt</text>
+
+      <line x1="140" y1="60" x2="180" y2="60" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <rect class="hl" x="185" y="30" width="150" height="60" rx="8"/>
+      <text x="260" y="56" text-anchor="middle">策略 πθ</text>
+      <text class="sub" x="260" y="75" text-anchor="middle">LLM 生成 think + answer</text>
+
+      <line x1="335" y1="60" x2="375" y2="60" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <rect class="box" x="380" y="30" width="170" height="60" rx="8"/>
+      <text x="465" y="56" text-anchor="middle">动作 aₜ</text>
+      <text class="sub" x="465" y="75" text-anchor="middle">&lt;think&gt;…&lt;/think&gt;&lt;answer&gt;…</text>
+
+      <line x1="550" y1="60" x2="590" y2="60" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <rect class="box" x="595" y="30" width="150" height="60" rx="8"/>
+      <text x="670" y="56" text-anchor="middle">环境</text>
+      <text class="sub" x="670" y="75" text-anchor="middle">返回 rₜ 与 sₜ₊₁</text>
+
+      <line x1="745" y1="60" x2="785" y2="60" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <rect class="box" x="790" y="30" width="145" height="60" rx="8"/>
+      <text x="862" y="56" text-anchor="middle">轨迹 τ</text>
+      <text class="sub" x="862" y="75" text-anchor="middle">K 轮交互</text>
+
+      <path d="M 862 90 L 862 135" fill="none" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <rect class="box" x="760" y="140" width="180" height="60" rx="8"/>
+      <text x="850" y="166" text-anchor="middle">轨迹奖励 R(τ)</text>
+      <text class="sub" x="850" y="185" text-anchor="middle">整条轨迹的累计奖励</text>
+
+      <line x1="760" y1="170" x2="715" y2="170" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <rect class="box" x="520" y="140" width="190" height="60" rx="8"/>
+      <text x="615" y="166" text-anchor="middle">PPO / GRPO 更新</text>
+      <text class="sub" x="615" y="185" text-anchor="middle">token 级策略梯度</text>
+
+      <path d="M 520 170 L 260 170 L 260 96" fill="none" stroke="var(--border-strong)" stroke-width="1.4" marker-end="url(#rg-arrow)"/>
+      <text class="sub" x="390" y="160" text-anchor="middle">更新后的 πθ</text>
+
+      <rect class="box" x="35" y="245" width="445" height="66" rx="8"/>
+      <text x="257" y="271" text-anchor="middle">StarPO-S 过滤：每个 prompt 采 N 条 rollout</text>
+      <text class="sub" x="257" y="290" text-anchor="middle">按组内 R(τ) 的 std 排序，保留 top 25% 高方差 prompt</text>
+
+      <path d="M 480 278 L 615 278 L 615 205" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#rg-arrow)"/>
+      <text class="sub" x="628" y="232" text-anchor="start">只有被保留的 prompt 进入更新</text>
+      <text class="sub" x="628" y="290" text-anchor="start">KL removal + Clip-Higher 同时生效</text>
+    </svg>
+    <figcaption>按 §2.2 / §4.2 重绘：主循环是 prompt → 多轮 rollout → 轨迹奖励 → PPO/GRPO；StarPO-S 在更新前按 prompt 组内奖励标准差筛选。图中「N 条」「top 25%」「KL removal」「Clip-Higher」来自 §4.2 与 Appendix D；未画出 critic、GAE 与每个环境的 reward 定义。</figcaption>
+  </figure>
+  <p>论文对「过滤为什么有效」的解释是环境依赖的：在 Bandit、Sokoban、FrozenLake 这类组内方差容易塌的任务上，过滤的收益更大；WebShop 的 rollout 方差本来就高且稳定，过滤的边际收益更小（Appendix E、Figure 13）。所以 StarPO-S 不是「任何多轮任务都该开」的通用开关，它的收益与任务方差结构绑定 <span class="infer">推断</span>（依据：Appendix E 把收益差异归因于各环境的组内方差水平，且 WebShop 的差距更小）。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>推理在单轮任务里有用，在多轮任务里会缩水；专家 SFT 仍然更强</h2></div>
+  <p class="sec-sub">先看两个反直觉：加推理不一定更好，加 RL 也不一定比专家数据更强。</p>
+  <p>论文用一组对照实验检查「推理」本身的价值：同一套 StarPO-S，比较正常输出 <code>&lt;think&gt;</code> 与去掉思考的 NoThink 版本。Table 3 的结果分成两半：在 Bandit 系列上，推理带来明显提升；在多轮 Sokoban / FrozenLake 上，差异很小甚至为负。</p>
+  <div class="table-cap">Table 3 · 有推理与 NoThink 的泛化成功率（%）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th rowspan="2">设置</th><th colspan="4" class="num">Train on Bandit</th><th colspan="2" class="num">Train on Sokoban</th></tr>
+        <tr><th class="num">Bandit</th><th class="num">Bandit-Rev</th><th class="num">FrozenLake</th><th class="num">LargeSokoban</th><th class="num">Sokoban</th><th class="num">SokobanNewVocab</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>StarPO-S</strong></td><td class="num"><strong>100.00</strong></td><td class="num"><strong>67.58</strong></td><td class="num"><strong>19.92</strong></td><td class="num">2.34</td><td class="num"><strong>21.48</strong></td><td class="num">18.75</td></tr>
+        <tr><td>NoThink</td><td class="num">81.25</td><td class="num">56.25</td><td class="num">19.53</td><td class="num"><strong>2.73</strong></td><td class="num">20.73</td><td class="num"><strong>26.17</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src-note">逐格转录自 Table 3；每列对应不同评测环境，训练设置由表头分组（Train on Bandit / Train on Sokoban）；不可把不同列的数值相加 <span class="infer">推断</span>（依据：Table 3 表头按训练集分组，列内是不同评测环境，单元格是独立成功率）。</p>
+  <p>Bandit 上，有推理的 100.00 对 NoThink 的 81.25，高 <strong data-src="Table 3">18.75</strong> 个百分点（相对 <strong data-src="Table 3">+23.1%</strong>）；Bandit-Rev 上 67.58 对 56.25，高 <strong data-src="Table 3">11.33</strong> 个百分点（相对 <strong data-src="Table 3">+20.1%</strong>）。这说明在单轮、需要把符号名称与奖励分布联系起来的任务里，显式推理确实帮助泛化。</p>
+  <p>多轮任务的结果就不一样：FrozenLake 上 19.92 对 19.53，只高 <strong data-src="Table 3">0.39</strong> 个百分点；Sokoban 上 21.48 对 20.73，高 <strong data-src="Table 3">0.75</strong> 个百分点；LargeSokoban 上 2.34 对 2.73，反而低 <strong data-src="Table 3">0.39</strong> 个百分点；SokobanNewVocab 上 18.75 对 26.17，低 <strong data-src="Table 3">7.42</strong> 个百分点（相对低 <strong data-src="Table 3">39.6%</strong>）。论文推测：多轮任务的奖励稀疏、延迟，无法区分「推理 coherent」与「碰巧试对」，于是模型会生成看似合理、实际与环境状态不一致的思考（§4.4 原文 “We presume …”）。</p>
+  <div class="table-cap">Table 4 · 不同训练步数下 &lt;think&gt; 块的平均 token 长度</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Step</th><th class="num">Bandit Original</th><th class="num">Bandit NoThink</th><th class="num">Bandit Reverse</th><th class="num">Reverse NoThink</th><th class="num">Sokoban Original</th><th class="num">Sokoban NoThink</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td class="num">66.0</td><td class="num">12.7</td><td class="num">68.8</td><td class="num">12.7</td><td class="num">307.1</td><td class="num">68.6</td></tr>
+        <tr><td>100</td><td class="num">25.6</td><td class="num">12.4</td><td class="num">33.7</td><td class="num">13.0</td><td class="num">104.6</td><td class="num">55.3</td></tr>
+        <tr><td>200</td><td class="num">17.6</td><td class="num">12.4</td><td class="num">30.7</td><td class="num">13.0</td><td class="num">89.5</td><td class="num">60.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src-note">逐格转录自 Table 4；Bandit 的 NoThink 行基本稳定（12.7 → 12.4 → 12.4）；Sokoban NoThink 从 68.6 降到 60.0，仍有变化。</p>
+  <p>推理长度也在缩：Sokoban 原始设置从 307.1 降到 89.5（少 <strong data-src="Table 4">217.6</strong> token，相对 <strong data-src="Table 4">70.9%</strong>）；Bandit 从 66.0 降到 17.6（少 <strong data-src="Table 4">48.4</strong>，相对 <strong data-src="Table 4">73.3%</strong>）；Bandit-Rev 从 68.8 降到 30.7（少 <strong data-src="Table 4">38.1</strong>，相对 <strong data-src="Table 4">55.4%</strong>）。论文把这解释为模型在抑制自己的思考过程，而不是学会了更高效的推理（§4.4）。</p>
+
+  <p>另一个对照是「小模型 RL」与「大模型零样本」。Table 5 里，0.5B 模型以每 prompt 4 条响应训练后，在 Sokoban 上 20.70%、FrozenLake 上 21.48%；GPT-4o 零样本是 27.73% / 26.56%，Qwen2.5-72B 零样本是 19.53% / 23.83%。论文的结论是：0.5B 训练后与这些大模型「同一量级」，参数量少 100 倍以上；但它并没有超过 GPT-4o（Appendix D、Table 5）。</p>
+  <div class="table-cap">Table 5 · 零样本大模型与训练后 0.5B 的对比（0.5B 每 prompt 4 条响应）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th class="num">Sokoban (%)</th><th class="num">FrozenLake (%)</th><th class="num">Response Length</th><th class="num">Effective Action (%)</th></tr></thead>
+      <tbody>
+        <tr><td>GPT-4o</td><td class="num">27.73</td><td class="num">26.56</td><td class="num">190.3 / 132.1</td><td class="num">70.0 / 88.7</td></tr>
+        <tr><td>Qwen2.5-72B</td><td class="num">19.53</td><td class="num">23.83</td><td class="num">179.4 / 107.3</td><td class="num">67.8 / 87.3</td></tr>
+        <tr><td><strong>0.5B（ours）</strong></td><td class="num"><strong>20.70</strong></td><td class="num"><strong>21.48</strong></td><td class="num">89.5 / 110.6</td><td class="num">79.2 / 80.7</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src-note">逐格转录自 Table 5；Response Length 与 Effective Action 的两个数依次对应 Sokoban / FrozenLake。大模型是零样本、无 fine-tuning、无 in-context rollout；0.5B 是每 prompt 4 条响应训练后的结果（Table 5 表注），条件不同（零样本 vs 训练后）。</p>
+
+  <p>最强的反例来自 Appendix G：用 BFS 专家轨迹做 SFT，Sokoban 达到 <strong data-src="Appendix G">74.6%</strong>，FrozenLake <strong data-src="Appendix G">23%</strong>；同一篇论文的 StarPO-S 是 <strong data-src="Appendix G">20.3%</strong> 与 <strong data-src="Appendix G">21.8%</strong>。也就是说，在有专家数据时，监督学习在这两个任务上远强于「从零自我进化」的 RL。两组条件不同：SFT 用 1,000 条训练样本、100 条测试样本，RL 用 256 个固定 prompt；但差距的量级仍然提示 RL 的样本效率是瓶颈 <span class="infer">推断</span>（依据：Appendix G 的 SFT 与 StarPO-S 训练/评测样本数不同，且没有控制数据量的对照）。</p>
+
+  <div class="sim" id="sft-sim">
+    <div class="sim-top" id="sft-tabs">
+      <button class="rule-btn active" data-env="sokoban">Sokoban<span class="r-sub">SFT 74.6 vs StarPO-S 20.3</span></button>
+      <button class="rule-btn" data-env="frozen">Frozen Lake<span class="r-sub">SFT 23.0 vs StarPO-S 21.8</span></button>
+    </div>
+    <div class="recipe-chart" id="sft-chart" data-src="Appendix G"></div>
+    <div class="readout" id="sft-readout" data-src="Appendix G">Sokoban：SFT 74.6，StarPO-S 20.3，差 54.3 个百分点。</div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>SFT（BFS 专家轨迹）</span>
+      <span><i style="background:var(--accent)"></i>StarPO-S</span>
+    </div>
+  </div>
+  <details>
+    <summary>手算：SFT 与 StarPO-S 的两组差值<span class="sum-sub">Appendix G</span></summary>
+    <div class="details-body">
+      <p><strong>Sokoban：</strong>SFT 74.6 − StarPO-S 20.3 = 54.3 个百分点。条宽按 <code>value / 80 × 100%</code>：74.6 → 93.3%，20.3 → 25.4%。</p>
+      <p><strong>Frozen Lake：</strong>SFT 23.0 − StarPO-S 21.8 = 1.2 个百分点。条宽：23.0 → 28.8%，21.8 → 27.3%。</p>
+      <p><strong>条件：</strong>SFT 用 BFS 生成的 1,000 条训练样本、100 条测试样本，LoRA rank 64 / alpha 32；StarPO-S 是论文主实验的 256 个固定 prompt 评测。两组不是同一评测集 <span class="infer">推断</span>（依据：SFT 用 100 条测试样本，RL 用 256 个固定 prompt），差值只用于说明量级。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它诊断了「怎么崩」，但没有解决「怎么让推理真的变强」</h2></div>
+  <p class="sec-sub">把论文明确写出的限制、以及页面对实验条件的观察放在一起，避免把「StarPO-S 更稳」外推成「多轮 RL 已经可用」。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界 1</span><h4>主实验只有 0.5B / 3B，7B 的 WebShop 还跑不动</h4></div>
+      <p>主实验用 Qwen2.5-0.5B-Instruct 跑三个符号任务，WebShop 用 3B。Appendix D 只给了 3B/7B 的有限扩展（Figure 10）；72B 仅作为零样本对照出现在 Table 5，不是 RL 训练结果。论文明确说 7B 在 WebShop 上因长上下文在 4×H100 上 OOM，所以 WebShop 只报 3B（Appendix D）。这些发现能否外推到更大模型，未系统验证 <span class="infer">推断</span>（依据：Figure 10 只画 0.5B/3B/7B，Table 5 的 72B 是零样本）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界 2</span><h4>有专家数据时，SFT 在 Sokoban 上远强于这套 RL</h4></div>
+      <p>Appendix G 的 SFT 是 <strong data-src="Appendix G">74.6%</strong>（Sokoban）与 <strong data-src="Appendix G">23%</strong>（Frozen Lake），StarPO-S 是 <strong data-src="Appendix G">20.3%</strong> / <strong data-src="Appendix G">21.8%</strong>。论文自己把这列为需要「更 scalable、更 effective 的 agent RL」的理由。也就是说，RAGEN 展示的是「无专家数据时也能学」的路径，不是「RL 已经优于监督学习」。</p>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界 3</span><h4>StarPO-S 的收益依赖环境方差结构</h4></div>
+      <p>Appendix E 的结论是：Bandit、Sokoban、FrozenLake 的组内方差容易塌，过滤收益大；WebShop 的方差本来就高且稳定，过滤的边际收益小。默认 <code>p=25%</code> 也是论文自己说「可能不是所有场景最优」的激进值（§4.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界 4</span><h4>推理的忠实性没有被奖励约束</h4></div>
+      <p>训练奖励只看任务成败，不看 <code>&lt;think&gt;</code> 是否与环境状态一致。论文在 §4.4 明确说模型可以生成 incoherent 或 hallucinated reasoning 却仍拿到高奖励；格式惩罚只检查标签结构，不检查推理质量。因此「有 think 标签」不等于「真的在推理」。</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">什么时候别用</span><h4>需要长程信用分配、要求推理忠实、或有高质量专家轨迹时</h4></div>
+    <p>这套方法在 5 轮、10 个动作的短程任务上验证；更长的 horizon、需要跨数千步 credit assignment 的场景没有覆盖。主实验在线采样（Online-1）；论文在 §6 Limitations 里把 omission of replay buffers 列为限制。如果样本效率是瓶颈，离线或半离线方法可能更合适。最后，Echo Trap 的指标是「早期预警信号」：论文没有做直接操纵组内方差并随机分组的因果实验；§4.2 的过滤比例干预（保留 75%/50%）与 Appendix D 的 KL/Clip 消融是间接证据 <span class="infer">推断</span>（依据：这些实验只改变过滤比例或梯度塑形设置并观察训练曲线，未随机分组操纵组内方差）。它提供的是相关性诊断，因果方向未被直接检验。</p>
+  </div>
+</section>
+
+<footer>
+  <div>RAGEN: Understanding Self-Evolution in LLM Agents via Multi-Turn Reinforcement Learning · Zihan Wang, Kangrui Wang, Qineng Wang, Pingyue Zhang, Linjie Li, Zhengyuan Yang, Xing Jin, Kefan Yu, Minh Nhat Nguyen, Licheng Liu, Eli Gottlieb, Yiping Lu, Kyunghyun Cho, Jiajun Wu, Li Fei-Fei, Lijuan Wang, Yejin Choi, Manling Li · Northwestern / UW / Stanford / Microsoft 等</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2504.20073v2">arXiv:2504.20073v2</a>（本页以 v2 为准，2025-05-26）<br>
+    代码：<a href="https://github.com/RAGEN-AI/RAGEN">github.com/RAGEN-AI/RAGEN</a><br>
+    笔记：<a href="/ragenunderstanding-self-evolution-in-llm-agents-via-multi-turn-reinforcement-learning/">RAGEN：Understanding Self-Evolution in LLM Agents via Multi-Turn Reinforcement Learning</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改笔记原文）</strong>
+    <ul>
+      <li>笔记把 Echo Trap 的命名写成优先权判断。摘要的说法是 “a recurring mode of Echo Trap”（p.1）；§4.1 说 “We refer to this failure mode as an ‘Echo Trap’”。两处都没有做优先权声明。页面只复述论文的命名与观察。</li>
+      <li>笔记说 StarPO-S「引入评判家（Critic）」。论文三处概述不一致：摘要写 “trajectory filtering, critic incorporation, and gradient stabilization”；§1 写 “variability-based trajectory filtering, critic baselining, and decoupled clipping”；§4.2 展开的三项是「不确定性过滤、KL removal、Clip-Higher」，不含新增 critic，并用 critic-free 描述 GRPO。页面并列三处，按 §4.2 展开，不把 critic 一词消解成确定组件。</li>
+      <li>笔记把「过滤低方差轨迹」类比成 DAPO。§4.2 把过滤的动机归到 active learning（不确定样本信息量最大）；DAPO 只在 KL removal 与 Clip-Higher 两处被引用。两者不是同一个机制。</li>
+      <li>笔记的「SFT 74.6% vs StarPO-S 20.3%」与 Appendix G 一致，但笔记没有写条件：SFT 用 BFS 专家轨迹、1,000 训练/100 测试样本；StarPO-S 在同一节是 20.3% / 21.8%，而 Table 5 的 0.5B 行是 20.70% / 21.48%，两组数字来自不同表、条件不同。页面把两组都列出，避免混用。</li>
+      <li>笔记说 StarPO-S 在四个任务上「显著优于」StarPO。原文 §4.2 的措辞是 “consistently delays collapse and enhances final task performance”，没有做统计显著性检验；页面不复述“显著”。</li>
+      <li>笔记把「轨迹过滤」写成逐条轨迹打分。§4.2 的实现是按 prompt 组内奖励标准差排序、保留 top p% 的 prompt，<span class="infer">推断</span>同一 prompt 的 N 条轨迹一起进出（依据：§4.2 只定义 prompt 级排序）；页面按这个实现描述。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var MAX = 40;
+
+  var recipeTabs = document.getElementById('recipe-tabs');
+  var diversityPanel = document.getElementById('diversity-panel');
+  var budgetPanel = document.getElementById('budget-panel');
+  if (recipeTabs && diversityPanel && budgetPanel) {
+    var panelBtns = recipeTabs.querySelectorAll('.rule-btn');
+    panelBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        panelBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        var isDiv = btn.getAttribute('data-panel') === 'diversity';
+        diversityPanel.style.display = isDiv ? 'block' : 'none';
+        budgetPanel.style.display = isDiv ? 'none' : 'block';
+      });
+    });
+  }
+
+  var DIV = {
+    '32': [21.09, 20.22, 17.97],
+    '16': [20.31, 21.48, 19.53],
+    '8': [20.31, 19.53, 17.19],
+    '4': [20.70, 25.39, 21.48],
+    '2': [19.92, 25.00, 12.50],
+    '1': [19.53, 22.27, 12.50]
+  };
+  var DIV_LABELS = ['SingleSokoban', 'SokobanNewVocab', 'FrozenLake'];
+  var DIV_NOTE = {
+    '32': '32 条响应/ prompt：SingleSokoban 21.09 最高，但 SokobanNewVocab 20.22、FrozenLake 17.97。',
+    '16': '16 条响应/ prompt：SingleSokoban 20.31，SokobanNewVocab 21.48，FrozenLake 19.53。',
+    '8': '8 条响应/ prompt：SingleSokoban 20.31，SokobanNewVocab 19.53，FrozenLake 17.19。',
+    '4': '4 条响应/ prompt：SokobanNewVocab 25.39，FrozenLake 21.48；SingleSokoban 20.70，比 32 条时低 0.39 个百分点。',
+    '2': '2 条响应/ prompt：SingleSokoban 19.92，SokobanNewVocab 25.00，FrozenLake 12.50。',
+    '1': '1 条响应/ prompt：SingleSokoban 19.53，SokobanNewVocab 22.27，FrozenLake 12.50。'
+  };
+  var divBtns = document.getElementById('div-btns');
+  var divChart = document.getElementById('div-chart');
+  var divReadout = document.getElementById('div-readout');
+  if (divBtns && divChart && divReadout) {
+    var divTabBtns = divBtns.querySelectorAll('.tab');
+    function renderDiv(r) {
+      var vals = DIV[r];
+      divChart.innerHTML = vals.map(function (v, i) {
+        var w = Math.max(0, Math.min(100, Math.round(v / MAX * 1000 + 1e-6) / 10));
+        var color = i === 0 ? 'var(--c1)' : (i === 1 ? 'var(--c2)' : 'var(--c3)');
+        return '<div class="recipe-row"><div class="recipe-name">' + DIV_LABELS[i] +
+          '</div><div class="recipe-track"><i class="recipe-fill" style="width:' +
+          w.toFixed(1) + '%;background:' + color +
+          '"></i></div><div class="recipe-val">' + v.toFixed(2) + '</div></div>';
+      }).join('');
+      divReadout.textContent = DIV_NOTE[r];
+    }
+    divTabBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        divTabBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderDiv(btn.getAttribute('data-r'));
+      });
+    });
+    renderDiv('4');
+  }
+
+  var BUDGET = {
+    '1': [12.11, 13.67, 1.17, 11.72],
+    '2': [16.41, 21.09, 3.52, 18.36],
+    '3': [19.53, 19.53, 1.95, 20.88],
+    '4': [26.95, 26.95, 5.08, 20.70],
+    '5': [28.13, 25.78, 6.25, 21.09],
+    '6': [33.59, 31.64, 6.64, 18.36],
+    '7': [22.27, 28.52, 3.91, 19.53]
+  };
+  var BUDGET_LABELS = ['Sokoban', 'SokobanNewVocab', 'LargeSokoban', 'FrozenLake'];
+  var BUDGET_NOTE = {
+    '1': '1 个动作：Sokoban 12.11，SokobanNewVocab 13.67，LargeSokoban 1.17，FrozenLake 11.72。',
+    '2': '2 个动作：Sokoban 16.41，SokobanNewVocab 21.09，LargeSokoban 3.52，FrozenLake 18.36。',
+    '3': '3 个动作：Sokoban 19.53，SokobanNewVocab 19.53，LargeSokoban 1.95，FrozenLake 20.88。',
+    '4': '4 个动作：Sokoban 26.95，SokobanNewVocab 26.95，LargeSokoban 5.08，FrozenLake 20.70。',
+    '5': '5 个动作：Sokoban 28.13，SokobanNewVocab 25.78，LargeSokoban 6.25，FrozenLake 21.09。',
+    '6': '6 个动作：Sokoban 33.59，SokobanNewVocab 31.64；比 7 个动作高 11.32 和 3.12 个百分点。',
+    '7': '7 个动作：Sokoban 22.27，SokobanNewVocab 28.52，LargeSokoban 3.91，FrozenLake 19.53；比 6 个动作明显回落。'
+  };
+  var budgetBtns = document.getElementById('budget-btns');
+  var budgetChart = document.getElementById('budget-chart');
+  var budgetReadout = document.getElementById('budget-readout');
+  if (budgetBtns && budgetChart && budgetReadout) {
+    var budgetTabBtns = budgetBtns.querySelectorAll('.tab');
+    function renderBudget(a) {
+      var vals = BUDGET[a];
+      budgetChart.innerHTML = vals.map(function (v, i) {
+        var w = Math.max(0, Math.min(100, Math.round(v / MAX * 1000 + 1e-6) / 10));
+        var color = i === 0 ? 'var(--c1)' : (i === 1 ? 'var(--c2)' : (i === 2 ? 'var(--c1)' : 'var(--c3)'));
+        return '<div class="recipe-row"><div class="recipe-name">' + BUDGET_LABELS[i] +
+          '</div><div class="recipe-track"><i class="recipe-fill" style="width:' +
+          w.toFixed(1) + '%;background:' + color +
+          '"></i></div><div class="recipe-val">' + v.toFixed(2) + '</div></div>';
+      }).join('');
+      budgetReadout.textContent = BUDGET_NOTE[a];
+    }
+    budgetTabBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        budgetTabBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderBudget(btn.getAttribute('data-a'));
+      });
+    });
+    renderBudget('6');
+  }
+
+  var SFT = {
+    sokoban: [74.6, 20.3],
+    frozen: [23.0, 21.8]
+  };
+  var SFT_LABELS = ['SFT', 'StarPO-S'];
+  var SFT_NOTE = {
+    sokoban: 'Sokoban：SFT 74.6，StarPO-S 20.3，差 54.3 个百分点。',
+    frozen: 'Frozen Lake：SFT 23.0，StarPO-S 21.8，差 1.2 个百分点。'
+  };
+  var sftTabs = document.getElementById('sft-tabs');
+  var sftChart = document.getElementById('sft-chart');
+  var sftReadout = document.getElementById('sft-readout');
+  if (sftTabs && sftChart && sftReadout) {
+    var sftBtns = sftTabs.querySelectorAll('.rule-btn');
+    function renderSft(env) {
+      var vals = SFT[env];
+      sftChart.innerHTML = vals.map(function (v, i) {
+        var w = Math.max(0, Math.min(100, Math.round(v / 80 * 1000 + 1e-6) / 10));
+        var color = i === 0 ? 'var(--c1)' : 'var(--accent)';
+        return '<div class="recipe-row"><div class="recipe-name">' + SFT_LABELS[i] +
+          '</div><div class="recipe-track"><i class="recipe-fill" style="width:' +
+          w.toFixed(1) + '%;background:' + color +
+          '"></i></div><div class="recipe-val">' + v.toFixed(1) + '</div></div>';
+      }).join('');
+      sftReadout.textContent = SFT_NOTE[env];
+    }
+    sftBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        sftBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderSft(btn.getAttribute('data-env'));
+      });
+    });
+    renderSft('sokoban');
+  }
+})();
+</script>
+</body>
+</html>

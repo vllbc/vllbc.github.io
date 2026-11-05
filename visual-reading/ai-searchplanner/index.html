@@ -1,0 +1,941 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 10.76 | Table 1 | (0.597-0.539)/0.539*100 |
+| 0.058 | Table 1 | 0.597-0.539 |
+| 0.091 | Table 1 | 0.678-0.587 |
+| 0.168 | Table 1 | 0.565-0.397 |
+| 0.126 | Table 1 | 0.355-0.229 |
+| 1.5 | §3.2 | 0.5+1-0.5*0 |
+| 1.0 | §3.2 | 0.5+1-0.5*1 |
+| 0.5 | §3.2 | 0.5+0-0.5*0 |
+| 0.0 | §3.2 | 0.5+0-0.5*1 |
+| 1.7 | §3.2 | 1.5+0.2 |
+| 0.2 | §3.2 | 0.0+0.2 |
+| 0.8 | §3.3 | 1-1/5 |
+| 0.9 | §3.3 | 1-1/10 |
+| 1.70 | §3.3 | 1-1/5+1-1/10 |
+| 0.00 | §3.3 | 1-5/5+1-10/10 |
+| 0.009 | Table 3 | 0.606-0.597 |
+| 1.51 | Table 3 | (0.606-0.597)/0.597*100 |
+| 0.374 | Table 3 | 2.260-1.886 |
+| -16.55 | Table 3 | (1.886-2.260)/2.260*100 |
+| 0.002 | Table 3 | 0.599-0.597 |
+| 0.34 | Table 3 | (0.599-0.597)/0.597*100 |
+| 0.505 | Table 3 | 2.260-1.755 |
+| -22.35 | Table 3 | (1.755-2.260)/2.260*100 |
+| 0.087 | Table 3 | 0.597-0.510 |
+| -14.57 | Table 3 | (0.510-0.597)/0.597*100 |
+| 1.260 | Table 3 | 2.260-1.000 |
+| -55.75 | Table 3 | (1.000-2.260)/2.260*100 |
+| 79.41 | Table 2 | (0.366-0.204)/0.204*100 |
+| 25.42 | Table 2 | (0.375-0.299)/0.299*100 |
+| 71.28 | Table 2 | (0.322-0.188)/0.188*100 |
+| 3.03 | Table 2 | (0.306-0.297)/0.297*100 |
+| -15.24 | Table 4 | (0.506-0.597)/0.597*100 |
+| -1.51 | Table 4 | (0.588-0.597)/0.597*100 |
+| -8.38 | Table 4 | (0.547-0.597)/0.597*100 |
+| 0.182 | Table 1 | 0.457-0.275 |
+| 0.085 | Table 1 | 0.539-0.454 |
+| 0.028 | Table 1 | 0.535-0.507 |
+| 0.028 | Table 1 | 0.648-0.620 |
+| 0.005 | Table 1 | 0.620-0.615 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v4">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-SearchPlanner · 只训练 7B 规划器，让冻结大模型更会答</title>
+<meta name="description" content="AI-SearchPlanner 把搜索规划器与冻结生成器拆开，只训练 7B 规划器，用结果+过程双奖励与 α 成本项做帕累托优化；7 个 Wiki 数据集平均分 0.597，相对 Naive RAG 0.539 提升 10.76%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调；公共组件样式全部来自 base.css */
+.tbl-note{font-size:12.5px;color:var(--text-soft);margin:16px 0 0;line-height:1.65}
+.tbl-note b{color:var(--text-muted)}
+#pareto-chart svg{width:100%;height:auto;display:block;max-width:100%}
+
+/* 流程 SVG */
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.3}
+.flow-train{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}
+.flow-frozen{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.3}
+.flow-reward{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.3}
+.flow-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.flow-dash{stroke:var(--accent);stroke-width:1.4;fill:none;stroke-dasharray:5 4}
+.flow-arrow{fill:var(--border-strong)}
+.flow-arrow-a{fill:var(--accent)}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.flow-l{font-family:"JetBrains Mono",monospace;font-size:9.5px;fill:var(--accent-deep)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">AI-SearchPlanner</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#reward">双奖励</a>
+      <a href="#train">怎么训</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2508.20368v4</span>
+  <h1>AI-SearchPlanner：只训练 7B 规划器，让冻结的 32B 模型更会答题</h1>
+  <p class="hero-sub">
+    现有 RL 搜索智能体让同一个 LLM 边规划边回答；这篇把两者拆开：
+    <strong>7B 规划器</strong>负责搜什么、何时停，<strong>冻结的大生成器</strong>只负责读完整条轨迹写答案。
+    训练信号不是单一答案对错，而是「相对不规划基线的增量」+「过程合理性」+「低成本奖励」。
+  </p>
+  <div class="meta">
+    <span>Lang Mei, Zhihan Yang, Xiaohan Yu, Huanyao Zhang, Chong Chen · Huawei Cloud BU / Peking University</span>
+    <a href="https://arxiv.org/abs/2508.20368v4" target="_blank" rel="noopener">arXiv 2508.20368v4 ↗</a>
+    <a href="/ai-searchplannermodular-agentic-search-via-pareto-optimal-multi-objective-reinforcement-learning/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    问题不是「检索次数不够」，而是<strong>规划与问答被同一个策略绑在一起</strong>。论文把 QA 交给一个冻结的大生成器，只让 7B 规划器学「搜什么、何时停」。
+  </p>
+  <p>
+    规划器的奖励由三块拼成：<strong>结果奖励</strong>看答案是否比 Direct Inference / Naive RAG 更好；<strong>过程奖励</strong>由冻结生成器给整条轨迹打分；<strong>成本奖励</strong>按轮次和子查询数扣分。α 控制成本项相对于效用的权重。
+  </p>
+  <p>
+    在 7 个 Wiki 数据集上，Qwen2.5-7B 规划器 + 冻结 Qwen3-32B 生成器的平均分是 <strong>0.597</strong>；
+    同一 32B 生成器的 Naive RAG 是 <strong>0.539</strong>；7B 端到端 Search-R1 是 <strong>0.519</strong>。
+    把 α 从 0 调到 0.005，平均轮次从 <strong>2.260</strong> 降到 <strong>1.886</strong>，平均分反而到 <strong>0.606</strong>。
+  </p>
+  <p>
+    代价是：这套训练只验证了一个 7B 规划器和两类搜索环境；成本用轮次/查询数代理，迁移到 Web 后绝对分只有 0.366 / 0.375。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">0.597</div>
+      <div class="k">7B 规划器 + 32B 冻结生成器<br>7 个 Wiki 数据集平均分</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+10.76<small>%</small></div>
+      <div class="k">相对 Naive RAG 0.539 的提升<br>不是绝对分数差</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">1.886</div>
+      <div class="k">α=0.005 的平均搜索轮次<br>α=0 为 2.260，相对 −16.55%</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一个模型同时学「搜什么」和「怎么答」，两个目标会互相拉扯</h2></div>
+  <p class="sec-sub">先把问题框定：不是检索次数不够，而是规划与问答被绑在同一个策略里。</p>
+
+  <p>
+    Agentic search 的常见做法，是让 LLM 在多轮里交替推理和调用搜索引擎；RL 用最终答案的对错作为奖励，端到端训练这个策略。
+    Search-R1 是这条线的代表：一个模型既决定搜什么，也负责把检索结果写成答案（§2）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">论文的原话</span><h4>单一模型同时优化两种能力的限制</h4></div>
+    <p>
+      “However, existing RL-based search agents rely on a single LLM to handle both search planning and question-answering (QA) tasks in an end-to-end manner,
+      which limits their ability to optimize both capabilities simultaneously.”（§1）
+    </p>
+    <p>
+      论文的展开是：实际 AI 搜索系统常常用大而冻结的 LLM（例如 GPT-4、DeepSeek-R1）保证 QA 质量（§1），
+      而对这类模型做完整 RL 微调成本高、通常也不可行。可训练的往往是一个小模型。
+    </p>
+  </div>
+
+  <p>
+    另一条路 RAG 也不解决问题：检索-生成流水线是固定的，缺少自适应规划，效果对检索精度高度敏感（§2）。
+    SFT 需要大量高质量的搜索-推理轨迹，而且论文引用已有研究指出，SFT 容易过拟合到记住的推理路径（§2）。
+  </p>
+
+  <p>
+    于是问题变成：<strong>能不能把 QA 能力留在大模型，把规划能力放到小模型，只训练小模型？</strong>
+    这不是「让小模型替代大模型」，而是「用一个小规划器，把大生成器的输入组织得更好」。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>RAG 是固定流水线，端到端 RL 是一肩挑，s3 也解耦但目标不同</h2></div>
+  <p class="sec-sub">三路对照，看清本文的位置：解耦不是它独有，按效用-成本帕累托训练规划器才是它的差异。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">RAG / IRCoT</span><h4>固定流水线</h4></div>
+      <p>检索与生成是预定义流程；IRCoT 交错检索和 CoT，但仍是 prompt 驱动，没有可训练的策略（§2）。</p>
+      <p><strong>卡在哪：</strong>不做自适应规划，效果高度依赖检索精度。Table 1 里 Qwen3-32B + Naive RAG 平均 <span class="mono" data-src="Table 1">0.539</span>，已经是很强的基线。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Search-R1</span><h4>端到端 RL</h4></div>
+      <p>一个 Qwen2.5-7B 同时学规划和回答，只用结果奖励；Table 1 平均 <span class="mono" data-src="Table 1">0.519</span>。</p>
+      <p><strong>卡在哪：</strong>同一个策略要同时优化「怎么搜」和「怎么写」，论文认为这限制了两种能力的同步提升（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">s3</span><h4>也解耦，但目标不同</h4></div>
+      <p>并发工作 s3 同样把 planner 与 generator 拆开，目标是用最少数据训出强 planner（§2）。</p>
+      <p><strong>差异：</strong>s3 的生成器只拿最后一步的关键文档，本文给整条轨迹；s3 用 Gain Beyond RAG 奖励并过滤 Naive RAG 可解的样本，本文用结果+过程双奖励与帕累托成本项（§2）。</p>
+    </div>
+  </div>
+
+  <p>
+    论文自己把 s3 列为 concurrent work，并列出三点差异：目标、框架、方法设计（§2）。
+    所以本文的差异不在「解耦」这个动作本身，而在解耦之后<strong>怎么训规划器</strong>：
+    奖励不是单纯的答案对错，而是相对基线的增量；成本不是硬约束，而是奖励里可调的 α 项。
+  </p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="reward">
+  <div class="sec-head"><span class="sec-num">03</span><h2>双奖励把「答对」和「搜得合理」拆开算，再用 α 把成本接进来</h2></div>
+  <p class="sec-sub">五个公式：结果奖励、过程奖励、效用、成本、帕累托奖励。核心是结果奖励衡量「相对基线的增量」，而不是单纯答对。</p>
+
+  <h3>结果奖励：只有比基线更好，才拿高分</h3>
+  <p>
+    <code>Score(·)</code> 是 0/1 的答案一致性判定（§3.2）；Appendix B 的答案评分 prompt 要求评审只输出 yes/no。
+    设 <code>a</code> 是规划后的答案，<code>a<sub>I</sub></code> 是 Direct Inference 的答案，<code>a<sub>R</sub></code> 是 Naive RAG 的答案。
+  </p>
+
+  <div class="eq">
+    R<sub>outcome</sub> = 1/2 + Score(a, gt) − 1/2 · max{ Score(a<sub>I</sub>, gt), Score(a<sub>R</sub>, gt) }
+  </div>
+  <div class="eq-cap">Eq. 2 · 取值范围 [0, 1.5]。减号后面是「不规划基线中较好的那个」；规划器只有在基线答错时答对，才拿满分。</div>
+
+  <p>
+    四组状态对应的奖励排序是 <code>⟨1,0⟩ &gt; ⟨1,1⟩ &gt; ⟨0,0⟩ &gt; ⟨0,1⟩</code>（Eq. 1）。
+    字面意思是：<strong>规划器答对而基线全错</strong>最值钱；<strong>规划器答错而基线答对</strong>最不值钱。
+  </p>
+
+  <p class="tbl-note"><b>由 Eq. 2 在二值 Score 下逐项代入（§3.2）</b> · 四种状态的 R_outcome</p>
+  <table>
+    <thead>
+      <tr><th>状态 ⟨Score(a), max{Score(a<sub>I</sub>), Score(a<sub>R</sub>)}⟩</th><th>含义</th><th style="text-align:right">R_outcome</th></tr>
+    </thead>
+    <tbody>
+      <tr class="best"><td>⟨1, 0⟩</td><td>规划器答对，两个不规划基线都错</td><td class="num">1.5</td></tr>
+      <tr><td>⟨1, 1⟩</td><td>规划器答对，至少一个基线也对</td><td class="num">1.0</td></tr>
+      <tr><td>⟨0, 0⟩</td><td>规划器答错，基线也错</td><td class="num">0.5</td></tr>
+      <tr><td>⟨0, 1⟩</td><td>规划器答错，至少一个基线对</td><td class="num">0.0</td></tr>
+    </tbody>
+  </table>
+
+  <h3>过程奖励与效用</h3>
+  <div class="eq">
+    R<sub>process</sub> = LLM<sub>gen</sub>(T, P<sub>T</sub>) ∈ [0, 0.5]
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    R<sub>utility</sub> = R<sub>outcome</sub> + R<sub>process</sub>
+  </div>
+  <div class="eq-cap">Eq. 3–4 · 过程奖励由冻结生成器读整条轨迹 T 和 prompt P_T 后给出；效用是两项之和。</div>
+
+  <p>
+    这里有一个论文没有展开的实现细节：Appendix B 给出的过程奖励 prompt 要求评审按 <strong>1–5 分</strong>输出，
+    而 Eq. 3 写 <code>R<sub>process</sub> ∈ [0, 0.5]</code>。论文没有说明这 1–5 分如何映射到 [0, 0.5]（是否归一化、除以多少）。
+    页面只并列呈现这两处，不替论文补映射规则。
+  </p>
+
+  <h3>成本与帕累托奖励</h3>
+  <p>
+    成本由两部分组成：规划轮次 <code>L</code>（直接影响推理延迟）和子查询总数 <code>Q</code>（决定搜索引擎调用频率），见 §3.3。
+  </p>
+  <div class="eq">
+    R<sub>cost</sub> = max(0, 1 − L/M<sub>t</sub>) + max(0, 1 − Q/M<sub>q</sub>)
+  </div>
+  <div class="eq-cap">Eq. 6 · M<sub>t</sub>=5、M<sub>q</sub>=10（§4.3）。两项各自截断在 0。</div>
+
+  <p>
+    代入两组：<code>L=1, Q=1</code> 时成本项是 <strong>1.70</strong>（0.8 + 0.9）；
+    <code>L=5, Q=10</code> 时成本项是 <strong>0.00</strong>。
+    也就是说，两项各自达到预算上限后饱和，不会继续变负；超过上限的额外轮次不会在 Eq. 6 里被额外惩罚。
+  </p>
+
+  <div class="eq">
+    R<sub>pareto</sub> = R<sub>utility</sub> + α · R<sub>cost</sub> + R<sub>format</sub>
+  </div>
+  <div class="eq-cap">Eq. 7 · α ≥ 0；R<sub>format</sub> 在格式正确且至少调用一次搜索、一次生成器时为 0，否则为 −1（Eq. 8）。</div>
+
+  <p>
+    α 是论文用来扫效用-成本前沿的显式旋钮：α 越大，规划器越愿意用更少的轮次换更低的成本项。
+    论文的做法是训练多个不同 α 的模型，把它们的（平均分，平均轮次）点画出来，观察帕累托前沿（§4.4.4）。
+  </p>
+
+  <h3>自己动手：四种结果状态，过程奖励怎么改变总效用</h3>
+  <p>
+    固定 Eq. 2 的四种结果状态，拖动过程奖励，看 Eq. 4 的效用怎么变。注意过程奖励上限 0.5 与结果奖励相邻两档的差距相同。
+  </p>
+
+  <div class="sim" id="reward-sim">
+    <div class="sim-top" id="state-btns">
+      <button class="rule-btn active" data-state="10">⟨1,0⟩<span class="r-sub">规划器对 · 基线全错</span></button>
+      <button class="rule-btn" data-state="11">⟨1,1⟩<span class="r-sub">规划器对 · 基线有对</span></button>
+      <button class="rule-btn" data-state="00">⟨0,0⟩<span class="r-sub">规划器错 · 基线全错</span></button>
+      <button class="rule-btn" data-state="01">⟨0,1⟩<span class="r-sub">规划器错 · 基线有对</span></button>
+    </div>
+
+    <div class="slots s3" data-src="§3.2">
+      <div class="slot"><div class="slot-name">R_outcome</div><div class="slot-val" id="r-out">1.50</div></div>
+      <div class="slot"><div class="slot-name">R_process</div><div class="slot-val" id="r-proc">0.20</div></div>
+      <div class="slot"><div class="slot-name">R_utility</div><div class="slot-val" id="r-util">1.70</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>过程奖励 R_process <span class="v" id="proc-v">0.20</span></label>
+        <input type="range" id="proc" min="0" max="0.5" step="0.05" value="0.2">
+      </div>
+    </div>
+
+    <div class="readout" data-src="§3.2" id="reward-readout">
+      <div class="r-head">当前效用</div>
+      <div id="reward-msg">规划器答对、基线全错，结果奖励拿满 1.50；加 0.20 过程奖励，效用 1.70。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算（2 组）<span class="sum-sub">状态 ⟨1,0⟩ 与 ⟨0,1⟩，R_process 都取 0.20</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组，⟨1,0⟩：</strong>R_outcome = 0.5 + 1 − 0.5 × 0 = 1.5；R_utility = 1.5 + 0.20 = 1.70。</p>
+      <p><strong>第 2 组，⟨0,1⟩：</strong>R_outcome = 0.5 + 0 − 0.5 × 1 = 0.0；R_utility = 0.0 + 0.20 = 0.20。</p>
+      <p><strong>口径：</strong>Score 为 0/1 二值，max{·} 取两个不规划基线中较高者；过程奖励按 Eq. 3 的 [0, 0.5] 取滑块值。这里不涉及标准差。</p>
+    </div>
+  </details>
+
+  <p>
+    一个由公式直接得到的现象：R_process 上限 0.5，正好等于结果奖励相邻两档的差距。
+    所以 <code>⟨1,1⟩</code> 加满过程奖励的效用是 1.0 + 0.5 = 1.5，和 <code>⟨1,0⟩</code> 加 0 过程奖励的 1.5 相同。
+    <span class="infer">推断</span>（由 Eq. 2 与 Eq. 4 直接代入得到；论文没有讨论这种并列。）
+  </p>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>PPO 只更新规划器；检索 token 不计梯度，成本按轮次和查询数扣</h2></div>
+  <p class="sec-sub">训练细节决定这套框架能不能落地：冻结生成器、屏蔽检索 token、两档预算阈值。</p>
+
+  <p>
+    训练数据是 NQ 与 HotpotQA 的训练集合并成一个统一数据集（§4.3）。
+    规划器是 <strong>Qwen2.5-7b-Instruct</strong>，生成器是冻结的 <strong>Qwen3-32b</strong>；
+    最大推理轮次 <code>M<sub>t</sub>=5</code>，最大子查询数 <code>M<sub>q</sub>=10</code>（§4.3）。
+  </p>
+
+  <p>
+    Wiki 环境用 2018 Wikipedia dump 作为知识源、E5 作为 retriever，每次检索 3 条 passage，最大推理轮次 5。
+    Web 环境用 Google search API（serper.dev），每次检索 10 条 title/snippet，最大推理轮次 10（§4.3）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">训练关键</span><h4>检索到的 token 不算策略动作</h4></div>
+    <p>
+      rollout 序列里既有规划器生成的 token，也有检索回来的文档。论文把检索文档视为环境观测，
+      用 loss masking 把这些 token 排除在梯度计算之外，只对规划器生成的 token 做策略梯度（§3.4）。
+    </p>
+    <p>
+      优化器用 PPO（Eq. 9）：对重要性采样比做 clip，<code>π<sub>θ</sub></code> 是当前策略，
+      <code>π<sub>old</sub></code> 是参考策略，<code>A<sub>t</sub></code> 是优势估计（§3.4）。
+    </p>
+  </div>
+
+  <p>
+    格式奖励是一条硬门槛：格式正确、且至少调用一次搜索引擎（<code>n<sub>S</sub> ≥ 1</code>）、
+    至少调用一次冻结生成器（<code>n<sub>A</sub> ≥ 1</code>）时 <code>R<sub>format</sub>=0</code>；
+    否则 <code>R<sub>format</sub>=−1</code>（Eq. 8）。这条奖励保证轨迹至少完成「搜一次 + 答一次」。
+  </p>
+
+  <p>
+    Figure 2 的训练曲线给出三个观察：答案奖励、过程奖励、格式奖励都随训练上升；
+    格式奖励收敛得最快；规划器先学会更频繁地调用搜索引擎、响应变长，
+    然后在拿到足够外部知识后学会终止推理、调用冻结生成器（§4.4.3）。
+  </p>
+
+  <p>
+    成本项在训练里是奖励的一部分，不是硬约束。Eq. 6 的第一项在 <code>L ≥ M<sub>t</sub></code> 时为 0，
+    第二项在 <code>Q ≥ M<sub>q</sub></code> 时为 0，不会继续变负；运行时另有一个最大轮次上限（Wiki 5、Web 10）。
+  </p>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条轨迹里，规划器只碰搜索工具，生成器只在推理末尾被调用</h2></div>
+  <p class="sec-sub">按 §3 与 Figure 1 重绘；重点看哪部分可训练、哪部分冻结。</p>
+
+  <p>
+    给定问题 <code>q</code> 和标准答案 <code>gt</code>，规划器在每一轮 <code>t</code> 先生成推理上下文，然后二选一：
+    调用 <code>search</code> 生成子查询 <code>{sq}<sup>t</sup></code> 并检索文档，或调用 <code>call_answer_llm</code> 终止推理。
+    最终轨迹是
+    <code>T = {q, r<sup>S</sup><sub>1</sub>, S({sq}<sup>1</sup>), …, r<sup>S</sup><sub>L</sub>, S({sq}<sup>L</sup>), r<sup>A</sup>}</code>
+    （§3）。终止时，整条轨迹被送进冻结生成器，生成答案 <code>a</code>。
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 880 430" role="img" aria-label="AI-SearchPlanner 流程示意：规划器循环调用搜索，终止后由冻结生成器答题，奖励用于 PPO 更新规划器">
+      <defs>
+        <marker id="fa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" class="flow-arrow"></path>
+        </marker>
+        <marker id="faa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" class="flow-arrow-a"></path>
+        </marker>
+      </defs>
+
+      <!-- 问题 -->
+      <rect x="20" y="20" width="170" height="70" rx="10" class="flow-box"></rect>
+      <text x="105" y="48" text-anchor="middle" class="flow-t">问题 q</text>
+      <text x="105" y="68" text-anchor="middle" class="flow-s">标准答案 gt</text>
+
+      <!-- 规划器 -->
+      <rect x="250" y="20" width="230" height="95" rx="10" class="flow-train"></rect>
+      <text x="365" y="46" text-anchor="middle" class="flow-t">Search Planner</text>
+      <text x="365" y="66" text-anchor="middle" class="flow-s">Qwen2.5-7b-Instruct</text>
+      <text x="365" y="84" text-anchor="middle" class="flow-s">可训练 · 只更新这里</text>
+      <text x="365" y="102" text-anchor="middle" class="flow-s">动作：search / call_answer_llm</text>
+
+      <!-- 冻结生成器 -->
+      <rect x="570" y="20" width="280" height="95" rx="10" class="flow-frozen"></rect>
+      <text x="710" y="46" text-anchor="middle" class="flow-t">Frozen Generator</text>
+      <text x="710" y="66" text-anchor="middle" class="flow-s">Qwen3-32b / Deepseek-V3 / R1</text>
+      <text x="710" y="84" text-anchor="middle" class="flow-s">参数冻结 · 不参与训练</text>
+
+      <!-- 搜索引擎 -->
+      <rect x="250" y="180" width="230" height="80" rx="10" class="flow-box"></rect>
+      <text x="365" y="205" text-anchor="middle" class="flow-t">Search Engine</text>
+      <text x="365" y="225" text-anchor="middle" class="flow-s">2018 Wiki + E5（top-3）</text>
+      <text x="365" y="243" text-anchor="middle" class="flow-s">或 Google Serper（10 条）</text>
+
+      <!-- 答案 -->
+      <rect x="570" y="180" width="280" height="70" rx="10" class="flow-box"></rect>
+      <text x="710" y="205" text-anchor="middle" class="flow-t">Answer a</text>
+      <text x="710" y="225" text-anchor="middle" class="flow-s">读完整条轨迹后生成</text>
+
+      <!-- 奖励 -->
+      <rect x="250" y="315" width="600" height="95" rx="10" class="flow-reward"></rect>
+      <text x="550" y="340" text-anchor="middle" class="flow-t">Reward</text>
+      <text x="550" y="362" text-anchor="middle" class="flow-s">R_outcome + R_process + α · R_cost + R_format</text>
+      <text x="550" y="382" text-anchor="middle" class="flow-s">过程奖励由冻结生成器对轨迹 T 打分（Eq. 3）</text>
+      <text x="550" y="400" text-anchor="middle" class="flow-s">成本：轮次 L + 子查询数 Q（Eq. 6）</text>
+
+      <!-- PPO -->
+      <rect x="20" y="325" width="170" height="75" rx="10" class="flow-train"></rect>
+      <text x="105" y="352" text-anchor="middle" class="flow-t">PPO 更新</text>
+      <text x="105" y="372" text-anchor="middle" class="flow-s">只更新规划器</text>
+      <text x="105" y="390" text-anchor="middle" class="flow-s">检索 token 不计梯度</text>
+
+      <!-- 箭头 -->
+      <line x1="190" y1="55" x2="250" y2="55" class="flow-line" marker-end="url(#fa)"></line>
+      <text x="220" y="47" text-anchor="middle" class="flow-l">q, gt</text>
+
+      <line x1="480" y1="55" x2="570" y2="55" class="flow-line" marker-end="url(#fa)"></line>
+      <text x="525" y="47" text-anchor="middle" class="flow-l">终止</text>
+
+      <line x1="365" y1="115" x2="365" y2="180" class="flow-line" marker-end="url(#fa)"></line>
+      <text x="375" y="152" text-anchor="start" class="flow-l">search({sq})</text>
+
+      <path d="M250,220 C190,220 190,120 250,120" class="flow-line" marker-end="url(#fa)"></path>
+      <text x="205" y="168" text-anchor="start" class="flow-l">检索文档</text>
+
+      <line x1="710" y1="115" x2="710" y2="180" class="flow-line" marker-end="url(#fa)"></line>
+      <text x="720" y="152" text-anchor="start" class="flow-l">生成答案</text>
+
+      <line x1="710" y1="250" x2="710" y2="315" class="flow-line" marker-end="url(#fa)"></line>
+      <text x="720" y="288" text-anchor="start" class="flow-l">轨迹 + 答案</text>
+
+      <line x1="250" y1="362" x2="190" y2="362" class="flow-line" marker-end="url(#fa)"></line>
+      <text x="220" y="354" text-anchor="middle" class="flow-l">reward</text>
+
+      <path d="M105,325 L105,115 L250,115" class="flow-dash" marker-end="url(#faa)"></path>
+      <text x="114" y="220" text-anchor="start" class="flow-l">梯度</text>
+    </svg>
+    <figcaption>
+      图 1：按 §3 与 Figure 1 重绘的 AI-SearchPlanner 流程示意。陶土红 = 可训练部分，青灰 = 冻结生成器，紫 = 奖励计算。
+    </figcaption>
+    <details>
+      <summary>这张图覆盖了什么、没覆盖什么<span class="sum-sub">避免把示意当成原文图</span></summary>
+      <div class="details-body">
+        <p><strong>覆盖：</strong>规划器与搜索引擎的多轮循环；search 与 call_answer_llm 两种动作；冻结生成器读取完整轨迹后生成答案；结果奖励、过程奖励、成本项与格式奖励的组合；PPO 只更新规划器。</p>
+        <p><strong>未覆盖：</strong>Figure 1 的具体图标、布局与配色；PPO 目标函数内部的 clip 结构；训练时过程奖励对冻结生成器的额外调用在图中只以文字标注，没有单独画箭头；Figure 2 的训练曲线。</p>
+        <p>因此这张图是流程示意，不是原文 Figure 1 的逐像素复刻。</p>
+      </div>
+    </details>
+  </figure>
+
+  <p>
+    训练路径比推理路径多一次生成器使用：过程奖励要把轨迹 <code>T</code> 和 prompt <code>P<sub>T</sub></code>
+    交给冻结生成器打分（Eq. 3）；推理路径里，生成器只在最后生成答案时被调用。
+    这两次调用都不更新生成器参数，梯度只回到规划器。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均分 0.597，相对 Naive RAG 高 10.76%；把 α 拧到 0.005，轮次少 16.55% 而分数没掉</h2></div>
+  <p class="sec-sub">先看 Table 1 的主结果，再看 Table 3 的效用-成本前沿、Table 2 的 Web 迁移和 Table 4 的消融。</p>
+
+  <p class="tbl-note">
+    <b>Table 1（节选）</b> · 转录 Qwen2.5-7b 的 Direct Inference / Naive RAG / IRCoT / Search-R1，Qwen3-32b、Deepseek-V3、Deepseek-R1 三组 frozen 基线，以及 AI-SearchPlanner 及其三行生成器迁移。
+    CoT、Search-o1、SFT 三行未转录；原表的 +6.74% / +14.02% / +4.52% 三个括号百分比也未转录，因为原表没有标注这三行所比的基线。
+    括号里的 +10.76% 相对的是同生成器的 Naive RAG（0.539），由 0.597 与 0.539 反推。
+    底纹行是本文主结果（Qwen3-32b 生成器系列）；Deepseek-R1 迁移行的 0.648 属于另一生成器系列，不能与 0.597 直接比。
+  </p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>方法（生成器 / 规划器）</th>
+          <th style="text-align:right">NQ</th>
+          <th style="text-align:right">TriviaQA</th>
+          <th style="text-align:right">PopQA</th>
+          <th style="text-align:right">HotpotQA</th>
+          <th style="text-align:right">2wiki</th>
+          <th style="text-align:right">Musique</th>
+          <th style="text-align:right">Bamboogle</th>
+          <th style="text-align:right">Avg.</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Direct Inference · Qwen2.5-7b</td><td class="num">0.325</td><td class="num">0.507</td><td class="num">0.196</td><td class="num">0.301</td><td class="num">0.268</td><td class="num">0.135</td><td class="num">0.192</td><td class="num">0.275</td></tr>
+        <tr><td>Naive RAG · Qwen2.5-7b</td><td class="num">0.585</td><td class="num">0.753</td><td class="num">0.489</td><td class="num">0.478</td><td class="num">0.325</td><td class="num">0.162</td><td class="num">0.408</td><td class="num">0.457</td></tr>
+        <tr><td>IRCoT · Qwen2.5-7b</td><td class="num">0.537</td><td class="num">0.703</td><td class="num">0.442</td><td class="num">0.394</td><td class="num">0.194</td><td class="num">0.105</td><td class="num">0.336</td><td class="num">0.387</td></tr>
+        <tr><td>Search-R1 · Qwen2.5-7b（端到端 RL）</td><td class="num">0.630</td><td class="num">0.771</td><td class="num">0.503</td><td class="num">0.571</td><td class="num">0.402</td><td class="num">0.215</td><td class="num">0.544</td><td class="num">0.519</td></tr>
+        <tr><td>Direct Inference · Qwen3-32b</td><td class="num">0.486</td><td class="num">0.737</td><td class="num">0.276</td><td class="num">0.451</td><td class="num">0.364</td><td class="num">0.218</td><td class="num">0.648</td><td class="num">0.454</td></tr>
+        <tr><td>Naive RAG · Qwen3-32b</td><td class="num">0.652</td><td class="num">0.824</td><td class="num">0.517</td><td class="num">0.587</td><td class="num">0.397</td><td class="num">0.229</td><td class="num">0.568</td><td class="num">0.539</td></tr>
+        <tr><td>Direct Inference · Deepseek-V3</td><td class="num">0.604</td><td class="num">0.870</td><td class="num">0.447</td><td class="num">0.519</td><td class="num">0.425</td><td class="num">0.254</td><td class="num">0.432</td><td class="num">0.507</td></tr>
+        <tr><td>Naive RAG · Deepseek-V3</td><td class="num">0.670</td><td class="num">0.840</td><td class="num">0.527</td><td class="num">0.606</td><td class="num">0.438</td><td class="num">0.241</td><td class="num">0.424</td><td class="num">0.535</td></tr>
+        <tr><td>Direct Inference · Deepseek-R1</td><td class="num">0.657</td><td class="num">0.903</td><td class="num">0.499</td><td class="num">0.655</td><td class="num">0.594</td><td class="num">0.365</td><td class="num">0.632</td><td class="num">0.615</td></tr>
+        <tr><td>Naive RAG · Deepseek-R1</td><td class="num">0.668</td><td class="num">0.903</td><td class="num">0.495</td><td class="num">0.661</td><td class="num">0.599</td><td class="num">0.369</td><td class="num">0.648</td><td class="num">0.620</td></tr>
+        <tr class="best"><td>AI-SearchPlanner · 7B planner + Qwen3-32b · α=0</td><td class="num">0.674</td><td class="num">0.800</td><td class="num">0.540</td><td class="num">0.678</td><td class="num">0.565</td><td class="num">0.355</td><td class="num">0.568</td><td class="num">0.597 (+10.76%)</td></tr>
+        <tr><td>AI-SearchPlanner · 生成器换成 Qwen2.5-7b</td><td class="num">0.628</td><td class="num">0.764</td><td class="num">0.517</td><td class="num">0.638</td><td class="num">0.462</td><td class="num">0.320</td><td class="num">0.552</td><td class="num">0.554</td></tr>
+        <tr><td>AI-SearchPlanner · 生成器换成 Deepseek-V3</td><td class="num">0.678</td><td class="num">0.833</td><td class="num">0.534</td><td class="num">0.671</td><td class="num">0.562</td><td class="num">0.349</td><td class="num">0.640</td><td class="num">0.610</td></tr>
+        <tr><td>AI-SearchPlanner · 生成器换成 Deepseek-R1</td><td class="num">0.719</td><td class="num">0.880</td><td class="num">0.549</td><td class="num">0.741</td><td class="num">0.617</td><td class="num">0.373</td><td class="num">0.656</td><td class="num">0.648</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    主结果：同样的冻结 Qwen3-32b 生成器，Naive RAG 平均 <span class="mono" data-src="Table 1">0.539</span>，
+    AI-SearchPlanner <span class="mono" data-src="Table 1">0.597</span>，绝对差 <span class="mono" data-src="Table 1">0.058</span>，
+    相对提升 <strong>10.76%</strong>（0.058 / 0.539）。换更强的生成器，分数继续涨：
+    Deepseek-V3 <span class="mono" data-src="Table 1">0.610</span>、Deepseek-R1 <span class="mono" data-src="Table 1">0.648</span>。
+  </p>
+
+  <p>
+    多跳数据集上的绝对差更大：HotpotQA <span class="mono" data-src="Table 1">0.678</span> 对 Naive RAG
+    <span class="mono" data-src="Table 1">0.587</span>，差 <span class="mono" data-src="Table 1">0.091</span>；
+    2wiki <span class="mono" data-src="Table 1">0.565</span> 对 <span class="mono" data-src="Table 1">0.397</span>，差
+    <span class="mono" data-src="Table 1">0.168</span>；Musique <span class="mono" data-src="Table 1">0.355</span> 对
+    <span class="mono" data-src="Table 1">0.229</span>，差 <span class="mono" data-src="Table 1">0.126</span>。
+    这些差值都是页面做的减法，原始分数在 Table 1。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">口径提醒</span><h4>「超过 10%」是相对提升，不是绝对分数差</h4></div>
+    <p>
+      笔记里写「实现了超过 10% 的性能增益」；对应的是 <strong>10.76%</strong> 这个相对提升，
+      分母是 Naive RAG 的 0.539，而不是 0.597 − 0.539 = 0.058 的绝对差。
+      把 0.058 说成「10% 的绝对提升」会混淆两种口径：0.058 是绝对差，10.76% 是相对提升。
+    </p>
+  </div>
+
+  <h3>Web 迁移：相对提升很大，绝对分仍然低</h3>
+  <p class="tbl-note"><b>Table 2（全表转录）</b> · 括号百分比为原表值，基准是该组 Qwen3-32b / Qwen2.5-7b 的 Naive RAG。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法（生成器）</th><th style="text-align:right">WebShaper</th><th style="text-align:right">WebWalker</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Direct Inference · Qwen2.5-7b</td><td class="num">0.110</td><td class="num">0.054</td></tr>
+        <tr><td>Naive RAG · Qwen2.5-7b</td><td class="num">0.188</td><td class="num">0.297</td></tr>
+        <tr><td>CoT · Qwen2.5-7b</td><td class="num">0.104</td><td class="num">0.022</td></tr>
+        <tr><td>IRCoT · Qwen2.5-7b</td><td class="num">0.140</td><td class="num">0.228</td></tr>
+        <tr><td>Search-o1 · Qwen2.5-7b</td><td class="num">0.186</td><td class="num">0.231</td></tr>
+        <tr><td>Direct Inference · Qwen3-32b</td><td class="num">0.170</td><td class="num">0.057</td></tr>
+        <tr><td>Naive RAG · Qwen3-32b</td><td class="num">0.204</td><td class="num">0.299</td></tr>
+        <tr class="best"><td>AI-SearchPlanner · 7B planner + Qwen3-32b · α=0</td><td class="num">0.366 (+79.41%)</td><td class="num">0.375 (+25.42%)</td></tr>
+        <tr><td>AI-SearchPlanner · 生成器换成 Qwen2.5-7b</td><td class="num">0.322 (+71.28%)</td><td class="num">0.306 (+3.03%)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    WebShaper 上 0.366 对 Naive RAG 0.204，相对提升 <strong>79.41%</strong>；WebWalker 上 0.375 对 0.299，
+    相对提升 <strong>25.42%</strong>。但绝对分只有 0.366 / 0.375，远低于 Wiki 数据集上的 0.5 以上。
+    把生成器换成 Qwen2.5-7b 后，WebShaper 0.322（相对 0.188 提升 <strong>71.28%</strong>），
+    WebWalker 0.306（相对 0.297 只提升 <strong>3.03%</strong>），几乎持平。
+  </p>
+
+  <h3>α 前沿：0.005 这一档同时拿到更低成本和更高平均分</h3>
+  <p class="tbl-note"><b>Table 3（节选）</b> · 只转录 Avg. 一列及括号内平均轮次；7 个数据集的逐项分数未转录。括号百分比为相对 α=0 的论文原表值。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>α</th><th style="text-align:right">Avg. score</th><th style="text-align:right">Avg. turns</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td class="num">0.597</td><td class="num">2.260</td></tr>
+        <tr class="best"><td>0.005</td><td class="num">0.606 (+1.51%)</td><td class="num">1.886 (−16.55%)</td></tr>
+        <tr><td>0.05</td><td class="num">0.599 (+0.34%)</td><td class="num">1.755 (−22.35%)</td></tr>
+        <tr><td>0.125</td><td class="num">0.510 (−14.57%)</td><td class="num">1.000 (−55.75%)</td></tr>
+        <tr><td>0.25</td><td class="num">0.510 (−14.57%)</td><td class="num">1.000 (−55.75%)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    论文对 Table 3 的描述是：α 增大，规划轮次持续下降并最终收敛到 1，答案分数先略有上升、再持续下降（§4.4.4）。
+    下面把五个 α 配置的（轮次，分数）点画出来；点越靠左上，效用-成本 trade-off 越好。
+  </p>
+
+  <div class="sim" id="pareto-sim">
+    <div class="sim-top" id="alpha-btns">
+      <button class="rule-btn active" data-alpha="0">α = 0<span class="r-sub">2.260 轮 · 0.597</span></button>
+      <button class="rule-btn" data-alpha="0.005">α = 0.005<span class="r-sub">1.886 轮 · 0.606</span></button>
+      <button class="rule-btn" data-alpha="0.05">α = 0.05<span class="r-sub">1.755 轮 · 0.599</span></button>
+      <button class="rule-btn" data-alpha="0.125">α = 0.125<span class="r-sub">1.000 轮 · 0.510</span></button>
+      <button class="rule-btn" data-alpha="0.25">α = 0.25<span class="r-sub">1.000 轮 · 0.510</span></button>
+    </div>
+
+    <div id="pareto-chart" data-src="Table 3"></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>AI-SearchPlanner 的五个 α 配置</span>
+      <span style="margin-left:auto">α=0.125 与 0.25 数值相同，图中合并为一个点</span>
+    </div>
+
+    <div class="slots s3" data-src="Table 3">
+      <div class="slot"><div class="slot-name">Avg. score</div><div class="slot-val" id="p-score">0.597</div></div>
+      <div class="slot"><div class="slot-name">Avg. turns</div><div class="slot-val" id="p-turns">2.260</div></div>
+      <div class="slot"><div class="slot-name">Δ vs α=0</div><div class="slot-val" id="p-delta">基准</div></div>
+    </div>
+
+    <div class="readout" data-src="Table 3" id="pareto-readout">
+      <div class="r-head">当前 α</div>
+      <div id="pareto-msg">α=0：平均分 0.597，平均轮次 2.260。基准档。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算（2 组）<span class="sum-sub">α=0.005 与 α=0.05，基准都是 α=0</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组，α=0.005：</strong>分数 0.606 − 0.597 = +0.009；相对 0.009 / 0.597 × 100 = +1.51%。轮次 1.886 − 2.260 = −0.374；相对 −0.374 / 2.260 × 100 = −16.55%。</p>
+      <p><strong>第 2 组，α=0.05：</strong>分数 0.599 − 0.597 = +0.002；相对 0.002 / 0.597 × 100 = +0.34%。轮次 1.755 − 2.260 = −0.505；相对 −0.505 / 2.260 × 100 = −22.35%。</p>
+      <p><strong>口径：</strong>所有百分比都相对 α=0 这一档，分母分别是 0.597 和 2.260；不是绝对分数差或绝对轮次差。没有计算标准差。</p>
+      <p><strong>这个交互覆盖了什么：</strong>只切换 Table 3 的五个 α 配置并显示论文原表数值；未实现 PPO 训练、奖励模型或真实搜索，是表格读数器，不是训练复现。Figure 3 还画了非规划基线，但 Table 3 没有给基线的轮次，本图未画基线点。</p>
+    </div>
+  </details>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉 1</span><h4>α=0.005 不是「用一点分数换成本」</h4></div>
+    <p>
+      分数从 0.597 升到 0.606（相对 <strong>+1.51%</strong>），轮次从 2.260 降到 1.886（相对
+      <strong>−16.55%</strong>）。论文只写「answer performance initially exhibits a slight improvement」
+      （§4.4.4），没有报告多 seed、置信区间或显著性检验；不要把它当成稳定的涨点。
+      <span class="infer">推断</span>（依据：Table 3 是单组结果，论文未报告方差。）
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">反直觉 2</span><h4>消融里掉得最多的是结果奖励，不是过程奖励</h4></div>
+    <p>
+      Table 4：完整模型平均 0.597；去掉 Outcome Gain 后 0.506，相对 <strong>−15.24%</strong>；
+      去掉 Process Reward 后 0.588，相对 <strong>−1.51%</strong>；完全不训 RL（冻结 planner）后 0.547，
+      相对 <strong>−8.38%</strong>。
+      论文说移除任一项都会带来 decline，但数值上结果项的影响大得多。
+      <span class="infer">推断</span>（依据：Table 4 的 Avg. 列；论文没有给出各项的方差或显著性。）
+    </p>
+  </div>
+
+  <p class="tbl-note"><b>Table 4（节选）</b> · 只转录 Avg. 一列；7 个数据集的逐项分数未转录。括号百分比为相对完整模型 0.597 的论文原表值。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>消融</th><th style="text-align:right">Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>AI-SearchPlanner（完整）</td><td class="num">0.597</td></tr>
+        <tr><td>w/o Outcome Gain</td><td class="num">0.506 (−15.24%)</td></tr>
+        <tr><td>w/o Process Reward</td><td class="num">0.588 (−1.51%)</td></tr>
+        <tr><td>w/o RL Training（冻结 planner）</td><td class="num">0.547 (−8.38%)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">反直觉 3</span><h4>生成器越强，RAG 相对 Direct Inference 的增益越小</h4></div>
+    <p>
+      按 Table 1 做减法：Naive RAG 相对 Direct Inference 的平均分差是
+      <span class="mono" data-src="Table 1">0.182</span>（Qwen2.5-7b）、
+      <span class="mono" data-src="Table 1">0.085</span>（Qwen3-32b）、
+      <span class="mono" data-src="Table 1">0.028</span>（Deepseek-V3）、
+      <span class="mono" data-src="Table 1">0.005</span>（Deepseek-R1）。
+      论文在 §4.4.1 明确观察到这一点，并解释为更强的生成器可能在预训练里记住了更多 Wiki 知识。
+    </p>
+    <p>
+      在 Deepseek-R1 上，AI-SearchPlanner 相对 Naive RAG 的领先是 <span class="mono" data-src="Table 1">0.028</span>（0.648 − 0.620），比 Qwen3-32b 上的 <span class="mono" data-src="Table 1">0.058</span> 小。
+      论文没有把这一点归因于单一原因；可以理解为强生成器压缩了检索带来的增量。
+      <span class="infer">推断</span>（依据：Table 1 的分数差。）
+    </p>
+  </div>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是「怎么用小模型组织大模型的输入」，不是「让小模型替代大模型」</h2></div>
+  <p class="sec-sub">四条边界：规划器规模、训练数据、成本口径、过程奖励的可靠性。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界一</span><h4>只验证了一个 7B 规划器</h4></div>
+      <p>
+        实验固定 Qwen2.5-7b-Instruct 作为 planner（§4.3）；论文没有给出不同 planner 规模的 scaling 曲线。
+        7B 是作者选择的工作点，不是论文结论说「7B 最好」。换更小或更大的 planner 会怎样，未获取。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界二</span><h4>训练数据只有 NQ + HotpotQA</h4></div>
+      <p>
+        §4.3 把 NQ 和 HotpotQA 的训练集合并成一个统一数据集；没有报告其他训练混合的结果。
+        Web 迁移用的是同一个 planner，不是在 Web 数据上再训练，所以 Table 2 衡量的是域迁移，不是域内训练。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">边界三</span><h4>成本是代理指标，不是账单</h4></div>
+      <p>
+        Eq. 6 只数规划轮次和子查询数；论文没有报告 FLOPs、wall-clock latency、API 价格，
+        也没有报告训练时调用冻结生成器做过程奖励的开销。Eq. 6 的两项分别在
+        <code>L ≥ M<sub>t</sub></code>、<code>Q ≥ M<sub>q</sub></code> 时饱和为 0，超过预算不再额外惩罚。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界四</span><h4>过程奖励的可靠性与映射未验证</h4></div>
+      <p>
+        过程奖励由单个冻结生成器打分（Eq. 3）。论文没有报告评分稳定性、偏差分析，也没有报告与人工判断的一致性。
+        Appendix B 的 prompt 要求输出 1–5 分，Eq. 3 写 <code>[0, 0.5]</code>；1–5 如何映射到 [0, 0.5] 未说明。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    另外，Table 1 的答案分数由 LLM judge 判 yes/no（Appendix B 的答案评分 prompt）；论文说 EM 不适合不同生成器的风格差异（§4.3），
+    但没有报告 LLM judge 与人工或 EM 的一致性。α=0.125 / 0.25 时，平均轮次都压到 1.000，平均分都掉到 0.510
+    （相对 α=0 下降 14.57%），说明成本项一旦压过效用，规划器会退化成「搜一次就答」。
+  </p>
+
+  <p>
+    一句话总结：<strong>AI-SearchPlanner 的收益来自「冻结生成器 + 可训练小规划器」这套接口，而不是规划器本身拥有了新的知识。</strong>
+    它把大模型的 QA 能力当成固定项，只优化送给它的上下文；所以当生成器已经很强、或者任务需要的不是搜索规划能力时，
+    这套方法的边际收益会变小。<span class="infer">推断</span>（依据：Table 1 中强生成器下 Naive RAG 增益收窄，以及方法只更新 planner 的结构。）
+  </p>
+</section>
+
+<footer>
+  <div>AI-SearchPlanner: Modular Agentic Search via Pareto-Optimal Multi-Objective Reinforcement Learning</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.20368v4" target="_blank" rel="noopener">arXiv:2508.20368v4</a> · 2025-12-27 修订 · Lang Mei, Zhihan Yang, Xiaohan Yu, Huanyao Zhang, Chong Chen · Huawei Cloud BU / Peking University<br>
+    笔记：<a href="/ai-searchplannermodular-agentic-search-via-pareto-optimal-multi-objective-reinforcement-learning/">AI-SEARCHPLANNER：MODULAR AGENTIC SEARCH VIA PARETO-OPTIMAL MULTI-OBJECTIVE REINFORCEMENT LEARNING</a><br>
+    本页所有数字以 arXiv:2508.20368v4 为准；Table 1 / 2 / 3 / 4 的转录范围见各表上方说明。
+  </div>
+  <div class="src">
+    <strong>笔记勘误（未改原笔记）：</strong><br>
+    1. 笔记说 α=0.005 是「以很小的性能代价（0.606 vs 0.597）」；0.606 高于 0.597，实际是分数上升，不是性能代价。<br>
+    2. 笔记说「实现了超过 10% 的性能增益」；这对应相对 Naive RAG 0.539 的 10.76%，不是绝对分数提升 0.058。<br>
+    3. 笔记说论文未详细说明过程奖励 prompt <code>P<sub>T</sub></code> 的设计；Appendix B 给出了完整 prompt。真正未说明的是 1–5 分如何映射到 Eq. 3 的 [0, 0.5]。<br>
+    4. 笔记说生成器「可以被轻易替换成任何更先进的模型」；论文只验证了 Qwen3-32b、Deepseek-V3、Deepseek-R1、Qwen2.5-7b 四个生成器，未测试「任何」模型。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 双奖励手算器
+   ============================================================ */
+(function () {
+  var btns = document.querySelectorAll('#state-btns .rule-btn');
+  var slider = document.getElementById('proc');
+  if (!btns.length || !slider) return;
+
+  var OUT = { '10': 1.5, '11': 1.0, '00': 0.5, '01': 0.0 };
+  var state = '10';
+
+  function renderReward() {
+    var p = parseFloat(slider.value);
+    var out = OUT[state];
+    var util = out + p;
+
+    var outEl = document.getElementById('r-out');
+    var procEl = document.getElementById('r-proc');
+    var utilEl = document.getElementById('r-util');
+    var procV = document.getElementById('proc-v');
+    var msg = document.getElementById('reward-msg');
+    if (outEl) outEl.textContent = out.toFixed(2);
+    if (procEl) procEl.textContent = p.toFixed(2);
+    if (utilEl) utilEl.textContent = util.toFixed(2);
+    if (procV) procV.textContent = p.toFixed(2);
+
+    var text = '';
+    if (state === '10') {
+      text = '规划器答对、两个不规划基线都错，结果奖励拿满 1.50。';
+    } else if (state === '11') {
+      text = '规划器答对、至少一个基线也对，结果奖励 1.00。';
+    } else if (state === '00') {
+      text = '规划器答错、基线也错，结果奖励 0.50。';
+    } else {
+      text = '规划器答错、至少一个基线对，结果奖励 0.00，是最低档。';
+    }
+    text += ' 过程奖励 ' + p.toFixed(2) + '，效用 ' + util.toFixed(2) + '。';
+    if (Math.abs(util - 1.5) < 1e-9 && state !== '10') {
+      text += ' 这一档与 ⟨1,0⟩ 且过程奖励为 0 的效用相同（都是 1.50）。';
+    }
+    if (state === '10' && p === 0) {
+      text += ' 若过程奖励为 0，⟨1,1⟩ 即使拿满 0.50 过程奖励，效用也只有 1.50。';
+    }
+    if (msg) msg.innerHTML = text;
+  }
+
+  btns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      state = btn.dataset.state;
+      renderReward();
+    });
+  });
+  slider.addEventListener('input', renderReward);
+  renderReward();
+})();
+
+/* ============================================================
+   2) α 帕累托前沿读数器
+   ============================================================ */
+(function () {
+  var btns = document.querySelectorAll('#alpha-btns .rule-btn');
+  var chart = document.getElementById('pareto-chart');
+  if (!btns.length || !chart) return;
+
+  var DATA = {
+    '0': { score: 0.597, turns: 2.260 },
+    '0.005': { score: 0.606, turns: 1.886 },
+    '0.05': { score: 0.599, turns: 1.755 },
+    '0.125': { score: 0.510, turns: 1.000 },
+    '0.25': { score: 0.510, turns: 1.000 }
+  };
+  var selected = '0';
+
+  function mapX(t) { return 56 + (t - 0.9) / 1.5 * 560; }
+  function mapY(s) { return 24 + (0.62 - s) / 0.13 * 234; }
+
+  function renderChart() {
+    var pts = [
+      { key: '0', score: 0.597, turns: 2.260 },
+      { key: '0.005', score: 0.606, turns: 1.886 },
+      { key: '0.05', score: 0.599, turns: 1.755 },
+      { key: '0.125', score: 0.510, turns: 1.000 }
+    ];
+    var path = pts.map(function (p) { return mapX(p.turns) + ',' + mapY(p.score); }).join(' L ');
+    var svg = '<svg viewBox="0 0 640 300" role="img" aria-label="AI-SearchPlanner 五个 α 配置的平均分与平均搜索轮次散点图">';
+
+    svg += '<line x1="56" y1="258" x2="616" y2="258" stroke="var(--border-strong)" stroke-width="1"></line>';
+    svg += '<line x1="56" y1="24" x2="56" y2="258" stroke="var(--border-strong)" stroke-width="1"></line>';
+
+    var xt = [1.0, 1.5, 2.0];
+    for (var i = 0; i < xt.length; i++) {
+      var xx = mapX(xt[i]);
+      svg += '<line x1="' + xx + '" y1="24" x2="' + xx + '" y2="258" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 4"></line>';
+      svg += '<text x="' + xx + '" y="276" text-anchor="middle" font-size="10" fill="var(--text-soft)" font-family="JetBrains Mono, monospace">' + xt[i].toFixed(1) + '</text>';
+    }
+    var yt = [0.50, 0.55, 0.60];
+    for (var j = 0; j < yt.length; j++) {
+      var yy = mapY(yt[j]);
+      svg += '<line x1="56" y1="' + yy + '" x2="616" y2="' + yy + '" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 4"></line>';
+      svg += '<text x="48" y="' + (yy + 3) + '" text-anchor="end" font-size="10" fill="var(--text-soft)" font-family="JetBrains Mono, monospace">' + yt[j].toFixed(2) + '</text>';
+    }
+
+    svg += '<path d="M ' + path + '" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="6 4" opacity="0.65"></path>';
+
+    pts.forEach(function (p) {
+      var cx = mapX(p.turns);
+      var cy = mapY(p.score);
+      var isSel = (p.key === selected) || (selected === '0.25' && p.key === '0.125');
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (isSel ? 7 : 5) + '" fill="' + (isSel ? 'var(--accent)' : 'var(--accent-soft)') + '" stroke="var(--accent)" stroke-width="1.6"></circle>';
+    });
+
+    svg += '<text x="' + mapX(2.260) + '" y="' + (mapY(0.597) - 12) + '" text-anchor="end" font-size="11" fill="var(--text-muted)" font-family="JetBrains Mono, monospace">α=0</text>';
+    svg += '<text x="' + mapX(1.886) + '" y="' + (mapY(0.606) - 12) + '" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="JetBrains Mono, monospace">0.005</text>';
+    svg += '<text x="' + mapX(1.755) + '" y="' + (mapY(0.599) + 22) + '" text-anchor="middle" font-size="11" fill="var(--text-muted)" font-family="JetBrains Mono, monospace">0.05</text>';
+    svg += '<text x="' + (mapX(1.000) + 14) + '" y="' + (mapY(0.510) + 4) + '" text-anchor="start" font-size="11" fill="var(--text-muted)" font-family="JetBrains Mono, monospace">0.125 / 0.25</text>';
+
+    svg += '<text x="336" y="292" text-anchor="middle" font-size="11" fill="var(--text-soft)" font-family="Inter, Noto Sans SC, sans-serif">平均搜索轮次（越少越好）→</text>';
+    svg += '<text x="18" y="141" text-anchor="middle" font-size="11" fill="var(--text-soft)" font-family="Inter, Noto Sans SC, sans-serif" transform="rotate(-90 18 141)">平均分（越高越好）→</text>';
+    svg += '</svg>';
+    chart.innerHTML = svg;
+  }
+
+  function renderPareto() {
+    var d = DATA[selected];
+    var base = DATA['0'];
+    var ds = d.score - base.score;
+    var dt = d.turns - base.turns;
+    var rs = ds / base.score * 100;
+    var rt = dt / base.turns * 100;
+
+    var scoreEl = document.getElementById('p-score');
+    var turnsEl = document.getElementById('p-turns');
+    var deltaEl = document.getElementById('p-delta');
+    var msg = document.getElementById('pareto-msg');
+    if (scoreEl) scoreEl.textContent = d.score.toFixed(3);
+    if (turnsEl) turnsEl.textContent = d.turns.toFixed(3);
+
+    if (selected === '0') {
+      if (deltaEl) deltaEl.textContent = '基准';
+    } else {
+      var sgn1 = ds >= 0 ? '+' : '−';
+      var sgn2 = rt >= 0 ? '+' : '−';
+      if (deltaEl) deltaEl.textContent = sgn1 + Math.abs(ds).toFixed(3) + ' / ' + sgn2 + Math.abs(rt).toFixed(2) + '%';
+    }
+
+    var text = '';
+    if (selected === '0') {
+      text = 'α=0：平均分 0.597，平均轮次 2.260。基准档，对应 Table 1 的主结果。';
+    } else if (selected === '0.005') {
+      text = '平均分 0.606（+0.009，相对 α=0 +1.51%）；平均轮次 1.886（−0.374，相对 α=0 −16.55%）。Table 3 里平均分最高的一档。';
+    } else if (selected === '0.05') {
+      text = '平均分 0.599（+0.002，相对 α=0 +0.34%）；平均轮次 1.755（−0.505，相对 α=0 −22.35%）。';
+    } else if (selected === '0.125') {
+      text = '平均分 0.510（−0.087，相对 α=0 −14.57%）；平均轮次 1.000（−1.260，相对 α=0 −55.75%）。成本项压过效用，规划器退化成「搜一次就答」。';
+    } else {
+      text = 'α=0.25 与 α=0.125 在 Table 3 中数值相同：平均分 0.510，平均轮次 1.000（相对 α=0 −14.57% / −55.75%）。';
+    }
+    if (msg) msg.innerHTML = text;
+  }
+
+  btns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      selected = btn.dataset.alpha;
+      renderChart();
+      renderPareto();
+    });
+  });
+
+  renderChart();
+  renderPareto();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,675 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 9.38 | Table 1 | 80.47-71.09 |
+| 11.7 | Table 1 | 9.38/80.47*100 |
+| 9.37 | Table 1 | 81.25-71.88 |
+| 11.5 | Table 1 | 9.37/81.25*100 |
+| 5.47 | Table 2（v1） | 83.59-78.12 |
+| 6.5 | Table 2（v1） | 5.47/83.59*100 |
+| 6.9 | Table 2 | 21.80-14.90 |
+| 2.46 | Table 2 | 21.80-19.34 |
+| 1.55 | Table 2 | 31.39-29.84 |
+| 3418 | §3.1 | 3500000/1024 |
+| 0.3 | Table 3 | 51.0-50.7 |
+| 2.0 | Table 3 | 51.0-49.0 |
+| 437.5 | Table 1 | 3500000/8000 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MemAgent · 用固定长度记忆把 8K 上下文拉到 3.5M</title>
+<meta name="description" content="MemAgent 把长文切成块，用固定长度的记忆逐块覆盖更新，再用 Multi-Conv DAPO 训练记忆写入；8K 训练窗口外推到 3.5M token。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.fig-svg{width:100%;height:auto;display:block}
+.fig-svg text{font-family:Inter,"Noto Sans SC",sans-serif;fill:var(--text)}
+.fig-svg .tt{font-size:12.5px;font-weight:600}
+.fig-svg .ts{font-size:10.5px;fill:var(--text-muted)}
+.fig-svg .tp{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.08em;fill:var(--text-soft)}
+.fig-svg .box{stroke-width:1.2}
+.fig-svg .bx-a{fill:var(--accent-soft);stroke:var(--accent)}
+.fig-svg .bx-b{fill:var(--c1-soft);stroke:var(--c1)}
+.fig-svg .bx-c{fill:var(--c2-soft);stroke:var(--c2)}
+.fig-svg .bx-n{fill:var(--bg-soft);stroke:var(--border-strong)}
+.fig-svg .edge{fill:none;stroke:var(--border-strong);stroke-width:1.4}
+.errata{margin-top:18px;border-top:1px solid var(--border);padding-top:14px;font-size:12.5px;line-height:1.75}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:6px}
+.small{font-size:12.5px;color:var(--text-soft)}
+tr.mem-row td{background:var(--accent-soft)}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.ver-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:14px 0 4px}
+.ver-btn{border:1px solid var(--border);border-radius:8px;padding:9px 6px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:11px;background:var(--bg);color:var(--text-soft);cursor:pointer}
+.ver-btn.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600}
+.ver-table{width:100%;border-collapse:collapse;font-family:"JetBrains Mono",monospace;font-size:10.5px;margin-top:10px}
+.ver-table td,.ver-table th{border-bottom:1px solid var(--border);padding:5px 4px;text-align:center;white-space:nowrap}
+.ver-table th{color:var(--text-soft);font-weight:500}
+.ver-table td:first-child,.ver-table th:first-child{text-align:left}
+.len-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0 4px}
+.len{border:1px solid var(--border);border-radius:8px;padding:9px 6px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:11px;background:var(--bg);color:var(--text-soft);cursor:pointer}
+.len.active{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600}
+@media(max-width:620px){.len-grid{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MemAgent</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">计算</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · ICLR 2026 · arXiv 2507.02259v2</span>
+  <h1>MemAgent：用固定长度记忆，把 8K 上下文拉到 3.5M</h1>
+  <p class="hero-sub">
+    长文本处理的「不可能三角」是无限长度、无损性能、线性成本。MemAgent 不在注意力结构上改，而是把文档切成块，让模型每读一块就<strong>覆盖</strong>一次固定长度的记忆；记忆更新被当成 RL 动作，用 Multi-Conv DAPO 端到端训练。
+    代价是：它把「读长文」变成了「串行地写摘要」，省的是注意力，不是总延迟。
+  </p>
+  <div class="meta">
+    <span>Hongli Yu, Tinghong Chen, Jiangtao Feng, Jiangjie Chen, Weinan Dai, Qiying Yu, Ya-Qin Zhang, Wei-Ying Ma, Jingjing Liu, Mingxuan Wang, Hao Zhou · Tsinghua AIR / ByteDance Seed / SIA-Lab</span>
+    <a href="https://arxiv.org/abs/2507.02259v2" target="_blank" rel="noopener">arXiv 2507.02259v2 ↗</a>
+    <a href="/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    做法只有三步：把长文切成 <code>K</code> 个块；每读一个块，模型把「问题 + 旧记忆 + 当前块」压成一段固定长度的新记忆，覆盖旧记忆；读完后只用「问题 + 最终记忆」回答。
+    因为记忆长度固定，每一步的上下文窗口恒定，端到端计算量随块数线性增长。
+  </p>
+  <p>
+    难点在于「覆盖」是离散操作，不能直接反传。论文把每次记忆更新当成一个独立对话，把最终答案的奖励广播给所有前序对话，得到 <strong>Multi-Conv DAPO</strong>：损失从 <code>(group, token)</code> 扩成 <code>(group, conversation, token)</code>。
+  </p>
+  <p>
+    结果：Qwen2.5-14B 在 <span data-src="§3.1">8K</span> 窗口、<span data-src="§3.1">1024</span> token 记忆、<span data-src="§3.1">5000</span> token 块的设置下训练，v2 Table 1 里 7K 到 3.5M 从 <span data-src="Table 1">80.47</span> 降到 <span data-src="Table 1">71.09</span>，差 <strong data-src="Table 1">9.38 个百分点</strong>（相对 <span data-src="Table 1">11.7%</span>）。
+    论文摘要说「loss of less than 10%」；按百分点读成立，按相对值读不成立。笔记里的 83.59 → 78.12 是 v1 的旧行，v2 已改。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">71.09</div>
+      <div class="k">RL-MemAgent-14B 在 3.5M token<br>7K 为 80.47；同表 QwenLong 896K 仅 11.72</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">9.38<small>pp</small></div>
+      <div class="k">v2 的 7K→3.5M 降幅<br>相对降幅 11.7%，摘要的 &lt;10% 按百分点才成立</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">51.0</div>
+      <div class="k">LongBench-QA 平均<br>QwenLong-L1-32B 50.7；DS-Distill-32B 49.0</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>上下文窗口不是「存不下」，而是「算不起、用不好」</h2></div>
+  <p class="sec-sub">先拆开三个约束：长度、性能、成本；再看为什么现有路线总得放弃一个。</p>
+
+  <p>论文把长文本处理的目标写成三件事：能处理任意长度；长度增加时性能不明显下降；解码复杂度随长度线性增长。三者同时满足很难，因为标准 Transformer 的完整注意力是 <code>O(n²)</code>：文本翻倍，注意力计算约翻四倍（§1）。</p>
+
+  <p>现有路线各占一角。位置编码外推（YaRN、NTK-aware RoPE 等）加继续预训练，能把窗口拉长，但极长文本下仍有性能衰减和 <code>O(n²)</code> 的计算；稀疏注意力、线性注意力能降复杂度，却往往要重训，且线性注意力并行训练困难、稀疏模式依赖人工设计；上下文压缩（token 级或外挂记忆模块）能缩短输入，但外推能力有限，还要改生成流程（§1）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的切口</span><h4>不改注意力，改「模型每一步能看到什么」</h4></div>
+    <p>MemAgent 把长文看成一个受控的证据流：每一步只让模型看「下一个文本块 + 一段固定长度记忆」。记忆是普通 token，放在上下文窗口里，所以基座模型的生成过程不用改；记忆长度不增长，所以每步计算恒定，总复杂度随块数线性增长（§2.1）。</p>
+  </div>
+
+  <p>这相当于把「一次读完」换成「边读边记笔记」。论文的类比是人类处理长文时会记要点、丢冗余；但要注意，模型的「笔记」仍是一段文本摘要，不是结构化数据库，也没有显式的检索或遗忘操作（§1、§2.1）。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条长文本路线，加上 GRPO/DAPO：缺的是「多段独立对话」的优化</h2></div>
+  <p class="sec-sub">MemAgent 的 novelty 不在某个单点技术，而在把记忆更新建模成跨多个独立上下文的 RL 问题。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">长度外推</span><h4>改位置编码 + 继续预训练</h4></div>
+      <p>通过移位位置嵌入、YaRN 等方法扩展窗口；配合长文本继续预训练。</p>
+      <p><strong>卡点：</strong>极长文本仍有性能衰减；完整注意力仍是 <code>O(n²)</code>（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">高效注意力</span><h4>稀疏 / 线性注意力</h4></div>
+      <p>稀疏注意力只算部分 token 对；线性注意力把复杂度降到线性。</p>
+      <p><strong>卡点：</strong>常要重训；线性注意力并行训练难，稀疏模式依赖人工设计（§1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">上下文压缩</span><h4>token 压缩 / 外挂记忆</h4></div>
+      <p>把长文压成短表示，或外接记忆模块；RAG 也属于外部检索路线。</p>
+      <p><strong>卡点：</strong>外推能力有限；要改生成流程，兼容性和并行化受影响（§1）。</p>
+    </div>
+  </div>
+
+  <p>训练算法侧，论文以 DAPO 为基础。DAPO 从 GRPO 改进而来，用组内相对优势、裁剪和动态采样做 RLVR。但标准 DAPO 的损失结构是 <code>(group, token)</code>：一个样本对应一条轨迹。MemAgent 一次处理长文会生成多条<strong>上下文独立</strong>的对话（每次记忆更新一条，最后回答一条），这些对话不共享注意力，不能简单拼成一条多轮轨迹（§2.2）。</p>
+
+  <p>所以论文把每条对话当成独立优化目标，损失扩成 <code>(group, conversation, token)</code>；最终答案所在对话给出奖励，优势广播到同一样本的所有对话。这个改动是整篇论文的方法核心，而不是「换一个更强的基座」（§2.2、Figure 3）。</p>
+</section>
+
+<!-- ================= 03 方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>固定记忆 + 覆盖写 + 奖励广播：三个部件咬成一个循环</h2></div>
+  <p class="sec-sub">先看工作流，再看 Multi-Conv DAPO 的目标函数，最后看训练配方。</p>
+
+  <h3>工作流：每读一块，覆盖一次记忆</h3>
+  <p>设文档被切成 <code>K</code> 个连续块 <code>c¹, …, c^K</code>，每块长度不超过 <code>C</code>；记忆长度固定为 <code>M</code>。读完第 <code>k</code> 块后，模型生成新记忆 <code>m^k</code>，覆盖旧记忆 <code>m^{k-1}</code>。因为 <code>|m^k| = M</code> 恒定，每一步的计算与显存是 <code>O(C+M)</code>，总复杂度 <code>O(N)</code>（§2.1、§2.3）。</p>
+
+  <p>推理分成两个模块：<strong>Context-Processing</strong> 循环读块、更新记忆；<strong>Answer-Generation</strong> 在流结束后只拿「问题 + 最终记忆」生成答案。论文强调，位置嵌入没有被重新缩放或打补丁，两个模块共用同一套 tokenization 和注意力布局，因此不需要架构修改（§2.1）。</p>
+
+  <div class="eq">
+    p(x<sub>1:N</sub>) = Σ<sub>m<sup>1:K−1</sup></sub> ∏<sub>k=1</sub><sup>K</sup> p(c<sup>k</sup> | m<sup>k−1</sup>) · p(m<sup>k</sup> | c<sup>k</sup>, m<sup>k−1</sup>)
+  </div>
+  <div class="eq-cap">Eq.4 · 读（read）与写（write）的分解；m<sup>0</sup> = ∅。记忆是潜变量，RL 优化的是一条读—写轨迹</div>
+
+  <h3>Multi-Conv DAPO：把最终奖励广播给所有记忆更新</h3>
+  <p>对每个问题 <code>q_i</code>，策略采样一组 <code>G</code> 个样本；每个样本 <code>i</code> 生成 <code>n_i</code> 条对话 <code>(o<sub>i,1</sub>, …, o<sub>i,n_i</sub>)</code>，每条对话再分解成 token。最终答案只在最后一条对话里，奖励是二值的：答案等价得 1，否则 0（Eq.3）。</p>
+
+  <p>优势不按每条对话单独算，而是用样本级奖励减去组内均值，然后<strong>原样广播</strong>到该样本的所有对话、所有 token：</p>
+
+  <div class="eq">
+    Â<sub>i,j,t</sub> = R<sub>i</sub> − mean({R<sub>i</sub>}<sub>i=1</sub><sup>G</sup>)
+  </div>
+  <div class="eq-cap">Eq.1 · 所有 j、t 共用同一个 Â；论文遵循 Dr. GRPO，不除以标准差</div>
+
+  <p>损失在「组 × 对话 × token」三个维度上归一化，并对每条对话的每个 token 做 PPO 式裁剪：</p>
+
+  <div class="eq">
+    J<sub>DAPO</sub>(θ) = E[ (1 / Σ<sub>i</sub>Σ<sub>j</sub>|o<sub>i,j</sub>|) Σ<sub>i</sub>Σ<sub>j</sub>Σ<sub>t</sub> ( C<sub>i,j,t</sub> − β D<sub>KL</sub>(π<sub>θ</sub> || π<sub>ref</sub>) ) ]
+  </div>
+  <div class="eq-cap">Eq.2 · C<sub>i,j,t</sub> = min(r·Â, clip(r, 1−ε<sub>low</sub>, 1+ε<sub>high</sub>)·Â)；r 是当前策略与旧策略的 token 概率比</div>
+
+  <p>这个设计的关键不是「把奖励分给每一步」这么简单，而是让模型学到一种<strong>跨对话的信用分配</strong>：某一次记忆更新写得好不好，要看它是否让最终答案正确，而不是看它自身是否像某条参考摘要。论文把它解释为优化一个读—写记忆轨迹的 MDP（§2.3）。</p>
+
+  <h3>训练配方：两阶段课程，8K 窗口</h3>
+  <p>基座是 Qwen2.5-7B-Instruct 与 Qwen2.5-14B-Instruct；框架基于 verl。训练故意把上下文限制在 <span data-src="§3.1">8K</span>，以测试外推。<span data-src="§3.1">8K</span> 的分配是：查询 <span data-src="§3.1">1024</span> token、文本块 <span data-src="§3.1">5000</span> token、记忆 <span data-src="§3.1">1024</span> token、输出 <span data-src="§3.1">1024</span> token，剩余留给 chat template（§3.1）。</p>
+
+  <p>课程分两阶段：Stage I 用 32,768 条合成 QA，每条约 32K token，基于 HotpotQA 并按 RULER 方法在大量干扰段落中嵌入金段落；Stage II 用 2,560 条最长 60K token 的困难长文 QA，来自 DocQA-RL-1.6K，并与 Stage I 数据混合。Stage I 收敛约 400 步后切到 Stage II（§A.3）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">§A.3 训练超参数（原文没有汇总表；下表按正文整理）</caption>
+      <thead><tr><th>项目</th><th>设置</th></tr></thead>
+      <tbody>
+        <tr><td>基座</td><td>Qwen2.5-7B-Instruct / Qwen2.5-14B-Instruct</td></tr>
+        <tr><td>训练窗口</td><td>8K（查询 1024 + 块 5000 + 记忆 1024 + 输出 1024 + 模板）</td></tr>
+        <tr><td>Stage I 数据</td><td>32,768 条合成 QA，约 32K token/条</td></tr>
+        <tr><td>Stage II 数据</td><td>2,560 条，最长 60K token；DocQA-RL-1.6K + Stage I 混合</td></tr>
+        <tr><td>优化器 / 学习率</td><td>AdamW；常数 1e-6；线性 warm-up 20 步</td></tr>
+        <tr><td>KL 系数</td><td>1e-3；关闭 entropy loss</td></tr>
+        <tr><td>Rollout batch / group</td><td>256 / 16；off-policy 采样比 16</td></tr>
+        <tr><td>Stage I 步数</td><td>约 400 步后切 Stage II</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>注意一个原文内部的小不一致：§A.3 先说 Stage I 每条「approximately 32K tokens」，后文又说每条约 28K token。页面不替作者选一个，两个数都保留（§A.3）。</p>
+
+  <h3>自己切换：同一行在 v1 与 v2 里怎么变</h3>
+  <p>笔记写于 v1 时期，数字与 v1 Table 2 一致；当前 arXiv 是 v2，RL-MemAgent-14B 的整行被重算。下面切换版本，看十个长度上的差异。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="ver-grid" id="ver-btns">
+      <button class="ver-btn" data-ver="v1">v1 · 笔记所用版本</button>
+      <button class="ver-btn active" data-ver="v2">v2 · 当前 arXiv</button>
+    </div>
+    <div class="tbl-scroll">
+      <table class="ver-table" id="ver-table">
+        <thead><tr><th>长度</th><th>7K</th><th>14K</th><th>28K</th><th>56K</th><th>112K</th><th>224K</th><th>448K</th><th>896K</th><th>1.75M</th><th>3.5M</th></tr></thead>
+        <tbody><tr id="ver-row"><td>RL-14B</td><td>80.47</td><td>82.03</td><td>82.03</td><td>83.59</td><td>81.25</td><td>77.34</td><td>79.69</td><td>75.78</td><td>78.91</td><td>71.09</td></tr></tbody>
+      </table>
+    </div>
+    <div class="readout" id="ver-readout" data-src="Table 1">
+      <div class="r-head">v2 · Table 1</div>
+      7K 80.47；3.5M 71.09；降幅 9.38 个百分点（相对 11.7%）。
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两版的 7K→3.5M 降幅<span class="sum-sub">与交互读数逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>v1（笔记所用）：</strong>7K 83.59；3.5M 78.12。绝对降幅 83.59 − 78.12 = 5.47 个百分点；相对降幅 5.47 / 83.59 = 6.5%。v1 摘要称「performance loss &lt; 5%」，但按 v1 Table 2 的 7K/3.5M 复算，绝对 5.47 个百分点、相对 6.5%，&lt; 5% 不成立。</p>
+      <p><strong>v2（当前 arXiv）：</strong>7K 80.47；3.5M 71.09。绝对降幅 80.47 − 71.09 = 9.38 个百分点；相对降幅 9.38 / 80.47 = 11.7%。</p>
+      <p>口径：都是同一版本、同一行、同一基准的百分点差；论文摘要的「less than 10%」没有说明是相对还是百分点。按百分点读，v2 的 9.38 成立；按相对值读，11.7 不成立。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 计算 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>线性的是 FLOPs，不一定是你感受到的延迟</h2></div>
+  <p class="sec-sub">固定窗口把每步成本压平，但串行读块意味着总延迟仍随块数增长。</p>
+
+  <p>标准完整注意力的计算随上下文长度平方增长；MemAgent 每一步只看 <code>C + M</code> 个 token，记忆不增长，所以每步成本恒定，总 FLOPs 随块数 <code>K</code> 线性增长。论文用 verl 的 FLOP estimator 在 8K–4M 长度上对比，Figure 10 显示基线是 <code>O(n²)</code>，MemAgent 是 <code>O(n)</code>（§B、Figure 10）。</p>
+
+  <p>从 8K 训练窗口到 3.5M 测试长度，长度约是窗口的 <span data-src="Table 1">437.5</span> 倍（按 3,500,000 / 8,000 计；3.5M 见 §3.2/Table 1，8K 见 §3.1）。这个倍数能成立，靠的是「每步窗口不变」，而不是模型学会了 3.5M 位置的注意力（§2.1、§3.1）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">成本边界</span><h4>论文只给了 FLOPs，没给墙钟时间</h4></div>
+    <p>论文没有报告 GPU 型号、卡数、总 GPU 小时，也没有给不同长度下的端到端延迟或吞吐。FLOPs 线性不等于延迟线性：每个块要等上一块写完记忆，串行依赖无法并行。对低延迟场景，这可能比「一次前向」更慢，尽管总算力更低（§B；Appendix 未给墙钟指标）。<span class="infer">推断</span>（依据：§B 只讨论 FLOPs；全文未给 wall-clock 或 GPU 小时）。</p>
+  </div>
+
+  <p>另一项成本是记忆管理的「信息取舍」：记忆固定 <span data-src="§3.1">1024</span> token，读 <span data-src="Table 1">3.5M</span> token 意味着极大的压缩比。压缩比越高，早期关键信息被覆盖的风险越大；论文用 RL 训练来缓解，§3.3.3 的 probe 是检验位置鲁棒性的诊断实验，不是缓解机制，也没有给出「信息丢失率」这类直接指标（§3.3.3、Table 4；Table 4 未完整转录）。</p>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一个循环写记忆，一个分支把奖励广播回去</h2></div>
+  <p class="sec-sub">按 Figure 2 / Figure 3 重绘：上半是推理时的读—写循环，下半是训练时的多对话信用分配。</p>
+
+  <figure>
+    <svg class="fig-svg" viewBox="0 0 940 580" role="img" aria-label="MemAgent 工作流与 Multi-Conv DAPO 示意图">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <!-- Left: inference loop -->
+      <text class="tp" x="24" y="26">INFERENCE · READ-WRITE LOOP</text>
+
+      <rect class="box bx-n" x="24" y="42" width="150" height="58" rx="10"></rect>
+      <text class="tt" x="99" y="66" text-anchor="middle">长文档</text>
+      <text class="ts" x="99" y="85" text-anchor="middle">切成 K 个块 c¹…c^K</text>
+
+      <rect class="box bx-b" x="212" y="42" width="180" height="58" rx="10"></rect>
+      <text class="tt" x="302" y="66" text-anchor="middle">当前块 c^k</text>
+      <text class="ts" x="302" y="85" text-anchor="middle">≤ 5000 token</text>
+
+      <rect class="box bx-a" x="430" y="42" width="200" height="58" rx="10"></rect>
+      <text class="tt" x="530" y="66" text-anchor="middle">LLM 读：q + m^(k−1) + c^k</text>
+      <text class="ts" x="530" y="85" text-anchor="middle">固定窗口 8K 预算</text>
+
+      <rect class="box bx-c" x="668" y="42" width="248" height="58" rx="10"></rect>
+      <text class="tt" x="792" y="66" text-anchor="middle">写：新记忆 m^k</text>
+      <text class="ts" x="792" y="85" text-anchor="middle">覆盖 m^(k−1)；长度恒为 1024</text>
+
+      <line class="edge" x1="174" y1="71" x2="212" y2="71" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="392" y1="71" x2="430" y2="71" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="630" y1="71" x2="668" y2="71" marker-end="url(#arrow)"></line>
+
+      <!-- loop back -->
+      <path class="edge" d="M792 100 L792 130 L530 130 L530 150" marker-end="url(#arrow)"></path>
+      <text class="ts" x="650" y="124" text-anchor="middle">k ← k+1，直到读完</text>
+
+      <!-- memory box -->
+      <rect class="box bx-c" x="430" y="150" width="200" height="52" rx="10"></rect>
+      <text class="tt" x="530" y="172" text-anchor="middle">固定长度记忆 m</text>
+      <text class="ts" x="530" y="190" text-anchor="middle">普通 token，不是外部数据库</text>
+
+      <!-- memory read-back -->
+      <path class="edge" d="M470 150 L470 100" marker-end="url(#arrow)"></path>
+      <text class="ts" x="482" y="132" text-anchor="start">m^k 回读</text>
+
+      <!-- answer -->
+      <rect class="box bx-n" x="668" y="150" width="248" height="52" rx="10"></rect>
+      <text class="tt" x="792" y="172" text-anchor="middle">Answer-Generation</text>
+      <text class="ts" x="792" y="190" text-anchor="middle">只输入 q + m^K，输出答案</text>
+      <path class="edge" d="M792 202 L792 230 L470 230 L470 258" marker-end="url(#arrow)"></path>
+
+      <!-- Training branch -->
+      <text class="tp" x="24" y="248">TRAINING · MULTI-CONV DAPO</text>
+
+      <rect class="box bx-b" x="24" y="258" width="260" height="66" rx="10"></rect>
+      <text class="tt" x="154" y="282" text-anchor="middle">一个样本 → n_i 条独立对话</text>
+      <text class="ts" x="154" y="301" text-anchor="middle">o_i1（记忆更新）… o_in（最终回答）</text>
+
+      <rect class="box bx-a" x="330" y="258" width="250" height="66" rx="10"></rect>
+      <text class="tt" x="455" y="282" text-anchor="middle">最终答案给奖励 R_i</text>
+      <text class="ts" x="455" y="301" text-anchor="middle">Eq.3：is_equiv(y, ŷ) → 1/0</text>
+
+      <rect class="box bx-c" x="626" y="258" width="290" height="66" rx="10"></rect>
+      <text class="tt" x="771" y="282" text-anchor="middle">优势广播到所有对话</text>
+      <text class="ts" x="771" y="301" text-anchor="middle">Â_i,j,t = R_i − mean({R_i})；Eq.1</text>
+
+      <line class="edge" x1="284" y1="291" x2="330" y2="291" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="580" y1="291" x2="626" y2="291" marker-end="url(#arrow)"></line>
+
+      <rect class="box bx-n" x="212" y="376" width="520" height="66" rx="10"></rect>
+      <text class="tt" x="472" y="400" text-anchor="middle">损失在 (group, conversation, token) 上归一化</text>
+      <text class="ts" x="472" y="419" text-anchor="middle">Eq.2：PPO 裁剪 + KL；所有对话共享同一个 Â</text>
+
+      <path class="edge" d="M771 324 L771 350 L472 350 L472 376" marker-end="url(#arrow)"></path>
+      <path class="edge" d="M154 324 L154 350 L472 350" marker-end="url(#arrow)"></path>
+      <path class="edge" d="M472 442 L472 476 L154 476 L154 512" marker-end="url(#arrow)"></path>
+
+      <rect class="box bx-a" x="24" y="512" width="260" height="52" rx="10"></rect>
+      <text class="tt" x="154" y="534" text-anchor="middle">策略更新</text>
+      <text class="ts" x="154" y="552" text-anchor="middle">下一轮采样更多长文</text>
+
+      <rect class="box bx-n" x="330" y="512" width="586" height="52" rx="10"></rect>
+      <text class="tt" x="623" y="534" text-anchor="middle">关键：不是把多条对话拼成一条多轮轨迹</text>
+      <text class="ts" x="623" y="552" text-anchor="middle">各对话上下文独立；奖励只在最后一条对话产生，再广播回去</text>
+    </svg>
+    <figcaption>
+      Figure 2 / Figure 3 的简化重绘：上半是推理循环（块 → 读 → 写记忆 → 回读记忆 → 下一块），下半是训练时的多对话奖励广播。左侧回路是概念示意，不是完整控制流。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>覆盖：</strong>§2.1 的分块读—写循环与两个模块、§2.2 的 Eq.1–3 与 <code>(group, conversation, token)</code> 损失、Figure 3 的奖励广播。</li>
+          <li><strong>未覆盖：</strong>Figure 4 的概率图模型与 read/write 因子分解细节、Algorithm 1 的逐行流程、verl 的分布式实现、chat template 的具体 token 分配。</li>
+          <li><strong>因此这是按正文重绘的示意，不是原文 Figure 2/3 的逐像素还原。</strong>左侧循环的箭头表示概念依赖，实际训练时多条对话是并行生成的。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>外推成立，但「无损」要按 v2 的表重新读</h2></div>
+  <p class="sec-sub">先看 Table 1 的完整行，再看 LongBench-QA/SUM 与消融；最后把笔记的 v1 数字与 v2 并列。</p>
+
+  <p>Table 1 是核心外推实验：训练窗口 <span data-src="§3.1">8K</span>，测试从 <span data-src="Table 1">7K</span> 拉到 <span data-src="Table 1">3.5M</span>。RL-MemAgent-14B 在 v2 的 7K 是 <span data-src="Table 1">80.47</span>，3.5M 是 <span data-src="Table 1">71.09</span>；RL-MemAgent-7B 从 <span data-src="Table 1">81.25</span> 降到 <span data-src="Table 1">71.88</span>。两条曲线都不是「完全平」，但也没有出现基线那种在 <span data-src="Table 1">896K</span> 附近归零的崩塌（Table 1）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">Table 1 完整转录（accuracy，%；N/A 表示原文未评测该长度；底色标出 MemAgent 两行，原文逐格加粗未复刻）</caption>
+      <thead>
+        <tr><th>Model</th><th class="num">7K</th><th class="num">14K</th><th class="num">28K</th><th class="num">56K</th><th class="num">112K</th><th class="num">224K</th><th class="num">448K</th><th class="num">896K</th><th class="num">1.75M</th><th class="num">3.5M</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>QwenLong-L1-32B</td><td class="num">72.66</td><td class="num">75.00</td><td class="num">72.66</td><td class="num">60.94</td><td class="num">31.25</td><td class="num">17.19</td><td class="num">13.28</td><td class="num">11.72</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>Qwen2.5-Instruct-14B-1M</td><td class="num">60.16</td><td class="num">60.94</td><td class="num">50.00</td><td class="num">57.03</td><td class="num">50.00</td><td class="num">37.50</td><td class="num">8.59</td><td class="num">0.00</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>Qwen2.5-Instruct-7B-1M</td><td class="num">61.72</td><td class="num">56.25</td><td class="num">53.91</td><td class="num">55.47</td><td class="num">51.56</td><td class="num">33.59</td><td class="num">12.50</td><td class="num">0.00</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>DS-Distill-Qwen-32B</td><td class="num">70.31</td><td class="num">66.41</td><td class="num">65.62</td><td class="num">46.88</td><td class="num">23.44</td><td class="num">13.28</td><td class="num">7.81</td><td class="num">7.03</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>DS-Distill-Qwen-14B</td><td class="num">64.06</td><td class="num">64.84</td><td class="num">57.03</td><td class="num">40.62</td><td class="num">14.84</td><td class="num">8.59</td><td class="num">3.12</td><td class="num">6.25</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>DS-Distill-Qwen-7B</td><td class="num">30.47</td><td class="num">12.50</td><td class="num">3.12</td><td class="num">0.00</td><td class="num">0.00</td><td class="num">0.78</td><td class="num">0.00</td><td class="num">0.00</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>Qwen2.5-Instruct-32B</td><td class="num">69.53</td><td class="num">64.84</td><td class="num">60.16</td><td class="num">51.56</td><td class="num">44.53</td><td class="num">21.88</td><td class="num">14.06</td><td class="num">7.03</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>Qwen2.5-Instruct-14B</td><td class="num">75.00</td><td class="num">67.19</td><td class="num">57.03</td><td class="num">54.69</td><td class="num">44.53</td><td class="num">21.88</td><td class="num">10.94</td><td class="num">2.34</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr><td>Qwen2.5-Instruct-7B</td><td class="num">52.34</td><td class="num">57.03</td><td class="num">51.56</td><td class="num">44.53</td><td class="num">32.81</td><td class="num">13.28</td><td class="num">6.25</td><td class="num">1.56</td><td class="num">N/A</td><td class="num">N/A</td></tr>
+        <tr class="mem-row"><td>RL-MemAgent-14B</td><td class="num">80.47</td><td class="num">82.03</td><td class="num">82.03</td><td class="num">83.59</td><td class="num">81.25</td><td class="num">77.34</td><td class="num">79.69</td><td class="num">75.78</td><td class="num">78.91</td><td class="num">71.09</td></tr>
+        <tr class="mem-row"><td>RL-MemAgent-7B</td><td class="num">81.25</td><td class="num">81.25</td><td class="num">82.03</td><td class="num">80.47</td><td class="num">79.69</td><td class="num">75.78</td><td class="num">76.56</td><td class="num">74.22</td><td class="num">77.34</td><td class="num">71.88</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>三个基线家族的失败模式不同：DS-Distill 系列下降很快，7B 在 7K 只有 30.47；QwenLong-L1 在训练长度内还能维持，112K 后从 31.25 掉到 17.19（224K）、11.72（896K）；Qwen2.5-Instruct-1M 系列在 112K 还有 50.00/51.56，到 896K 直接归零（Table 1）。</p>
+
+  <h3>口径审计：摘要的「less than 10%」</h3>
+  <p>v2 摘要写「extrapolate from an 8K context to a 3.5M QA task with a performance loss of less than 10%」。按 Table 1 的 <span data-src="Table 1">7K</span> 列复算（Table 1 没有 <span data-src="§3.1">8K</span> 列，以 7K 作最近代理）：14B 从 <span data-src="Table 1">80.47</span> 到 <span data-src="Table 1">71.09</span>，绝对差 <span data-src="Table 1">9.38</span> 个百分点，相对差 <span data-src="Table 1">11.7</span>%；7B 从 <span data-src="Table 1">81.25</span> 到 <span data-src="Table 1">71.88</span>，绝对差 <span data-src="Table 1">9.37</span> 个百分点，相对差 <span data-src="Table 1">11.5</span>%。</p>
+
+  <p>论文没有说明分母。按百分点读，9.38 和 9.37 都小于 10；按相对值读，11.7 和 11.5 都大于 10。页面不替作者选口径，只把两种算法并列。<span class="infer">推断</span>（依据：摘要只写「less than 10%」；Table 1 的 7K/3.5M 两列可复算）。</p>
+
+  <h3>自己切换：不同长度下谁还在</h3>
+  <p>下面从 Table 1 取 7K、112K、896K、3.5M 四个长度，比较 RL-MemAgent-14B、QwenLong-L1-32B、Qwen2.5-Instruct-14B-1M。基线在超出评测长度时显示 N/A，不是 0。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="len-grid" id="len-btns">
+      <button class="len active" data-len="7K">7K</button>
+      <button class="len" data-len="112K">112K</button>
+      <button class="len" data-len="896K">896K</button>
+      <button class="len" data-len="3.5M">3.5M</button>
+    </div>
+    <div class="chart" id="len-chart"></div>
+    <div class="cx"><span>准确率（%，轴 0–100）</span></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>RL-MemAgent-14B</span>
+      <span><i style="background:var(--c1)"></i>QwenLong-L1-32B</span>
+      <span><i style="background:var(--c2)"></i>Qwen2.5-Instruct-14B-1M</span>
+    </div>
+    <div class="readout" id="len-readout" data-src="Table 1">
+      <div class="r-head">7K · Table 1</div>
+      MemAgent 80.47；QwenLong 72.66；Qwen2.5-14B-1M 60.16。
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：四个长度的三行读数<span class="sum-sub">与交互读数逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>7K：</strong>80.47 / 72.66 / 60.16。<strong>112K：</strong>81.25 / 31.25 / 50.00。</p>
+      <p><strong>896K：</strong>75.78 / 11.72 / 0.00。<strong>3.5M：</strong>71.09 / N/A / N/A。</p>
+      <p>口径：都是 RULER-HQA accuracy（%）；N/A 是原文没有评测该长度，不是 0 分。112K 时 Qwen2.5-14B-1M 仍高于 QwenLong，但 896K 时已归零。</p>
+    </div>
+  </details>
+
+  <h3>其他基准：QA 与摘要</h3>
+  <p>LongBench-QA 更短但信息密度更高，考的是记忆管理而不是纯定位。MemAgent-14B 平均 <strong>51.0</strong>，比 QwenLong-L1-32B 的 50.7 高 <span data-src="Table 3">0.3</span> 个百分点，比 DS-Distill-Qwen-32B 的 49.0 高 <span data-src="Table 3">2.0</span> 个百分点；MemAgent-7B 平均 48.2（Table 3）。这说明在短而密的文本上，记忆机制仍然有效，但优势没有长文外推那么悬殊。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">Table 3 完整转录（accuracy，%）</caption>
+      <thead><tr><th>Method</th><th class="num">2Wiki</th><th class="num">HQA</th><th class="num">MuSiQue</th><th class="num">NQA</th><th class="num">Qasper</th><th class="num">AVG</th></tr></thead>
+      <tbody>
+        <tr><td>QwenLong-L1-32B</td><td class="num">83.0</td><td class="num">69.5</td><td class="num">51.0</td><td class="num">26.0</td><td class="num">24.0</td><td class="num">50.7</td></tr>
+        <tr><td>Qwen2.5-Instruct-14B-1M</td><td class="num">70.5</td><td class="num">65.5</td><td class="num">35.0</td><td class="num">22.0</td><td class="num">22.0</td><td class="num">43.0</td></tr>
+        <tr><td>Qwen2.5-Instruct-7B-1M</td><td class="num">67.5</td><td class="num">58.5</td><td class="num">26.0</td><td class="num">21.5</td><td class="num">24.0</td><td class="num">39.5</td></tr>
+        <tr><td>DS-Distill-Qwen-32B</td><td class="num">83.5</td><td class="num">69.0</td><td class="num">47.5</td><td class="num">24.0</td><td class="num">21.0</td><td class="num">49.0</td></tr>
+        <tr><td>DS-Distill-Qwen-14B</td><td class="num">83.5</td><td class="num">67.0</td><td class="num">42.0</td><td class="num">22.0</td><td class="num">22.0</td><td class="num">47.3</td></tr>
+        <tr><td>DS-Distill-Qwen-7B</td><td class="num">47.0</td><td class="num">31.5</td><td class="num">7.5</td><td class="num">4.0</td><td class="num">17.5</td><td class="num">21.5</td></tr>
+        <tr><td>Qwen2.5-Instruct-32B</td><td class="num">68.5</td><td class="num">66.0</td><td class="num">37.0</td><td class="num">24.5</td><td class="num">22.5</td><td class="num">43.7</td></tr>
+        <tr><td>Qwen2.5-Instruct-14B</td><td class="num">67.0</td><td class="num">63.5</td><td class="num">39.0</td><td class="num">20.0</td><td class="num">20.5</td><td class="num">42.0</td></tr>
+        <tr><td>Qwen2.5-Instruct-7B</td><td class="num">52.5</td><td class="num">59.0</td><td class="num">24.0</td><td class="num">19.0</td><td class="num">19.0</td><td class="num">34.7</td></tr>
+        <tr class="best"><td>MemAgent-14B</td><td class="num">79.0</td><td class="num">73.0</td><td class="num">52.0</td><td class="num">25.0</td><td class="num">26.0</td><td class="num">51.0</td></tr>
+        <tr class="best"><td>MemAgent-7B</td><td class="num">74.0</td><td class="num">69.5</td><td class="num">47.0</td><td class="num">21.5</td><td class="num">29.0</td><td class="num">48.2</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>LongBench-SUM 用 ROUGE-{1,2,L} 的 recall 评估。Table 2 中 RL-MemAgent-14B 的 GOV REPORT 平均是 <strong>21.80</strong>：比 Qwen2.5-Instruct-14B-1M 的 19.34 高 <span data-src="Table 2">2.46</span> 个百分点，比 Qwen2.5-Instruct-32B 的 14.90 高 <span data-src="Table 2">6.9</span> 个百分点。QMSUM 平均 <strong>31.39</strong>，比最高基线 Qwen2.5-Instruct-14B-1M 的 29.84 高 <span data-src="Table 2">1.55</span> 个百分点。论文说「almost all metrics」最好，这个限定是必要的：QMSUM ROUGE-2 一列，RL-MemAgent-7B 为 <span data-src="Table 2">14.41</span>（最高）、Qwen2.5-Instruct-14B-1M 为 <span data-src="Table 2">13.13</span>、RL-MemAgent-14B 为 <span data-src="Table 2">12.70</span>；14B 该项低于基线的 13.13（Table 2）。原文把 12.70 标为第二高（下划线），这与 13.13 的数值更高不一致；原文如此，页面并列呈现，不替作者消解。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">Table 2 的 AVG 列节选（recall，%；GOV REPORT / QMSUM 的 ROUGE-1/2/L 分项未转录，完整表见原文 Table 2）。分项补注：QMSUM ROUGE-2 上 Qwen2.5-Instruct-14B-1M 为 13.13，反超 RL-MemAgent-14B 的 12.70；RL-MemAgent-7B 的 14.41 为该列最高。</caption>
+      <thead><tr><th>Model</th><th class="num">GOV REPORT AVG</th><th class="num">QMSUM AVG</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen2.5-Instruct-32B</td><td class="num">14.90</td><td class="num">29.08</td></tr>
+        <tr><td>Qwen2.5-Instruct-14B</td><td class="num">19.04</td><td class="num">29.09</td></tr>
+        <tr><td>Qwen2.5-Instruct-7B</td><td class="num">19.26</td><td class="num">28.99</td></tr>
+        <tr><td>QwenLong-L1</td><td class="num">16.29</td><td class="num">23.74</td></tr>
+        <tr><td>Qwen2.5-Instruct-14B-1M</td><td class="num">19.34</td><td class="num">29.84</td></tr>
+        <tr><td>Qwen2.5-Instruct-7B-1M</td><td class="num">19.26</td><td class="num">29.24</td></tr>
+        <tr><td>DS-Distill-Qwen-32B</td><td class="num">15.99</td><td class="num">23.93</td></tr>
+        <tr><td>DS-Distill-Qwen-14B</td><td class="num">17.25</td><td class="num">25.07</td></tr>
+        <tr><td>DS-Distill-Qwen-7B</td><td class="num">19.10</td><td class="num">20.62</td></tr>
+        <tr class="best"><td>RL-MemAgent-14B</td><td class="num">21.80</td><td class="num">31.39</td></tr>
+        <tr class="best"><td>RL-MemAgent-7B</td><td class="num">19.34</td><td class="num">31.27</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>消融与探针：RL 必要，记忆长度不敏感，位置效应不单调</h3>
+  <p>RL 消融（NIAH 见 Figure 5，RULER-HQA 见 Figure 6，LongBench-QA 见 Figure 7）：没有 RL 的 MemAgent 在短文本上可能优于基座，但随着长度增加仍明显下降；RL 之后曲线更平。论文的措辞是 RL 训练对「generalizable and robust memory abilities」必要，但没有给逐点数值表，只有图（§3.3.1、Figure 5、Figure 6、Figure 7）。</p>
+
+  <p>记忆长度消融（Figure 8/9）：在 <span data-src="§3.3.2">256–4096</span> token 范围内，论文称 <span data-src="§3.3.2">1024</span> 是「reasonable sweet spot」，且性能对记忆大小较稳健；§3.3.2 只给 Figure 8/9，Appendix D.1 的 Table 8/9 有逐点消融数据（14B/7B × m4096/m3072/m2048/m1024 × c1928/c2952/c3976/c5000；Table 8 各长度 / Table 9 各基准）。Table 8/9 未完整转录。</p>
+
+  <p>上下文分布探针（Table 4）：把两组关键信息放在 <span data-src="Table 4">(0%,100%)、(20%,80%)、(40%,60%)、(0%,20%)、(80%,100%)</span> 五种位置组合，14B 在部分设置上高于 random，部分设置上低于 random。例如 (0%,20%) 在 <span data-src="Table 4">14K</span> 上 <span data-src="Table 4">−3.91</span>、在 <span data-src="Table 4">224K</span> 上 <span data-src="Table 4">+4.69</span>。论文的结论是「没有灾难性下降」，而不是「所有位置都无损」；页面按这个限定呈现（§3.3.3、Table 4；Table 4 未完整转录，仅摘此两例）。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它把「长文 QA」做成了流式记忆，但不是通用长文理解</h2></div>
+  <p class="sec-sub">论文自己承认的限制，加上从实验设置能看到的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>评测集中在可验证的 QA 与摘要</h4></div>
+    <p>主实验是 RULER-HQA（合成多跳 QA）、LongBench-QA（NarrativeQA、Qasper、HotpotQA、2Wiki、MuSiQue）和 LongBench-SUM（GovReport、QMSum），奖励是答案等价的 0/1。没有开放式写作、多轮对话、代码库理解或需要全局抽象的任务（§3.1、§3.2）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>串行读块：FLOPs 线性，延迟不一定</h4></div>
+    <p>每读一块都要等上一块写完记忆，块与块之间有串行依赖。论文只报 FLOPs（Figure 10），没有报墙钟延迟、吞吐或 GPU 小时；对低延迟应用，线性 FLOPs 可能仍比一次前向慢（§B）。<span class="infer">推断</span>（依据：§B 只讨论 FLOPs；全文未给 wall-clock 指标）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>固定 1024 token 记忆，压缩比极高</h4></div>
+    <p><span data-src="Table 1">3.5M</span> token 的文档最终只留 <span data-src="§3.1">1024</span> token 记忆，压缩比约 <span data-src="§3.1">3418:1</span>（3,500,000 / 1024；3.5M 见 Table 1，1024 见 §3.1；该比值是页面推算）。早期关键信息一旦被覆盖，后续无法找回；论文用 RL 训练缓解，§3.3.3 的 probe 检验位置鲁棒性，不给信息丢失率或可恢复性指标（§3.1、§3.3.3、Table 4；Table 4 未完整转录）。<span class="infer">推断</span>（依据：记忆固定 1024 token；§3.3.3 只给准确率探针，没有信息保留率）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>基座与训练数据范围窄</h4></div>
+    <p>只验证了 Qwen2.5-7B/14B-Instruct，训练数据是 HotpotQA 合成的 RULER 风格 QA 加 DocQA-RL-1.6K；没有跨模型家族、跨语言、跨领域的实验。论文的「any moderately context-sized LLM」是设计主张，不是已被多基座验证的结论（§3.1、§A.3）。</p>
+  </div>
+
+  <p>什么时候别用：如果任务需要精确引用原文、逐字定位、或对整篇文档做全局结构推理，固定长度摘要记忆会丢细节；如果任务本身短于训练窗口，分块反而增加串行开销；如果应用不能接受「读完整篇才能回答」的延迟，MemAgent 的流式循环也不合适。<span class="infer">推断</span>（依据：论文的任务与指标集中在 QA/摘要；未覆盖精确引用与低延迟场景）。</p>
+</section>
+
+<footer>
+  <div>MemAgent: Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent · Hongli Yu, Tinghong Chen, Jiangtao Feng, Jiangjie Chen, Weinan Dai, Qiying Yu, Ya-Qin Zhang, Wei-Ying Ma, Jingjing Liu, Mingxuan Wang, Hao Zhou · Tsinghua AIR / ByteDance Seed / SIA-Lab</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.02259v2" target="_blank" rel="noopener">arXiv 2507.02259v2</a>（本页以 v2 为准；v2 于 2026-07-29 修订）<br>
+    笔记：<a href="/memagentreshaping-long-context-llm-with-multi-conv-rl-based-memory-agent/">MemAgent：Reshaping Long-Context LLM with Multi-Conv RL-based Memory Agent</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改笔记原文）</strong>
+    <ul>
+      <li>版本：笔记写于 v1 时期，正文的 7K 83.59、112K 76.56、896K 77.34、3.5M 78.12 都来自 v1 Table 2。当前 v2 把 RL-MemAgent-14B 整行重算为 7K 80.47、112K 81.25、896K 75.78、3.5M 71.09；7B 行也变了。页面以 v2 为准，并在交互里并列两版。v1 摘要称 performance loss &lt; 5%，但按 v1 Table 2 的 7K/3.5M 复算为 5.47 个百分点 / 6.5%，&lt; 5% 不成立。</li>
+      <li>「性能损失极小 / 几乎没有衰减」：v2 的 7K→3.5M 是 80.47→71.09，降 9.38 个百分点（相对 11.7%）。摘要的「less than 10%」按百分点读成立，按相对值读不成立；不是「几乎没有衰减」。</li>
+      <li>「10 个 RULER 任务平均超过 95%（512K）」：论文摘要只说 512K NIAH 测试的绝对准确率超过 95%；§3.2 的原句是「shows only a minimal performance loss of less than 5% at 512K」，原文未说明这个 5% 是绝对百分点还是相对值。没有「10 个 RULER 任务」这个统计。NIAH 是 RULER 下的三个变体，不是十个任务。</li>
+      <li>「QwenLong-L1-32B 在 224K 后性能开始大幅下滑」：v2 Table 1 中它在 112K 已从 60.94 降到 31.25，224K 是 17.19；下滑从 112K 后就开始了，不是 224K 之后。</li>
+      <li>「Qwen2.5-Instruct-1M 在 896K 准确率降为 0」：这一条与 v2 Table 1 一致（14B-1M 和 7B-1M 都是 0.00），不是勘误；保留在此是为了说明页面与笔记一致的部分。</li>
+      <li>「Multi-Conv DAPO 把奖励公平分配给所有前序记忆更新」：Eq.1 是把样本级优势原样广播到该样本的所有对话和 token，不是把最终奖励按对话数做除法。页面用「广播」而不是「均分」，避免误解为每个对话拿到 R_i/n_i。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ============================================================
+     交互 1：v1 / v2 的 RL-MemAgent-14B 行
+     ============================================================ */
+  var VERSIONS = {
+    v1: {
+      label: 'v1 · 笔记所用版本',
+      table: 'Table 2',
+      values: [83.59, 82.03, 84.38, 80.47, 76.56, 81.25, 75.00, 77.34, 76.56, 78.12],
+      note: '7K 83.59；3.5M 78.12；降幅 5.47 个百分点（相对 6.5%）。'
+    },
+    v2: {
+      label: 'v2 · 当前 arXiv',
+      table: 'Table 1',
+      values: [80.47, 82.03, 82.03, 83.59, 81.25, 77.34, 79.69, 75.78, 78.91, 71.09],
+      note: '7K 80.47；3.5M 71.09；降幅 9.38 个百分点（相对 11.7%）。'
+    }
+  };
+
+  var verBtns = document.getElementById('ver-btns');
+  var verRow = document.getElementById('ver-row');
+  var verReadout = document.getElementById('ver-readout');
+
+  function renderVersion(key) {
+    var cfg = VERSIONS[key];
+    if (!cfg || !verRow || !verReadout) return;
+    var cells = verRow.querySelectorAll('td');
+    for (var i = 0; i < cfg.values.length; i++) {
+      if (cells[i + 1]) cells[i + 1].textContent = cfg.values[i].toFixed(2);
+    }
+    verReadout.setAttribute('data-src', cfg.table);
+    verReadout.innerHTML = '<div class="r-head">' + cfg.label + ' · ' + cfg.table + '</div>' + cfg.note;
+  }
+
+  if (verBtns) {
+    var vButtons = verBtns.querySelectorAll('.ver-btn');
+    vButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        vButtons.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderVersion(btn.getAttribute('data-ver'));
+      });
+    });
+    renderVersion('v2');
+  }
+
+  /* ============================================================
+     交互 2：四个长度下的三模型对比（Table 1）
+     ============================================================ */
+  var LENGTHS = {
+    '7K':   { mem: 80.47, long: 72.66, qwen: 60.16 },
+    '112K': { mem: 81.25, long: 31.25, qwen: 50.00 },
+    '896K': { mem: 75.78, long: 11.72, qwen: 0.00 },
+    '3.5M': { mem: 71.09, long: null,  qwen: null }
+  };
+
+  var lenBtns = document.getElementById('len-btns');
+  var lenChart = document.getElementById('len-chart');
+  var lenReadout = document.getElementById('len-readout');
+
+  function fmt(v) { return v === null ? 'N/A' : v.toFixed(2); }
+
+  function renderLength(key) {
+    var cfg = LENGTHS[key];
+    if (!cfg || !lenChart || !lenReadout) return;
+    var rows = [
+      { name: 'MemAgent-14B', val: cfg.mem, color: 'var(--accent)' },
+      { name: 'QwenLong-L1', val: cfg.long, color: 'var(--c1)' },
+      { name: 'Qwen2.5-14B-1M', val: cfg.qwen, color: 'var(--c2)' }
+    ];
+    lenChart.innerHTML = '';
+    rows.forEach(function (item) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = item.name;
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      var bar = document.createElement('div');
+      bar.className = 'cbar';
+      var track = document.createElement('div');
+      track.className = 'track';
+      var fill = document.createElement('div');
+      fill.className = 'fill';
+      fill.style.background = item.color;
+      fill.style.height = (item.val === null || item.val === 0 ? 0 : Math.max(2, Math.min(100, item.val))) + '%';
+      var num = document.createElement('div');
+      num.className = 'num';
+      num.textContent = fmt(item.val);
+      track.appendChild(fill);
+      bar.appendChild(track);
+      bar.appendChild(num);
+      bars.appendChild(bar);
+      row.appendChild(name);
+      row.appendChild(bars);
+      lenChart.appendChild(row);
+    });
+    lenReadout.setAttribute('data-src', 'Table 1');
+    lenReadout.innerHTML = '<div class="r-head">' + key + ' · Table 1</div>' +
+      'MemAgent ' + fmt(cfg.mem) + '；QwenLong ' + fmt(cfg.long) + '；Qwen2.5-14B-1M ' + fmt(cfg.qwen) + '。' +
+      (cfg.long === null ? ' 两个基线在原文中未评测该长度（N/A），不是 0 分。' : '');
+  }
+
+  if (lenBtns) {
+    var lButtons = lenBtns.querySelectorAll('.len');
+    lButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        lButtons.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        renderLength(btn.getAttribute('data-len'));
+      });
+    });
+    renderLength('7K');
+  }
+
+  window.toggleFig = function (el) {
+    var figure = el.closest('figure');
+    if (!figure) return;
+    var detail = figure.querySelector('.figure-detail');
+    if (!detail) return;
+    var open = detail.classList.toggle('active');
+    el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+  };
+})();
+</script>
+</body>
+</html>

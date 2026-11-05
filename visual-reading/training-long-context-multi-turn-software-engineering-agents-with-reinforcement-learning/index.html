@@ -1,0 +1,512 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 9.04 | Table 1 | 20.46-11.42 |
+| 15.3 | Table 1 | 35.74-20.46 |
+| 3.3 | Table 1 | 39.04-35.74 |
+| 18.6 | Table 1 | 39.04-20.46 |
+| 19.4 | Table 1 | 58.4-39.04 |
+| 0.52 | Table 1 | 39.56-39.04 |
+| 1.75 | Table 1 | 36.75-35.00 |
+| 0.25 | Table 1 | 31.71-31.46 |
+| 1.5 | Table 1 | 36.50-35.00 |
+| 0.49 | Table 1 | 31.71-31.22 |
+| 1.91 | Table 1 | 39.04/20.46 |
+| 3.2 | Table 2 | 42.2-39.0 |
+| 79.2 | Table 1 | (20.46-11.42)/11.42*100 |
+| 14087 | §3.1 | 21336-7249 |
+| 5221 | §3.3 | 7249-2028 |
+| 102.3 | §3.2/§4.3 | 6548/64 |
+| 3200 | §4.3 | 50*64 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Long-Context SWE Agent · 用 0/1 奖励训练多轮软件工程智能体</title>
+<meta name="description" content="论文把软件工程任务当成 POMDP，用 RFT 热身、DAPO 多轮 RL 训练 Qwen2.5-72B：SWE-bench Verified Pass@1 从 RFT 后的 20.46% 提到 39.04%（base 11.42%），Pass@10 达 58.4%，不依赖教师模型。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共组件样式来自 base.css */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.flow-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.flow-pa{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.flow-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.stage-chart .track{height:110px}
+.stage-chart .cbar .num{font-size:10px}
+.stage-chart .cname{min-width:108px}
+@media (max-width:520px){
+  .stage-chart .track{height:84px}
+  .stage-chart .cbar .num{font-size:9px}
+  .stage-chart .cname{min-width:0;font-size:11px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SWE Agent</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#train">训练</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>SWE Agent · arXiv 2025 · 2508.03501v1</span>
+  <h1>Long-Context SWE Agent：用 0/1 奖励训练多轮软件工程智能体</h1>
+  <p class="hero-sub">
+    修一个 GitHub issue 不是“一次生成补丁”，而是一串“执行命令、看报错、再改”的交互。论文把 SWE 任务当成 POMDP，
+    先用拒绝微调让模型学会正确的工具格式，再用 DAPO 在真实仓库环境里做多轮 RL；主奖励是补丁是否通过测试的 0/1 信号，另加超长轨迹的长度惩罚。
+  </p>
+  <div class="meta">
+    <span>Alexander Golubev 等 · Nebius / Humanoid</span>
+    <a href="https://arxiv.org/abs/2508.03501" target="_blank" rel="noopener">arXiv 2508.03501v1 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文先做一个区分：数学题和单次代码生成可以当成“多臂赌博机”，输入一个问题、输出一个答案、拿一个奖励，中间没有环境反馈；软件工程不是。智能体要执行 <code>grep</code>、读文件、改代码、跑测试；每个动作都会产生可观察的转移（其中一部分会改变仓库状态），并返回新的观察。它把这种任务形式化成 POMDP，并指出当时的 LLM RL 大多停留在单轮设定（§1、§2.1）。
+  </p>
+  <p>
+    训练分两段。<strong>RFT</strong>：先让 Qwen2.5-72B-Instruct 在 7,249 个任务上各尝试 10 次，只留下补丁能通过测试的 6,548 条轨迹（rollout + 筛选），再在这批成功轨迹上做 1 个 epoch 的 SFT——SFT 是 RFT 的一部分。<strong>RL</strong>：用改过的 DAPO，每个问题采 10 条完整轨迹，按组内均值/标准差算优势；主奖励是补丁通过测试为 1、否则为 0，另加超长轨迹的线性惩罚。
+  </p>
+  <p>
+    RL 分两个课程阶段：先在 65k 上下文、最多 40 轮里训练，等性能到约 32%（论文未说明该阈值对应哪个评测集）后切到 131k、最多 80 轮，并把训练池从 7,249 个任务筛到 2,028 个。最终 SWE-bench Verified 的 Pass@1 是 <span class="mono" data-src="Table 1">39.04%</span>，比 RFT 后的 <span class="mono" data-src="Table 1">20.46%</span> 高 <span class="mono" data-src="Table 1">18.6</span> 个百分点（RFT 用 65k、最终模型用 131k 评测，这一差值还含 65k→131k 与 40→80 轮的变化）；Pass@10 是 <span class="mono" data-src="Table 1">58.4%</span>。
+  </p>
+  <p>
+    边界同样清楚：奖励依赖 SWE-rebench 训练任务自带的验证测试套件（SWE-bench Verified 只用于评测），训练只覆盖 Python issue 类任务（原文未按任务类型细分，§3.1）；完整流程要 16 个 H200 节点；Pass@1 与 Pass@10 之间还差 <span class="mono" data-src="Table 1">19.4</span> 个百分点，说明模型经常“生成了对的候选但没选中”。和领先的开放权重模型比，按 Pass@1，Verified 上比 DeepSeek-V3-0324 低 <span class="mono" data-src="Table 1">0.52</span> 个百分点，SWE-rebench 的 May 低 <span class="mono" data-src="Table 1">1.75</span>、June 高 <span class="mono" data-src="Table 1">0.25</span>，两个分片一低一高；按 Pass@10，三个分片（Verified/May/June）都低于 DeepSeek（Table 1）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">39.04<small>%</small></div>
+      <div class="k">SWE-bench Verified Pass@1<br>最终模型，131k 上下文</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">18.6<small>pp</small></div>
+      <div class="k">Pass@1 · RL 阶段差（含 65k→131k）<br>39.04% − 20.46%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">58.4<small>%</small></div>
+      <div class="k">同一模型的 Pass@10<br>比 Pass@1 高 19.4 个百分点</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>修 issue 是状态化交互，不是一次性生成</h2></div>
+  <p class="sec-sub">先分清“赌博机式任务”和“部分可观察的交互任务”，这决定了 RL 能优化什么。</p>
+
+  <p>论文的出发点是一个建模差异。数学推理、单次代码生成这类任务可以写成 <code>(问题 → 答案 → 奖励)</code> 的单步过程：模型看不到中间状态，也没有机会根据环境反馈改变策略。论文把它称为 bandit-style 或退化的 MDP（§1、Figure 2 上半）。</p>
+
+  <p>软件工程任务不是这样。一个 issue 只给出自然语言描述，仓库的真实状态（文件内容、依赖、测试结果）对智能体是<strong>部分可观察</strong>的；它只能通过动作去获取观察：运行 <code>ls</code> 或 <code>grep</code> 看目录和代码，打开文件，修改某几行，运行测试，读失败日志。每个动作都会产生可观察的转移（其中一部分会改变仓库状态），下一步的决策依赖完整的动作—观察历史。论文把它写成 POMDP（§2.1），Figure 2 的下半部分给出与单步任务的对比（§1）。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">单步任务</span><h4>奖励可以直接归因到一次输出</h4></div>
+      <p>模型生成一个答案，验证器判对错，奖励回到这次生成。信用分配只发生在一个回答内部，RL 的组内比较足以工作。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">SWE 任务</span><h4>奖励只出现在 episode 结束</h4></div>
+      <p>补丁是否通过测试，要等智能体执行 <code>submit</code> 后才知道。中间几十步没有即时奖励，哪一步导致成功或失败并不直接可见。</p>
+    </div>
+  </div>
+
+  <p>这个建模带来两个直接后果。第一，<strong>轨迹会很长</strong>：一个任务可能要几十轮命令和修改，上下文里堆满文件片段、报错和 diff。论文最终把训练上下文推到 131k，单条 episode 最多 80 轮（§3.3）。第二，<strong>奖励是稀疏的 0/1</strong>：中间步骤没有人工奖励，唯一信号是最终补丁有没有通过验证测试。论文明确把 <code>R(τ) ∈ {0,1}</code> 作为策略优化的唯一任务信号（§2.1）。</p>
+
+  <p>这也解释了为什么“直接上 RL”不够。基础模型常常连工具格式都写不对：命令格式错误、编辑时缩进不符合要求（§2.3 的 <code>edit</code> 要求精确缩进）。论文说初始 checkpoint 在 SWE-bench Verified 上只有约 11%，主要失败原因是指令跟随不正确（§3.2）。如果 RL 从这种状态开始，大部分 rollout 都会因为格式错误拿 0 分，组内比较没有有效梯度——原文没有直接给出这个实验，<span class="infer">推断</span>（依据：§3.2 说初始 checkpoint 的主要失败是指令跟随/格式，RFT 正是为修正它而设计）。RFT 的作用就是先把这些“无效动作”清掉。</p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>闭源模型、推理时搜索、教师蒸馏：三条路都贵</h2></div>
+  <p class="sec-sub">论文要证明的是：不靠教师模型，RL 阶段只靠环境交互和 0/1 奖励（RFT 仍用自生成成功轨迹做 SFT），也能把开源模型推到同一档。</p>
+
+  <p>论文在引言里列出当时做高性能 SWE 智能体的三条常见路线（§1）：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 1</span><h4>闭源模型 + 复杂脚手架</h4></div>
+      <p>用 GPT-4 之类的专有模型，外面套一层工程化的工具和流程。效果稳定，但成本高、模型不可控，研究社区难以复用。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 2</span><h4>推理时扩展</h4></div>
+      <p>用 MCTS、best-of-N 或多次采样在推理阶段搜索。算力换准确率，部署时延迟和成本都会上升。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">路线 3</span><h4>教师模型蒸馏</h4></div>
+      <p>让更强的教师生成“完美轨迹”，再 SFT 学生模型。需要高质量示范数据。</p>
+    </div>
+  </div>
+
+  <p>Table 2 把近期的专用 SWE 智能体按“是否使用教师蒸馏”分了类。这个分类很重要：教师蒸馏路线里，32B 模型可以在 SWE-bench Verified 上到 40.2%（SWE-agent-LM-32B）；不用教师的方法里，DeepSWE-32B 到 42.2%。论文的最终模型在 Table 2 的 after 列是 39.0%（与 Table 1 的 Pass@1 39.04% 对应），处在这个区间的同一档，但它的卖点不是“最高分”，而是<strong>不用教师数据；RL 阶段只用 0/1 环境奖励（RFT 用自生成成功轨迹做 SFT）</strong>。</p>
+
+  <p>论文选择 RFT + RL 的组合。RFT 仍然需要模型自己产生成功轨迹，但不需要外部教师；RL 则在 RFT（采样筛选 + SFT）的基础上继续用环境反馈优化策略（§3.2、§3.3）。论文在 §1 的论点是：RL 通过与环境交互直接优化策略，可能在不依赖教师模型的情况下取得更强性能。</p>
+</section>
+
+<!-- ================= 3. 方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>ReAct 循环 + 稀疏奖励 + 组内优势</h2></div>
+  <p class="sec-sub">方法不新在网络，而在把多轮交互、长轨迹和 0/1 奖励接进 DAPO。</p>
+
+  <h3>智能体怎么动：工具、轮数与 submit</h3>
+  <p>智能体采用 ReAct 式循环，动作—观察历史会拼进每一次决策。工具集包括（§2.3）：任意 shell 命令（<code>ls</code>、<code>cat</code>、<code>grep</code> 等）；一个按行替换文件内容的 <code>edit</code> 命令，要求给出精确缩进；<code>search_file</code>、<code>open</code>、<code>goto</code> 这类检索与导航工具；以及一个无参数的 <code>submit</code> 命令，调用后 episode 结束。智能体可见的是 issue 描述、失败测试套件与仓库快照（§2.3）；数据集记录还含 ground-truth patch（§3.1）。</p>
+
+  <p>奖励在 episode 结束时计算：最终补丁通过验证测试套件则 <code>R(τ)=1</code>，否则为 0。中间步骤的即时奖励全为 0，所以整条轨迹只有终点信号（§2.1）。这个设定和真实开发接近，但也把信用分配问题留给了算法。</p>
+
+  <h3>RFT：先让模型学会“怎么用工具”</h3>
+  <p>RFT 的流程在论文里写得很具体（§3.2）：用初始 checkpoint 在 7,249 个 SWE-rebench 任务上各生成 10 条轨迹，只保留补丁通过测试的轨迹，一共得到 6,548 条；在这批成功轨迹上做 1 个 epoch 的监督微调。训练时<strong>屏蔽掉所有触发环境格式错误的 agent turn</strong>，Loss 只落在格式正确的动作上。</p>
+
+  <p><strong>口径提示：</strong>原文 §3.2 的 6,548 条与 §4.3 的 batch 64 / 50 个梯度步不吻合（6,548 / 64 ≈ 102.3；50 × 64 = 3,200）；<span class="infer">推断</span> 可能 batch 是全局/每设备口径，或只用了部分轨迹，论文未说明。此处按原文并列，不替它消解。</p>
+
+  <p>这一步不是“学解题思路”，而是“学接口”。原文说基础模型的主要失败是指令跟随不正确、命令不符合要求格式（§3.2）；§2.3 的 <code>edit</code> 命令还要求精确缩进。把这些无效动作从 Loss 里去掉，模型会更快稳定在可执行的交互模式上。RFT 后 Verified Pass@1 从 <span class="mono" data-src="Table 1">11.42%</span> 到 <span class="mono" data-src="Table 1">20.46%</span>，差 <span class="mono" data-src="Table 1">9.04</span> 个百分点（base 用 131k、RFT 用 65k 评测，见 Table 1 caption；差值含评测上下文变化）。</p>
+
+  <h3>DAPO：组内比较，不需要 critic</h3>
+  <p>RL 阶段用 DAPO。它属于 GRPO 一系：对同一个初始 observation 采一组 <code>G</code> 条完整轨迹，用组内奖励的均值 <code>R̄</code> 和标准差 <code>σ<sub>R</sub></code> 归一化每条轨迹的终点奖励，得到这条轨迹的优势：</p>
+
+  <div class="eq">
+    <span class="hl-a">Â<sup>(i)</sup> = (R(τ<sup>(i)</sup>) − R̄) / (σ<sub>R</sub> + δ)</span>
+  </div>
+  <div class="eq-cap">Eq. 3 · <code>R̄ = (1/G) Σ R(τ<sup>(i)</sup>)</code>；<code>δ</code> 是数值稳定项。这个优势会应用到该轨迹的所有 token 上。论文每个问题采 <code>G=10</code> 条（§3.3；§4.2 复述为每个问题 10 条）。</div>
+
+  <p>DAPO 相对 GRPO 的改动有四条，论文都写进了 §2.2：<strong>token-level loss</strong>（按 token 平均，而不是每条轨迹等权）；<strong>动态采样</strong>（优势为 0 的样本被丢掉，不让它们占据计算）；<strong>软超长惩罚</strong>（超过长度阈值后线性扣分，而不是直接把轨迹截断）；以及<strong>非对称 clip</strong>（上下界分开设置，Stage 1 为 [0.2, 0.3]，Stage 2 为 [0.2, 0.26]）。</p>
+
+  <p>软超长惩罚的公式是：</p>
+
+  <div class="eq">
+    <span class="hl-a">R<sub>final</sub>(τ) = R(τ) + R<sub>length</sub>(τ)</span><br>
+    <span class="hl-b">R<sub>length</sub>(τ) = 0，若 |τ| &lt; L<sub>thr</sub>；否则 (L<sub>thr</sub> − |τ|) / (T<sub>max</sub> − L<sub>thr</sub>)</span>
+  </div>
+  <div class="eq-cap">Eq. 6–7 · <code>L<sub>thr</sub></code> 是惩罚阈值，<code>T<sub>max</sub></code> 是最大 episode 长度。超过阈值后越长扣得越多；它加在测试奖励上，不改变“通过/不通过”的主信号。</div>
+
+  <p>为什么不用 PPO：PPO 需要一个学出来的 critic 来估计优势，critic 本身要训练、会引入额外的不稳定；组内比较直接用同一组轨迹的终点奖励做基线，省掉了这个网络（§2.2）。代价是每组必须采多条完整轨迹，而 SWE 的轨迹很长，所以采样成本高。</p>
+</section>
+
+<!-- ================= 4. 训练 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>65k 先学交互，131k 再学长程，课程把池子从 7,249 筛到 2,028</h2></div>
+  <p class="sec-sub">这一节把两阶段超参数、数据过滤和基础设施摊开。</p>
+
+  <h3>数据：从 21,336 到 7,249</h3>
+  <p>训练数据来自 SWE-rebench：21,336 个任务，覆盖约 3,400 个 Python 仓库；每个任务包含 GitHub issue、失败测试套件、可复现的仓库快照，以及 ground-truth solution patch（§3.1），原文没有把任务类型限定为 bug fix（§3.1）。论文按四条规则过滤（§3.1）：<strong>任务正确性</strong>（去掉测试因无效引用/导入而失败的任务，如 AttributeError、ImportError）；<strong>受控复杂度</strong>（只保留最多修改 7 个文件、少于 500 行代码的任务）；<strong>LLM 质量评分</strong>（去掉原数据集中 LLM 评分 3.0 的任务，理由包括 issue 描述不清、任务过复杂或测试补丁有缺陷）；<strong>确定性测试</strong>（50 次重复运行，去掉 flaky 任务）。最终留下 7,249 个任务，也就是过滤掉 <span class="mono" data-src="§3.1">14,087</span> 个。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 3 转录 + §3.3 · 每轮问题数、训练池、batch、clip 来自 Table 3；上下文 65k/131k 与最大轮数 40/80 来自 §3.3；RFT 与优化器设置见下文 §4.3（不在本表）。</caption>
+      <thead>
+        <tr><th>阶段</th><th>上下文</th><th>最大轮数 T<sub>max</sub></th><th>每轮问题数</th><th>训练池</th><th>Batch size</th><th>Clip 范围</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Stage 1 RL</td><td>65k</td><td>40</td><td>300</td><td>7,249</td><td>128</td><td>[0.2, 0.3]</td></tr>
+        <tr><td>Stage 2 RL</td><td>131k</td><td>80</td><td>100</td><td>2,028</td><td>256</td><td>[0.2, 0.26]</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Stage 1 用 65k 上下文，已经超过多数开源模型默认的 32k；论文说这个长度还不够覆盖长堆栈或长 diff 历史，所以在性能到约 32% 后切到 Stage 2（论文未说明该阈值对应哪个评测集；Figure 1/4 的中间评测用 Verified-50，Table 1 的完整 Verified 上 Stage 1 为 35.74%）：上下文升到 131k，最大轮数从 40 翻到 80，同时降低高 clip 上界、增大 batch、降低每轮问题数，让训练更接近 on-policy（§3.3）。131k 是通过 YaRN 位置编码（factor = 4.0）实现的（§4.3）。</p>
+
+  <h3>课程：去掉“已经会做”和“从来没做对”的任务</h3>
+  <p>Stage 2 开始前做一次性的课程调整。论文定义任务的累计解决率：它在之前所有训练迭代中的成功率。累计解决率超过 <code>2/3</code> 的任务被移除（说明已经能稳定解决），累计解决率始终为 0 的任务也被移除（说明大概率不可解）。训练池因此从 7,249 缩到 2,028，筛掉 <span class="mono" data-src="§3.3">5,221</span> 个任务（§3.3）。</p>
+
+  <h3>优化与基础设施</h3>
+  <p>RFT：1 个 epoch，学习率 <code>5×10<sup>−6</sup></code>，AdamW，weight decay 0.1，10 步 warmup，cosine 衰减到 0，batch 64，共 50 个梯度步。RL：学习率 <code>10<sup>−6</sup></code>，1 个 epoch，梯度裁剪 1.0，AdamW（β<sub>1</sub>=0.9、β<sub>2</sub>=0.999、ε=1e−8、weight decay 0.1）（§4.3）。6,548 条成功轨迹与这里的 batch 64 / 50 步不吻合（6,548/64≈102.3，50×64=3,200）；原文未说明，见 §3.2 后的口径提示。</p>
+
+  <p>整个流程是同步的：rollout 生成完再训练，没有策略滞后（on-policy）。每个问题采 10 条轨迹，每轮产生 2–8 个优化步，具体取决于 batch size 和优势非零的轨迹数。训练与推理都在 <strong>16 个 H200 节点</strong>上完成；为了在 131k 序列上做全参数训练，用了 context parallelism（§4.2）。论文未报告总 GPU 小时、token 数或单轮墙钟；§4.2 给出 16 个 H200 节点；Appendix C 给出单 pod 配置（8×H200、32 CPU、960 GiB、JAX、vLLM 0.7.4），但没有总量指标。同步训练的一个已知问题是 straggler：一轮的耗时取决于最慢的那条轨迹。</p>
+
+  <p>RL 总共跑了 100 多个训练迭代（over 100 RL iterations，§4.1）。论文未给出 Stage 2 的迭代次数，也未说明每轮采样是否放回；因此无法判断 2,028 个任务是否被重复采样（Stage 1 的 300 问题/轮、Stage 2 的 100 问题/轮见 Table 3）。</p>
+</section>
+
+<!-- ================= 5. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条流水线：RFT 采样筛选 → SFT（RFT 的一部分）→ 65k RL → 课程筛选 → 131k RL</h2></div>
+  <p class="sec-sub">上半部分是训练流水线，下半部分是一条 episode 内的交互循环。</p>
+
+  <figure>
+    <svg viewBox="0 0 960 330" role="img" aria-label="训练流水线：7,249 个任务先做 RFT 的 rollout 与筛选，得到 6,548 条成功轨迹，再做 SFT（RFT 的一部分），进入 65k 上下文 RL，课程筛选到 2,028 个任务，再进入 131k RL，最终评测。下方是单条 episode 的 act-observe-submit 循环">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect class="flow-c1" x="10" y="60" width="135" height="78" rx="9"></rect>
+      <text class="flow-t" x="77" y="88" text-anchor="middle">7,249 个任务</text>
+      <text class="flow-s" x="77" y="108" text-anchor="middle">SWE-rebench</text>
+      <text class="flow-s" x="77" y="124" text-anchor="middle">Python 仓库</text>
+
+      <rect class="flow-c2" x="170" y="52" width="150" height="94" rx="9"></rect>
+      <text class="flow-t" x="245" y="78" text-anchor="middle">RFT 采样筛选</text>
+      <text class="flow-s" x="245" y="98" text-anchor="middle">每个任务 10 条轨迹</text>
+      <text class="flow-s" x="245" y="114" text-anchor="middle">只留通过测试的</text>
+      <text class="flow-s" x="245" y="130" text-anchor="middle">得到 6,548 条</text>
+
+      <rect class="flow-c2" x="345" y="60" width="135" height="78" rx="9"></rect>
+      <text class="flow-t" x="412" y="88" text-anchor="middle">SFT 1 epoch</text>
+      <text class="flow-s" x="412" y="108" text-anchor="middle">RFT 的一部分</text>
+      <text class="flow-s" x="412" y="124" text-anchor="middle">屏蔽格式错误 turn</text>
+
+      <rect class="flow-pa" x="505" y="52" width="150" height="94" rx="9"></rect>
+      <text class="flow-t" x="580" y="78" text-anchor="middle">RL Stage 1</text>
+      <text class="flow-s" x="580" y="98" text-anchor="middle">65k 上下文</text>
+      <text class="flow-s" x="580" y="114" text-anchor="middle">最多 40 轮</text>
+      <text class="flow-s" x="580" y="130" text-anchor="middle">训练池 7,249</text>
+
+      <rect class="flow-box" x="680" y="60" width="130" height="78" rx="9" stroke-dasharray="5 4"></rect>
+      <text class="flow-t" x="745" y="86" text-anchor="middle">课程筛选</text>
+      <text class="flow-s" x="745" y="106" text-anchor="middle">累计解决率 &gt; 2/3</text>
+      <text class="flow-s" x="745" y="122" text-anchor="middle">或 = 0 的移除</text>
+
+      <rect class="flow-pa" x="835" y="52" width="115" height="94" rx="9"></rect>
+      <text class="flow-t" x="892" y="78" text-anchor="middle">RL Stage 2</text>
+      <text class="flow-s" x="892" y="98" text-anchor="middle">131k 上下文</text>
+      <text class="flow-s" x="892" y="114" text-anchor="middle">最多 80 轮</text>
+      <text class="flow-s" x="892" y="130" text-anchor="middle">池 2,028</text>
+
+      <path class="flow-line" d="M145 99 L166 99" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M320 99 L341 99" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M480 99 L501 99" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M655 99 L676 99" marker-end="url(#arr)"></path>
+      <path class="flow-line" d="M810 99 L831 99" marker-end="url(#arr)"></path>
+
+      <rect class="flow-box" x="70" y="215" width="820" height="86" rx="10"></rect>
+      <text class="flow-t" x="480" y="243" text-anchor="middle">单条 episode：act → observation → act → … → submit → 跑测试 → 奖励 R ∈ {0, 1}</text>
+      <text class="flow-s" x="480" y="266" text-anchor="middle">动作：shell / edit / search_file / open / goto / submit；历史条件每一次决策</text>
+      <text class="flow-s" x="480" y="285" text-anchor="middle">10 条轨迹一组 → 组内归一化优势 → DAPO token-level 更新</text>
+      <path class="flow-line" d="M480 146 L480 211" marker-end="url(#arr)" stroke-dasharray="5 4"></path>
+    </svg>
+    <figcaption>按 Figure 2 与 §3–§4 重绘（Figure 1 只提供训练趋势，不参与本图结构）：覆盖 RFT 采样筛选、SFT（RFT 的一部分）、两阶段 RL、课程筛选与单条 episode 的交互循环。未覆盖工具调用的具体实现、失败轨迹的存储格式、分布式训练的通信细节与评测脚本；页面不对 agent 行为做模拟。</figcaption>
+  </figure>
+
+  <p>流水线里只有 RL 两段用环境 0/1 奖励更新策略。RFT（采样筛选 + SFT）负责把模型带到“能正常跑完 episode”的起点；Stage 1 在 65k 上下文、最多 40 轮上训练；课程筛选把已经稳定解决和完全解不出的任务拿掉；Stage 2 把上下文扩到 131k、最大轮数提到 80（§3.3）。评测时不再更新参数，只把最终 checkpoint 放到同样的工具环境里跑。</p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Pass@1 从 11.4% 到 39.0%，但长上下文阶段的收益并不均匀</h2></div>
+  <p class="sec-sub">先看主表和分阶段柱状图，再看三个反直觉点：Stage 2 的 Pass@1 在 Verified 上涨、May 下降、June 小幅上涨（Pass@10 下 May/June 不涨）、Pass@1 与 Pass@10 的差距、以及与 DeepSeek 的逐项对比（结论按 Pass@1 / Pass@10 分开）。</p>
+
+  <p>Table 1 是主结果。Pass@1 是 10 次运行的平均值，括号里是标准误；最终模型和基线用 131k 评测，中间模型用各自训练阶段的上下文长度（65k）评测。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 转录 · SWE-bench Verified 与 SWE-rebench 的 May / June 分片；Pass@1 为 10 次运行平均 ± 标准误，Pass@10 为百分数；所有模型使用其 Hugging Face 配置中的默认解码参数（与 §4.3 的训练 rollout 采样设置不同）。</caption>
+      <thead>
+        <tr><th rowspan="2">模型</th><th colspan="2">SWE-bench Verified</th><th colspan="2">SWE-rebench May</th><th colspan="2">SWE-rebench June</th></tr>
+        <tr><th>Pass@1</th><th>Pass@10</th><th>Pass@1</th><th>Pass@10</th><th>Pass@1</th><th>Pass@10</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Qwen2.5-72B-Instruct</td><td class="num">11.42 ± 0.24</td><td class="num">31.0</td><td class="num">14.50 ± 1.33</td><td class="num">40.0</td><td class="num">14.63 ± 1.03</td><td class="num">36.6</td></tr>
+        <tr><td>+ RFT @ 65k</td><td class="num">20.46 ± 0.42</td><td class="num">43.0</td><td class="num">22.50 ± 1.18</td><td class="num">45.0</td><td class="num">20.98 ± 1.51</td><td class="num">43.9</td></tr>
+        <tr><td>+ Stage 1 RL @ 65k</td><td class="num">35.74 ± 0.28</td><td class="num">54.6</td><td class="num">36.50 ± 1.59</td><td class="num">55.0</td><td class="num">31.22 ± 0.80</td><td class="num">53.7</td></tr>
+        <tr class="best"><td>+ Stage 2 RL @ 131k</td><td class="num">39.04 ± 0.50</td><td class="num">58.4</td><td class="num">35.00 ± 1.54</td><td class="num">52.5</td><td class="num">31.71 ± 1.31</td><td class="num">53.7</td></tr>
+        <tr><td>DeepSeek-V3-0324</td><td class="num">39.56 ± 0.47</td><td class="num">62.2</td><td class="num">36.75 ± 0.92</td><td class="num">60.0</td><td class="num">31.46 ± 1.38</td><td class="num">58.5</td></tr>
+        <tr><td>Qwen3-235B no-thinking</td><td class="num">25.84 ± 0.37</td><td class="num">54.4</td><td class="num">27.25 ± 1.15</td><td class="num">57.5</td><td class="num">22.93 ± 2.16</td><td class="num">48.8</td></tr>
+        <tr><td>Qwen3-32B no-thinking</td><td class="num">20.40 ± 0.34</td><td class="num">44.0</td><td class="num">21.75 ± 1.54</td><td class="num">50.0</td><td class="num">17.56 ± 1.30</td><td class="num">36.6</td></tr>
+        <tr><td>Llama4 Maverick</td><td class="num">15.84 ± 0.54</td><td class="num">47.2</td><td class="num">19.00 ± 1.72</td><td class="num">50.0</td><td class="num">13.66 ± 1.79</td><td class="num">39.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>交互：切换 Pass@1 / Pass@10，看四个训练阶段</h3>
+  <p>下面把 Table 1 的四个训练阶段画成柱状图，按基准分组。切换指标会重画全部柱子；同一组里从左到右是 Base、RFT、Stage 1、Stage 2。数值逐字来自 Table 1。</p>
+
+  <div class="sim" id="stage-sim">
+    <div class="tabs" id="metric-tabs">
+      <button class="tab active" type="button" data-metric="p1">Pass@1</button>
+      <button class="tab" type="button" data-metric="p10">Pass@10</button>
+    </div>
+
+    <div class="readout" data-src="Table 1">
+      <div class="r-head">当前读数</div>
+      <div id="stage-msg">Pass@1 · Verified：11.42 → 20.46 → 35.74 → 39.04；May：14.50 → 22.50 → 36.50 → 35.00；June：14.63 → 20.98 → 31.22 → 31.71</div>
+    </div>
+
+    <div class="chart stage-chart" id="stage-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>Base</span>
+      <span><i style="background:var(--c2)"></i>RFT</span>
+      <span><i style="background:var(--c3)"></i>Stage 1</span>
+      <span><i style="background:var(--accent)"></i>Stage 2</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算：三组阶段差值与口径<span class="sum-sub">与上面的图表同一数据源</span></summary>
+    <div class="details-body">
+      <p><strong>配置 A：Verified · Pass@1。</strong>RFT − Base = <code>20.46 − 11.42 = 9.04</code>；Stage 1 − RFT = <code>35.74 − 20.46 = 15.28</code>（页面写 15.3）；Stage 2 − Stage 1 = <code>39.04 − 35.74 = 3.30</code>；RL 总计 = <code>39.04 − 20.46 = 18.58</code>（页面写 18.6）。</p>
+      <p><strong>配置 B：SWE-rebench May · Pass@1。</strong>Stage 1 = <strong>36.50</strong>，Stage 2 = <strong>35.00</strong>，Stage 2 相对 Stage 1 低 <code>36.50 − 35.00 = 1.50</code> 个百分点；同一阶段在 June 分片是 <code>31.71 − 31.22 = 0.49</code> 的上升。</p>
+      <p><strong>配置 C：Pass@10 直读。</strong>Verified：31.0 → 43.0 → 54.6 → 58.4；May：40.0 → 45.0 → 55.0 → 52.5；June：36.6 → 43.9 → 53.7 → 53.7。Pass@10 为 Table 1 表格直读，不做插值或重新计算；Stage 2 相对 Stage 1 在 June 持平（53.7 → 53.7），Verified 为 54.6 → 58.4。</p>
+      <p>交互只做表格读数与柱高映射，不计算平均、标准差或标准误；Table 1 的 ± 值是原文报告的标准误，页面不重新计算。图表里的柱高按百分数直接映射，不做归一化。</p>
+    </div>
+  </details>
+
+  <h3>训练账：阶段差 9.04 / 15.3 / 3.3，口径不同不能直接当贡献拆分</h3>
+  <p>在 Verified 上，RFT 把 Pass@1 从 11.42% 拉到 20.46%，差 <span class="mono" data-src="Table 1">9.04</span> 个百分点（base 用 131k、RFT 用 65k 评测）；Stage 1 的 RL 把它拉到 35.74%，差 <span class="mono" data-src="Table 1">15.3</span> 个百分点（同为 65k，是唯一同口径的阶段差）；Stage 2 再差 <span class="mono" data-src="Table 1">3.3</span> 个百分点（同时改了上下文、轮数、batch、clip，以及训练池——课程筛选从 7,249 到 2,028——和每轮问题数（§3.3、Table 3），不是纯算法贡献）。RL 两段合计比 RFT 高 <span class="mono" data-src="Table 1">18.6</span> 个百分点，最终是 RFT 基线的 <span class="mono" data-src="Table 1">1.91</span> 倍（39.04 / 20.46）。</p>
+
+  <p><strong>反直觉 1（Pass@1）：Stage 2 在 Verified 和 June 上涨、在 May 下降。</strong>按 Pass@1，把上下文从 65k 扩到 131k、轮数从 40 扩到 80 后，Stage 2 在 Verified 和 June 上涨、在 May 下降：Verified 从 35.74 涨到 39.04，涨 <span class="mono" data-src="Table 1">3.3</span> 个百分点；June 只涨 <span class="mono" data-src="Table 1">0.49</span> 个百分点；SWE-rebench May 从 36.50 掉到 35.00，低 <span class="mono" data-src="Table 1">1.5</span> 个百分点。<span class="infer">推断</span> 只有 Verified 的涨幅明显——June 的 +0.49 落在两个阶段各自的标准误（±0.80 与 ±1.31）之内（依据：Table 1 的 Pass@1 ±SE 比较；原文没有这句显著性判断）。按 Pass@10，方向不同：Verified 54.6 → 58.4，May 55.0 → 52.5，June 53.7 → 53.7（持平）；三个分片里只有 Verified 上涨。论文没有对 May 的下降给出解释，也没有把它归因于课程筛选或上下文变化；这里按 Table 1 原样并列，不替原文消解。</p>
+
+  <p><strong>反直觉 2：Pass@10 远高于 Pass@1。</strong>最终模型 Verified Pass@1 是 39.04%，Pass@10 是 58.4%，相差 <span class="mono" data-src="Table 1">19.4</span> 个百分点。论文据此指出，模型生成的候选里经常存在正确解，只是单次选择没选中；这为后续接重排或 best-of-n 留了空间（§3.3）。注意这是“候选里有没有”和“最终提交哪一个”的差别，不是模型不会做。</p>
+
+  <p><strong>反直觉 3：对 DeepSeek 的比较要分片看，而且 Pass@1 / Pass@10 方向不同。</strong>按 Pass@1，Verified 上 DeepSeek-V3-0324 是 39.56%，比最终模型高 <span class="mono" data-src="Table 1">0.52</span> 个百分点；SWE-rebench May 上 DeepSeek 36.75%，高 <span class="mono" data-src="Table 1">1.75</span> 个百分点；June 上 DeepSeek 31.46%，最终模型 31.71%，最终模型高 <span class="mono" data-src="Table 1">0.25</span> 个百分点（31.71 − 31.46）。按 Pass@10，DeepSeek 在三个分片都更高：Verified 62.2 对 58.4、May 60.0 对 52.5、June 58.5 对 53.7（Table 1）。按 Pass@1，只有 June 略高 0.25，Verified/May 分别低 0.52/1.75，不能概括为追平；按 Pass@10 三个分片都低。</p>
+
+  <h3>和专用 SWE 智能体比：不是 Table 2 的最高分</h3>
+  <p>Table 2 汇总了专用 SWE 智能体。下表转录 Table 2 全部 9 行。“Teacher Distillation”列表示训练是否用了教师模型生成的轨迹。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2 转录 · “before” 是基座模型训练前的 Pass@1，“after” 是训练后的最终成绩；均指 SWE-bench Verified。</caption>
+      <thead>
+        <tr><th>智能体</th><th>基座模型</th><th>Before</th><th>After</th><th>Teacher Distillation</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>Ours</td><td>Qwen2.5-72B-Instruct</td><td class="num">11.4</td><td class="num">39.0</td><td>No</td></tr>
+        <tr><td>DeepSWE-32B</td><td>Qwen3-32B</td><td class="num">23</td><td class="num">42.2</td><td>No</td></tr>
+        <tr><td>SkyRL-Agent-14B-v0</td><td>Qwen3-14B</td><td class="num">18.0</td><td class="num">21.6</td><td>No</td></tr>
+        <tr><td>SWE-agent-LM-32B</td><td>Qwen2.5-Coder-32B-Instruct</td><td class="num">14.3</td><td class="num">40.2</td><td>Yes</td></tr>
+        <tr><td>Skywork-SWE-32B</td><td>Qwen2.5-Coder-32B-Instruct</td><td class="num">6.4</td><td class="num">38.0</td><td>Yes</td></tr>
+        <tr><td>R2EGym-Agent-32B</td><td>Qwen2.5-Coder</td><td class="num">7.0</td><td class="num">34.4</td><td>Yes</td></tr>
+        <tr><td>SWE-Fixer-72B</td><td>Qwen2.5-72B-Base</td><td class="num">–</td><td class="num">30.2</td><td>Yes</td></tr>
+        <tr><td>SWE-Gym-32B</td><td>Qwen2.5-Coder-32B-Instruct</td><td class="num">7.0</td><td class="num">20.6</td><td>Yes</td></tr>
+        <tr><td>SWESynInfer-72B</td><td>Qwen2.5-72B-Instruct</td><td class="num">25.4</td><td class="num">30.2</td><td>Yes</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>表里有三个不用教师的方法：最终模型 39.0%，DeepSWE-32B 42.2%，SkyRL-Agent-14B-v0 21.6%。Table 2 的 after 列原文只写 final performance，未注明指标；Ours 的 39.0 与 Table 1 的 Pass@1 39.04 对应，DeepSWE/SkyRL 的 42.2/21.6 按原文转录，不能断言均为 Pass@1。按 Table 2 的 after 数值，DeepSWE-32B 比最终模型高 <span class="mono" data-src="Table 2">3.2</span> 个百分点。用教师蒸馏的 32B 模型里，SWE-agent-LM-32B 也到 40.2%。所以这篇论文的位置是“不用教师、RL 阶段只用环境奖励的强基线”，不是“所有设置下的最高分”。</p>
+
+  <h3>训练里的两个坑</h3>
+  <p><strong>坑 1：不要一概丢掉超长轨迹。</strong>常见做法是把超过上下文长度的轨迹过滤掉，以减少奖励噪声。论文说这要谨慎：在它的设定里，超长轨迹往往意味着智能体陷入了重复循环；把这些轨迹丢掉，也就丢掉了“循环”这个失败模式的负样本，模型反而学不会如何跳出循环，训练中这种循环会更频繁（§4.4）。</p>
+
+  <p><strong>坑 2：训练 rollout 必须来自 <code>π<sub>old</sub></code>。</strong>训练中途升级 vLLM 后，运行时默认启用了 <code>top_k</code> 和 <code>min_p</code>。一开始评测指标变好，但继续训练 <span class="mono" data-src="§4.4">5–10</span> 个迭代后开始下降。论文把这个现象归因于 rollout 分布和训练分布的错配：DAPO 的重要性采样比只有在 rollout 来自 <code>π<sub>old</sub></code> 时才有意义，换解码参数相当于从另一个分布采样（§4.4）。这里说的是训练 rollout 的采样解码（§4.3 的 temperature=1.0、禁用 top_p/top_k 等），不是 Table 1 评测所用的默认解码。这是一个工程细节，但会直接影响复现。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决不了：测试即裁判、Python issue 类任务、算力门槛</h2></div>
+  <p class="sec-sub">这些限制决定了这套方法能不能搬到别的任务，以及复现成本有多高。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">限制 1</span><h4>奖励依赖测试套件</h4></div>
+      <p>0/1 奖励来自 SWE-rebench 训练任务自带的验证测试（SWE-bench Verified 只用于评测）。测试通过不等于补丁正确：模型可能针对测试写特例，也可能修好测试覆盖的部分却破坏未覆盖的行为。论文未报告超出测试的语义正确性检查。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">限制 2</span><h4>只覆盖 Python issue 类任务</h4></div>
+      <p>训练数据是 SWE-rebench 的 Python issue 类任务，原文未按任务类型细分（§3.1）。新功能开发、重构、文档、跨语言仓库都没有实验；任务分布一变，RFT 和 RL 学到的工具使用模式未必迁移。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">限制 3</span><h4>算力与工程门槛</h4></div>
+      <p>16 个 H200 节点、全参数训练、131k 上下文、100 多个训练迭代。论文未报告总成本；没有同等算力和训练框架的研究者难以完整复现。</p>
+    </div>
+  </div>
+
+  <p><strong>没有解决“选择”问题。</strong>Pass@1 39.04%、Pass@10 58.4%，说明候选里经常已经有正确补丁，但模型自己选不中。论文只把这个差距作为一个观察和未来方向，未描述重排器或提交前的验证/自我检查。实际部署时，这个差距会直接变成“再多试几次”的成本。</p>
+
+  <p><strong>没有风险意识。</strong>智能体被训练成“尽力提交一个补丁”，没有“这题我没把握，先停下或求助”的动作。论文在讨论里把不确定性估计和放弃机制列为未来工作；当前模型在低成功率的任务上也会走完 episode 并提交。</p>
+
+  <p><strong>同步训练的限制。</strong>论文明确说异步框架可能有更好的扩展性，但为了消除轨迹滞后选择了同步；同步的 straggler 问题会让每轮时间取决于最慢的轨迹（§4.2）。这意味着吞吐和资源利用率还有优化空间，但论文未报告异步版本的对照实验。</p>
+
+  <p><strong>什么时候别用：</strong>如果任务没有可自动运行的验证测试、代码执行有安全风险、或者仓库状态无法快速快照和回滚，这套方法的奖励和 rollout 都搭不起来。反过来，在有测试、有沙箱、任务类型稳定的软件工程场景里，它的路径很直接：先用成功轨迹教会模型用工具，再用 0/1 结果做多轮策略优化。</p>
+</section>
+
+<footer>
+  <div>Training Long-Context, Multi-Turn Software Engineering Agents with Reinforcement Learning</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.03501" target="_blank" rel="noopener">arXiv:2508.03501v1</a><br>
+    笔记：<a href="/training-long-context-multi-turn-software-engineering-agents-with-reinforcement-learning/">Training Long-Context, Multi-Turn Software Engineering Agents with Reinforcement Learning</a>
+  </div>
+  <div class="src" style="margin-top:14px">
+    <strong>笔记勘误</strong><br>
+    1. 笔记称最终模型「性能上追平了 DeepSeek-V3-0324」。按 Pass@1，Verified 是 39.04 对 39.56，低 0.52 个百分点；SWE-rebench May 低 1.75 个百分点，June 高 0.25 个百分点，只是接近，不是每一项都追平。按 Pass@10，三个分片都低于 DeepSeek（58.4 对 62.2、52.5 对 60.0、53.7 对 58.5，Table 1）。<br>
+    2. 笔记有两处倍数表述，分母不同。第 130 行称 RFT「将成功率提升近一倍」：11.42% → 20.46% 是相对提升 79.2%（9.04 / 11.42），不是 +100%，所以「近一倍」偏大。第 62 行称最终模型「几乎是 RFT 基线的两倍」：39.04 / 20.46 = 1.91×，这个 1.91× 是终局 / RFT 基线之比，不是 RFT 相对 base 的提升。<br>
+    3. 笔记把课程筛选概括为「剔除太简单或太难的任务」。原文的规则是移除累计解决率超过 2/3 的任务（已能稳定解决）和累计解决率始终为 0 的任务（大概率不可解），训练池从 7,249 缩到 2,028；「太简单 / 太难」是笔记的等价概括，原文并未使用静态难度分档。<br>
+    4. 笔记第 117 行把基础模型的上下文写成 65k。原文 Table 1 caption 明确：最终模型和基线模型用 131k 评测，中间模型用各自训练阶段的上下文长度（RFT / Stage 1 为 65k）；所以 base 是 131k，65k 是 RFT 与 Stage 1 的评测长度。<br>
+    5. 笔记第 160 行称任务类型主要是修复 bug；原文 §3.1 未给类型分布，不能据此断言。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var DATA = {
+    p1: {
+      msg: 'Pass@1 · Verified：11.42 → 20.46 → 35.74 → 39.04；May：14.50 → 22.50 → 36.50 → 35.00；June：14.63 → 20.98 → 31.22 → 31.71',
+      rows: [
+        ['Verified', [11.42, 20.46, 35.74, 39.04]],
+        ['Rebench May', [14.50, 22.50, 36.50, 35.00]],
+        ['Rebench June', [14.63, 20.98, 31.22, 31.71]]
+      ]
+    },
+    p10: {
+      msg: 'Pass@10 · Verified：31.0 → 43.0 → 54.6 → 58.4；May：40.0 → 45.0 → 55.0 → 52.5；June：36.6 → 43.9 → 53.7 → 53.7',
+      rows: [
+        ['Verified', [31.0, 43.0, 54.6, 58.4]],
+        ['Rebench May', [40.0, 45.0, 55.0, 52.5]],
+        ['Rebench June', [36.6, 43.9, 53.7, 53.7]]
+      ]
+    }
+  };
+
+  var COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--accent)'];
+  var state = { metric: 'p1' };
+  var chart = document.getElementById('stage-chart');
+  var msg = document.getElementById('stage-msg');
+  var tabs = document.getElementById('metric-tabs');
+
+  function render() {
+    if (!chart) return;
+    var cfg = DATA[state.metric];
+    chart.innerHTML = cfg.rows.map(function (row) {
+      var bars = row[1].map(function (val, i) {
+        return '<div class="cbar"><div class="track">' +
+          '<div class="fill" style="height:' + val + '%;background:' + COLORS[i] + '"></div>' +
+          '</div><div class="num">' + val.toFixed(2) + '</div></div>';
+      }).join('');
+      return '<div class="crow"><div class="cname">' + row[0] + '</div>' +
+        '<div class="cbars">' + bars + '</div></div>';
+    }).join('');
+    if (msg) msg.textContent = cfg.msg;
+  }
+
+  if (tabs) {
+    tabs.addEventListener('click', function (e) {
+      var b = e.target.closest('.tab');
+      if (!b) return;
+      state.metric = b.getAttribute('data-metric');
+      var btns = tabs.querySelectorAll('.tab');
+      for (var i = 0; i < btns.length; i++) {
+        if (btns[i].getAttribute('data-metric') === state.metric) btns[i].classList.add('active');
+        else btns[i].classList.remove('active');
+      }
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

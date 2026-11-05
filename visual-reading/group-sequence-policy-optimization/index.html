@@ -1,0 +1,558 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 666.7 | §5.1 | 0.2/0.0003 |
+| 675 | §5.1 | 0.27/0.0004 |
+| 0.8 | §5.1 | 1-0.2 |
+| 1.27 | §5.1 | 1+0.27 |
+| 0.9997 | §5.1 | 1-0.0003 |
+| 1.0004 | §5.1 | 1+0.0004 |
+| 0.03 | §5.1 | 0.0003*100 |
+| 0.04 | §5.1 | 0.0004*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GSPO · 把重要性采样从 token 级搬回序列级</title>
+<meta name="description" content="GSPO 用整条响应的似然比替代 GRPO 的 token 级重要性权重，做序列级裁剪，在 Qwen3-30B-A3B-Base 的数学与代码 RL 上稳定训练，并去掉 MoE 的 Routing Replay。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调 */
+.fig-svg{width:100%;height:auto;display:block}
+.fig-svg text{font-family:Inter,"Noto Sans SC",sans-serif;fill:var(--text)}
+.fig-svg .tt{font-size:12.5px;font-weight:600}
+.fig-svg .ts{font-size:10.5px;fill:var(--text-muted)}
+.fig-svg .tp{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.08em;fill:var(--text-soft)}
+.fig-svg .box{stroke-width:1.2}
+.fig-svg .bx-a{fill:var(--accent-soft);stroke:var(--accent)}
+.fig-svg .bx-b{fill:var(--c1-soft);stroke:var(--c1)}
+.fig-svg .bx-c{fill:var(--c2-soft);stroke:var(--c2)}
+.fig-svg .bx-n{fill:var(--bg-soft);stroke:var(--border-strong)}
+.fig-svg .edge{fill:none;stroke:var(--border-strong);stroke-width:1.4}
+.fig-svg .edge-dash{fill:none;stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:4 4}
+.errata{margin-top:18px;border-top:1px solid var(--border);padding-top:14px;font-size:12.5px;line-height:1.75}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:6px}
+.small{font-size:12.5px;color:var(--text-soft)}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.token-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:8px;margin:16px 0}
+.token{border:1px solid var(--border);border-radius:8px;padding:8px 4px;text-align:center;font-family:"JetBrains Mono",monospace;font-size:10.5px;background:var(--bg);color:var(--text-soft)}
+.token .w{display:block;font-size:12px;font-weight:600;margin-top:5px;color:var(--text)}
+.token.hit{border-color:var(--c1);background:var(--c1-soft)}
+.decision{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+.decision .d{border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)}
+.decision .d .lab{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.06em;color:var(--text-soft);margin-bottom:5px}
+.decision .d .val{font-size:13px;font-weight:600;color:var(--text)}
+.decision .d.a{border-color:var(--accent);background:var(--accent-soft)}
+@media(max-width:620px){.token-grid{grid-template-columns:repeat(4,1fr)}.decision{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GSPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">计算</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · LLM-RL</span>
+  <h1>GSPO：把重要性采样从 token 级搬回序列级</h1>
+  <p class="hero-sub">
+    GRPO 把同一个组内归一化优势分给整条响应，却仍按 token 计算重要性比率；论文认为这一步既没有完成分布校正，又把高方差噪声带进了长序列。
+    GSPO 改成用整条响应的似然比 <code>s<sub>i</sub>(θ)</code> 做一次裁剪，让一条响应里的所有 token 共享同一权重。
+    代价是裁剪范围要缩到 <code>3e-4</code> / <code>4e-4</code> 量级，实验也只覆盖一个 MoE 底座的数学与代码任务。
+  </p>
+  <div class="meta">
+    <span>Chujie Zheng, Shixuan Liu, Mingze Li, Xiong-Hui Chen, Bowen Yu 等 · Qwen Team, Alibaba</span>
+    <a href="https://arxiv.org/abs/2507.18071v2" target="_blank" rel="noopener">arXiv 2507.18071v2 ↗</a>
+    <a href="/group-sequence-policy-optimization/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    GSPO 的出发点是<strong>让优化单元与奖励单元对齐</strong>：奖励按整条响应给，重要性比率和裁剪也应该按整条响应做。
+    GRPO 的 token 级权重只基于每个位置的一次采样，重要性采样需要的「多样本平均」并不成立，结果是噪声而不是校正。
+  </p>
+  <p>
+    目标函数保留 GRPO 的组内相对优势，只把比率换成序列似然比的几何平均：
+    <code>s<sub>i</sub>(θ) = (π<sub>θ</sub>(y<sub>i</sub>|x) / π<sub>old</sub>(y<sub>i</sub>|x))<sup>1/|y<sub>i</sub>|</sup></code>（Eq.7）。
+    长度归一化把不同长度响应的比率压到同一数值范围，否则少数 token 的似然变化就能让整条序列的比率剧烈波动。
+  </p>
+  <p>
+    梯度分析给出最直接的差别：GRPO 给每个 token 各自的权重（Eq.12），GSPO 给同一条响应的所有 token 相同权重（Eq.10）。
+    论文在 Qwen3-30B-A3B-Base 上报告：GSPO 训练更稳、在相同计算与 query 消耗下效果更好，并且不再需要 MoE 的 Routing Replay。
+  </p>
+  <p>
+    需要注意证据形态：全文只有三张图（Figure 1/3 为训练曲线，Figure 2 为平均裁剪比例柱状图），没有结果表；正文也只给「裁剪比例相差两个数量级」这样的量级描述。
+    具体到某个 benchmark 的最终分数，论文没有列表，页面也不替它补。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§5.1">3e-4 / 4e-4</div>
+      <div class="k">GSPO 的左 / 右裁剪范围<br>GRPO 是 0.2 / 0.27（§5.1）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.3">10<small>%</small></div>
+      <div class="k">48 层 Qwen3-30B-A3B-Base<br>每次梯度更新后专家激活变化比例</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.2">2<small>个数量级</small></div>
+      <div class="k">GSPO 与 GRPO 裁掉的 token 比例差距<br>Figure 2 柱标 0.15 / 0.0013；正文未给精确值</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>GRPO 的毛病不在裁剪太松，而在被裁剪的对象错了</h2></div>
+  <p class="sec-sub">先建立两个前提：大规模 RL 首先要稳；token 级重要性采样在长序列上会累积噪声。</p>
+
+  <p>论文把稳定训练列为扩大 RL 计算投入的首要前提。作者观察到，以 GRPO 为代表的现有算法在训练超大模型时会出现严重的稳定性问题，甚至导致<strong>灾难性且不可逆的模型崩溃</strong>；崩溃发生后，回退到旧 checkpoint、重新调裁剪范围、延长生成长度或更换 query 都不一定救得回来（§1、§3）。</p>
+
+  <p>论文给出的根因不是裁剪范围没调好，而是 GRPO 的<strong>重要性采样权重用错了层级</strong>。重要性采样的目标是估计目标分布下的期望，它依赖从行为分布抽取多个样本后对权重求平均：</p>
+
+  <div class="eq">
+    E<sub>z~π<sub>tar</sub></sub>[ f(z) ] = E<sub>z~π<sub>beh</sub></sub>[ (π<sub>tar</sub>(z) / π<sub>beh</sub>(z)) · f(z) ]
+  </div>
+  <div class="eq-cap">Eq.4 · 重要性采样需要 N ≫ 1 个来自行为分布的样本，权重才能完成分布校正（§3）</div>
+
+  <p>GRPO 却在每个 token 位置 <code>t</code> 上使用 <code>π<sub>θ</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) / π<sub>old</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>)</code>（<code>π<sub>old</sub></code> 即论文的 <code>π<sub>θ<sub>old</sub></sub></code>）。这个权重只基于下一 token 分布的一次采样 <code>y<sub>i,t</sub></code>，没有多样本平均，因此<strong>没有完成它声称要做的分布校正</strong>；相反，它把高方差噪声带进梯度。序列越长，噪声累积越多，再被裁剪机制放大，最终可能把训练推向崩溃（§3）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心判断</span><h4>奖励是序列级，优化却停在 token 级</h4></div>
+    <p>论文把这一点上升为设计原则：<strong>优化目标的单元应该与奖励的单元匹配</strong>。既然 verifier 只对整条回答给一个分数，那么在 token 级做 off-policy 校正就没有对应的奖励粒度。GSPO 的全部改动都从这条原则推出（§3、§4.1）。</p>
+  </div>
+
+  <p>这也解释了为什么问题在长响应任务上更尖锐：token 数越多，单样本权重的噪声累积越久；模型越大、越稀疏，梯度里的小偏差越容易被放大。<span class="infer">推断</span>（依据：§3 明确写噪声随 response length 累积，并被 clipping 放大；§5.3 补充 MoE 稀疏激活会让 token 比率波动更大）。</p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>PPO 甩掉 value model，GRPO 又引入 token 级噪声；MoE 还要额外补丁</h2></div>
+  <p class="sec-sub">两路对照：PPO 的代价是 value model，GRPO 的代价是 token 级比率；MoE 把后者的代价放大。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">PPO</span><h4>用 value model 换稳定性</h4></div>
+      <p>PPO 用旧策略采样，通过裁剪把更新限制在旧策略附近。每个 token 的优势 <code>Â<sub>t</sub></code> 由另一个 value model 估计（Eq.1）。</p>
+      <p><strong>代价：</strong>value model 通常与策略模型体量相近，带来可观的内存与计算负担；算法效果还依赖 value 估计是否可靠，而把可靠的价值模型扩展到更长响应、更复杂任务本身就更难（§2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">GRPO</span><h4>用组内相对优势绕开 value model</h4></div>
+      <p>GRPO 对同一个 query 采样 <code>G</code> 条响应，用组内归一化的奖励作为每条响应的优势，所有 token 共享这个优势（Eq.2–3）。这样就不需要 value model。</p>
+      <p><strong>代价：</strong>重要性比率仍然是 token 级的 <code>w<sub>i,t</sub></code>。论文认为这正是 §3 所说的高方差噪声来源；在 MoE 模型上，专家激活波动会让这些 token 比率进一步失真（§5.3）。</p>
+    </div>
+  </div>
+
+  <h3>MoE 把 token 级比率的问题放大</h3>
+  <p>MoE 的稀疏激活带来额外的稳定性问题。论文报告：在 48 层的 Qwen3-30B-A3B-Base 上，每次 RL 梯度更新后，对于同一条 rollout 样本，新策略 <code>π<sub>θ</sub></code> 激活的专家里大约有 <span data-src="§5.3">10%</span> 与旧策略 <code>π<sub>old</sub></code> 不同；模型越深，这个现象越明显（§5.3）。</p>
+
+  <p>专家组合一变，token 级重要性比率就会剧烈波动。此前的做法是 <strong>Routing Replay</strong>：缓存 <code>π<sub>old</sub></code> 激活的专家，在 <code>π<sub>θ</sub></code> 计算重要性比率时重放同一套路由，使新旧策略共享激活网络，从而恢复 token 比率的稳定性（§5.3）。Figure 3 显示，Routing Replay 对 GRPO 的 MoE 训练正常收敛起关键作用。</p>
+
+  <p>但 Routing Replay 不是免费的：复用路由模式会带来额外的内存与通信开销，还可能限制 MoE 模型的实际容量（§5.3）。GSPO 的切入点就是：<strong>如果只关心序列似然，就不需要让 token 级路由保持一致</strong>。</p>
+</section>
+
+<!-- ================= 03 方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>一条响应只算一个比率、只裁一次，所有 token 共享同一权重</h2></div>
+  <p class="sec-sub">三个公式：序列级目标、组内优势、序列似然比；再用梯度分析看清它和 GRPO 的差别。</p>
+
+  <h3>目标函数：把 min/clip 从 token 移到响应</h3>
+  <p>GSPO 保留 GRPO 的组采样与组内相对优势，只把优化对象从「每个 token 的比率」换成「整条响应的比率」：</p>
+
+  <div class="eq">
+    J<sub>GSPO</sub>(θ) = E<sub>x~D, {y<sub>i</sub>}~π<sub>old</sub></sub>[ (1/G) Σ<sub>i=1</sub><sup>G</sup> min( s<sub>i</sub>(θ) Â<sub>i</sub>, clip(s<sub>i</sub>(θ), 1−ε<sub>low</sub>, 1+ε<sub>high</sub>) Â<sub>i</sub> ) ]
+  </div>
+  <div class="eq-cap">Eq.5 · GSPO 目标：每条响应一个比率 s<sub>i</sub>(θ)，整条响应一起裁剪；原文以 1±ε 记，§5.1 给出左右不同值，本页用 ε<sub>low</sub>/ε<sub>high</sub> 表示</div>
+
+  <div class="eq">
+    Â<sub>i</sub> = ( r(x,y<sub>i</sub>) − mean({r(x,y<sub>i</sub>)}<sub>i=1</sub><sup>G</sup>) ) / std({r(x,y<sub>i</sub>)}<sub>i=1</sub><sup>G</sup>)
+  </div>
+  <div class="eq-cap">Eq.6 · 组内归一化优势；同一条响应里的所有 token 共享 Â<sub>i</sub></div>
+
+  <div class="eq">
+    s<sub>i</sub>(θ) = ( π<sub>θ</sub>(y<sub>i</sub>|x) / π<sub>old</sub>(y<sub>i</sub>|x) )<sup>1/|y<sub>i</sub>|</sup>
+    = exp( (1/|y<sub>i</sub>|) Σ<sub>t=1</sub><sup>|y<sub>i</sub>|</sup> log( π<sub>θ</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) / π<sub>old</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) ) )
+  </div>
+  <div class="eq-cap">Eq.7 · 序列重要性比率：token 似然比的几何平均；指数 1/|y<sub>i</sub>| 是长度归一化</div>
+
+  <p>长度归一化不是为了好看。论文解释：如果不除以 <code>|y<sub>i</sub>|</code>，少数 token 的似然变化就能让整条序列的比率剧烈波动；不同长度响应也会需要不同的裁剪范围。归一化后，<code>s<sub>i</sub></code> 被压到统一的数值范围，裁剪范围才能对所有长度共用（§4.1）。论文也指出：正因为比率定义不同，两者通常相差数量级；因此两组数值不宜直接横向比较。<span class="infer">推断</span></p>
+
+  <h3>梯度分析：GRPO 每个 token 一个权重，GSPO 整条响应一个权重</h3>
+  <p>忽略裁剪，GSPO 目标的梯度是：</p>
+
+  <div class="eq">
+    ∇<sub>θ</sub>J<sub>GSPO</sub>(θ) = E[ (1/G) Σ<sub>i=1</sub><sup>G</sup> s<sub>i</sub>(θ) Â<sub>i</sub> · (1/|y<sub>i</sub>|) Σ<sub>t=1</sub><sup>|y<sub>i</sub>|</sup> ∇<sub>θ</sub> log π<sub>θ</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) ]
+  </div>
+  <div class="eq-cap">Eq.10 · 同一条响应内，所有 token 的梯度共享系数 s<sub>i</sub>(θ) Â<sub>i</sub> / |y<sub>i</sub>|</div>
+
+  <p>作为对照，GRPO 的梯度是：</p>
+
+  <div class="eq">
+    ∇<sub>θ</sub>J<sub>GRPO</sub>(θ) = E[ (1/G) Σ<sub>i=1</sub><sup>G</sup> Â<sub>i</sub> · (1/|y<sub>i</sub>|) Σ<sub>t=1</sub><sup>|y<sub>i</sub>|</sup> w<sub>i,t</sub>(θ) ∇<sub>θ</sub> log π<sub>θ</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) ]
+  </div>
+  <div class="eq-cap">Eq.12 · 每个 token 有自己的 w<sub>i,t</sub>(θ)，权重在序列内不相等</div>
+
+  <p>论文进一步指出，GRPO 的这些不等权重不是可以忽略的小量：当 <code>Â<sub>i</sub> &gt; 0</code> 时它们落在 <code>(0, 1+ε]</code>，当 <code>Â<sub>i</sub> &lt; 0</code> 时落在 <code>[1−ε, +∞)</code>，并且会随训练累积，产生不可预测的后果。GSPO 则把同一条响应的所有 token 等权处理，直接消掉了这个不稳定性来源（§4.2）。</p>
+
+  <h3>GSPO-token：序列级裁剪 + token 级优势</h3>
+  <p>如果未来需要在多轮 RL 里做更细的优势分配，论文给出一个变体：保留 <code>s<sub>i</sub>(θ)</code> 的序列级裁剪，但允许每个 token 有自己的 <code>Â<sub>i,t</sub></code>。它把比率写成：</p>
+
+  <div class="eq">
+    s<sub>i,t</sub>(θ) = sg[ s<sub>i</sub>(θ) ] · π<sub>θ</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) / sg[ π<sub>θ</sub>(y<sub>i,t</sub>|x,y<sub>i,&lt;t</sub>) ]
+  </div>
+  <div class="eq-cap">Eq.14 · sg[·] 表示只取数值、停止梯度（PyTorch 的 detach）；比率数值上等于 s<sub>i</sub>(θ)</div>
+
+  <p>因为 <code>π<sub>θ</sub> / sg[π<sub>θ</sub>]</code> 的数值为 1，<code>s<sub>i,t</sub></code> 与 <code>s<sub>i</sub></code> 数值相同。论文证明：当所有 token 的 advantage 都设为 <code>Â<sub>i</sub></code> 时，GSPO-token 与 GSPO 在目标、裁剪条件和理论梯度上完全相同；区别只在于前者允许逐 token 调整优势（Eq.13–17、§4.3）。论文没有报告 GSPO-token 的实验，它只是一条可扩展的接口。</p>
+
+  <h3>自己动手：token 波动 vs 序列比率</h3>
+  <p>下面是一个<strong>简化模拟</strong>：固定 8 个 token，令第 <code>t</code> 个 token 的 log 重要性比率为 <code>δ + σ·(+1,−1,+1,−1,…)</code>。因此 token 比率随 <code>σ</code> 上下波动，而序列比率 <code>s = exp(δ)</code> 只由整体漂移决定。两个裁剪阈值都取自 §5.1。这里的「裁掉」只按比率越界计数，不区分 advantage 符号；advantage 符号与 min 的交互未覆盖。</p>
+
+  <div class="sim" style="padding:18px">
+    <div class="controls">
+      <div class="ctrl">
+        <label>整体漂移 δ <span class="v" id="gspo-delta-v">0.00</span></label>
+        <input type="range" id="gspo-delta" min="-0.6" max="0.6" step="0.05" value="0">
+      </div>
+      <div class="ctrl">
+        <label>token 间波动 σ <span class="v" id="gspo-sigma-v">0.40</span></label>
+        <input type="range" id="gspo-sigma" min="0" max="0.6" step="0.05" value="0.4">
+      </div>
+    </div>
+
+    <div class="token-grid" id="gspo-tokens"></div>
+
+    <div class="decision">
+      <div class="d" id="gspo-grpo-dec">
+        <div class="lab">GRPO · token 级裁剪 [0.8, 1.27]</div>
+        <div class="val" id="gspo-grpo-val">—</div>
+      </div>
+      <div class="d a" id="gspo-gspo-dec">
+        <div class="lab">GSPO · 序列裁剪 [0.9997, 1.0004]</div>
+        <div class="val" id="gspo-gspo-val">—</div>
+      </div>
+    </div>
+
+    <div class="readout" id="gspo-readout" data-src="§5.1">
+      <div class="r-head">简化模拟 · 阈值来自 §5.1</div>
+      <span id="gspo-readout-body">—</span>
+    </div>
+  </div>
+
+  <p class="small">注：1.4918 / 0.6703 / 1.2214 / 1.3499 / 1.0000 与 8/8、4/8 是页面模拟输出，不是论文派生数字，已由下方手算块核对。</p>
+
+  <details>
+    <summary>手算对账：两组参数 → 裁剪结果<span class="sum-sub">与交互读数逐位一致（保留 4 位小数）</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：δ = 0.00，σ = 0.40。</strong>8 个 token 的 log 比率交替为 +0.40 / −0.40，所以 token 比率为 <code>e<sup>0.4</sup> = 1.4918</code> 与 <code>e<sup>−0.4</sup> = 0.6703</code>。序列比率 <code>s = e<sup>0</sup> = 1.0000</code>。GRPO 阈值 [0.8, 1.27]：1.4918 &gt; 1.27、0.6703 &lt; 0.8，8/8 个 token 都被裁掉。GSPO 阈值 [0.9997, 1.0004]：1.0000 在区间内，不裁整条响应。这里的「裁掉」只按比率越界计数，不区分 advantage 符号；advantage 符号与 min 的交互未覆盖。</p>
+      <p><strong>组 2：δ = 0.30，σ = 0.10。</strong>log 比率交替为 +0.40 / +0.20，token 比率为 <code>e<sup>0.4</sup> = 1.4918</code> 与 <code>e<sup>0.2</sup> = 1.2214</code>。序列比率 <code>s = e<sup>0.3</sup> = 1.3499</code>。GRPO：1.4918 &gt; 1.27 的 4 个 token 被裁，1.2214 的 4 个保留，共 4/8。GSPO：1.3499 &gt; 1.0004，整条响应被裁掉。</p>
+      <p>口径说明：这是按 Eq.7 与 §5.1 两组裁剪范围写的页面模拟，token 序列是页面构造的对称模式，不是论文中的真实样本；它覆盖几何平均、GRPO 双侧越界、GSPO 上侧越界 / 不裁剪；GSPO 下侧越界未在手算块中列出（δ &lt; 0 可触发）。它也不覆盖真实 token 分布、长短序列差异、advantage 采样与 reward 噪声。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 计算 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>没有额外 value model，但裁剪范围要缩到万分之一量级</h2></div>
+  <p class="sec-sub">工程账本：底座、采样协议、mini-batch、两组裁剪范围，以及 §5.4 的推理引擎可能性。</p>
+
+  <p>实验从一个 <strong>Qwen3-30B-A3B-Base</strong> 冷启动模型出发，每批 rollout 数据被切成 <span data-src="§5.1">4</span> 个 mini-batch 做梯度更新。评测协议是：AIME'24 用 <span data-src="§5.1">32</span> 次采样的平均 Pass@1；LiveCodeBench（202410–202502）用 <span data-src="§5.1">8</span> 次采样的平均 Pass@1；CodeForces 用 Elo rating（§5.1）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">§5.1 文字设置的整理（原文没有结果表；下表只汇总训练与评测协议）</caption>
+      <thead><tr><th>项目</th><th>设置</th></tr></thead>
+      <tbody>
+        <tr><td>底座</td><td>Qwen3-30B-A3B-Base 冷启动模型</td></tr>
+        <tr><td>AIME'24</td><td>平均 Pass@1，32 次采样</td></tr>
+        <tr><td>LiveCodeBench</td><td>202410–202502，平均 Pass@1，8 次采样</td></tr>
+        <tr><td>CodeForces</td><td>Elo rating</td></tr>
+        <tr><td>rollout batch</td><td>切成 4 个 mini-batch</td></tr>
+        <tr><td>GSPO 裁剪</td><td>左 3e-4，右 4e-4（Eq.5）</td></tr>
+        <tr><td>GRPO 裁剪</td><td>左 0.2，右 0.27（Eq.2，论文称经过仔细调参）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>把两组范围直接相除，GRPO 的左 / 右范围分别是 GSPO 的 <span data-src="§5.1"><code>0.2 / 0.0003 ≈ 666.7</code></span> 倍与 <span data-src="§5.1"><code>0.27 / 0.0004 = 675</code></span> 倍。这不是「GRPO 更宽松所以更好」：两者的比率定义不同，<code>s<sub>i</sub></code> 是几何平均，天然更靠近 1，因此需要更窄的区间。论文在 §4.1 指出两者通常相差数量级；因此两组数值不宜直接横向比较。<span class="infer">推断</span></p>
+
+  <p>换个说法：GSPO 的序列比率只有落在 <span data-src="§5.1"><code>[1−0.03%, 1+0.04%]</code></span> 内才不被裁剪。这个量级说明它裁的是「整条响应偏离旧策略」这件事，而不是逐 token 的局部波动；一条响应里只要整体似然有明显漂移，整条就被排除出梯度估计。</p>
+
+  <h3>§5.4 的工程承诺还停留在「可能」</h3>
+  <p>训练引擎（如 Megatron）与推理引擎（如 SGLang、vLLM）之间存在精度差异，实践中通常要用训练引擎重新计算旧策略下采样响应的似然。论文认为，GSPO 只用序列级似然而非 token 级似然，前者对精度差异更宽容，因此<strong>有可能</strong>直接使用推理引擎返回的似然，省掉训练引擎的重算；这在 partial rollout、多轮 RL 和训练-推理分离的框架里尤其有价值（§5.4）。</p>
+
+  <p>但论文没有给出精度误差、重算耗时或端到端吞吐的测量，也没有报告 GPU 小时、显存或墙钟时间。§5.4 是一段方向性论证，不是已量化的工程结果。<span class="infer">推断</span>（依据：§5.4 全文只写 intuitively / makes it possible，未给实验或数字）。</p>
+</section>
+
+<!-- ================= 05 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>同一个 rollout，两条梯度路径：逐 token 加权 vs 整条响应加权</h2></div>
+  <p class="sec-sub">按 Eq.5–Eq.12 与 §5.3 重绘的对比示意；论文本身没有架构图。</p>
+
+  <figure>
+    <svg class="fig-svg" viewBox="0 0 940 520" role="img" aria-label="GSPO 与 GRPO 的梯度路径对比">
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <!-- Top shared pipeline -->
+      <rect class="box bx-n" x="24" y="28" width="176" height="58" rx="10"></rect>
+      <text class="tt" x="112" y="52" text-anchor="middle">Rollout：G 条响应</text>
+      <text class="ts" x="112" y="71" text-anchor="middle">来自 π_old(·|x)</text>
+
+      <rect class="box bx-n" x="240" y="28" width="196" height="58" rx="10"></rect>
+      <text class="tt" x="338" y="52" text-anchor="middle">reward r(x, y_i)</text>
+      <text class="ts" x="338" y="71" text-anchor="middle">verifier 给整条响应打分</text>
+
+      <rect class="box bx-n" x="476" y="28" width="196" height="58" rx="10"></rect>
+      <text class="tt" x="574" y="52" text-anchor="middle">组内归一化优势 Â_i</text>
+      <text class="ts" x="574" y="71" text-anchor="middle">Eq.6；同响应所有 token 共享</text>
+
+      <line class="edge" x1="200" y1="57" x2="240" y2="57" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="436" y1="57" x2="476" y2="57" marker-end="url(#arrow)"></line>
+
+      <!-- Branch arrows -->
+      <path class="edge" d="M574 86 L574 112 L174 112 L174 144" marker-end="url(#arrow)"></path>
+      <path class="edge" d="M574 86 L574 112 L766 112 L766 144" marker-end="url(#arrow)"></path>
+
+      <!-- Divider -->
+      <line x1="470" y1="132" x2="470" y2="464" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 5"></line>
+
+      <!-- Left: GRPO -->
+      <text class="tp" x="24" y="132">GRPO · TOKEN-LEVEL</text>
+      <rect class="box bx-b" x="24" y="144" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="174" y="168" text-anchor="middle">w_i,t = πθ(y_i,t|·) / πold(y_i,t|·)</text>
+      <text class="ts" x="174" y="187" text-anchor="middle">每个 token 一次采样 → 一个权重</text>
+
+      <rect class="box bx-b" x="24" y="226" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="174" y="250" text-anchor="middle">逐 token 裁剪 [0.8, 1.27]</text>
+      <text class="ts" x="174" y="269" text-anchor="middle">同一序列里有的 token 留、有的裁</text>
+
+      <rect class="box bx-b" x="24" y="308" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="174" y="332" text-anchor="middle">梯度：每个 token 权重不同</text>
+      <text class="ts" x="174" y="351" text-anchor="middle">Eq.12 · w_i,t 在序列内不相等</text>
+
+      <rect class="box bx-b" x="24" y="390" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="174" y="414" text-anchor="middle">高方差；长序列累积</text>
+      <text class="ts" x="174" y="433" text-anchor="middle">论文认为这是崩溃来源（§3）</text>
+
+      <line class="edge" x1="174" y1="202" x2="174" y2="226" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="174" y1="284" x2="174" y2="308" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="174" y1="366" x2="174" y2="390" marker-end="url(#arrow)"></line>
+
+      <!-- Right: GSPO -->
+      <text class="tp" x="616" y="132">GSPO · SEQUENCE-LEVEL</text>
+      <rect class="box bx-a" x="616" y="144" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="766" y="168" text-anchor="middle">s_i = (πθ(y_i|x) / πold(y_i|x))^(1/|y_i|)</text>
+      <text class="ts" x="766" y="187" text-anchor="middle">整条响应一个比率；长度归一化</text>
+
+      <rect class="box bx-a" x="616" y="226" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="766" y="250" text-anchor="middle">整条响应裁剪 [0.9997, 1.0004]</text>
+      <text class="ts" x="766" y="269" text-anchor="middle">一条响应只有留 / 裁两个结果</text>
+
+      <rect class="box bx-a" x="616" y="308" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="766" y="332" text-anchor="middle">梯度：所有 token 共享 s_i Â_i / |y_i|</text>
+      <text class="ts" x="766" y="351" text-anchor="middle">Eq.10 · 序列内权重相等</text>
+
+      <rect class="box bx-a" x="616" y="390" width="300" height="58" rx="10"></rect>
+      <text class="tt" x="766" y="414" text-anchor="middle">一条响应一个权重；噪声源被移除</text>
+      <text class="ts" x="766" y="433" text-anchor="middle">论文报告训练更稳（§5.1）</text>
+
+      <line class="edge" x1="766" y1="202" x2="766" y2="226" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="766" y1="284" x2="766" y2="308" marker-end="url(#arrow)"></line>
+      <line class="edge" x1="766" y1="366" x2="766" y2="390" marker-end="url(#arrow)"></line>
+
+      <!-- Bottom MoE note -->
+      <line x1="24" y1="470" x2="916" y2="470" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 5"></line>
+      <text class="ts" x="24" y="492">MoE（48 层 Qwen3-30B-A3B-Base）：每次更新约 10% 专家激活变化</text>
+      <text class="ts" x="24" y="510">GRPO 依赖 Routing Replay 才能正常收敛；GSPO 不需要（§5.3，Figure 1/3）</text>
+    </svg>
+    <figcaption>
+      按 Eq.5–Eq.12 与 §5.3 文字重绘的对比示意：上排共享 rollout、reward 与组内优势，下排分叉到 token 级与序列级两条梯度路径。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>覆盖：</strong>Eq.5–Eq.7 的序列级目标、优势与比率；Eq.10 与 Eq.12 的梯度加权差异；§5.3 的 Routing Replay 对比。</li>
+          <li><strong>未覆盖：</strong>论文没有给出架构图；本图不包含 rollout 引擎与 verifier 的实现、GSPO-token 分支、分布式训练与精度重算细节，也不表示真实的张量流。</li>
+          <li><strong>因此这是页面按公式重绘的示意，不是原文插图的还原。</strong>箭头表示概念上的依赖关系，不是完整的控制流。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>三张图支撑三个结论，但没有一张结果表</h2></div>
+  <p class="sec-sub">先分清论文「展示了什么」与「量化了什么」，再看裁剪比例的反直觉观察。</p>
+
+  <p>Figure 1 是 Qwen3-30B-A3B-Base 冷启动模型在 AIME'24、LiveCodeBench、CodeForces 上的训练曲线。论文的文字结论是：GSPO 全程稳定；增加训练计算、定期更新 query set、延长生成长度都能继续带来提升；在相同训练计算与相同 query 消耗下，GSPO 的训练准确率与 benchmark 表现都好于 GRPO（§5.1）。论文没有在正文给出这些曲线的最终数值，也没有结果表。</p>
+
+  <p>Figure 2 是两者在 RL 训练期间平均裁剪比例的柱状图（Figure 2 caption；PDF p.5），GSPO / GRPO 柱标分别为 0.15 / 0.0013。§5.2 正文只给了一个量级描述：GSPO 与 GRPO 的裁剪比例<strong>相差两个数量级</strong>，而且调整裁剪范围不会改变这个量级差异；GSPO 裁掉更多 token、实际用于训练的 token 更少，却仍然有更高的训练效率（§5.2）。作者把这称为反直觉观察，并据此论证 GRPO 的 token 级梯度估计「噪声大、样本利用效率低」。</p>
+
+  <p>Figure 3 是 GRPO 在 MoE 上的消融：不开 Routing Replay 时训练无法正常收敛（Figure 3 橙线持续下滑），开启后才能正常收敛。结合 Figure 1 里 GSPO 没有使用 Routing Replay 也能稳定训练，论文得出 GSPO 从根本上解决了 MoE 专家激活波动问题的结论（§5.3）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.75;padding-bottom:6px">论文主张与证据形态（原文没有结果表；本表只整理主张、图号与正文给出的量化程度）</caption>
+      <thead><tr><th>主张</th><th>证据</th><th>原文给出的量化</th></tr></thead>
+      <tbody>
+        <tr><td>GSPO 训练更稳、效率更高</td><td>Figure 1、§5.1</td><td>曲线；正文未给最终分数</td></tr>
+        <tr><td>GSPO 裁掉的 token 比例高两个数量级</td><td>Figure 2、§5.2</td><td>「difference of two orders of magnitude」；正文无精确值；Figure 2 柱标 0.15 / 0.0013</td></tr>
+        <tr><td>GRPO 的 MoE 训练依赖 Routing Replay</td><td>Figure 3、§5.3</td><td>曲线；正文称 essential</td></tr>
+        <tr><td>GSPO 不需要 Routing Replay</td><td>Figure 1、§5.3</td><td>文字声明；Figure 1 未使用该策略</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>读图时容易误读：「AIME'24 约 75 分、GRPO 约 70 分」「CodeForces Elo 1900+ / 1800–1900」不是正文数值，而是从 Figure 1 曲线估读的；「裁剪比例 15% / 0.13%」来自 Figure 2 柱标（0.15 / 0.0013），不是估读。页面不把这些值写成论文结论；正文可核对的量级表述是「两个数量级」，Figure 2 柱标也可核对。<span class="infer">推断</span>（依据：v2 没有结果表，§5.1/§5.2 正文只给训练曲线与量级描述；Figure 2 柱标给出 0.15 / 0.0013）。</p>
+
+  <p>论文还把 GSPO 用到了最新 Qwen3 模型的 RL 训练，并称这些优点「contributed to the remarkable improvements in the latest Qwen3 models」（摘要、§5.1）。这是作者的自述，不是受控实验：论文未报告 Qwen3 与「不用 GSPO」的对照，也未拆分 GSPO 与其他训练改动的贡献。<span class="infer">推断</span>（依据：摘要只有一句归因，§5.1 也没有消融或对照）。</p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决的是「序列级奖励下的稳定性」，不是通用 RL 的全部问题</h2></div>
+  <p class="sec-sub">论文自己承认的边界，加上从实验设置能看到的限制。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>单一底座、单一算法对照</h4></div>
+    <p>实验只用一个冷启动的 Qwen3-30B-A3B-Base，对照只有 GRPO；论文未报告 dense 模型、其他规模或其他 MoE 配置，也未报告与 PPO、DPO 或其他 RL 算法的直接比较。因此「GSPO 比 GRPO 更稳」有证据，「GSPO 是通用最优 RL 算法」没有证据（§5.1）。<span class="infer">推断</span></p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>任务限于可验证奖励的数学与代码</h4></div>
+    <p>三个 benchmark 都是有明确正确答案的推理任务：AIME'24（数学）、LiveCodeBench（代码）、CodeForces（竞赛编程）。论文未报告开放写作、主观对话、多轮交互等奖励更模糊的任务。GSPO-token 虽然是针对多轮 RL 等需要更细优势分配的场景提出的接口，但论文没有跑任何多轮实验（§4.3、§5.1）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>没有超参数敏感性与方差报告</h4></div>
+    <p>GSPO 的裁剪范围固定为 3e-4 / 4e-4，论文未报告敏感性分析；GRPO 的 0.2 / 0.27 被称为「仔细调参」后的值，但论文也未报告调参过程或方差。正文未报告误差带、seed 数或显著性检验，因此不能从图里读出稳定的置信区间（§5.1）。<span class="infer">推断</span></p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>工程收益尚未量化</h4></div>
+    <p>§5.4 说 GSPO 的序列级似然对训练 / 推理引擎的精度差异更宽容，可能省掉重算；但论文未报告精度误差、重算耗时、吞吐或显存数据；Routing Replay 被去掉后省下多少内存与通信，论文也未量化。这些都是方向性判断，不是测量结果（§5.3、§5.4）。</p>
+  </div>
+
+  <p>什么时候别用：如果奖励不是「一条响应一个标量」，而是需要细粒度 credit assignment（例如多轮工具调用里每一步都该单独评价），GSPO 的序列级比率会把整条响应绑在一起；论文给出的 GSPO-token 只是接口，没有验证。反过来，如果任务短、模型密集、训练稳定，token 级噪声可能不是主要矛盾，GSPO 的收益也未必值得改动训练栈。<span class="infer">推断</span>（依据：论文只在长响应、MoE、可验证奖励的设置里报告收益，未覆盖上述场景）。</p>
+</section>
+
+<footer>
+  <div>Group Sequence Policy Optimization · Chujie Zheng, Shixuan Liu, Mingze Li, Xiong-Hui Chen, Bowen Yu, Chang Gao, Kai Dang, Yuqiong Liu, Rui Men, An Yang, Jingren Zhou, Junyang Lin · Qwen Team, Alibaba Inc.</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.18071v2" target="_blank" rel="noopener">arXiv 2507.18071v2</a>（本页以 v2 为准）<br>
+    笔记：<a href="/group-sequence-policy-optimization/">Group Sequence Policy Optimization</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改笔记原文）</strong>
+    <ul>
+      <li>公式编号：笔记把序列比率 <code>s<sub>i</sub>(θ)</code> 写成「公式8」，v2 中是 <strong>Eq.7</strong>；目标函数是 <strong>Eq.5</strong>（笔记写「公式6」用于裁剪优势，Eq.6 实际是优势定义）；梯度对比是 <strong>Eq.10 vs Eq.12</strong>（笔记写「公式11 vs 公式13」）。</li>
+      <li>裁剪比例：笔记写「GSPO 0.15、GRPO 0.0013，相差超过 100 倍」。v2 §5.2 正文只说两者相差「两个数量级」，没有重复这两个数；但 Figure 2 是柱状图，柱标明确给出 0.15 / 0.0013，笔记数值与图一致（0.15/0.0013≈115，确实超过 100 倍），不是估读。页面只是不把柱标当作正文数值。</li>
+      <li>AIME 与 CodeForces 分数：笔记写「AIME'24 约 75 分、GRPO 约 70 分」「CodeForces Elo 1900+ / 1800–1900」。v2 没有结果表，这些是从 Figure 1 曲线估读的；正文只给评测协议（32 次采样平均 Pass@1、8 次采样平均 Pass@1、Elo）。</li>
+      <li>GSPO-token 编号：笔记写「GSPO-token（公式14）」。v2 中 GSPO-token 的目标函数是 <strong>Eq.13</strong>，Eq.14 是 <code>s<sub>i,t</sub></code> 的定义。</li>
+      <li>「显著优于」：笔记用「显著优于精心调优后的 GRPO」。原文 §1 用了 significant superiority，但未报告显著性检验；页面按「报告更高」处理，避免把 significant 读成统计显著（曲线也没有误差带）。</li>
+      <li><strong>证据边界（非笔记勘误）：</strong>笔记写 GSPO「天然地解决了 MoE 模型的训练稳定性问题」，这是原文自己的主张；证据是 Figure 1/3 同一底座上的曲线对照，不是跨模型、跨规模的因果证明。笔记是复述原文，页面在此标注证据边界，不把它列为笔记错误，也不据此推断跨模型、跨规模的因果结论。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var deltaEl = document.getElementById('gspo-delta');
+  var sigmaEl = document.getElementById('gspo-sigma');
+  var deltaV = document.getElementById('gspo-delta-v');
+  var sigmaV = document.getElementById('gspo-sigma-v');
+  var tokenHost = document.getElementById('gspo-tokens');
+  var grpoVal = document.getElementById('gspo-grpo-val');
+  var gspoVal = document.getElementById('gspo-gspo-val');
+  var readout = document.getElementById('gspo-readout-body');
+  if (!deltaEl || !sigmaEl || !tokenHost || !grpoVal || !gspoVal || !readout) return;
+
+  var GRPO_LO = 1 - 0.2;
+  var GRPO_HI = 1 + 0.27;
+  var GSPO_LO = 1 - 0.0003;
+  var GSPO_HI = 1 + 0.0004;
+  var N = 8;
+
+  function f4(v) { return v.toFixed(4); }
+
+  function render() {
+    var delta = parseFloat(deltaEl.value);
+    var sigma = parseFloat(sigmaEl.value);
+    deltaV.textContent = delta.toFixed(2);
+    sigmaV.textContent = sigma.toFixed(2);
+
+    tokenHost.innerHTML = '';
+    var grpoHits = 0;
+    var sampleHigh = 0;
+    var sampleLow = 0;
+
+    for (var t = 0; t < N; t++) {
+      var pattern = (t % 2 === 0) ? 1 : -1;
+      var logRatio = delta + sigma * pattern;
+      var w = Math.exp(logRatio);
+      var hit = (w < GRPO_LO || w > GRPO_HI);
+      if (hit) grpoHits++;
+      if (pattern > 0) sampleHigh = w; else sampleLow = w;
+
+      var cell = document.createElement('div');
+      cell.className = 'token' + (hit ? ' hit' : '');
+      cell.innerHTML = 't=' + (t + 1) + '<span class="w">' + f4(w) + '</span>';
+      tokenHost.appendChild(cell);
+    }
+
+    var s = Math.exp(delta);
+    var gspoClip = (s < GSPO_LO || s > GSPO_HI);
+
+    grpoVal.textContent = '裁掉 ' + grpoHits + ' / ' + N + ' 个 token';
+    gspoVal.textContent = gspoClip ? '裁掉整条响应（s = ' + f4(s) + '）' : '保留整条响应（s = ' + f4(s) + '）';
+
+    readout.innerHTML =
+      '8 个 token 的比率在 <strong>' + f4(Math.min(sampleLow, sampleHigh)) + '</strong> 与 <strong>' +
+      f4(Math.max(sampleLow, sampleHigh)) + '</strong> 之间交替；序列比率 <strong>s = ' + f4(s) +
+      '</strong>。GRPO 逐 token 判断，裁掉 <strong>' + grpoHits + '/8</strong>；GSPO 只看 s，' +
+      (gspoClip ? '整条响应被裁掉' : '整条响应保留') + '。';
+  }
+
+  deltaEl.addEventListener('input', render);
+  sigmaEl.addEventListener('input', render);
+  render();
+
+  window.toggleFig = function (el) {
+    var figure = el.closest('figure');
+    if (!figure) return;
+    var detail = figure.querySelector('.figure-detail');
+    if (!detail) return;
+    var open = detail.classList.toggle('active');
+    el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+  };
+})();
+</script>
+</body>
+</html>

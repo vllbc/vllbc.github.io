@@ -1,0 +1,893 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 8.0 | Table 1 | 34.00-26.00 |
+| 49.0 | Table 3 | 91.00-42.00 |
+| 30.0 | Table 4 | 96.67-66.67 |
+| 55.5 | Table 5 | 57.00-1.50 |
+| 11.25 | Table 2 | 49.50-38.25 |
+| 3.0 | Table 3 | 94.00-91.00 |
+| 2.23 | Table 4 | 96.67-94.44 |
+| 15.5 | Table 5 | 57.00-41.50 |
+| 60.0 | Table 1 | 80.00-20.00 |
+| 2.0 | Table 6 | 75.00-73.00 |
+| 8.89 | Table 6 | 93.33-84.44 |
+| 1.75 | Table 6 | 25.75-24.00 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGym-RL · 把交互轮数做成课程的多轮 Agent RL</title>
+<meta name="description" content="AgentGym-RL 用多轮强化学习从零训练 LLM Agent：ScalingInter-RL 逐步放开交互轮数，RL 训练后的 Qwen2.5-7B（ScalingInter-7B）在 BabyAI、SciWorld 上超过 o3，在 WebArena、Deep Search 上仍落后。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调，公共样式一律在 base.css */
+.ag-tblcap{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-soft);margin:18px 0 6px}
+.ag-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:8px 0 0}
+.ag-method-col{background:var(--accent-soft)}
+.ag-hbrow{display:grid;grid-template-columns:190px 1fr 58px;gap:10px;align-items:center;margin:6px 0}
+.ag-hbname{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ag-hbname.method{color:var(--accent-deep);font-weight:600}
+.ag-hbname.framework{color:var(--accent-deep)}
+.ag-hbtrack{height:14px;background:var(--bg-soft);border-radius:4px;overflow:hidden}
+.ag-hbfill{display:block;height:100%;border-radius:4px}
+.ag-hbnum{font-family:"JetBrains Mono",monospace;font-size:11.5px;text-align:right;color:var(--text)}
+.ag-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:var(--text-muted);margin:10px 0 0}
+.ag-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+.ag-sched{width:100%;height:auto;display:block;overflow:visible}
+.ag-sched text{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-soft)}
+.ag-fig-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin-top:10px}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+@media (max-width:600px){
+  .ag-hbrow{grid-template-columns:112px 1fr 48px;gap:7px}
+  .ag-hbname{font-size:10.5px}
+  .ag-hbnum{font-size:10.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">AgentGym-RL</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">课程方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#arch">架构</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent · 多轮 RL · arXiv 2025</span>
+  <h1>AgentGym-RL：把「最大交互轮数」做成课程，7B 智能体从零训起</h1>
+  <p class="hero-sub">
+    多轮 Agent 的 RL 训练有两种常见死法：轮数一开始就给大，模型陷入冗余推理和无效动作，训练崩溃；一直给小，探索变窄，性能撞天花板。
+    这篇论文把最大交互轮数做成<strong>单调递增的课程</strong>，并把环境、Agent、训练三块解耦成一个可并行 rollout 的框架。
+    代价是：规则清晰的模拟环境收益最大，开放网页和深度搜索仍落后顶级闭源模型。
+  </p>
+  <div class="meta">
+    <span>复旦 / 字节 Seed / 上海创智学院 · arXiv 2509.08755v1（2025-09-10）</span>
+    <a href="https://arxiv.org/abs/2509.08755v1" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/woooodyy/AgentGym-RL" target="_blank" rel="noopener">代码 ↗</a>
+    <a href="https://AgentGym-RL.github.io/" target="_blank" rel="noopener">项目页 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>AgentGym-RL</strong> 想做的是：不用 SFT 预热，直接让 Qwen2.5-3B / 7B 在五个环境里多轮交互，用终局奖励做 RL。
+    五个场景分别是 WebArena、Deep Search、TextCraft、BabyAI、SciWorld。
+  </p>
+  <p>
+    核心不是新损失函数，而是<em>课程</em>：先把最大交互轮数压小，让模型学会在少量轮次内完成任务；再按
+    <code>h<sub>t+1</sub> = h<sub>t</sub> + δ<sub>h</sub></code> 逐步放开，逼它探索更长决策路径。
+    论文把这套方法叫 <strong>ScalingInter-RL</strong>。
+  </p>
+  <p>
+    结果分两类：ScalingInter-7B 在 TextCraft 上 91.00 对 o3 的 93.00，接近；在 BabyAI 和 SciWorld 上超过 o3；
+    WebArena 和 Deep Search 仍有明显差距。论文摘要的说法是 <em>“match or surpass commercial models on 27 tasks”</em>，不是全面超越。
+  </p>
+  <p>
+    边界同样清楚：只在域内、数字环境、单智能体验证；Chem-Mix 这类任务对论文自己的三个模型仍是 0；
+    论文未报告 GPU 小时数，样本效率无法判断。
+  </p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 4">96.67<small>%</small></div><div class="k">BabyAI Overall（ScalingInter-7B）<br>o3 94.44 / GPT-4o 86.67</div></div>
+    <div class="metric"><div class="v" data-src="Table 5">57.00<small>分</small></div><div class="k">SciWorld Overall（ScalingInter-7B）<br>o3 41.50 / GPT-4o 21.00</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">8.0<small>pp</small></div><div class="k">WebArena 与 o3 的差距<br>（34.00 − 26.00）</div></div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>多轮 Agent 的 RL，难在「轮数一多就学崩」</h2></div>
+  <p class="sec-sub">先建立共同认知：奖励只在轨迹末尾给出，轮数越多，信用分配越难，探索空间越大。</p>
+
+  <p>
+    论文把 agentic task 建模成部分可观测马尔可夫决策过程（POMDP）：给定指令 <code>u</code>，Agent 根据当前状态
+    <code>s</code> 生成动作 <code>a</code>，环境返回观测 <code>o</code> 并转移到下一个状态；经过 <code>N</code> 轮交互后，
+    环境给出一个终局奖励 <code>r(τ) ∈ [0,1]</code>。中间轮次没有逐步奖励。
+  </p>
+
+  <p>
+    这把监督信号压到一条轨迹的末尾：同一个终局奖励要归因到几十个动作上，方差大；轮数越多，动作空间和观测空间越大，
+    稀疏奖励越难命中。论文的初步实验给出两种失败模式，正好对应两个极端。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">失败模式 A</span><h4>大轮数开局</h4></div>
+      <p>一开始就给较大的最大交互轮数（例如 10），模型会进入<strong>冗余推理</strong>和<strong>无效动作</strong>的循环，最终训练崩溃、性能下降。</p>
+      <p class="ag-note">原文：<em>“beginning with a large number of interaction turns often leads the model into redundant reasoning and unproductive actions, ultimately causing training collapse and degraded performance.”</em>（§3.3）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">失败模式 B</span><h4>小轮数到底</h4></div>
+      <p>一直限制在较小的最大交互轮数（例如 5），探索被压窄，模型学不到多样化的交互模式，后期遇到性能天花板。</p>
+      <p class="ag-note">原文：<em>“constraining the number of interactions to remain consistently small tends to narrow exploration and limits the agent’s ability to master diverse patterns.”</em>（§3.3）</p>
+    </div>
+  </div>
+
+  <p>
+    所以问题不是「有没有 RL 算法」，而是<strong>怎样安排交互预算</strong>：让策略先学会基本技能，再逐步扩展决策路径。
+    这也是 Section 03 的课程方法要解决的核心矛盾。
+  </p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有两条路：提示闭源模型，或模仿专家轨迹</h2></div>
+  <p class="sec-sub">两条路都能做出 demo，但都没有让模型通过与环境交互自己变强。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线一</span><h4>Prompting / workflow</h4></div>
+      <p>用 GPT-4o、o3 等闭源模型做规划、反思、角色分工，靠 prompt 和外部 workflow 把任务串起来。</p>
+      <p><strong>卡点：</strong>底层模型没有被训练，能力不会随交互演化；依赖强大的闭源模型，成本高，也无法把能力沉淀到开源模型里。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线二</span><h4>SFT / 模仿专家</h4></div>
+      <p>收集专家轨迹，逐步模仿专家的动作，学习 API 调用、规划和反思。</p>
+      <p><strong>卡点：</strong>专家数据昂贵、难规模化；专家没覆盖的情况学不会；论文的原话是 <em>“the model struggles to self-improve through interactions with the environment”</em>（§6）。</p>
+    </div>
+  </div>
+
+  <p>
+    RL 路线已有单轮推理的成功案例（如 DeepSeek-R1 类工作），也有少量多轮 Agent 的尝试；论文认为后者受限于任务复杂度、
+    环境多样性，且优化稳定性不足（§1、§6）。在 test-time scaling 一侧，Zhu et al. [96] 探索了多种 agent test-time scaling 策略，
+    但没有研究 RL 中的 inference scaling；论文认为最接近的工作是 TTI [55]，它用 rejection sampling 教 Agent 把更多 compute
+    分配给交互，局限在 web navigation（§6）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文指出的缺口</span><h4>缺少一个统一的、端到端的多轮交互 RL 框架</h4></div>
+    <p>要同时满足：跨多种真实环境、不依赖 SFT 预热、支持主流 RL 算法、训练稳定可复现。AgentGym-RL 想填的就是这个缺口；ScalingInter-RL 则是为了让训练在长轮数下不崩。</p>
+  </div>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>ScalingInter-RL：把「最大交互轮数」当成课程</h2></div>
+  <p class="sec-sub">方法的核心是一条递推式：每 Δ 步把轮数上限加 δ<sub>h</sub>，直到环境允许的上限。</p>
+
+  <p>
+    论文的目标仍然是最大化终局奖励：<code>J(θ) = E<sub>τ∼π<sub>θ</sub></sub>[r(τ)]</code>。
+    一条轨迹写成 <code>τ = (a<sub>0</sub>, o<sub>1</sub>, a<sub>1</sub>, …, a<sub>K−1</sub>, o<sub>K</sub>)</code>，
+    <code>K</code> 是交互轮数。课程给 <code>K</code> 加了一个上限 <code>h<sub>t</sub></code>，并要求上限单调递增：
+  </p>
+
+  <div class="eq">
+    K ≤ h<sub>t</sub>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    h<sub>1</sub> &lt; h<sub>2</sub> &lt; ⋯ &lt; h<sub>n</sub>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    h<sub>t+1</sub> = h<sub>t</sub> + δ<sub>h</sub>（每 Δ 个训练步更新）
+  </div>
+  <div class="eq-cap">§3.3 的课程递推。论文称 δ<sub>h</sub> 是 adaptive increment，但没有给出具体的自适应规则或每环境取值。</div>
+
+  <p>
+    <strong>早期 h 小：</strong>Agent 只能在少量交互内完成任务，迫使它学会高效利用（exploitation），先掌握基本技能和简单任务。<br>
+    <strong>后期 h 增大：</strong>允许更长的决策路径，鼓励探索、规划、反思和策略性回溯；论文把这种现象类比为 RLVR 中的 length-scaling。
+  </p>
+
+  <p>
+    论文强调这不是靠大量超参搜索：阶段切换点按原 RL 过程的总优化步数设置（§4.2）。
+    Figure 7 在 Deep Search 上给了三种策略的对照：固定 10 轮早期奖励更高但快速崩溃；固定 5 轮稳定但遇到天花板；
+    ScalingInter 逐步放开，长期性能更高。
+  </p>
+
+  <h3>自己动手：看轮数上限怎样随训练步数抬升</h3>
+  <p>
+    下面的示意器只实现课程递推式和 Appendix B 给出的环境上限。<strong>h<sub>1</sub>、Δ、δ<sub>h</sub> 是页面自设的示意参数，不是论文的训练配置</strong>——
+    原文只给了递推式、单调性、环境上限，以及“按总优化步数设切换点”的描述。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" id="sched-envs" data-src="Appendix B">
+      <button class="rule-btn" data-env="webarena">WebArena<span class="r-sub">上限 15 轮</span></button>
+      <button class="rule-btn active" data-env="deep">Deep Search<span class="r-sub">上限 4 轮</span></button>
+      <button class="rule-btn" data-env="textcraft">TextCraft<span class="r-sub">上限 20 轮</span></button>
+      <button class="rule-btn" data-env="babyai">BabyAI<span class="r-sub">上限 20 轮</span></button>
+      <button class="rule-btn" data-env="sciworld">SciWorld<span class="r-sub">上限 20 轮</span></button>
+    </div>
+
+    <div class="slots" id="sched-slots">
+      <div class="slot" data-src="§3.3"><div class="slot-name">当前上限 h_t</div><div class="slot-val" id="sched-h">4</div></div>
+      <div class="slot" data-src="Appendix B"><div class="slot-name">环境上限</div><div class="slot-val" id="sched-cap">4</div></div>
+      <div class="slot" data-src="§3.3"><div class="slot-name">阶段索引 ⌊t/Δ⌋</div><div class="slot-val" id="sched-phase">3</div></div>
+      <div class="slot"><div class="slot-name">训练步 t</div><div class="slot-val" id="sched-tval">300</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>训练步 t <span class="v" id="sched-t-v">300</span></label>
+        <input type="range" id="sched-t" min="0" max="600" step="10" value="300">
+      </div>
+      <div class="ctrl">
+        <label>更新间隔 Δ <span class="v" id="sched-d-v">100</span></label>
+        <input type="range" id="sched-d" min="50" max="200" step="10" value="100">
+      </div>
+      <div class="ctrl">
+        <label>增量 δ_h <span class="v" id="sched-s-v">1</span></label>
+        <input type="range" id="sched-s" min="1" max="5" step="1" value="1">
+      </div>
+      <div class="ctrl">
+        <label>起始上限 h₁ <span class="v" id="sched-h1-v">1</span></label>
+        <input type="range" id="sched-h1" min="1" max="5" step="1" value="1">
+      </div>
+    </div>
+
+    <svg class="ag-sched" id="sched-svg" viewBox="0 0 720 240" role="img" aria-label="轮数上限随训练步数变化的阶梯图"></svg>
+
+    <div class="readout" id="sched-readout" data-src="§3.3">
+      <div class="r-head">当前课程状态</div>
+      <div id="sched-msg">在 Deep Search（上限 4）下，t=300、Δ=100、δ_h=1：h_t = min(1 + 1×3, 4) = 4。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个示意器覆盖了什么、没覆盖什么？<span class="sum-sub">点开看与原文的差异</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>§3.3 的递推式 <code>h<sub>t+1</sub> = h<sub>t</sub> + δ<sub>h</sub></code>、单调递增、每 Δ 步更新；
+      Appendix B.1–B.5 给出的五个环境最大交互轮数（WebArena 15、Deep Search 4、TextCraft 20、BabyAI 20、SciWorld 20）；
+      以及“早期 exploitation、后期 exploration”的阶段行为。</p>
+      <p><strong>未覆盖：</strong>论文没有给出 h<sub>1</sub>、δ<sub>h</sub>、Δ 的具体取值，也没有给出 δ<sub>h</sub> 的 adaptive 规则、阶段数量和“按总优化步数设切换点”的精确算法；
+      示意器用固定滑块代替。它<strong>不是论文训练曲线的复现</strong>，只是机制演示。</p>
+      <p><strong>两处原文设置并列：</strong>§4.2 与 Figure 7 在 Deep Search 上用最大 10 轮和 5 轮做对照；Appendix B.2 写 Deep Search 的最大交互轮数是 4。
+      示意器采用 Appendix B.2 的 4 作为环境上限；原文没有说明这两组设置的关系。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>手算核对：两组参数 → 结果<span class="sum-sub">与 JS 同一公式，逐位一致</span></summary>
+    <div class="details-body">
+      <p>JS 使用的公式是 <code>h = min(h₁ + δ_h × Math.floor(t / Δ), cap)</code>，其中 <code>cap</code> 来自环境选择。
+      阶段边界按已进入下一阶段计（<code>t</code> 是 Δ 的整数倍时，<code>Math.floor</code> 取商）。</p>
+      <p><strong>参数组 A：</strong>Deep Search（cap=4），h₁=1，δ_h=1，Δ=100，t=350。<br>
+      <code>Math.floor(350/100)=3</code> → <code>1 + 1×3 = 4</code> → <code>min(4, 4) = 4</code>。页面应显示 <strong>4</strong>。</p>
+      <p><strong>参数组 B：</strong>TextCraft（cap=20），h₁=2，δ_h=2，Δ=150，t=400。<br>
+      <code>Math.floor(400/150)=2</code> → <code>2 + 2×2 = 6</code> → <code>min(6, 20) = 6</code>。页面应显示 <strong>6</strong>。</p>
+      <p>把上方环境切到 Deep Search、滑块设为 A 组，或切到 TextCraft、滑块设为 B 组，读数应与这里逐位一致。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 4. 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>从零开始：五个环境、GRPO 为主、每环境一套轮数上限</h2></div>
+  <p class="sec-sub">论文没有用 SFT 预热；训练细节大多在 Appendix B，页面把能查到的都列出来。</p>
+
+  <p>
+    主实验的 backbone 是 <strong>Qwen2.5-3B</strong> 和 <strong>Qwen2.5-7B</strong>，从零开始做 RL，不做 SFT 预热。
+    主要算法是 <strong>GRPO</strong>；框架同时集成 PPO、RLOO、REINFORCE++，也支持 SFT、DPO 和 rejection sampling（AgentEvol）（§3.2.2）。
+    所有环境共用 KL 系数 <code>1×10⁻³</code>、采样温度 <code>1.0</code>；WebArena 每个 query 采样 4 条轨迹，其余环境 8 条。
+  </p>
+
+  <p class="ag-tblcap">Appendix B.1–B.5 · 各环境训练设置摘录</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>环境</th><th>场景 / 任务</th><th style="text-align:right">最大交互轮数</th><th style="text-align:right">学习率</th><th style="text-align:right">每 query 轨迹数</th><th>数据规模</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>WebArena</td><td>网页导航（5 个子任务）</td><td class="num">15</td><td class="num">5×10⁻⁷</td><td class="num">4</td><td>372 训练 / 50 测试（排除 Content &amp; Config）</td></tr>
+        <tr><td>Deep Search</td><td>深度搜索（7 个数据集）</td><td class="num">4</td><td class="num">1×10⁻⁶</td><td class="num">8</td><td>每个数据集从 dev set 采样 400 例</td></tr>
+        <tr><td>TextCraft</td><td>数字游戏（Depth 1–4）</td><td class="num">20</td><td class="num">1×10⁻⁶</td><td class="num">8</td><td>4 个深度子集</td></tr>
+        <tr><td>BabyAI</td><td>具身任务（6 个子任务）</td><td class="num">20</td><td class="num">1×10⁻⁶</td><td class="num">8</td><td>6 个子集</td></tr>
+        <tr><td>SciWorld</td><td>科学实验（8 个子集）</td><td class="num">20</td><td class="num">1×10⁻⁶</td><td class="num">8</td><td>8 个子集</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="ag-note">以上数字取自 Appendix B.1–B.5（轮数、学习率、轨迹数为原文数值；场景和子集为原文描述）。SFT 基线的学习率是 1×10⁻⁴，主表用的是 RL 设置；Deep Search 在 Appendix B.2 写的是 4 轮，而 §4.2/Figure 7 另有一组 5/10 轮的对照实验。</p>
+
+  <h3>工程上做了什么</h3>
+  <ul>
+    <li><strong>WebArena</strong>：把默认的“每进程一个浏览器”改成基于子进程的架构，单台服务器可并发管理多个 Chromium；另提供 full-reset 接口，每个 episode 后把网站恢复到初始状态，缓解长训练中的状态不一致（§3.2.3）。</li>
+    <li><strong>SciWorld</strong>：重写环境初始化和 reset，使多个实例可以并行创建与重置（§3.2.3）。</li>
+    <li><strong>TextCraft</strong>：修掉 <code>recursive crafting_tree</code> 里列表结构冗余复制导致的内存泄漏（§3.2.3）。</li>
+    <li><strong>SciWorld</strong>：修掉内部 clock 机制在长 rollout 中的内存累积（§3.2.3）。</li>
+  </ul>
+
+  <p>
+    硬件是 NVIDIA A100 GPU 和 Ascend 910B NPU（Appendix B）；训练可跨多节点、多进程分布式执行（Appendix A）。
+    论文<strong>未报告</strong>总 GPU 小时数、单次训练成本或样本效率；Appendix B 只交代了硬件类型。这一点会影响“7B 模型很便宜”这类推断——页面不替论文补这个数。
+  </p>
+</section>
+
+<!-- ================= 5. 架构 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三块解耦：环境服务器、Agent 循环、训练管线</h2></div>
+  <p class="sec-sub">环境通过 HTTP server–client 并行跑 rollout，训练模块消费轨迹并更新策略；课程只改 rollout 的最大轮数。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 440" role="img" aria-label="AgentGym-RL 框架结构示意图">
+      <defs>
+        <marker id="ag-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--text-muted)"></path>
+        </marker>
+        <marker id="ag-arrow-accent" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <!-- 课程 pill -->
+      <rect x="340" y="18" width="220" height="36" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"></rect>
+      <text x="450" y="41" text-anchor="middle" font-size="12" font-weight="600" fill="var(--accent-deep)">课程 h_t 控制 max_rounds</text>
+      <path d="M450,54 L450,68" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ag-arrow-accent)"></path>
+
+      <!-- Environment -->
+      <rect x="20" y="70" width="250" height="320" rx="14" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.6"></rect>
+      <text x="145" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="var(--c1)">Environment module</text>
+      <text x="145" y="115" text-anchor="middle" font-size="11" fill="var(--c1)">5 类场景 · HTTP server–client</text>
+      <rect x="40" y="135" width="210" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="145" y="156" text-anchor="middle" font-size="11.5" fill="var(--text)">WebArena</text>
+      <rect x="40" y="180" width="210" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="145" y="201" text-anchor="middle" font-size="11.5" fill="var(--text)">Deep Search</text>
+      <rect x="40" y="225" width="210" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="145" y="246" text-anchor="middle" font-size="11.5" fill="var(--text)">TextCraft</text>
+      <rect x="40" y="270" width="210" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="145" y="291" text-anchor="middle" font-size="11.5" fill="var(--text)">BabyAI</text>
+      <rect x="40" y="315" width="210" height="32" rx="7" fill="var(--bg-surface)" stroke="var(--c1)" stroke-width="1"></rect>
+      <text x="145" y="336" text-anchor="middle" font-size="11.5" fill="var(--text)">SciWorld</text>
+      <text x="145" y="372" text-anchor="middle" font-size="10.5" fill="var(--c1)">/reset · /observation · /available_actions · /step</text>
+
+      <!-- Agent -->
+      <rect x="325" y="70" width="240" height="320" rx="14" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.6"></rect>
+      <text x="445" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="var(--c2)">Agent module</text>
+      <text x="445" y="115" text-anchor="middle" font-size="11" fill="var(--c2)">多轮 reasoning–action loop</text>
+      <rect x="345" y="140" width="200" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--c2)" stroke-width="1"></rect>
+      <text x="445" y="166" text-anchor="middle" font-size="11.5" fill="var(--text)">Observation / prompt</text>
+      <rect x="345" y="207" width="200" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--c2)" stroke-width="1"></rect>
+      <text x="445" y="233" text-anchor="middle" font-size="11.5" fill="var(--text)">LLM reasoning</text>
+      <rect x="345" y="274" width="200" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--c2)" stroke-width="1"></rect>
+      <text x="445" y="300" text-anchor="middle" font-size="11.5" fill="var(--text)">Action / tool call</text>
+      <path d="M445,182 L445,205" fill="none" stroke="var(--text-muted)" stroke-width="1.4" marker-end="url(#ag-arrow)"></path>
+      <path d="M445,249 L445,272" fill="none" stroke="var(--text-muted)" stroke-width="1.4" marker-end="url(#ag-arrow)"></path>
+      <text x="445" y="350" text-anchor="middle" font-size="10.5" fill="var(--c2)">rollout 到 all_done 或 max_rounds</text>
+
+      <!-- Training -->
+      <rect x="610" y="70" width="270" height="320" rx="14" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"></rect>
+      <text x="745" y="96" text-anchor="middle" font-size="14" font-weight="700" fill="var(--accent-deep)">Training module</text>
+      <text x="745" y="115" text-anchor="middle" font-size="11" fill="var(--accent-deep)">轨迹 → 优势 → 策略更新</text>
+      <rect x="630" y="135" width="230" height="34" rx="7" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1"></rect>
+      <text x="745" y="157" text-anchor="middle" font-size="11.5" fill="var(--text)">Rollout batch</text>
+      <rect x="630" y="185" width="230" height="34" rx="7" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1"></rect>
+      <text x="745" y="207" text-anchor="middle" font-size="11.5" fill="var(--text)">log π / ref log π</text>
+      <rect x="630" y="235" width="230" height="34" rx="7" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1"></rect>
+      <text x="745" y="257" text-anchor="middle" font-size="11.5" fill="var(--text)">Advantage（GRPO）</text>
+      <rect x="630" y="285" width="230" height="34" rx="7" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1"></rect>
+      <text x="745" y="307" text-anchor="middle" font-size="11.5" fill="var(--text)">Actor update</text>
+      <path d="M745,169 L745,183" fill="none" stroke="var(--text-muted)" stroke-width="1.4" marker-end="url(#ag-arrow)"></path>
+      <path d="M745,219 L745,233" fill="none" stroke="var(--text-muted)" stroke-width="1.4" marker-end="url(#ag-arrow)"></path>
+      <path d="M745,269 L745,283" fill="none" stroke="var(--text-muted)" stroke-width="1.4" marker-end="url(#ag-arrow)"></path>
+      <text x="745" y="350" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">PPO · GRPO · RLOO · REINFORCE++</text>
+
+      <!-- 跨模块箭头 -->
+      <path d="M270,220 L323,220" fill="none" stroke="var(--text-muted)" stroke-width="1.6" marker-end="url(#ag-arrow)"></path>
+      <text x="297" y="212" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">observation</text>
+      <path d="M323,265 L270,265" fill="none" stroke="var(--text-muted)" stroke-width="1.6" marker-end="url(#ag-arrow)"></path>
+      <text x="297" y="280" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">action</text>
+      <path d="M565,240 L608,240" fill="none" stroke="var(--text-muted)" stroke-width="1.6" marker-end="url(#ag-arrow)"></path>
+      <text x="587" y="232" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">trajectory</text>
+
+      <!-- 回灌箭头 -->
+      <path d="M745,390 L745,418 L445,418 L445,392" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#ag-arrow-accent)"></path>
+      <text x="595" y="432" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">更新后的策略回灌到下一轮 rollout</text>
+    </svg>
+    <figcaption>
+      图 1：AgentGym-RL 的三模块结构重绘示意（依据 Figure 2、Figure 3、Appendix A），非原文截图。颜色只用于区分模块：青灰＝环境，紫＝Agent，陶土红＝训练 / 课程。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>Environment module：</strong>每个环境是一个独立服务，可部署多个 replica；客户端通过 HTTP 调用 <code>/observation</code>、<code>/available_actions</code>、<code>/step</code>、<code>/reset</code>（Appendix A）。</li>
+          <li><strong>Agent module：</strong>接收观测、做多轮推理、输出动作（如调用工具 API）；支持不同 prompting 策略、采样配置和奖励函数（Appendix A）。</li>
+          <li><strong>Training module：</strong>管理轨迹收集、优势估计、策略优化和 reward shaping；支持 curriculum learning 与 staged interaction scaling，也就是 ScalingInter-RL（Appendix A）。</li>
+          <li><strong>Figure 3 的三段式：</strong>伪代码的注释是 <code># Stage 1: Generate responses</code>、<code># Stage 2: Prepare experience</code>（compute log prob、ref log prob、advantages）、<code># Stage 3: Actor training</code>。rollout 循环里每个 handler 记录 assistant message、observation 和 score，<code>all_done</code> 时提前结束。</li>
+          <li><strong>课程的位置：</strong>从 Figure 3 看，ScalingInter-RL 只改 rollout 的 <code>max_rounds</code>，不改环境、Agent 或训练损失；它与具体算法（PPO/GRPO/…）的组合效果，论文没有给出单独消融。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+
+  <p>
+    论文把“可扩展、可复现”当作框架贡献的一部分：环境/Agent/训练三块可以独立替换，新的环境只需继承 <code>BaseEnvClient</code> 并实现
+    <code>reset()</code>、<code>step()</code>、<code>observe()</code>（§3.2.3）。训练管线支持多节点、多进程并行，并记录 policy entropy、KL divergence、
+    reward curve、rollout statistics 等诊断指标（Appendix A）。
+  </p>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：规则清晰的环境增益大，开放环境仍落后</h2></div>
+  <p class="sec-sub">五个 benchmark 的 Overall 放在一起看，结论不是「全面超过」，而是「两类环境、两种结果」。</p>
+
+  <p class="ag-tblcap">Table 1–5 · Overall 列摘录（最后一列为该表最强对比模型；未列本文 3B 模型）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Benchmark</th><th style="text-align:right">Qwen2.5-7B-Instruct</th><th style="text-align:right">AgentGym-RL-7B</th><th style="text-align:right" class="ag-method-col">ScalingInter-7B</th><th style="text-align:right">OpenAI o3</th><th>最强对比模型</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>WebArena</td><td class="num">9.76</td><td class="num">22.00</td><td class="num ag-method-col">26.00</td><td class="num">34.00</td><td>o4-mini 36.00</td></tr>
+        <tr><td>Deep Search</td><td class="num">18.75</td><td class="num">34.00</td><td class="num ag-method-col">38.25</td><td class="num">49.50</td><td>o3 49.50</td></tr>
+        <tr><td>TextCraft</td><td class="num">42.00</td><td class="num">89.00</td><td class="num ag-method-col">91.00</td><td class="num">93.00</td><td>Gemini-2.5-Pro 94.00</td></tr>
+        <tr><td>BabyAI</td><td class="num">66.67</td><td class="num">92.22</td><td class="num ag-method-col">96.67</td><td class="num">94.44</td><td>o3 94.44</td></tr>
+        <tr><td>SciWorld</td><td class="num">1.50</td><td class="num">50.50</td><td class="num ag-method-col">57.00</td><td class="num">41.50</td><td>o3 41.50</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="ag-note">数字逐字取自 Table 1–5 的 Overall 列；任务子集见各原表。评测随机性（重复次数、种子、avg@k 等）原文未报告。Qwen2.5-7B-Instruct 是未做 agentic RL 的基座对照。</p>
+
+  <h3>五条值得记住的发现</h3>
+  <ul>
+    <li><strong>规则清晰的环境，增益最大。</strong>TextCraft 从 42.00 到 91.00（+49.00 分）；BabyAI 从 66.67 到 96.67（+30.00 分）；SciWorld 从 1.50 到 57.00（+55.50 分）。论文的原话是 <em>“Environmental structure is a key determinant for the efficiency of reinforcement learning.”</em>（§4.2）</li>
+    <li><strong>开放环境，增益有限且仍落后。</strong>WebArena 从 9.76 到 26.00，仍比 o3 的 34.00 低 8.00 分；Deep Search 从 18.75 到 38.25，仍比 o3 的 49.50 低 11.25 分。论文说 WebArena 的差距“almost entirely concentrated in the GitLab &amp; Reddit sub-task”（§4.3）；该子任务上 ScalingInter-7B 是 20.00，o3 是 80.00，差 60.00 分（Table 1）。</li>
+    <li><strong>模型规模不是唯一变量。</strong>论文报告 ScalingInter-7B 的平均成功率约 58.6%，高于 Llama-3.1-70B 的约 47% 和 Qwen2.5-72B 的约 43%（§4.2、Figure 1 右）。这三个数都是论文转述，未在表中逐项展开。</li>
+    <li><strong>轮数预算不是越大越好。</strong>Figure 7 的 Deep Search 对照里，固定 10 轮早期奖励更高但快速崩溃；固定 5 轮稳定但遇到天花板；ScalingInter 逐步放开后长期更高。论文把崩溃归因于高方差、信用分配困难和过拟合到虚假行为（Figure 7 图注）。</li>
+    <li><strong>GRPO 在低信号环境里更稳。</strong>Table 6 中，3B GRPO 在 TextCraft 得 75.00，高于 7B REINFORCE++ 的 73.00（+2.00）；BabyAI 是 93.33 对 84.44（+8.89）；SearchQA 是 25.75 对 24.00（+1.75）。论文的解释是 REINFORCE++ 用整条 episode 的 Monte Carlo return，长轨迹上方差大；GRPO 用组内相对优势（§5.2）。</li>
+  </ul>
+
+  <p>
+    论文在 §1 还报告了一个汇总数字：用该框架训练的 Qwen-2.5-7B 平均提升 <strong>33.65 分</strong>。
+    这个数字没有在 Table 1–5 中逐项展开，页面只按原文转述，不把它当作可复算指标。
+  </p>
+
+  <h3>切一个 benchmark，看主要模型排序</h3>
+  <p>下面只放 Overall 分数，数值逐字取自 Table 1–5；柱长按 0–100 线性映射。切换标签可以看同一模型在不同环境里的位置。</p>
+
+  <div class="tabs" id="bench-tabs">
+    <button class="tab active" data-bench="webarena">WebArena</button>
+    <button class="tab" data-bench="deep">Deep Search</button>
+    <button class="tab" data-bench="textcraft">TextCraft</button>
+    <button class="tab" data-bench="babyai">BabyAI</button>
+    <button class="tab" data-bench="sciworld">SciWorld</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="readout" id="bench-readout" data-src="Table 1" style="margin-top:0;margin-bottom:14px">
+      <div class="r-head">WebArena · Table 1</div>
+      <div id="bench-desc">ScalingInter-7B 26.00；该表最高是 OpenAI o4-mini 36.00，o3 为 34.00。</div>
+    </div>
+    <div id="bench-chart"></div>
+    <div class="ag-legend">
+      <span><i style="background:var(--accent)"></i>ScalingInter-7B</span>
+      <span><i style="background:var(--accent-soft)"></i>AgentGym-RL-7B</span>
+      <span><i style="background:var(--c1)"></i>闭源对比模型</span>
+      <span><i style="background:var(--c2)"></i>开源对比模型</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>柱长怎么映射？<span class="sum-sub">两组例子，和 JS 同口径</span></summary>
+    <div class="details-body">
+      <p>所有 Overall 分数的范围都在 0–100，因此柱长直接取 <code>width = value%</code>，不做归一化、不做平滑。</p>
+      <p>例 1：WebArena 的 ScalingInter-7B 26.00 → 柱长 26.00%。<br>
+      例 2：BabyAI 的 ScalingInter-7B 96.67 → 柱长 96.67%。</p>
+      <p>排序按当前 benchmark 的分数从高到低；切换标签时只换数据，不改映射规则。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>原文里的几处数字口径（并列，不替原文消解）<span class="sum-sub">点开看冲突位置</span></summary>
+    <div class="details-body">
+      <p><strong>1. Chem-Mix。</strong>§4.3 写 <em>“The ‘Chem-Mix’ sub-task proved to be intractable, with every model, including our top performers, scoring zero.”</em>
+      但 Table 5 的 Chem-Mix 列有非零值：GPT-4o 20.00、Qwen-Max 20.00、OpenAI o3 40.00、Qwen3-235B-A22B 20.00、Qwen2.5-72B-Instruct 20.00、
+      Llama-3.1-8B-Instruct 20.00、Llama-3.1-70B-Instruct 40.00 等；论文自己的 AgentGym-RL-3B、AgentGym-RL-7B、ScalingInter-7B 三行均为 0.00。</p>
+      <p><strong>2. WebArena 的 AgentGym-RL-7B。</strong>§4.3 写它“achieved an overall score of 16.00%, matching the performance of GPT-4o”；
+      Table 1 的 AgentGym-RL-7B 行是 22.00。页面表格采用 Table 1 的 22.00，并在正文保留 §4.3 的 16.00 说法。</p>
+      <p><strong>3. TextCraft 的提升幅度。</strong>§4.2 写 ScalingInter-RL “surpasses the base model by 30 points”；
+      Table 3 的 Qwen2.5-7B-Instruct 是 42.00，ScalingInter-7B 是 91.00，差 49.00 分。两个说法并列。</p>
+      <p><strong>4. Deep Search 的轮数。</strong>§4.2 与 Figure 7 用最大 10 轮和 5 轮做对照；Appendix B.2 写 Deep Search 的最大交互轮数是 4。
+      页面在 §3 的示意器里采用 Appendix B.2 的 4，在 §03 和 §06 引用 Figure 7 时保留 5/10 的表述。</p>
+      <p><strong>5. SciWorld 的 50.50 与 57.00。</strong>§4.2 写 RL <em>“boosted the model’s score from 1.50 to 50.50”</em>；
+      Table 5 里 AgentGym-RL-7B 是 50.50，ScalingInter-7B 是 57.00。页面的 SciWorld 卡片和条形图采用 Table 5 的 ScalingInter-7B 57.00，
+      §4.2 的 50.50 作为 AgentGym-RL-7B 的原文表述并列保留。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：域内有效，开放网页和科学推理仍有硬骨头</h2></div>
+  <p class="sec-sub">论文自己的表、案例和 future work 划出了四条边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>开放环境仍明显落后</h4></div>
+    <p>WebArena 26.00 对 o3 34.00，差 8.00 分；Deep Search 38.25 对 o3 49.50，差 11.25 分（Table 1、Table 2）。WebArena 的差距集中在 GitLab &amp; Reddit：20.00 对 80.00（Table 1）。论文自己写的是“a disparity almost entirely concentrated in the ‘GitLab &amp; Reddit’ sub-task”（§4.3）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界二</span><h4>Chem-Mix：论文的三个模型都是 0</h4></div>
+    <p>Table 5 的 Chem-Mix 列里，AgentGym-RL-3B、AgentGym-RL-7B、ScalingInter-7B 全是 0.00；部分基线反而非零（o3 40.00、Llama-3.1-70B 40.00、GPT-4o 20.00 等）。§4.3 的文字却说 “every model ... scoring zero”。两处并列，页面不替原文消解。对论文方法而言，这个子任务是明确失败。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>只验证了域内、数字世界、单智能体</h4></div>
+    <p>论文的 future work 原文列出三条：域内 → 新环境/新工具的泛化与迁移；数字任务 → 更长时程、物理世界任务；单智能体 → 多智能体 RL（§7）。论文还写 “Most existing studies—including ours—focus on relatively simple digital tasks.” 这套结果不能直接外推到真实机器人、自动驾驶或多 Agent 协作。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>代价与行为失败没有被完全解决</h4></div>
+    <p>Appendix B 只写使用 A100 与 Ascend 910B，<strong>未报告</strong> GPU 小时数或总计算量；因此无法判断“小模型 + 后训练更便宜”是否成立<span class="infer">推断</span>（依据：Appendix B 只列硬件类型，未列训练时长/能耗）。案例研究还展示了 over-interaction（Figure 16）和过早终止（Figure 15）等失败模式；论文说 RL 过程 “failed to instill the precision and efficiency required for optimal task completion”（§5.3）。</p>
+  </div>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>这篇论文给出的是一套在规则清晰的模拟环境里可复现的多轮 RL 训练配方，而不是一个在开放世界全面超过闭源模型的 Agent。</strong>
+    如果目标环境像 WebArena 一样开放，论文自己的数据说明提升有限且仍落后 o3；如果目标环境规则清晰、反馈可判定，ScalingInter-RL 的课程思路可以直接借鉴。
+  </p>
+</section>
+
+<footer>
+  <div>AgentGym-RL: Training LLM Agents for Long-Horizon Decision Making through Multi-Turn Reinforcement Learning · Zhiheng Xi, Jixuan Huang, Chenyang Liao, … , Yu-Gang Jiang · 复旦大学 / 字节跳动 Seed / 上海创智学院 · arXiv 2509.08755v1</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.08755v1" target="_blank" rel="noopener">arxiv.org/abs/2509.08755v1</a>（本页以 v1，2025-09-10 为准）<br>
+    代码：<a href="https://github.com/woooodyy/AgentGym-RL" target="_blank" rel="noopener">woooodyy/AgentGym-RL</a> · 项目页：<a href="https://AgentGym-RL.github.io/" target="_blank" rel="noopener">AgentGym-RL.github.io</a><br>
+    笔记：<a href="/agentgym-rltraining-llm-agents-for-long-horizon-decision-making-through-multi-turn-reinforcement-learning/">AgentGym-RL：Training LLM Agents for Long-Horizon Decision Making through Multi-Turn Reinforcement Learning</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按论文 arXiv v1 核对，未改动笔记文件）：</strong><br>
+    1. 笔记的小标题写“7B 模型超越顶级闭源模型”。原文摘要的说法是 “match or surpass commercial models on 27 tasks”；按 Table 1–5，WebArena 26.00 对 o3 34.00、Deep Search 38.25 对 o3 49.50 仍落后，领先出现在 BabyAI 与 SciWorld。页面按分基准呈现。<br>
+    2. 笔记的“不足”一节写 SciWorld 的 Chem-Mix “所有模型（包括本文模型）得分均为 0”。这与 §4.3 的原句一致，但 Table 5 的 Chem-Mix 列有多个非零基线（o3 40.00、Llama-3.1-70B 40.00、GPT-4o 20.00 等）；论文自己的三个模型才是 0.00。原文两处并列，页面不替它消解。<br>
+    3. 笔记的表格数据（WebArena 26.00 / Deep Search 38.25 / TextCraft 91.00 / BabyAI 96.67 / SciWorld 57.00，以及 o3、Gemini-2.5-Pro、Llama-3.1-70B 的对应值）与 Table 1–5 的 Overall 列一致；笔记没有列 AgentGym-RL-7B 在 WebArena 的 22.00，而 §4.3 的文字又写成 16.00——这是原文内部的口径差异，详见页面 §06 的“原文里的几处数字口径”。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   0) 图注展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest('figure');
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+
+/* ============================================================
+   1) ScalingInter-RL 课程示意器
+   常量来源：§3.3 的递推式；Appendix B.1–B.5 的环境最大交互轮数
+   h1 / Δ / δ 为页面示意参数，原文未给具体值
+   ============================================================ */
+(function () {
+  var ENVS = {
+    webarena: { name: 'WebArena', cap: 15 },
+    deep:     { name: 'Deep Search', cap: 4 },
+    textcraft:{ name: 'TextCraft', cap: 20 },
+    babyai:   { name: 'BabyAI', cap: 20 },
+    sciworld: { name: 'SciWorld', cap: 20 }
+  };
+  var state = { env: 'deep', h1: 1, delta: 1, interval: 100, t: 300 };
+
+  var svg = document.getElementById('sched-svg');
+  var readout = document.getElementById('sched-msg');
+  var hEl = document.getElementById('sched-h');
+  var capEl = document.getElementById('sched-cap');
+  var phaseEl = document.getElementById('sched-phase');
+  var tEl = document.getElementById('sched-tval');
+  if (!svg || !readout || !hEl || !capEl || !phaseEl || !tEl) return;
+
+  function cap() { return ENVS[state.env].cap; }
+  function horizonAt(t) {
+    return Math.min(state.h1 + state.delta * Math.floor(t / state.interval), cap());
+  }
+
+  function render() {
+    var hMax = Math.min(5, cap());
+    if (h1Slider) {
+      h1Slider.max = String(hMax);
+      if (state.h1 > hMax) {
+        state.h1 = hMax;
+        h1Slider.value = String(hMax);
+        if (h1Val) h1Val.textContent = String(hMax);
+      }
+    }
+    var h = horizonAt(state.t);
+    var phase = Math.floor(state.t / state.interval);
+    hEl.textContent = String(h);
+    capEl.textContent = String(cap());
+    phaseEl.textContent = String(phase);
+    tEl.textContent = String(state.t);
+
+    var capped = (state.h1 + state.delta * phase) >= cap();
+    readout.innerHTML =
+      '在 <strong>' + ENVS[state.env].name + '</strong>（上限 ' + cap() + '）下，' +
+      't=' + state.t + '、Δ=' + state.interval + '、δ_h=' + state.delta + '、h₁=' + state.h1 + '：' +
+      'h_t = min(' + state.h1 + ' + ' + state.delta + '×' + phase + ', ' + cap() + ') = <strong>' + h + '</strong>' +
+      (capped ? '，已封顶。' : '。');
+
+    drawChart(h);
+  }
+
+  function drawChart(currentH) {
+    var W = 720, H = 240;
+    var ml = 42, mr = 18, mt = 20, mb = 34;
+    var plotW = W - ml - mr;
+    var plotH = H - mt - mb;
+    var ymax = Math.max(cap() + (cap() <= 5 ? 1 : 2), 5);
+    var tmax = 600;
+
+    function x(t) { return ml + (t / tmax) * plotW; }
+    function y(v) { return mt + plotH - (v / ymax) * plotH; }
+
+    var parts = [];
+    parts.push('<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="none"></rect>');
+
+    var ystep = ymax <= 6 ? 1 : (ymax <= 18 ? 5 : 5);
+    for (var gy = 0; gy <= ymax; gy += ystep) {
+      var yy = y(gy);
+      parts.push('<line x1="' + ml + '" y1="' + yy + '" x2="' + (W - mr) + '" y2="' + yy + '" stroke="var(--border)" stroke-width="1"></line>');
+      parts.push('<text x="' + (ml - 6) + '" y="' + (yy + 3) + '" text-anchor="end">' + gy + '</text>');
+    }
+
+    var xticks = [0, 150, 300, 450, 600];
+    for (var i = 0; i < xticks.length; i++) {
+      var tx = x(xticks[i]);
+      parts.push('<line x1="' + tx + '" y1="' + (mt + plotH) + '" x2="' + tx + '" y2="' + (mt + plotH + 4) + '" stroke="var(--border-strong)" stroke-width="1"></line>');
+      parts.push('<text x="' + tx + '" y="' + (H - 12) + '" text-anchor="middle">' + xticks[i] + '</text>');
+    }
+    parts.push('<text x="' + (W / 2) + '" y="' + (H - 1) + '" text-anchor="middle">训练步 t</text>');
+    parts.push('<text x="' + (ml - 6) + '" y="' + (mt - 6) + '" text-anchor="end">轮数</text>');
+
+    var path = '';
+    var k = 0;
+    var prevH = Math.min(state.h1, cap());
+    path += 'M ' + x(0) + ' ' + y(prevH);
+    while (true) {
+      var boundary = (k + 1) * state.interval;
+      var nextH = Math.min(state.h1 + state.delta * (k + 1), cap());
+      if (boundary >= tmax) {
+        path += ' L ' + x(tmax) + ' ' + y(prevH);
+        if (boundary === tmax) {
+          path += ' L ' + x(tmax) + ' ' + y(nextH);
+        }
+        break;
+      }
+      path += ' L ' + x(boundary) + ' ' + y(prevH);
+      path += ' L ' + x(boundary) + ' ' + y(nextH);
+      prevH = nextH;
+      k++;
+      if (k > 100) break;
+    }
+    parts.push('<path d="' + path + '" fill="none" stroke="var(--accent)" stroke-width="2.2"></path>');
+
+    var cx = x(state.t);
+    var cy = y(currentH);
+    parts.push('<line x1="' + cx + '" y1="' + mt + '" x2="' + cx + '" y2="' + (mt + plotH) + '" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"></line>');
+    parts.push('<circle cx="' + cx + '" cy="' + cy + '" r="4.5" fill="var(--accent)" stroke="var(--bg-surface)" stroke-width="1.5"></circle>');
+    var labelAnchor = cx > W - 150 ? 'end' : 'start';
+    var labelX = cx > W - 150 ? cx - 8 : cx + 8;
+    parts.push('<text x="' + labelX + '" y="' + Math.max(mt + 12, cy - 10) + '" text-anchor="' + labelAnchor + '" fill="var(--accent-deep)" font-weight="600">t=' + state.t + ' · h=' + currentH + '</text>');
+
+    svg.innerHTML = parts.join('');
+  }
+
+  var envButtons = document.querySelectorAll('#sched-envs .rule-btn');
+  envButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      envButtons.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      state.env = btn.dataset.env;
+      render();
+    });
+  });
+
+  var tSlider = document.getElementById('sched-t');
+  var dSlider = document.getElementById('sched-d');
+  var sSlider = document.getElementById('sched-s');
+  var h1Slider = document.getElementById('sched-h1');
+  var tVal = document.getElementById('sched-t-v');
+  var dVal = document.getElementById('sched-d-v');
+  var sVal = document.getElementById('sched-s-v');
+  var h1Val = document.getElementById('sched-h1-v');
+  if (!tSlider || !dSlider || !sSlider || !h1Slider) return;
+
+  tSlider.addEventListener('input', function (e) {
+    state.t = parseInt(e.target.value, 10) || 0;
+    if (tVal) tVal.textContent = String(state.t);
+    render();
+  });
+  dSlider.addEventListener('input', function (e) {
+    state.interval = parseInt(e.target.value, 10) || 100;
+    if (dVal) dVal.textContent = String(state.interval);
+    render();
+  });
+  sSlider.addEventListener('input', function (e) {
+    state.delta = parseInt(e.target.value, 10) || 1;
+    if (sVal) sVal.textContent = String(state.delta);
+    render();
+  });
+  h1Slider.addEventListener('input', function (e) {
+    state.h1 = parseInt(e.target.value, 10) || 1;
+    if (h1Val) h1Val.textContent = String(state.h1);
+    render();
+  });
+
+  render();
+})();
+
+/* ============================================================
+   2) 五个 benchmark 的 Overall 排序图
+   数值逐字取自 Table 1–5 的 Overall 列
+   ============================================================ */
+(function () {
+  var BENCH = {
+    webarena: {
+      name: 'WebArena', table: 'Table 1',
+      rows: [
+        ['OpenAI o4-mini', 36.00, 'closed'],
+        ['OpenAI o3', 34.00, 'closed'],
+        ['Gemini-2.5-Pro', 28.00, 'closed'],
+        ['ScalingInter-7B', 26.00, 'method'],
+        ['AgentGym-RL-7B', 22.00, 'framework'],
+        ['GPT-4o', 16.00, 'closed'],
+        ['Llama-3.1-70B-Instruct', 16.00, 'open'],
+        ['Qwen2.5-7B-Instruct', 9.76, 'open']
+      ],
+      desc: 'ScalingInter-7B 26.00；该表最高是 OpenAI o4-mini 36.00，o3 为 34.00。'
+    },
+    deep: {
+      name: 'Deep Search', table: 'Table 2',
+      rows: [
+        ['OpenAI o3', 49.50, 'closed'],
+        ['OpenAI o4-mini', 42.50, 'closed'],
+        ['DeepSeek-R1-0528', 40.25, 'open'],
+        ['ScalingInter-7B', 38.25, 'method'],
+        ['Gemini-2.5-Pro', 36.50, 'closed'],
+        ['AgentGym-RL-7B', 34.00, 'framework'],
+        ['GPT-4o', 26.75, 'closed'],
+        ['Llama-3.1-70B-Instruct', 22.00, 'open'],
+        ['Qwen2.5-7B-Instruct', 18.75, 'open']
+      ],
+      desc: 'ScalingInter-7B 38.25；该表最高是 OpenAI o3 49.50，DeepSeek-R1-0528 为 40.25。'
+    },
+    textcraft: {
+      name: 'TextCraft', table: 'Table 3',
+      rows: [
+        ['Gemini-2.5-Pro', 94.00, 'closed'],
+        ['OpenAI o3', 93.00, 'closed'],
+        ['Llama-3.1-70B-Instruct', 93.00, 'open'],
+        ['ScalingInter-7B', 91.00, 'method'],
+        ['AgentGym-RL-7B', 89.00, 'framework'],
+        ['GPT-4o', 83.00, 'closed'],
+        ['Qwen2.5-7B-Instruct', 42.00, 'open']
+      ],
+      desc: 'ScalingInter-7B 91.00；该表最高是 Gemini-2.5-Pro 94.00，o3 为 93.00。'
+    },
+    babyai: {
+      name: 'BabyAI', table: 'Table 4',
+      rows: [
+        ['ScalingInter-7B', 96.67, 'method'],
+        ['OpenAI o3', 94.44, 'closed'],
+        ['AgentGym-RL-7B', 92.22, 'framework'],
+        ['OpenAI o4-mini', 92.22, 'closed'],
+        ['Gemini-2.5-Pro', 87.77, 'closed'],
+        ['GPT-4o', 86.67, 'closed'],
+        ['Llama-3.1-70B-Instruct', 86.67, 'open'],
+        ['Qwen2.5-7B-Instruct', 66.67, 'open']
+      ],
+      desc: 'ScalingInter-7B 96.67，排在该表第一；o3 94.44，GPT-4o 86.67。'
+    },
+    sciworld: {
+      name: 'SciWorld', table: 'Table 5',
+      rows: [
+        ['ScalingInter-7B', 57.00, 'method'],
+        ['AgentGym-RL-7B', 50.50, 'framework'],
+        ['OpenAI o3', 41.50, 'closed'],
+        ['OpenAI o4-mini', 29.50, 'closed'],
+        ['Llama-3.1-70B-Instruct', 25.00, 'open'],
+        ['GPT-4o', 21.00, 'closed'],
+        ['Gemini-2.5-Pro', 12.50, 'closed'],
+        ['Qwen2.5-7B-Instruct', 1.50, 'open']
+      ],
+      desc: 'ScalingInter-7B 57.00，排在该表第一；o3 41.50，GPT-4o 21.00。'
+    }
+  };
+
+  var chart = document.getElementById('bench-chart');
+  var readout = document.getElementById('bench-readout');
+  var desc = document.getElementById('bench-desc');
+  if (!chart || !readout || !desc) return;
+
+  function colorFor(group) {
+    if (group === 'method') return 'var(--accent)';
+    if (group === 'framework') return 'var(--accent-soft)';
+    if (group === 'closed') return 'var(--c1)';
+    return 'var(--c2)';
+  }
+  function nameClass(group) {
+    if (group === 'method') return 'ag-hbname method';
+    if (group === 'framework') return 'ag-hbname framework';
+    return 'ag-hbname';
+  }
+
+  function render(key) {
+    var cfg = BENCH[key];
+    if (!cfg) return;
+    readout.dataset.src = cfg.table;
+    readout.querySelector('.r-head').textContent = cfg.name + ' · ' + cfg.table;
+    desc.textContent = cfg.desc;
+
+    chart.innerHTML = '';
+    cfg.rows.forEach(function (row) {
+      var name = row[0], val = row[1], group = row[2];
+      var w = Math.max(0, Math.min(100, val));
+      var line = document.createElement('div');
+      line.className = 'ag-hbrow';
+
+      var n = document.createElement('div');
+      n.className = nameClass(group);
+      n.textContent = name;
+
+      var track = document.createElement('div');
+      track.className = 'ag-hbtrack';
+      var fill = document.createElement('i');
+      fill.className = 'ag-hbfill';
+      fill.style.width = w + '%';
+      fill.style.background = colorFor(group);
+      track.appendChild(fill);
+
+      var num = document.createElement('div');
+      num.className = 'ag-hbnum';
+      num.textContent = val.toFixed(2);
+
+      line.appendChild(n);
+      line.appendChild(track);
+      line.appendChild(num);
+      chart.appendChild(line);
+    });
+  }
+
+  var tabs = document.querySelectorAll('#bench-tabs .tab');
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      render(btn.dataset.bench);
+    });
+  });
+
+  render('webarena');
+})();
+</script>
+</body>
+</html>

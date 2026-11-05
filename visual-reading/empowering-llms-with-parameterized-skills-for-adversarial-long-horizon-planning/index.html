@@ -1,0 +1,639 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 78 | Table IV + Appendix VII-A | 6+4+4+4+4+7+49 |
+| 27 | Table III | 5+5+3+8+6 |
+| 4992 | Appendix VII-A + §V-B | 78*8*8 |
+| 0.4 | Figure 7 | 0.2-(-0.2) |
+| 1.4 | Figure 7 | -0.2-(-1.6) |
+| 16 | §V-D | 4*4 |
+| 70 | §V-E | 7*2*5 |
+| 24 | Table II | 49-25 |
+| 18.6 | Table II | 84.3-65.7 |
+| 10 | §IV | 1000/100 |
+| 100 | §IV | 1000/10 |
+| 40 | §IV | 2000/50 |
+| 50 | §IV | 2000/40 |
+| 22.1 | Table II | 18.6/84.3*100 |
+| 42.2 | Table II | 0.98/2.32*100 |
+| 4 | Figure 7 | 5-1 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PLAP · 让 LLM 在技能层规划，把落地交给执行器</title>
+<meta name="description" content="PLAP 在 LLM 与 MicroRTS 底层动作之间插入参数化技能：LLM 每 100 步生成一次技能计划，预定义执行器把技能翻译成动作。论文在 5 个脚本基线上平均分 0.91，GPT-4o 在 8 个 LLM 循环赛中胜率 84.3%。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共组件样式来自 base.css */
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+.flow-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.flow-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.flow-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.flow-pa{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.flow-line{stroke:var(--border-strong);stroke-width:1.5;fill:none}
+.flow-arrow{fill:var(--border-strong)}
+.flow-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:14px;font-weight:600;fill:var(--text)}
+.flow-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:10.5px;fill:var(--text-muted)}
+.flow-note{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-soft)}
+.flow-mobile{display:none;margin:18px 0}
+.fm-step{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin:8px 0;font-size:13.5px;line-height:1.65}
+.fm-step b{font-family:"JetBrains Mono",monospace;color:var(--accent);margin-right:6px}
+.lb-chart{display:flex;flex-direction:column;gap:8px;margin:16px 0}
+.lb-row{display:grid;grid-template-columns:112px 1fr 64px;gap:10px;align-items:center}
+.lb-name{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-muted)}
+.lb-track{height:14px;background:var(--bg-soft);border-radius:100px;overflow:hidden}
+.lb-track i{display:block;height:100%;background:var(--c1);border-radius:100px;transition:width .4s ease}
+.lb-row.top .lb-track i{background:var(--accent)}
+.lb-val{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-soft);text-align:right}
+.tbl-note{font-size:12.5px;color:var(--text-soft);margin:-6px 0 18px;line-height:1.7}
+footer .errata{margin-top:18px;font-size:12.8px;line-height:1.8;color:var(--text-soft)}
+footer .errata ul{margin:8px 0 0;padding-left:18px}
+footer .errata li{margin-bottom:6px}
+@media(max-width:640px){
+  .flow-svg{display:none}
+  .flow-mobile{display:block}
+  .lb-row{grid-template-columns:92px 1fr 54px;gap:6px}
+  .lb-name{font-size:10.5px}
+  .lb-val{font-size:10.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">PLAP</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">怎么算</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM Agent · IJCNN 2025 · arXiv 2509.13127v1</span>
+  <h1>PLAP：让 LLM 在「技能」层规划，把落地交给执行器</h1>
+  <p class="hero-sub">
+    LLM 直接输出底层动作，动作空间大、非法动作多；只输出高层任务，又要靠专家规则或额外训练把它翻译成动作。
+    PLAP 在两者之间插入<strong>参数化技能</strong>：LLM 只负责选技能和参数，预定义的执行器负责把技能拆成可执行动作。
+    论文在 MicroRTS 上验证，<strong>不做额外训练</strong>，每 <span class="mono" data-src="§IV">k=100</span> 个游戏步才调用一次 LLM。
+  </p>
+  <div class="meta">
+    <span>Sijia Cui, Shuai Xu, Aiyao He, Yanna Wang, Bo Xu · CAS 自动化所 / UCAS / 南京AI研究院 / NUIST</span>
+    <a href="https://arxiv.org/abs/2509.13127v1" target="_blank" rel="noopener">arXiv 2509.13127v1 ↗</a>
+    <a href="https://github.com/AI-Research-TeamX/PLAP" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    论文把 LLM 智能体的接地问题拆成两层：高层用语言规划，低层用环境动作执行。直接让 LLM 输出低层动作，空间大且容易出非法动作；让 LLM 输出高层任务，又要靠专家经验或额外训练把任务翻译成动作。PLAP 选中间层：<strong>参数化技能</strong>。
+  </p>
+  <p>
+    技能库给出 <span class="mono" data-src="Table I">5</span> 个技能（Table I），每个技能有名字和参数，内部对应若干原子动作。LLM 在提示里看到规则、技能表、示例、tips 和当前战场文本，输出 <code>[Skill](params)</code> 形式的计划；解析器丢掉非法行。执行器每步检查技能是否可用（<code>I<sub>i</sub></code>），调用预定义函数 <code>π<sub>i</sub></code> 取当前状态下的第一个动作，再拼成动作向量；技能终止就删除。每 <span class="mono" data-src="§IV">k=100</span> 步重新规划。
+  </p>
+  <p>
+    在 5 个脚本基线上，<span class="mono" data-src="§V-D">16</span> 个 PLAP 设置的平均分是 <span class="mono" data-src="§V-D1">0.91</span>，高于 RandomBiasedAI、LightRush、NaiveMCTS；Qwen-fs-tip 与 DeepSeek-fs-tip 超过 CoacAI。另一张表是 <span class="mono" data-src="Table II">8</span> 个 LLM 的循环赛：GPT-4o <span class="mono" data-src="Table II">49</span> 分、<span class="mono" data-src="Table II">84.3%</span> 胜率，Gemini 1.5 Flash <span class="mono" data-src="Table II">25</span> 分、<span class="mono" data-src="Table II">65.7%</span>。注意 84.3% 是 LLM 之间的胜率，不是对脚本基线的胜率。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table II">84.3<small>%</small></div>
+      <div class="k">GPT-4o 的循环赛胜率<br>70 场零样本 PLAP；Gemini 65.7%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§V-D1">0.91</div>
+      <div class="k">16 个设置对 5 个脚本基线的平均分<br>WorkerRush 1.8 / NaiveMCTS 0.2</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§IV">100<small>步</small></div>
+      <div class="k">规划间隔 k<br>n 步游戏只需 n/k 次 LLM 调用</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 1. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>动作空间太大，LLM 直接落地会踩空</h2></div>
+  <p class="sec-sub">先看 MicroRTS 的观测与动作编码，才能理解为什么需要中间层。</p>
+
+  <p>MicroRTS 是实时战略游戏：红蓝双方在对称地图上采集资源、建造单位、击败对手。一局有成千上万个游戏步，每一步都要做实时决策（§IV）。论文主要用 <span class="mono" data-src="§V-B">basesWorkers8x8</span> 地图，双方各从一个基地和一个工人开始。</p>
+
+  <p>环境给智能体的观测是一个 <code>(h, w, n<sub>f</sub>)</code> 张量，<span class="mono" data-src="Table III">n<sub>f</sub>=27</span> 个特征平面，由多组 one-hot 特征拼接而成（Table III）。要让 LLM 读，还得把这 27 个平面转成结构化文本（Fig.5）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table III 转录 · MicroRTS 观测的 27 个特征平面（5+5+3+8+6）。</caption>
+      <thead><tr><th>特征</th><th>平面数</th><th>取值</th></tr></thead>
+      <tbody>
+        <tr><td>Hit Points</td><td class="num">5</td><td>0, 1, 2, 3, ≥4</td></tr>
+        <tr><td>Resources</td><td class="num">5</td><td>0, 1, 2, 3, ≥4</td></tr>
+        <tr><td>Owner</td><td class="num">3</td><td>player 1, -, player 2</td></tr>
+        <tr><td>Unit Types</td><td class="num">8</td><td>-, resource, base, barrack, worker, light, heavy, ranged</td></tr>
+        <tr><td>Current Action</td><td class="num">6</td><td>-, move, harvest, return, produce, attack</td></tr>
+        <tr><td><strong>合计</strong></td><td class="num"><strong>27</strong></td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>动作侧更紧。MicroRTS 的每个动作编码长度是 <span class="mono" data-src="Appendix VII-A">78</span>，整个动作向量是 <span class="mono" data-src="Appendix VII-A">78 × w·h</span> 维。Table IV 把 78 拆成 7 段 one-hot：动作类型 6、移动方向 4、采集方向 4、返回方向 4、生产方向 4、生产类型 7、相对攻击位置 49（<code>a<sub>r</sub>=7</code>，<code>a<sub>r</sub><sup>2</sup>=49</code>），相加正好是 <span class="mono" data-src="Table IV + Appendix VII-A">78</span>。<span class="infer">推断</span>（由 Table IV 的各段取值范围相加得到；论文只直接给出 78 这个总长度。）</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">把两个数字放在一起</span><h4>27 个平面描述状态，78 维编码描述一个动作</h4></div>
+    <p>在 <span class="mono" data-src="§V-B">8×8</span> 地图上，动作向量长度是 <span class="mono" data-src="Appendix VII-A + §V-B">78×8×8 = 4992</span>。LLM 若直接生成底层动作，每一步都要在这个 4992 维空间里给出一个合法组合；对手一行动，上一步的组合还可能立刻失效。这就是论文说的“invalid actions + curse of dimensionality”（§I）。</p>
+  </div>
+
+  <p>另一条路是把输出空间抬到高层任务，但“高层任务 → 底层动作”的翻译本身没有解决：要么靠人写规则，要么训练一个辅助模块。问题于是变成：<strong>能不能找一个比动作抽象、又比任务具体的中间层？</strong></p>
+</section>
+
+<!-- ================= 2. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条老路：一条踩空动作，一条卡在翻译</h2></div>
+  <p class="sec-sub">论文把现有做法归成两类，各自的失败点正好相反。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Fig.1(a)</span><h4>直接生成底层动作</h4></div>
+      <p>把 LLM 的输出空间约束成环境的低层动作空间。好处是接口直接；坏处是动作空间巨大，模型容易生成无效或非法动作，论文称之为 curse of dimensionality（§I）。</p>
+      <p><strong>卡点：</strong>可靠性。每一步都要合法，长序列里错误会累积。<span class="infer">推断</span>（依据：§I 指出直接生成低层动作会遇到 invalid actions 与 curse of dimensionality；错误随序列累积是本页的延伸。）</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Fig.1(b)</span><h4>先生成高层任务</h4></div>
+      <p>把输出空间抬到高层任务或语言指南，再把任务翻译成底层动作。翻译环节通常依赖专家经验，或者额外训练一个模块。</p>
+      <p><strong>卡点：</strong>高层与低层对不齐；论文原话是 “the latter faces challenges in effectively bridging high-level planning with execution”（§I）。</p>
+    </div>
+  </div>
+
+  <p>论文在 §II 列了几种代表做法：SayCan 需要训练一个 value function 来过滤可执行动作；Plan-Seq-Learn 依赖训练好的低层控制策略；EES 需要学习一个参数选择策略来指导执行；LLaMAR 用四个 LLM 模块协作，推理时间和调用成本都高。这些方法在机器人任务上有效，但到了对抗环境，技能参数空间会动态变化（比如新造出来的兵种），再训练一个参数生成策略很难。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文的选择</span><h4>中间层：参数化技能空间</h4></div>
+    <p>Fig.1(c) 在低层动作和高层任务之间插入 parameterized skill space。每个技能是一个预定义函数，带明确参数，内部映射到一串底层动作。LLM 只在这个技能空间里规划，执行器负责把技能展开成动作。这样既不需要 LLM 直接碰 4992 维动作向量，也不需要再训练一个“任务 → 动作”的翻译器。</p>
+  </div>
+
+  <p>和 EES 的关键差别在参数由谁选：EES 学一个参数选择策略；PLAP 把技能选择和参数选择都交给 LLM（§IV-B），因此不需要额外的参数生成网络。</p>
+</section>
+
+<!-- ================= 3. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>在技能层规划：LLM 选技能和参数，执行器负责每一步</h2></div>
+  <p class="sec-sub">核心是把「做什么」和「怎么做」拆开；公式只有 active set、动作向量、终止删除三行。</p>
+
+  <p>论文沿用 parameterized action MDP（PAMDP）的设定，用一个五元组描述任务：<code>(S, U, R, T, γ)</code>。其中 <code>U</code> 是参数化技能集合。每个技能 <code>u<sub>i</sub></code> 写成四元组：</p>
+
+  <div class="eq">
+    <span class="hl-c">u<sub>i</sub> = (π<sub>i</sub>, Θ<sub>i</sub>, I<sub>i</sub>, β<sub>i</sub>)</span>
+  </div>
+  <div class="eq-cap">§III-A · π<sub>i</sub> 是低层控制策略；Θ<sub>i</sub> 是参数空间；I<sub>i</sub> 判断技能在当前状态是否可用；β<sub>i</sub> 是终止条件</div>
+
+  <p>技能库是人工设计的，论文在 MicroRTS 里放了 <span class="mono" data-src="Table I">5</span> 个技能。每个技能只需要 LLM 给出技能名和参数，内部包含哪些原子动作由执行器处理：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table I 转录 · Skill-RTS 的 5 个参数化技能；每个技能可包含一个或多个原子动作。</caption>
+      <thead><tr><th>Skill</th><th>Parameters</th><th>Atomic Actions</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Deploy Unit</td><td>unit type, deployment location</td><td>move, NOOP</td><td>Moves a unit of a specified type to a specified location.</td></tr>
+        <tr><td>Harvest Mineral</td><td>mineral location</td><td>move, harvest, return</td><td>Move to a specified location to harvest resources and return to base.</td></tr>
+        <tr><td>Build Building</td><td>building type, building location</td><td>move, produce</td><td>Build a building of the specified type at the specified location.</td></tr>
+        <tr><td>Produce Unit</td><td>unit type, produce direction</td><td>produce</td><td>Produce a specified type of unit from a specified direction.</td></tr>
+        <tr><td>Attack Enemy</td><td>unit type, enemy type</td><td>move, Attack</td><td>Command a specified type of unit to attack a specified enemy type of unit.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>LLM 的输出不是单个技能，而是一个技能计划。解析器 <code>f</code> 用正则从 <code>START OF SKILL_PLAN</code> / <code>END OF SKILL_PLAN</code> 之间提取 <code>[SKILL_NAME](PARAMETERS)</code>，格式错误、技能不存在、参数非法的行直接丢掉。剩下的 <code>c<sub>t</sub></code> 个技能组成：</p>
+
+  <div class="eq">
+    <span class="hl-c">Q<sub>t</sub> = { u<sub>1</sub>(θ<sub>1</sub>), u<sub>2</sub>(θ<sub>2</sub>), …, u<sub>c<sub>t</sub></sub>(θ<sub>c<sub>t</sub></sub>) }</span>
+  </div>
+  <div class="eq-cap">Eq.4 · 计划只在第 t 步生成；接下来的 k 步由执行器维护</div>
+
+  <p>执行器每步先筛出当前状态可用的技能：</p>
+
+  <div class="eq">
+    <span class="hl-c">Q<sub>t′</sub><sup>active</sup> = { u<sub>i</sub> ∈ Q<sub>t</sub> | I<sub>i</sub>(s<sub>t′</sub>) = 1 }</span>
+  </div>
+  <div class="eq-cap">Eq.5 · 不可用的技能不参与这一步，但不会从计划里删除</div>
+
+  <p>对每个活跃技能，执行器调用它的策略 <code>π<sub>i</sub></code>，只取当前状态下的第一个动作，再把所有活跃技能的动作拼成动作向量：</p>
+
+  <div class="eq">
+    <span class="hl-c">a<sub>t′</sub> = [ a<sup>0</sup><sub>(t′,0)</sub>, a<sup>1</sup><sub>(t′,0)</sub>, …, a<sup>c<sub>t′</sub></sup><sub>(t′,0)</sub> ]</span>
+  </div>
+  <div class="eq-cap">Eq.7 · c<sub>t′</sub> 是当前活跃技能数；动作向量里每个分量来自一个技能的第一步</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键细节</span><h4>执行器不是把技能展开成固定序列后回放</h4></div>
+    <p>论文特别说明：下一步不会直接使用上一步序列里的第二个动作 <code>a<sup>i</sup><sub>(t′,1)</sub></code>。原因有两个：技能可能在新的状态里不可用；对手行为不可预测，原来的第二个动作可能已经无效。所以每一步都重新调用 <code>π<sub>i</sub>(s<sub>t′+1</sub>, θ<sub>i</sub>)</code>，取新状态下的第一个动作（§IV-C）。</p>
+  </div>
+
+  <p>技能终止后从计划里删除：</p>
+
+  <div class="eq">
+    <span class="hl-c">Q<sub>t</sub> ← Q<sub>t</sub> \ { u<sub>i</sub> ∈ Q<sub>t</sub> | β<sub>i</sub>(s<sub>t″</sub>) = 1 }</span>
+  </div>
+  <div class="eq-cap">Eq.8 · 终止条件硬编码在技能函数里；删除后执行器继续处理剩余技能</div>
+
+  <p>这套循环把“规划”和“执行”拆成两个时间尺度：LLM 每 k 步重新看一次战场，执行器每一步都按当前状态重算动作。下一节看 k 带来的调用成本。</p>
+</section>
+
+<!-- ================= 4. 怎么算 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>不训练，只靠提示和 k 步节奏</h2></div>
+  <p class="sec-sub">PLAP 的开销主要不在执行器，而在 LLM 调用次数；k 决定调用频率。</p>
+
+  <p>论文强调 PLAP 不需要额外学习成本，也不依赖专家经验或先验知识（§I）。实验里没有训练或微调，主要超参数只有 temperature 和 max_tokens：temperature 设为 <span class="mono" data-src="§V-B">0</span>，max_tokens 设为 <span class="mono" data-src="§V-B">256</span>，规划间隔 <code>k</code> 默认 <span class="mono" data-src="§IV">100</span>。地图主要是 <span class="mono" data-src="§V-B">basesWorkers8x8</span>；论文称 prompt 的构造与具体地图无关，因此换地图可基于同一框架实现（§V-B）。</p>
+
+  <p>每次规划的 prompt 由六部分组成（Eq.1）：用户指令 <code>Inst</code>、游戏手册 <code>Manu</code>、技能描述 <code>U<sup>desc</sup></code>、few-shot 示例 <code>shots</code>、专家提示 <code>tips</code>、当前文本观察 <code>O<sub>t</sub><sup>text</sup></code>。few-shot 只用 <span class="mono" data-src="§IV-A">2</span> 个手工构造的例子；tips 可以为空，也可以放“先打敌方兵营”这类专家建议。</p>
+
+  <div class="eq">
+    D<sub>t</sub> ← Construction( Inst, Manu, U<sup>desc</sup>, shots, tips, O<sub>t</sub><sup>text</sup> )
+  </div>
+  <div class="eq-cap">Eq.1 · prompt 的动态部分是当前战场观察；技能表、手册、示例、tips 相对固定</div>
+
+  <p>如果一局需要 <code>n</code> 个游戏步，规划每 <code>k</code> 步发生一次，LLM 只需被调用 <code>n/k</code> 次（§IV）。执行器本身是预定义函数，不调用 LLM。下面把 n 和 k 做成可调的，看调用次数怎么变。</p>
+
+  <div class="sim" id="cost-sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>游戏步数 n <span class="v" id="n-v">1000</span></label>
+        <input type="range" id="n-range" min="100" max="5000" step="100" value="1000">
+      </div>
+      <div class="ctrl">
+        <label>规划间隔 k <span class="v" id="k-v">100</span></label>
+        <input type="range" id="k-range" min="20" max="500" step="10" value="100">
+      </div>
+    </div>
+    <div class="readout" id="cost-readout" data-src="§IV">
+      <div class="r-head">LLM 调用次数</div>
+      <div id="cost-msg">n=1000，k=100 → <strong>10 次</strong> LLM 调用；逐 step 调用需要 1000 次，<strong>少 100.0×</strong>。</div>
+    </div>
+    <div class="actions">
+      <button class="act ghost" id="cost-reset">重置为论文默认</button>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两组 n / k<span class="sum-sub">调用次数 = ceil(n/k)</span></summary>
+    <div class="details-body">
+      <p>组 1：<code>n=1000, k=100</code> → <code>ceil(1000/100)=10</code> 次；逐 step 调用 1000 次，<code>1000/10=100</code> 倍。</p>
+      <p>组 2：<code>n=2000, k=50</code> → <code>ceil(2000/50)=40</code> 次；逐 step 调用 2000 次，<code>2000/40=50</code> 倍。</p>
+      <p>两组都能整除，所以 ceil 不改变结果；滑块取不能整除的值时，JS 用 <code>Math.ceil</code> 向上取整，读数会略高于 n/k。论文没有报告端到端延迟或 API 成本，这里只比较调用次数，不比较实际耗时。</p>
+    </div>
+  </details>
+
+  <p>这也是 PLAP 和 LLaMAR 那类多模块架构的差别：LLaMAR 要四个 LLM 模块协作，PLAP 每次规划只调用一个 LLM，靠执行器承担高频决策（§II）。代价是执行器的技能函数要人工写；论文把这一点列进了限制。</p>
+</section>
+
+<!-- ================= 5. 架构 / 流程 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次规划管 k 步，执行器每步重算动作</h2></div>
+  <p class="sec-sub">看图：LLM 只在 t=0, k, 2k... 介入；中间每一步由技能函数闭环执行。</p>
+
+  <figure class="flow-svg">
+    <svg viewBox="0 0 880 390" role="img" aria-label="PLAP 流程：环境观察进入 prompt，LLM 每 k 步生成技能计划，解析后交给执行器，执行器每步筛活跃技能并生成动作向量；终止条件成立后从计划删除该技能">
+      <defs>
+        <marker id="plap-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" class="flow-arrow"></path>
+        </marker>
+      </defs>
+
+      <!-- Row 1 -->
+      <rect class="flow-c1" x="20" y="20" width="180" height="76" rx="10"></rect>
+      <text class="flow-t" x="110" y="50" text-anchor="middle">MicroRTS 环境</text>
+      <text class="flow-s" x="110" y="70" text-anchor="middle">8×8 地图 · 27 特征平面</text>
+
+      <rect class="flow-c1" x="240" y="20" width="170" height="76" rx="10"></rect>
+      <text class="flow-t" x="325" y="50" text-anchor="middle">文本观察 O_t</text>
+      <text class="flow-s" x="325" y="70" text-anchor="middle">结构化战场描述</text>
+
+      <rect class="flow-c2" x="450" y="20" width="200" height="76" rx="10"></rect>
+      <text class="flow-t" x="550" y="50" text-anchor="middle">Prompt D_t</text>
+      <text class="flow-s" x="550" y="70" text-anchor="middle">指令 · 手册 · 技能 · 示例 · tips</text>
+
+      <rect class="flow-pa" x="690" y="20" width="170" height="76" rx="10"></rect>
+      <text class="flow-t" x="775" y="50" text-anchor="middle">LLM Skill Planner</text>
+      <text class="flow-s" x="775" y="70" text-anchor="middle">每 k=100 步调用一次</text>
+
+      <!-- Row 2 -->
+      <rect class="flow-c2" x="690" y="150" width="170" height="76" rx="10"></rect>
+      <text class="flow-t" x="775" y="180" text-anchor="middle">Parser / 校验</text>
+      <text class="flow-s" x="775" y="200" text-anchor="middle">正则提取 · 丢弃非法行</text>
+
+      <rect class="flow-c2" x="450" y="150" width="200" height="76" rx="10"></rect>
+      <text class="flow-t" x="550" y="180" text-anchor="middle">技能计划 Q_t</text>
+      <text class="flow-s" x="550" y="200" text-anchor="middle">{u1(θ1), …, uc(θc)}</text>
+
+      <rect class="flow-pa" x="240" y="150" width="170" height="76" rx="10"></rect>
+      <text class="flow-t" x="325" y="180" text-anchor="middle">Skill Executor</text>
+      <text class="flow-s" x="325" y="200" text-anchor="middle">每步：I_i(s)=1 → π_i → 首个动作</text>
+
+      <rect class="flow-box" x="20" y="150" width="180" height="76" rx="10"></rect>
+      <text class="flow-t" x="110" y="180" text-anchor="middle">动作向量 a_t</text>
+      <text class="flow-s" x="110" y="200" text-anchor="middle">78 × w·h 维</text>
+
+      <!-- Row 3 -->
+      <rect class="flow-c1" x="20" y="280" width="180" height="76" rx="10"></rect>
+      <text class="flow-t" x="110" y="310" text-anchor="middle">Env.step</text>
+      <text class="flow-s" x="110" y="330" text-anchor="middle">执行 → 新状态 s_t+1</text>
+
+      <rect class="flow-box" x="450" y="280" width="200" height="76" rx="10"></rect>
+      <text class="flow-t" x="550" y="310" text-anchor="middle">终止删除 β_i</text>
+      <text class="flow-s" x="550" y="330" text-anchor="middle">β_i(s)=1 → 从 Q_t 删除</text>
+
+      <!-- Arrows -->
+      <line class="flow-line" x1="200" y1="58" x2="240" y2="58" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="410" y1="58" x2="450" y2="58" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="650" y1="58" x2="690" y2="58" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="775" y1="96" x2="775" y2="150" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="690" y1="188" x2="650" y2="188" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="450" y1="188" x2="410" y2="188" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="240" y1="188" x2="200" y2="188" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="110" y1="226" x2="110" y2="280" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="200" y1="318" x2="450" y2="318" marker-end="url(#plap-arrow)"></line>
+      <line class="flow-line" x1="550" y1="280" x2="550" y2="226" marker-end="url(#plap-arrow)"></line>
+
+      <!-- Feedback loop: new state back to environment -->
+      <polyline class="flow-line" points="20,318 8,318 8,58 20,58" marker-end="url(#plap-arrow)"></polyline>
+      <text class="flow-note" x="30" y="252" text-anchor="start">s_t 每步回传</text>
+
+      <text class="flow-note" x="690" y="128" text-anchor="start">每 k 步重新规划</text>
+      <text class="flow-note" x="240" y="252" text-anchor="start">每步执行，不等待 LLM</text>
+      <text class="flow-note" x="560" y="268" text-anchor="start">执行后更新 Q_t</text>
+    </svg>
+    <figcaption>
+      依据 Fig.2 与 Algorithm 1 重绘。覆盖：规划、解析、执行、终止删除四条主路径；未覆盖：prompt 的具体文本、技能函数内部实现、MicroRTS 渲染。图中 <code>I_i(s)=1</code> 表示技能在当前状态可用，<code>π_i</code> 只取第一个动作；<code>β_i(s)=1</code> 表示技能终止，对应技能从 <code>Q_t</code> 删除。
+    </figcaption>
+  </figure>
+
+  <div class="flow-mobile">
+    <div class="fm-step"><b>1</b><strong>环境 → 文本观察</strong><br>MicroRTS 的 27 个特征平面被转成结构化文本。</div>
+    <div class="fm-step"><b>2</b><strong>Prompt → LLM Planner</strong><br>每 k=100 步构造一次 prompt，LLM 输出技能计划。</div>
+    <div class="fm-step"><b>3</b><strong>Parser / 校验</strong><br>正则提取技能与参数，非法行丢弃，得到 Q_t。</div>
+    <div class="fm-step"><b>4</b><strong>Skill Executor</strong><br>每步筛出 I_i(s)=1 的技能，调用 π_i 取第一个动作。</div>
+    <div class="fm-step"><b>5</b><strong>动作向量 → Env.step</strong><br>拼成动作向量执行；新状态回传，进入下一步。</div>
+    <div class="fm-step"><b>6</b><strong>β_i 终止删除</strong><br>终止条件成立后，从 Q_t 删除该技能。</div>
+  </div>
+
+  <p>Algorithm 1 的循环可以压成三行：</p>
+  <ul>
+    <li><strong>t % k == 0：</strong>构造 <code>D<sub>t</sub></code>，调用 LLM，解析出 <code>Q<sub>t</sub></code>。</li>
+    <li><strong>每一步：</strong>按 <code>I<sub>i</sub>(s<sub>t</sub>)</code> 求活跃技能集，调用各自的 <code>π<sub>i</sub></code>，取第一个动作，拼成 <code>a<sub>t</sub></code>。</li>
+    <li><strong>执行后：</strong><code>Env.step</code> 返回新状态；按 <code>β<sub>i</sub></code> 删除已终止技能；<code>t ← t+1</code>。</li>
+  </ul>
+</section>
+
+<!-- ================= 6. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>平均分高于多数脚本 AI，84.3% 是另一场比赛</h2></div>
+  <p class="sec-sub">把 Fig.7 与 Table II 分开看：Fig.7 是对 5 个脚本基线，Table II 是 8 个 LLM 互相循环赛。</p>
+
+  <p>先看对脚本基线。论文实现了 4 种提示变体（zero-shot、zero-shot + tips、few-shot、few-shot + tips），在 Qwen2-72B、DeepSeek V2.5、GPT-4o mini、GPT-4o 四个 LLM 上跑（Fig.7 横轴），共 <span class="mono" data-src="§V-D">16</span> 个设置；每个设置与 5 个基线对战，按 +1 胜、0 平、−1 负算平均分。全部 16 个设置的平均分是 <span class="mono" data-src="§V-D1">0.91</span>，落在 WorkerRush 的 <span class="mono" data-src="§V-D1">1.8</span> 和 NaiveMCTS 的 <span class="mono" data-src="§V-D1">0.2</span> 之间。论文据此说，PLAP 在平均分上优于 RandomBiasedAI、LightRush、NaiveMCTS 三个基线（原文用 “completely superior”）；部分变体（DeepSeek-fs、GPT-4o-mini-fs、GPT-4o-mini-fs-tip、GPT-4o-zs-tip）能超过 WorkerRush；Qwen-fs-tip 和 DeepSeek-fs-tip 超过最强的脚本 AI CoacAI（§V-D1）。Fig.7 中 Qwen-fs-tip 柱为 <span class="mono" data-src="Figure 7">4.6</span>，CoacAI 基线虚线为 <span class="mono" data-src="Figure 7">4.0</span>；本页只转录与正文结论直接相关的点值，其余未逐点转录。</p>
+
+  <p>再看 LLM 循环赛。8 个模型都用零样本 PLAP，每个模型同时当红方和蓝方，与另外 7 个模型各打 5 局，所以每个模型共 <span class="mono" data-src="§V-E">70</span> 场（7 个对手 × 红蓝双方 × 5 局）。Table II 按 Scores 排名：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table II 转录 · Skill-RTS 排行榜。8 个 LLM 用零样本 PLAP 互相循环赛；每个模型 70 场（7 个对手 × 红蓝双方 × 5 局），Scores 为总分，WR 为胜率。原表加粗最优；下划线表示次优与第三优两项（原文：“underlined values represent the two next-best results”），本页只标出 GPT-4o 行。</caption>
+      <thead>
+        <tr><th>Model</th><th>Scores</th><th>WR</th><th>RHR</th><th>RUR</th><th>UPR</th><th>CER</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>GPT-4o</td><td class="num">49</td><td class="num">84.3%</td><td class="num">2.32</td><td class="num">2.34</td><td class="num">1.61</td><td class="num">1.63</td></tr>
+        <tr><td>Gemini 1.5 Flash</td><td class="num">25</td><td class="num">65.7%</td><td class="num">1.93</td><td class="num">1.57</td><td class="num">1.57</td><td class="num">1.22</td></tr>
+        <tr><td>GPT-3.5 Turbo</td><td class="num">13</td><td class="num">52.9%</td><td class="num">1.13</td><td class="num">1.38</td><td class="num">1.32</td><td class="num">0.95</td></tr>
+        <tr><td>GPT-4o mini</td><td class="num">-4</td><td class="num">40.0%</td><td class="num">1.08</td><td class="num">1.27</td><td class="num">1.22</td><td class="num">0.81</td></tr>
+        <tr><td>Qwen2-72B-Instruct</td><td class="num">-15</td><td class="num">35.7%</td><td class="num">1.61</td><td class="num">1.38</td><td class="num">0.90</td><td class="num">1.26</td></tr>
+        <tr><td>Claude 3.5 Sonnet</td><td class="num">-18</td><td class="num">28.6%</td><td class="num">1.56</td><td class="num">1.35</td><td class="num">1.29</td><td class="num">1.14</td></tr>
+        <tr><td>Claude 3 Haiku</td><td class="num">-25</td><td class="num">20.0%</td><td class="num">0.98</td><td class="num">1.23</td><td class="num">1.20</td><td class="num">0.89</td></tr>
+        <tr><td>DeepSeek V2.5</td><td class="num">-25</td><td class="num">18.6%</td><td class="num">0.98</td><td class="num">1.09</td><td class="num">0.83</td><td class="num">0.70</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>GPT-4o 以 <span class="mono" data-src="Table II">49</span> 分、<span class="mono" data-src="Table II">84.3%</span> 胜率排第一；Gemini 1.5 Flash 以 <span class="mono" data-src="Table II">25</span> 分、<span class="mono" data-src="Table II">65.7%</span> 排第二。两者分差 <span class="mono" data-src="Table II">24</span> 分（49 − 25），胜率差 <span class="mono" data-src="Table II">18.6</span> 个百分点（84.3 − 65.7）。论文还指出不同模型有不同强项：GPT-3.5 Turbo 擅长高效花费资源和快速产兵，Qwen2-72B 在资源采集和战斗上更强（§V-E）。</p>
+
+  <p>提示变体的结果不是单调的。对 Qwen2-72B、DeepSeek V2.5、GPT-4o mini 三个模型，加 2 个 few-shot 例子平均提高约 <span class="mono" data-src="§V-D2">3.8</span> 分；但 §V-D2 称 GPT-4o 反而下降：few-shot 比 zero-shot 低 <span class="mono" data-src="§V-D2">1.4</span> 分，few-shot + tips 低 <span class="mono" data-src="§V-D2">2.8</span> 分。Fig.7 给出的 GPT-4o 点值是：zero-shot <span class="mono" data-src="Figure 7">-0.2</span>、few-shot <span class="mono" data-src="Figure 7">-1.6</span>、few-shot + tips <span class="mono" data-src="Figure 7">0.2</span>。其中 few-shot 从 -0.2 降到 -1.6，低 <span class="mono" data-src="Figure 7">1.4</span> 分，与 §V-D2 相同；但 few-shot + tips 比 zero-shot 高 <span class="mono" data-src="Figure 7">0.4</span> 分（0.2 − (-0.2)），与 §V-D2 的“低 2.8 分”不一致，原文未说明以哪个为准。论文对 GPT-4o 的解释是它更强，清晰完整的指令已经够用，额外例子可能反而限制它（§V-D2）。专家 tips 则在 zero-shot 和 few-shot 下都带来稳定提升（§V-D3）。但 Fig.7 中 GPT-4o-mini 的 few-shot 为 <span class="mono" data-src="Figure 7">3.0</span>、few-shot + tips 也为 <span class="mono" data-src="Figure 7">3.0</span>，未提升（§V-D3 的 consistent improvements 未覆盖这一例外）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉的对照</span><h4>论文用 QA 对照支持多数模型对 MicroRTS 缺乏内部知识；‘收益不是来自背攻略’是本页的推断 <span class="infer">推断</span></h4></div>
+    <p>论文用 <span class="mono" data-src="Appendix VII-B">5</span> 道 MicroRTS 题和 <span class="mono" data-src="Appendix VII-B">5</span> 道 StarCraft II 题测了 8 个 LLM 的领域知识。MicroRTS 的平均准确率是 <span class="mono" data-src="§V-C">0.15%</span>，StarCraft II 最高到 <span class="mono" data-src="§V-C">80%</span>。只有两个模型在 MicroRTS 上非零，其中 Claude 3.5 Sonnet 是 <span class="mono" data-src="§V-C">100%</span>；论文认为这提示 Sonnet 的训练数据里包含题目来源。作者用这组对照支持“多数 LLM 对 Skill-RTS 没有内部知识”的判断（§V-C）。</p>
+  </div>
+
+  <p>切换下面的指标，可以看 Table II 里 8 个模型在五项指标上的相对位置。柱长按当前指标的最大值归一化，跨指标不可比。</p>
+
+  <div class="sim" id="lb-sim">
+    <div class="tabs" id="lb-tabs">
+      <button class="tab active" data-metric="WR">WR 胜率</button>
+      <button class="tab" data-metric="RHR">RHR 采集</button>
+      <button class="tab" data-metric="RUR">RUR 利用</button>
+      <button class="tab" data-metric="UPR">UPR 产兵</button>
+      <button class="tab" data-metric="CER">CER 战斗</button>
+    </div>
+    <div class="lb-chart" id="lb-chart"></div>
+    <div class="readout" id="lb-readout" data-src="Table II">
+      <div class="r-head">当前指标</div>
+      <div id="lb-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两根柱子的相对高度<span class="sum-sub">柱高 = 值 / 该指标最大值 × 100%</span></summary>
+    <div class="details-body">
+      <p>WR 指标：最大 84.3%（GPT-4o）。DeepSeek V2.5 的 18.6% → <code>18.6/84.3×100 = 22.1%</code>。</p>
+      <p>RHR 指标：最大 2.32（GPT-4o）。DeepSeek V2.5 的 0.98 → <code>0.98/2.32×100 = 42.2%</code>。</p>
+      <p>柱高只表示同一指标内的相对位置；不同指标的量纲不同，不能横向比较。图中模型名是缩写，对应 Table II 的完整名称。</p>
+    </div>
+  </details>
+
+  <p>§VI 称 zero-shot GPT-4o ‘outperforms 80% of baseline AI bots’；Fig.7 中 GPT-4o-zs=<span class="mono" data-src="Figure 7">-0.2</span>（低于 naiveMCTS 0.2、WorkerRush 1.8、CoacAI <span class="mono" data-src="Figure 7">4</span>，只高于 LightRush -2.6、RandomBiasedAI -3.4），GPT-4o-zs-tip=<span class="mono" data-src="Figure 7">3.0</span> 才在 5 个基线中胜过 <span class="mono" data-src="Figure 7">4</span> 个（低于 CoacAI <span class="mono" data-src="Figure 7">4</span>）；原文未说明 80% 指哪个 zero-shot 变体。这和循环赛的 84.3% 是两套不同的分母，不能混在一起读。</p>
+</section>
+
+<!-- ================= 7. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>技能库是人写的，对手意图没有建模</h2></div>
+  <p class="sec-sub">论文自己列了三条限制；每一条都直接决定 PLAP 能用到哪。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">限制一</span><h4>只在 MicroRTS 上验证</h4></div>
+    <p>论文原话：“PLAP has only been tested in the MicroRTS environment, lacking validation in more realistic adversarial scenarios.”（§VI）8×8 的网格游戏和真实世界的对抗场景差得远。<span class="infer">推断</span> 换到高维观察、连续动作或部分可观测环境，技能库和执行器能否直接复用，论文没有验证（依据：§VI 只列“仅在 MicroRTS 验证”这一限制，没有报告其他环境的实验）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">限制二</span><h4>技能函数是人工构造的</h4></div>
+    <p>论文原话：“The skill functions used in PLAP are manually constructed, which limits generalization across different domains.”（§VI）<span class="infer">推断</span> 技能库的粒度和覆盖范围直接决定规划空间：太粗，LLM 没有足够表达力；太细，又退回到底层动作（依据：Table I 的 5 个技能覆盖部署、采集、建造、生产、攻击五类操作；§IV-B 把技能与参数都交给 LLM 选）。论文没有给出技能库设计的系统方法，只把“用 LLM 生成技能代码”列为未来方向。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">限制三</span><h4>没有建模对手的策略意图</h4></div>
+    <p>论文原话：“PLAP currently focuses on explicit state(observation) changes in the environment and opponent, without modeling the opponent’s strategic intent. This limits its upper performance bound.”（§VI）执行器只对显式状态变化做反应；对手下一步想做什么、为什么这么做，不在模型里。论文把对手建模列为未来工作。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">本页的推断</span><h4>还有两个没被实验覆盖的口子</h4></div>
+    <p><span class="infer">推断</span> 文本化观察的可扩展性没有测。论文把 27 个特征平面转成结构化文本，在 8×8 地图上够用；但更高维的观察要压成多长的文本、会不会丢关键信息，论文没有实验（依据：§V-A 定义 Skill-RTS 的指标与 5 个技能，观察转换示例见 Fig.5，动作/观测细节见 Appendix VII-A；§V-B 主实验用 basesWorkers8x8）。</p>
+    <p><span class="infer">推断</span> 失败归因没有专门机制。Algorithm 1 在 <code>t % k == 0</code> 时重新规划，但没有“分析上一轮为什么失败”的步骤；计划失败后主要靠下一轮重新看状态（依据：Algorithm 1 的循环里没有失败归因分支）。论文提到可以接入 Reflection 等推理模块（§V-D），但那是可选扩展，不是基础循环的一部分。</p>
+    <p>论文也没有报告端到端延迟或 API 成本；k 步规划降低的是调用次数，单次 LLM 延迟仍然存在。</p>
+  </div>
+</section>
+
+<footer>
+  <div>Empowering LLMs with Parameterized Skills for Adversarial Long-Horizon Planning</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.13127v1" target="_blank" rel="noopener">arXiv 2509.13127v1</a> · IJCNN 2025 · Sijia Cui, Shuai Xu, Aiyao He, Yanna Wang, Bo Xu<br>
+    代码：<a href="https://github.com/AI-Research-TeamX/PLAP" target="_blank" rel="noopener">AI-Research-TeamX/PLAP</a><br>
+    笔记：<a href="/empowering-llms-with-parameterized-skills-for-adversarial-long-horizon-planning/">Empowering LLMs with Parameterized Skills for Adversarial Long-Horizon Planning</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改笔记原文）：</strong>
+    <ul>
+      <li>笔记称 MicroRTS 的 QA 平均准确率是 15%；原文 §V-C 写的是 <strong>0.15%</strong>，StarCraft II 为 “up to 80%”。</li>
+      <li>笔记称 StarCraft II 平均准确率 80%；原文是 “up to 80%”（最高值），不是平均值。</li>
+      <li>笔记称 PLAP 对所有基线都占优（另称“几乎所有版本……显著高于”）；原文 §V-D1 的 “completely superior” 只针对 RandomBiasedAI、LightRush、NaiveMCTS 三个基线，并说部分变体超过 WorkerRush、Qwen/DeepSeek fs-tip 超过 CoacAI。Fig.7 中多个版本为负分（如 Qwen-zs -3、DeepSeek-zs -2.6），“几乎所有版本都显著高于基线”也不成立。</li>
+      <li>笔记称执行器把技能翻译成动作序列并注入动作队列；原文 Fig.2 图注确实使用 “action queue” 措辞，但 §IV-C 强调下一步不直接复用上一步序列的第二个动作，而是按新状态重新调用 π_i 取第一个动作。</li>
+      <li>笔记称 QA 结果排除了模型背攻略的可能、确保了实验公正；原文用 “suggests” / “support the hypothesis”，并指出 Claude 3.5 Sonnet 在 MicroRTS 上 100%，作者认为其训练数据可能包含题目来源。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 规划间隔 / LLM 调用次数
+   ============================================================ */
+(function () {
+  var nRange = document.getElementById('n-range');
+  var kRange = document.getElementById('k-range');
+  var nVal = document.getElementById('n-v');
+  var kVal = document.getElementById('k-v');
+  var msg = document.getElementById('cost-msg');
+  var reset = document.getElementById('cost-reset');
+  if (!nRange || !kRange || !nVal || !kVal || !msg) return;
+
+  function update() {
+    var n = parseInt(nRange.value, 10);
+    var k = parseInt(kRange.value, 10);
+    var calls = Math.ceil(n / k);
+    var ratio = n / calls;
+    nVal.textContent = String(n);
+    kVal.textContent = String(k);
+    msg.innerHTML = 'n=' + n + '，k=' + k + ' → <strong>' + calls +
+      ' 次</strong> LLM 调用；逐 step 调用需要 ' + n +
+      ' 次，<strong>少 ' + ratio.toFixed(1) + '×</strong>。';
+  }
+
+  nRange.addEventListener('input', update);
+  kRange.addEventListener('input', update);
+  if (reset) {
+    reset.addEventListener('click', function () {
+      nRange.value = '1000';
+      kRange.value = '100';
+      update();
+    });
+  }
+  update();
+})();
+
+/* ============================================================
+   2) Table II 指标切换
+   ============================================================ */
+(function () {
+  var tabs = document.getElementById('lb-tabs');
+  var chart = document.getElementById('lb-chart');
+  var msg = document.getElementById('lb-msg');
+  if (!tabs || !chart || !msg) return;
+
+  var LB = [
+    { n: 'GPT-4o', WR: 84.3, RHR: 2.32, RUR: 2.34, UPR: 1.61, CER: 1.63 },
+    { n: 'Gemini 1.5F', WR: 65.7, RHR: 1.93, RUR: 1.57, UPR: 1.57, CER: 1.22 },
+    { n: 'GPT-3.5T', WR: 52.9, RHR: 1.13, RUR: 1.38, UPR: 1.32, CER: 0.95 },
+    { n: 'GPT-4o mini', WR: 40.0, RHR: 1.08, RUR: 1.27, UPR: 1.22, CER: 0.81 },
+    { n: 'Qwen2-72B', WR: 35.7, RHR: 1.61, RUR: 1.38, UPR: 0.90, CER: 1.26 },
+    { n: 'Claude 3.5S', WR: 28.6, RHR: 1.56, RUR: 1.35, UPR: 1.29, CER: 1.14 },
+    { n: 'Claude 3H', WR: 20.0, RHR: 0.98, RUR: 1.23, UPR: 1.20, CER: 0.89 },
+    { n: 'DeepSeek V2.5', WR: 18.6, RHR: 0.98, RUR: 1.09, UPR: 0.83, CER: 0.70 }
+  ];
+
+  var LABELS = {
+    WR: '胜率 WR',
+    RHR: '资源采集率 RHR',
+    RUR: '资源利用率 RUR',
+    UPR: '单位产出率 UPR',
+    CER: '战斗效率 CER'
+  };
+
+  function fmt(metric, value) {
+    return metric === 'WR' ? value.toFixed(1) + '%' : value.toFixed(2);
+  }
+
+  function render(metric) {
+    var max = 0;
+    var maxName = '';
+    var i;
+    for (i = 0; i < LB.length; i++) {
+      if (LB[i][metric] > max) {
+        max = LB[i][metric];
+        maxName = LB[i].n;
+      }
+    }
+
+    chart.innerHTML = '';
+    for (i = 0; i < LB.length; i++) {
+      var row = document.createElement('div');
+      row.className = 'lb-row' + (LB[i][metric] === max ? ' top' : '');
+
+      var name = document.createElement('div');
+      name.className = 'lb-name';
+      name.textContent = LB[i].n;
+
+      var track = document.createElement('div');
+      track.className = 'lb-track';
+      var fill = document.createElement('i');
+      fill.style.width = (LB[i][metric] / max * 100).toFixed(1) + '%';
+      track.appendChild(fill);
+
+      var val = document.createElement('div');
+      val.className = 'lb-val';
+      val.textContent = fmt(metric, LB[i][metric]);
+
+      row.appendChild(name);
+      row.appendChild(track);
+      row.appendChild(val);
+      chart.appendChild(row);
+    }
+
+    msg.innerHTML = '<strong>' + LABELS[metric] + '</strong>：' + maxName +
+      ' 最高（' + fmt(metric, max) + '）。柱长按该指标最大值归一化，跨指标不可比。';
+  }
+
+  var buttons = tabs.querySelectorAll('.tab');
+  buttons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      buttons.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      render(btn.dataset.metric);
+    });
+  });
+
+  render('WR');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,581 @@
+<!-- LEDGER
+| 22.37 | Table 1 | 48.08-25.71 |
+| 87.0 | Table 1 | (48.08-25.71)/25.71*100 |
+| 20.26 | Table 1 | 49.30-29.04 |
+| 69.8 | Table 1 | (49.30-29.04)/29.04*100 |
+| 7.76 | Table 1 | 48.08-40.32 |
+| 19.2 | Table 1 | (48.08-40.32)/40.32*100 |
+| 2.83 | Table 1 | 49.30-46.47 |
+| 6.1 | Table 1 | (49.30-46.47)/46.47*100 |
+| 49.04 | Table 1 | (5+42+378+90+250)/1560*100 |
+| 0.26 | Table 1 | 49.30-49.04 |
+| 6.98 | Table 2 | 47.24-40.26 |
+| 17.3 | Table 2 | (47.24-40.26)/40.26*100 |
+| 5.52 | Table 2 | 53.21-47.69 |
+| 11.6 | Table 2 | (53.21-47.69)/47.69*100 |
+| 7.43 | Table 2 | 47.69-40.26 |
+| 0.39 | Table 6 | 53.40-53.01 |
+| 0.89 | Table 6 | 53.90-53.01 |
+| 0.71 | Table 6 | 48.08-47.37 |
+| 0.20 | Table 2 + Table 6 | 53.21-53.01 |
+| 3.71 | Table 1 + Table 6 | 53.01-49.30 |
+| 2.0 | §Signal-level: Entropy-Driven Advantage (EDA) | 1/0.5 |
+| -2.0 | §Signal-level: Entropy-Driven Advantage (EDA) | -1/0.5 |
+| 0.667 | §Signal-level: Entropy-Driven Advantage (EDA) | 1/1.5 |
+| -0.667 | §Signal-level: Entropy-Driven Advantage (EDA) | -1/1.5 |
+| 83.9 | Table 1 | 40.32/48.08*100 |
+| 89.6 | Table 2 | 47.69/53.21*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EDGE-GRPO：用熵重新加权优势，用参考答案更可能补足全错组</title>
+<meta name="description" content="EDGE-GRPO 用 Guided Error Correction 对错误回答按概率重生成、注入答案或替换参考解，再用 Entropy-Driven Advantage 按样本熵缩放优势；1K 样本训练 Qwen2.5-Math-1.5B 平均 25.71→48.08，7B 29.04→49.30。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b2{background:var(--c1)}
+.cbar .fill.b3{background:var(--c2)}
+.cbar .fill.b4{background:var(--c3)}
+.cbar .num{color:var(--text-muted)}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.arrow-head{fill:var(--text-soft)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:18px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:13px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:12.5px;fill:var(--text-muted)}
+.tbl-scroll .tbl-wide{min-width:980px}
+.tbl-scroll .tbl-mid{min-width:700px}
+.tbl-center td,.tbl-center th{text-align:center}
+.model-row td{background:var(--bg-soft);font-weight:700;color:var(--text)}
+.ours td{background:var(--accent-soft)}
+@media(max-width:560px){.controls{grid-template-columns:1fr}figure{padding:14px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">EDGE-GRPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">代价</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM-RL · arXiv 2025</span>
+  <h1>EDGE-GRPO：用熵重新加权优势，用参考答案更可能补足全错组</h1>
+  <p class="hero-sub">GRPO 的组内优势在“全对”或“全错”时一起变成 0，难样本因此被浪费。EDGE-GRPO 在响应层面按概率对错误回答做引导纠错，让组里更可能出现正例；在信号层面用样本级策略熵缩放优势，让“自信地错”罚得更重、“不自信地对”奖得更轻。Qwen2.5-Math-1.5B 只用 1K 样本，五基准平均从 <span data-src="Table 1">25.71</span> 升到 <span data-src="Table 1">48.08</span>。</p>
+  <div class="meta">
+    <span>Xingjian Zhang、Siwei Wen、Wenjun Wu、Lei Huang · 北京航空航天大学</span>
+    <a href="https://arxiv.org/abs/2507.21848v1" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/ZhangXJ199/EDGE-GRPO" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>GRPO 用组内均值算优势。一个组 8 条回答如果全对或全错，奖励相同，优势全为 0，策略梯度也就为 0；难题上这种组很常见。论文的 Hard-1K 里<span data-src="§Experimental Setup">约 80%</span> 的问题在 8 次采样中全部答错。</p>
+  <p>EDGE-GRPO 分两层补信号。GEC 对每条错误回答按 0.5 / 0.25 / 0.25 的概率做“提示后重生成 / 提示并给答案 / 直接替换成参考解”，提高组里出现正例的概率；EDA 再把优势除以归一化熵：低熵（自信）放大优势绝对值，高熵（不确定）缩小。</p>
+  <p>Qwen2.5-Math-1.5B 上，Random-1K 平均 <span data-src="Table 1">25.71</span>→<span data-src="Table 1">48.08</span>；7B 上 <span data-src="Table 1">29.04</span>→<span data-src="Table 1">49.30</span>。Hard-1K 上 7B 从 <span data-src="Table 2">47.69</span> 到 <span data-src="Table 2">53.21</span>。</p>
+  <p>代价是训练数据要带参考答案：答案注入只需要最终答案，参考解替换才需要参考解；GEC 是“开卷”干预，EDA 的收益依赖组里先有非零优势。论文只验证数学推理，GEC 概率与熵缩放也没有敏感性实验。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">48.08<small>%</small></div><div class="k">Qwen2.5-Math-1.5B 在 Random-1K 上的五基准平均；Base 为 25.71%</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">49.30<small>%</small></div><div class="k">Qwen2.5-Math-7B 在 Random-1K 上的平均；Base 为 29.04%</div></div>
+    <div class="metric"><div class="v" data-src="Table 2">53.21<small>%</small></div><div class="k">7B 在 Hard-1K 上的平均；Vanilla GRPO 为 47.69%</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>全对或全错的组，优势一起归零</h2></div>
+  <p class="sec-sub">先看 GRPO 的失效点：优势是组内相对量，组内奖励没有差异时，整组都拿不到梯度。</p>
+  <p>GRPO 对每个问题采样 G 条回答，用规则 verifier 给每条回答一个奖励，再在组内标准化：</p>
+  <div class="eq">A<sub>i</sub> = ( r<sub>i</sub> − mean({r<sub>1</sub>, …, r<sub>G</sub>}) ) / std({r<sub>1</sub>, …, r<sub>G</sub>})</div>
+  <div class="eq-cap">Eq. 2：GRPO 的组内优势；r<sub>i</sub> 通常来自最终答案是否正确。</div>
+  <p>如果 8 条回答全对，r<sub>i</sub> 全相等，分子为 0；全错也一样。于是按论文口径记为 A<sub>i</sub> = 0（严格说 Eq. 2 为 0/0，实现通常加 epsilon），策略梯度没有信号。论文把这个现象叫 <strong>advantage collapse</strong>。它不是偶发：在 Hard-1K 里，<span data-src="§Experimental Setup">约 80%</span> 的问题在 8 次采样中全部答错，这些题恰好是模型最需要学习的题。</p>
+  <p>所以问题不是“奖励太稀疏”这么简单，而是<strong>组内没有对照</strong>：没有一条比组平均更好的回答，模型无法判断该往哪个方向更新。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>让模型反思收效有限，按样本看熵又常常错配</h2></div>
+  <p class="sec-sub">已有两条路线：响应层面逼模型反思，信号层面把熵/内部反馈塞进优势。论文先各做了一组量化实验，说明两条都不够。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">响应层面</span><h4>反思回答的准确率反而更低</h4></div>
+      <p>论文用 15 个反思关键词（check again、recheck、verify again 等）识别回答里是否出现自我反思。多数模型上，含反思的回答准确率明显低于整体；强制模型对错误答案反思，Figure 2 右下报告的准确率多数模型低于 5%。Table 5 按单个触发词统计，多数纠正率低于 10%，0.1 档最高为 <span data-src="Table 5">11.059%</span>（DeepSeek-R1-Distill-Qwen-7B，Hmm），全表最高为 0.6 档的 <span data-src="Table 5">12.097%</span>。DeepSeek-R1-Distill 系列相对更高，论文正文称最好的 DeepSeek-R1-Distill-Qwen-7B 也只有约 11%（Table 5、Appendix）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">信号层面</span><h4>平均熵有方向，样本级却大量错配</h4></div>
+      <p>论文定义 RCM = (Entropy<sub>Correct</sub> − Entropy<sub>Wrong</sub>) / Average Entropy。多数后训练模型的 RCM 为负（Table 3），说明正确回答平均更自信；但逐样本看，约一半错误回答的熵低于平均，近三分之一正确回答的熵高于平均（Figure 3 右）。</p>
+    </div>
+  </div>
+  <p class="eq-cap">Table 3 / Table 5 未全文转录，仅引用定性结论 / 极值（SPEC §1.3-J）。</p>
+  <p>这两组观察决定了方法：既然模型自己反思很难产生正例，就从外部给答案或参考解；既然熵的 aggregate 方向对但样本级常错，就不能全局鼓励高熵或低熵，而要<strong>按每条回答的熵相对组均值来缩放它的优势</strong>。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-mid">
+    <thead><tr><th>模型（temperature=0.1）</th><th>平均准确率</th><th>含反思回答准确率</th><th>无反思回答准确率</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen2.5-Math-1.5B</td><td class="num">25.71</td><td class="num">10.00</td><td class="num">26.01</td></tr>
+      <tr><td>Qwen2.5-Math-1.5B-Oat-Zero</td><td class="num">47.37</td><td class="num">17.86</td><td class="num">47.91</td></tr>
+      <tr><td>Qwen2.5-Math-7B</td><td class="num">29.04</td><td class="num">13.51</td><td class="num">29.42</td></tr>
+      <tr><td>Qwen2.5-Math-7B-SimpleRL</td><td class="num">47.37</td><td class="num">25.71</td><td class="num">47.87</td></tr>
+      <tr><td>DeepSeek-R1-Distill-Qwen-7B</td><td class="num">45.38</td><td class="num">56.21</td><td class="num">22.77</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 4 的节选（temperature=0.1，5 个模型）；完整表还含 0.3/0.6/1.0 与另外 4 个模型。DeepSeek-R1-Distill 是反例：它的反思准确率高于自身平均，论文归因于高质量长 CoT 蒸馏数据。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>GEC 让组里更可能出现正例，EDA 按熵放大或缩小优势</h2></div>
+  <p class="sec-sub">两个模块正交：GEC 改的是“组里有哪些回答”，EDA 改的是“已有优势值怎么缩放”。</p>
+  <h3>响应层面：Guided Error Correction</h3>
+  <p>对每条错误回答，GEC 按固定概率三选一：</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">P = 0.5</span><h4>提示后重生成</h4></div><p>追加一句反思提示（如 “Wait! Something is wrong here.”），让模型基于提示重新生成，保留自纠机会。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">P = 0.25</span><h4>提示并注入答案</h4></div><p>在提示后把最终答案直接拼进这条回答（外部注入，不再生成）；回答的其余部分仍是模型生成，正确目标已写入。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pa">P = 0.25</span><h4>参考解替换</h4></div><p>用外部参考解整体替换这条错误回答；改完之后，组里更可能出现正确样本。</p></div>
+  </div>
+  <p>关键点是 GEC 作用在<strong>每条错误回答</strong>上，而不是只在“整组全错”时启动。这样即使组里已经有一条正确回答，其余错误回答仍可能被纠正，组内正负样本的比例更高，优势更不容易塌成 0。</p>
+  <p>论文把“每个问题都有最终答案和参考解”列为整体数据条件；逐操作看，直接答案注入只需要最终答案，参考解替换才需要参考解，两者都没有时只能提示后重生成，正例不保证。GEC 是把外部监督注入 RL 组内，不是让模型凭空自纠。论文没有测试低质量或噪声参考解的影响。</p>
+
+  <h3>信号层面：Entropy-Driven Advantage</h3>
+  <p>对每条回答，先按 token 级策略分布算平均熵 P<sub>i</sub>，再除以组内平均熵：</p>
+  <div class="eq">P̂<sub>i</sub> = P<sub>i</sub> / mean({P<sub>1</sub>, …, P<sub>G</sub>})<br>Â<sub>i</sub> = A<sub>i</sub> / P̂<sub>i</sub></div>
+  <div class="eq-cap">Eq. 6–7：归一化熵 P̂<sub>i</sub> 与熵驱动优势 Â<sub>i</sub>。注意 Eq. 7 是除法，不是乘法。</div>
+  <p>P̂ &lt; 1 表示这条回答比组内平均更自信；P̂ &gt; 1 表示更不确定。除以 P̂ 后：</p>
+  <ul>
+    <li><strong>正确且自信</strong>（A &gt; 0，P̂ &lt; 1）：Â 变大，奖励被放大。</li>
+    <li><strong>错误但自信</strong>（A &lt; 0，P̂ &lt; 1）：Â 更负，惩罚被放大。</li>
+    <li><strong>正确但不自信</strong>（A &gt; 0，P̂ &gt; 1）：Â 变小，奖励被缩小，容忍探索。</li>
+    <li><strong>错误但不自信</strong>（A &lt; 0，P̂ &gt; 1）：Â 的绝对值变小，惩罚被缩小。</li>
+  </ul>
+  <p>注意 EDA 的前提是 A<sub>i</sub> 已经非零。整组全对或全错时 A<sub>i</sub> 按论文口径记为 0，除以任何 P̂ 仍是 0。GEC 对每条错误回答按概率处理：全错组是主要场景，GEC 能提高组里出现正例的概率；全对组没有错误回答可改，GEC 不执行任何操作，优势仍为 0。</p>
+
+  <div class="sim" id="eda-sim">
+    <div class="controls">
+      <div class="ctrl"><label>初始优势 A<sub>i</sub> <span class="v" id="eda-a-v">1.0</span></label><input type="range" id="eda-a" min="-2" max="2" step="0.1" value="1"></div>
+      <div class="ctrl"><label>归一化熵 P̂<sub>i</sub> <span class="v" id="eda-p-v">0.50</span></label><input type="range" id="eda-p" min="0.5" max="2" step="0.05" value="0.5"></div>
+    </div>
+    <div class="readout" data-src="§Signal-level: Entropy-Driven Advantage (EDA)">
+      <div class="r-head">熵驱动优势</div>
+      <div>Â<sub>i</sub> = A<sub>i</sub> / P̂<sub>i</sub> = <strong id="eda-out">2.000</strong></div>
+      <div id="eda-quad">正确且自信：放大奖励</div>
+    </div>
+  </div>
+  <details class="handcalc">
+    <summary>手算：四组参数 <span class="sum-sub">与滑块输出逐位一致（三位小数）</span></summary>
+    <div class="details-body">
+      <p>1）A=1.0，P̂=0.5：Â = 1.0 / 0.5 = 2.000（正确且自信，奖励放大）。</p>
+      <p>2）A=−1.0，P̂=0.5：Â = −1.0 / 0.5 = −2.000（错误但自信，惩罚放大）。</p>
+      <p>3）A=1.0，P̂=1.5：Â = 1.0 / 1.5 = 0.667（正确但不自信，奖励缩小）。</p>
+      <p>4）A=−1.0，P̂=1.5：Â = −1.0 / 1.5 = −0.667（错误但不自信，惩罚缩小）。</p>
+      <p>滑块范围 A∈[−2,2]、P̂∈[0.5,2.0]；A=0 时输出恒为 0，EDA 无法救回全对/全错组（GEC 只处理错误回答，全对组仍为 0）。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>1K 样本、8 张 A100、一个 epoch：便宜在数据，不便宜在参考答案</h2></div>
+  <p class="sec-sub">论文没有报告 GPU 小时或 token 成本；能确认的是训练配置、数据规模和 GEC 对数据的额外要求。</p>
+  <p>训练在 8 张 NVIDIA A100-40G 上进行，每个问题采样 8 条回答，每条最多 1024 token；只训练 1 个 epoch，学习率 1e-6，并去掉了 KL 约束（§Implementation Details、Appendix）。训练集是从 DeepScaleR 过滤后随机抽的 1K 条 <strong>DeepScaleR-Random-1K</strong>；另外用 Qwen2.5-Math-7B 筛出 8 次采样准确率最低的 1K 条，构成 <strong>DeepScaleR-Hard-1K</strong>。</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill pa">数据</span></div><p><strong>1K</strong> 条训练样本，1 个 epoch；对比模型使用 5.7K–800K 条（Table 6 的 #Train 列）。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">硬件</span></div><p><strong>8×A100-40G</strong>；论文没有给出 GPU 小时、训练时长或显存峰值。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p1">GEC 成本</span></div><p>错误回答按概率触发一次重生成、答案注入或参考解替换；论文没有量化额外 token/时间，也没有 GEC 概率的敏感性实验。</p></div>
+  </div>
+  <p>GEC 的数据条件值得单独看：直接答案注入只需要最终答案；参考解替换才需要参考解；两者都没有时只能提示后重生成，正例不保证。论文把“每个问题都有最终答案与参考解”列为整体数据前提，这把数据门槛从“答案可验证”提高到“过程可参考”；论文没有测试低质量或噪声参考解。</p>
+  <p>另一个工程细节是 <code>std</code> 分母。GRPO 的 Eq. 2 在组内奖励全相等时会出现 0/0；论文没有展开实现里的 epsilon 处理，页面不对 0/0 的数值结果做推断。论文的口径是：全同奖励组为 zero advantage；后续 EDA 对 A = 0 也除不出信号。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>先补组内正例，再重加权，最后才更新</h2></div>
+  <p class="sec-sub">把两个模块放回一次 GRPO 迭代：采样 → 奖励 → GEC → 重新算奖励与优势 → EDA → 策略更新。</p>
+  <figure>
+    <svg viewBox="0 0 600 470" role="img" aria-label="EDGE-GRPO 流程：采样一组回答，GEC 对错误回答按概率干预，重算奖励和优势，EDA 按熵缩放优势，最后更新策略">
+      <defs><marker id="edge-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" class="arrow-head"/></marker></defs>
+      <rect class="svg-box" x="10" y="20" width="150" height="64" rx="10"/>
+      <text x="85" y="47" text-anchor="middle" class="svg-t">问题 q</text>
+      <text x="85" y="69" text-anchor="middle" class="svg-s">数学题</text>
+      <rect class="svg-box" x="190" y="20" width="170" height="64" rx="10"/>
+      <text x="275" y="47" text-anchor="middle" class="svg-t">采样 G=8 条</text>
+      <text x="275" y="69" text-anchor="middle" class="svg-s">policy π_θ</text>
+      <rect class="svg-box" x="390" y="20" width="200" height="64" rx="10"/>
+      <text x="490" y="47" text-anchor="middle" class="svg-t">规则奖励</text>
+      <text x="490" y="69" text-anchor="middle" class="svg-s">答对 1，答错 0</text>
+      <rect class="svg-hot" x="10" y="120" width="580" height="100" rx="10"/>
+      <text x="300" y="148" text-anchor="middle" class="svg-t">GEC 引导纠错</text>
+      <text x="300" y="174" text-anchor="middle" class="svg-s">对每条错误回答按概率三选一</text>
+      <text x="300" y="198" text-anchor="middle" class="svg-s">0.5 重生成 / 0.25 注入 / 0.25 替换</text>
+      <rect class="svg-box" x="10" y="260" width="160" height="64" rx="10"/>
+      <text x="90" y="287" text-anchor="middle" class="svg-t">重算奖励</text>
+      <text x="90" y="309" text-anchor="middle" class="svg-s">组内出现正例</text>
+      <rect class="svg-box" x="195" y="260" width="225" height="64" rx="10"/>
+      <text x="307" y="287" text-anchor="middle" class="svg-t">GRPO 优势</text>
+      <text x="307" y="309" text-anchor="middle" class="svg-s">(r_i−mean)/std</text>
+      <rect class="svg-hot" x="445" y="260" width="145" height="64" rx="10"/>
+      <text x="517" y="287" text-anchor="middle" class="svg-t">EDA 缩放</text>
+      <text x="517" y="309" text-anchor="middle" class="svg-s">A_i / P̂_i</text>
+      <rect class="svg-box" x="150" y="380" width="300" height="64" rx="10"/>
+      <text x="300" y="407" text-anchor="middle" class="svg-t">策略更新</text>
+      <text x="300" y="429" text-anchor="middle" class="svg-s">PPO clip 更新，去掉 KL</text>
+      <path class="svg-ln" d="M160 52 L186 52" marker-end="url(#edge-ar)"/>
+      <path class="svg-ln" d="M360 52 L386 52" marker-end="url(#edge-ar)"/>
+      <path class="svg-ln" d="M490 84 L490 116" marker-end="url(#edge-ar)"/>
+      <path class="svg-ln" d="M90 220 L90 256" marker-end="url(#edge-ar)"/>
+      <path class="svg-ln" d="M170 292 L191 292" marker-end="url(#edge-ar)"/>
+      <path class="svg-ln" d="M420 292 L441 292" marker-end="url(#edge-ar)"/>
+      <path class="svg-ln" d="M517 324 L517 350 L300 350 L300 376" marker-end="url(#edge-ar)"/>
+    </svg>
+    <figcaption>图：EDGE-GRPO 的一次迭代示意。覆盖 §Response-level: Guided Error Correction (GEC) 的三选一概率与 §Signal-level: Entropy-Driven Advantage (EDA) 的 Eq. 6–7；不覆盖 TRL 的具体 batch 组织、clip 实现与分布式采样细节。</figcaption>
+  </figure>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Step 1–2</span><h4>采样与奖励</h4></div>
+      <p>每个问题采样 8 条回答，规则 verifier 只给最终答案对错。全部同奖时组内分子为 0；其中有错误回答（全错组）时 GEC 会对每条错误回答按概率处理，全对组没有错误回答可改，GEC 不执行任何操作。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Step 3–4</span><h4>GEC 与重算</h4></div>
+      <p>对每条错误回答按 0.5/0.25/0.25 触发三种干预；参考解替换会直接写入正确解，提示并注入答案则把最终答案直接拼进回答，两者都让组里更可能出现正例；重生成则给模型一次自纠机会。之后重新算奖励与优势。</p>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Step 5</span><h4>EDA 缩放</h4></div>
+      <p>用 Eq. 3–4 算每条回答的平均策略熵，除以组均值得到 P̂，再用 Â = A / P̂ 放大或缩小优势。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Step 6</span><h4>更新</h4></div>
+      <p>把 Â 放进 GRPO/PPO 的 clip 目标，更新 actor。论文去掉了 KL 项，理由是训练分布可能显著偏离初始模型。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>1K 样本把 1.5B 从 25.71 拉到 48.08，7B 在 Hard-1K 到 53.21</h2></div>
+  <p class="sec-sub">先看两张主表：Random-1K 与 Hard-1K；再看与开源模型的对比，以及原文表间的一处数值并列。</p>
+
+  <h3>Table 1 · Random-1K：两个模型、六个方法</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-wide">
+    <thead><tr><th>模型 / 方法</th><th>Avg (1560)</th><th>AIME (30)</th><th>AMC (83)</th><th>MATH (500)</th><th>Minerva (272)</th><th>Olympiad (675)</th></tr></thead>
+    <tbody>
+      <tr class="model-row"><td colspan="7">Qwen2.5-Math-1.5B</td></tr>
+      <tr><td>Base</td><td class="num">25.71</td><td class="num">6.67</td><td class="num">37.35</td><td class="num">34.60</td><td class="num">12.13</td><td class="num">24.00</td></tr>
+      <tr><td>SFT</td><td class="num">30.13</td><td class="num">10.00</td><td class="num">30.12</td><td class="num">47.20</td><td class="num">14.71</td><td class="num">24.59</td></tr>
+      <tr><td>Vanilla GRPO</td><td class="num">40.32</td><td class="num">13.33</td><td class="num">39.76</td><td class="num">65.60</td><td class="num">19.49</td><td class="num">31.26</td></tr>
+      <tr><td>+ Force-R</td><td class="num">42.63</td><td class="num">10.00</td><td class="num">36.14</td><td class="num">71.40</td><td class="num">21.69</td><td class="num">32.00</td></tr>
+      <tr><td>+ Force-R &amp; EDA</td><td class="num">45.83</td><td class="num">10.00</td><td class="num">37.35</td><td class="num">73.60</td><td class="num">23.90</td><td class="num">36.74</td></tr>
+      <tr class="best"><td>EDGE-GRPO</td><td class="num">48.08</td><td class="num">13.33</td><td class="num">44.58</td><td class="num">76.40</td><td class="num">28.68</td><td class="num">36.89</td></tr>
+      <tr class="model-row"><td colspan="7">Qwen2.5-Math-7B</td></tr>
+      <tr><td>Base</td><td class="num">29.04</td><td class="num">10.00</td><td class="num">37.35</td><td class="num">53.40</td><td class="num">10.66</td><td class="num">18.22</td></tr>
+      <tr><td>SFT</td><td class="num">41.99</td><td class="num">6.67</td><td class="num">43.37</td><td class="num">69.00</td><td class="num">22.06</td><td class="num">31.41</td></tr>
+      <tr><td>Vanilla GRPO</td><td class="num">46.47</td><td class="num">23.33</td><td class="num">55.42</td><td class="num">72.40</td><td class="num">27.94</td><td class="num">34.67</td></tr>
+      <tr><td>+ Force-R</td><td class="num">47.76</td><td class="num">23.33</td><td class="num">53.01</td><td class="num">74.60</td><td class="num">23.16</td><td class="num">38.22</td></tr>
+      <tr><td>+ Force-R &amp; EDA</td><td class="num">45.71</td><td class="num">23.33</td><td class="num">49.40</td><td class="num">67.00</td><td class="num">32.35</td><td class="num">35.85</td></tr>
+      <tr class="best"><td>EDGE-GRPO</td><td class="num">49.30</td><td class="num">16.67</td><td class="num">50.60</td><td class="num">75.60</td><td class="num">33.09</td><td class="num">37.04</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 1：DeepScaleR-Random-1K，训练 1 epoch；Pass@1（temperature=0.1）；Avg 是按题目数加权（总答对数 / 1560），不是五个基准准确率的简单平均。</p>
+
+  <h3>Table 2 · Hard-1K：7B 的提升在 Hard-1K 进一步放大</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-wide">
+    <thead><tr><th>模型 / 方法</th><th>Avg (1560)</th><th>AIME (30)</th><th>AMC (83)</th><th>MATH (500)</th><th>Minerva (272)</th><th>Olympiad (675)</th></tr></thead>
+    <tbody>
+      <tr class="model-row"><td colspan="7">Qwen2.5-Math-1.5B</td></tr>
+      <tr><td>SFT</td><td class="num">29.17</td><td class="num">6.67</td><td class="num">28.92</td><td class="num">46.40</td><td class="num">12.87</td><td class="num">24.00</td></tr>
+      <tr><td>Vanilla GRPO</td><td class="num">40.26</td><td class="num">10.00</td><td class="num">46.99</td><td class="num">65.00</td><td class="num">20.59</td><td class="num">30.37</td></tr>
+      <tr><td>+ Force-R</td><td class="num">41.55</td><td class="num">13.33</td><td class="num">31.33</td><td class="num">70.00</td><td class="num">22.06</td><td class="num">30.81</td></tr>
+      <tr><td>+ Force-R &amp; EDA</td><td class="num">42.44</td><td class="num">10.00</td><td class="num">34.94</td><td class="num">69.60</td><td class="num">23.53</td><td class="num">32.30</td></tr>
+      <tr class="best"><td>EDGE-GRPO</td><td class="num">47.24</td><td class="num">10.00</td><td class="num">44.58</td><td class="num">73.20</td><td class="num">29.04</td><td class="num">37.33</td></tr>
+      <tr class="model-row"><td colspan="7">Qwen2.5-Math-7B</td></tr>
+      <tr><td>SFT</td><td class="num">37.37</td><td class="num">3.33</td><td class="num">44.58</td><td class="num">68.00</td><td class="num">19.85</td><td class="num">22.37</td></tr>
+      <tr><td>Vanilla GRPO</td><td class="num">47.69</td><td class="num">26.67</td><td class="num">53.01</td><td class="num">74.20</td><td class="num">25.74</td><td class="num">37.19</td></tr>
+      <tr><td>+ Force-R</td><td class="num">40.26</td><td class="num">13.33</td><td class="num">40.96</td><td class="num">67.60</td><td class="num">19.85</td><td class="num">29.33</td></tr>
+      <tr><td>+ Force-R &amp; EDA</td><td class="num">45.19</td><td class="num">26.67</td><td class="num">50.60</td><td class="num">68.00</td><td class="num">28.68</td><td class="num">35.11</td></tr>
+      <tr class="best"><td>EDGE-GRPO</td><td class="num">53.21</td><td class="num">16.67</td><td class="num">53.01</td><td class="num">79.00</td><td class="num">36.03</td><td class="num">42.67</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 2：DeepScaleR-Hard-1K，Pass@1，temperature=0.1；Hard-1K 中约 80% 的问题在 8 次采样中全部答错（§Experimental Setup）。</p>
+
+  <p>先看相对 Base 的提升：1.5B 是 <span data-src="Table 1">48.08</span> − <span data-src="Table 1">25.71</span> = <span data-src="Table 1">22.37</span> 个百分点，相对 <span data-src="Table 1">87.0</span>%；7B 是 <span data-src="Table 1">49.30</span> − <span data-src="Table 1">29.04</span> = <span data-src="Table 1">20.26</span> 个百分点，相对 <span data-src="Table 1">69.8</span>%。相对 Vanilla GRPO，1.5B 提升 <span data-src="Table 1">7.76</span> 个百分点（相对 <span data-src="Table 1">19.2</span>%），7B 提升 <span data-src="Table 1">2.83</span> 个百分点（相对 <span data-src="Table 1">6.1</span>%）；Hard-1K 上分别是 <span data-src="Table 2">6.98</span> 个百分点（相对 <span data-src="Table 2">17.3</span>%）与 <span data-src="Table 2">5.52</span> 个百分点（相对 <span data-src="Table 2">11.6</span>%）。</p>
+  <p>消融里有两个值得注意的反例。第一，Table 2 里 7B 的 + Force-R 只有 <span data-src="Table 2">40.26</span>，比 Vanilla GRPO 的 <span data-src="Table 2">47.69</span> 低 <span data-src="Table 2">7.43</span> 个百分点，方向与 7B Random-1K 相反（<span data-src="Table 1">47.76</span> 对 <span data-src="Table 1">46.47</span>）；论文没有单独解释这一下降。第二，在 Force-R 基础上再加 EDA（+ Force-R &amp; EDA）对 7B 的两个设置都低于 Vanilla GRPO（Random <span data-src="Table 1">45.71</span> 对 <span data-src="Table 1">46.47</span>；Hard <span data-src="Table 2">45.19</span> 对 <span data-src="Table 2">47.69</span>），但相对 + Force-R 在 1.5B Random（<span data-src="Table 1">45.83</span> 对 <span data-src="Table 1">42.63</span>）、1.5B Hard（<span data-src="Table 2">42.44</span> 对 <span data-src="Table 2">41.55</span>）与 7B Hard（<span data-src="Table 2">45.19</span> 对 <span data-src="Table 2">40.26</span>）三处更高，只在 7B Random 下降（<span data-src="Table 1">45.71</span> 对 <span data-src="Table 1">47.76</span>）。从表看，+Force-R&amp;EDA 在 3/4 设置高于 +Force-R <span class="infer">推断</span>（依据：Table 1 与 Table 2 的 Avg 逐项比较）；论文的解释是：EDA 对全零优势组无效，GEC 提高非零优势组的比例。+Force-R&amp;EDA 在四个设置中仍都低于完整 EDGE-GRPO。</p>
+
+  <h3>Table 6 · 与开源模型对比：1K 样本接近 5.7K–800K 训练的模型</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-mid">
+    <thead><tr><th>模型</th><th>#Train</th><th>Avg (1560)</th><th>AIME</th><th>AMC</th><th>MATH</th><th>Minerva</th><th>Olympiad</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen2.5-Math-1.5B Base</td><td class="num">—</td><td class="num">25.71</td><td class="num">6.67</td><td class="num">37.35</td><td class="num">34.60</td><td class="num">12.13</td><td class="num">24.00</td></tr>
+      <tr><td>DeepSeek-Distill-1.5B</td><td class="num">800K</td><td class="num">33.53</td><td class="num">6.67</td><td class="num">27.71</td><td class="num">61.00</td><td class="num">13.60</td><td class="num">23.11</td></tr>
+      <tr><td>Oat-Zero-1.5B</td><td class="num">8.5K</td><td class="num">47.37</td><td class="num">20.00</td><td class="num">48.19</td><td class="num">75.00</td><td class="num">25.74</td><td class="num">36.74</td></tr>
+      <tr><td>Qwen2.5-Math-7B Base</td><td class="num">—</td><td class="num">29.04</td><td class="num">10.00</td><td class="num">37.35</td><td class="num">53.40</td><td class="num">10.66</td><td class="num">18.22</td></tr>
+      <tr><td>DeepSeek-Distill-7B</td><td class="num">800K</td><td class="num">45.39</td><td class="num">16.67</td><td class="num">36.14</td><td class="num">74.20</td><td class="num">29.41</td><td class="num">32.89</td></tr>
+      <tr><td>Oat-Zero-7B</td><td class="num">8.5K</td><td class="num">53.40</td><td class="num">36.67</td><td class="num">61.45</td><td class="num">79.80</td><td class="num">30.88</td><td class="num">42.67</td></tr>
+      <tr><td>SimpleRL-Zoo-7B</td><td class="num">8K</td><td class="num">47.37</td><td class="num">23.33</td><td class="num">53.01</td><td class="num">76.00</td><td class="num">24.26</td><td class="num">35.85</td></tr>
+      <tr><td>Eurus-7B*</td><td class="num">48.4K</td><td class="num">53.9</td><td class="num">26.7</td><td class="num">57.8</td><td class="num">79.2</td><td class="num">38.6</td><td class="num">42.1</td></tr>
+      <tr><td>OpenReasoner-Zero-7B</td><td class="num">5.7K</td><td class="num">51.99</td><td class="num">20.00</td><td class="num">40.96</td><td class="num">80.20</td><td class="num">29.41</td><td class="num">42.96</td></tr>
+      <tr class="ours"><td>EDGE-GRPO-1.5B</td><td class="num">1K</td><td class="num">48.08</td><td class="num">13.33</td><td class="num">44.58</td><td class="num">76.40</td><td class="num">28.68</td><td class="num">36.89</td></tr>
+      <tr class="ours"><td>EDGE-GRPO-7B</td><td class="num">1K</td><td class="num">53.01</td><td class="num">16.67</td><td class="num">49.40</td><td class="num">79.00</td><td class="num">36.03</td><td class="num">42.67</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 6：与开源模型的 Pass@1 对比，temperature=0.1；* 表示数据来自原论文，其余为论文自己评测。#Train 为训练样本数；Avg (1560) 为总答对数 / 1560。强调色只表示 EDGE-GRPO（论文方法），不表示该列为全表最高。</p>
+  <p>数据效率的对比很直接：EDGE-GRPO-1.5B 用 1K 样本达到 48.08，高于 Oat-Zero-1.5B 的 47.37，差 <span data-src="Table 6">0.71</span> 个百分点；EDGE-GRPO-7B 的 53.01 比 Oat-Zero-7B 的 53.40 低 <span data-src="Table 6">0.39</span> 个百分点、比 Eurus-7B 的 53.9 低 <span data-src="Table 6">0.89</span> 个百分点。论文的“comparable”是合理描述，不是全面超过。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">表间并列</span><h4>Table 2 的 53.21 与 Table 6 的 53.01 不是同一个数</h4></div>
+    <p>Table 2（Hard-1K）7B EDGE-GRPO 的 Avg 是 <span data-src="Table 2">53.21</span>；Table 6 的 EDGE-GRPO-7B 写 <span data-src="Table 6">53.01</span>，差 <span data-src="Table 2 + Table 6">0.20</span> 个百分点。Table 6 的 EDGE-GRPO-1.5B 行 48.08 与 Table 1 Random-1K 行数值完全相同，但 7B 行既不等于 Table 1 的 49.30（差 <span data-src="Table 1 + Table 6">3.71</span> 个百分点），也不同于 Table 2 的 53.21（差 <span data-src="Table 2 + Table 6">0.20</span> 个百分点）。Table 6 没有注明这两行各自对应哪个训练集；页面并列两处，不替原文选一个。</p>
+  </div>
+
+  <div class="sim">
+    <div class="tabs" id="edge-view-tabs">
+      <button class="tab active" data-view="15r">1.5B · Random-1K</button>
+      <button class="tab" data-view="7r">7B · Random-1K</button>
+      <button class="tab" data-view="15h">1.5B · Hard-1K</button>
+      <button class="tab" data-view="7h">7B · Hard-1K</button>
+    </div>
+    <div class="tabs" id="edge-metric-tabs">
+      <button class="tab active" data-metric="avg">Avg</button>
+      <button class="tab" data-metric="aime">AIME</button>
+      <button class="tab" data-metric="amc">AMC</button>
+      <button class="tab" data-metric="math">MATH</button>
+      <button class="tab" data-metric="min">Minerva</button>
+      <button class="tab" data-metric="oly">Olympiad</button>
+    </div>
+    <div class="readout" id="edge-readout" data-src="Table 1"><div class="r-head">当前读数</div><div id="edge-chart-out"></div></div>
+    <div class="chart" id="edge-chart">
+      <div class="crow"><div class="cname">SFT</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="edge-fill-0"></div></div><div class="num" id="edge-num-0">30.13</div></div></div></div>
+      <div class="crow"><div class="cname">GRPO</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="edge-fill-1"></div></div><div class="num" id="edge-num-1">40.32</div></div></div></div>
+      <div class="crow"><div class="cname">+Force-R</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="edge-fill-2"></div></div><div class="num" id="edge-num-2">42.63</div></div></div></div>
+      <div class="crow"><div class="cname">+Force-R&amp;EDA</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="edge-fill-3"></div></div><div class="num" id="edge-num-3">45.83</div></div></div></div>
+      <div class="crow"><div class="cname">EDGE-GRPO</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b1" id="edge-fill-4"></div></div><div class="num" id="edge-num-4">48.08</div></div></div></div>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>EDGE-GRPO（完整方法）</span><span><i style="background:var(--c1)"></i>对照变体</span><span>柱高按当前视图、当前指标内最大值归一；数值逐字取自 Table 1/Table 2</span></div>
+  </div>
+  <details class="handcalc">
+    <summary>手算：图表归一化 <span class="sum-sub">两个视图各一组，与柱高逐位一致</span></summary>
+    <div class="details-body">
+      <p>1.5B · Random-1K · Avg：该视图最大值是 EDGE-GRPO 48.08，所以 EDGE-GRPO 柱高 = round(48.08 / 48.08 × 1000) / 10 = 100.0%；GRPO = round(40.32 / 48.08 × 1000) / 10 = 83.9%。</p>
+      <p>7B · Hard-1K · Avg：最大值是 EDGE-GRPO 53.21，所以 EDGE-GRPO 柱高 = round(53.21 / 53.21 × 1000) / 10 = 100.0%；GRPO = round(47.69 / 53.21 × 1000) / 10 = 89.6%。</p>
+      <p>柱高最低 1.2%，避免 0 值柱不可见；当前表内最小值不会触发。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它更可能把“全错组”变成可学信号，但只在有参考答案的数学题上验证</h2></div>
+  <p class="sec-sub">边界有三层：数据要带最终答案或参考解、GEC 是外部监督、评测只覆盖数学推理；此外超参数敏感性没有展开。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">数据门槛</span><h4>答案注入要答案，参考解替换要过程</h4></div>
+      <p>GEC 的“答案注入”需要最终答案；“参考解替换”才需要参考解；两者都没有时只能提示后重生成，正例不保证。论文在过滤 DeepScaleR 时要求答案位于 <code>\boxed{}</code> 且带 solution；论文没有测试低质量或噪声参考解的影响。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">外部监督</span><h4>GEC 把参考答案放进训练组</h4></div>
+      <p>这不是模型自己纠错，而是把外部正确解按概率注入。论文的消融显示它有效，但也意味着性能提升部分来自“开卷”信号；GEC 与纯 RL 的贡献比例，论文没有拆分。</p>
+    </div>
+  </div>
+  <p>评测范围是五个数学基准：AIME24、AMC、MATH500、Minerva、OlympiadBench，共 1560 题；没有代码、科学问答、开放对话或多模态。论文只在五个数学基准上评测，未讨论其他领域，页面不把“数学上有效”扩成“通用有效”。</p>
+  <p>超参数方面，GEC 的三个概率（0.5/0.25/0.25）与熵缩放都没有敏感性实验；EDA 的熵是 token 级策略熵，论文没有比较语义熵、序列熵等替代信号。训练还去掉了 KL 约束，作者称这是沿用已有工作的做法，但没有给出有无 KL 的对照。</p>
+  <p>最后一个边界是 EDA 的适用条件：它只能重加权非零优势。全错组可由 GEC 提高出现正例的概率；全对组没有错误回答可改，GEC 不执行任何操作，A 仍为 0，除以 P̂ 仍是 0。页面把这条写成机制约束，而不是“EDA 单独解决优势坍塌”。</p>
+</section>
+
+<footer>
+  <div>EDGE-GRPO: Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity · Xingjian Zhang、Siwei Wen、Wenjun Wu、Lei Huang · 北京航空航天大学</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.21848v1">https://arxiv.org/abs/2507.21848v1</a><br>
+    代码：<a href="https://github.com/ZhangXJ199/EDGE-GRPO">https://github.com/ZhangXJ199/EDGE-GRPO</a><br>
+    笔记：<a href="/edge-grpoentropy-driven-grpo-with-guided-error-correction-for-advantage-diversity/">EDGE-GRPO：Entropy-Driven GRPO with Guided Error Correction for Advantage Diversity</a>
+  </div>
+  <div class="errata">
+    <p><strong>笔记勘误（只改页面，不动笔记）：</strong></p>
+    <ul>
+      <li>笔记写「当一组响应被判断为全错时，GEC 会启动」。论文 §Response-level: Guided Error Correction (GEC) 的实际规则是：对<strong>每条错误回答</strong>按概率三选一，不管同组是否已有正确回答。全错组只是 GEC 最重要的场景，不是触发条件。</li>
+      <li>笔记写 GEC「保证响应组中至少包含一些高质量的正面样本」。论文措辞也是 ensure（“These three strategies ensure that each group of responses contains positive examples with correct answers”），但按机制应理解为概率性 <span class="infer">推断</span>（由 §Response-level: Guided Error Correction (GEC) 的三种操作定义推得）：三种操作按每条错误回答分别以 0.5/0.25/0.25 触发，「提示后重生成」（P=0.5）仍可能继续答错；「提示并注入答案」（P=0.25）把最终答案直接写进回答；「参考解替换」（P=0.25）写入完整参考解。两者都直接引入正确内容，只有「提示后重生成」（P=0.5）仍可能答错，因此 GEC 是提高正例出现的概率，不是绝对保证。</li>
+      <li>笔记的 Table 1 只摘了 Vanilla GRPO 与 EDGE-GRPO 两个方法（4 行：1.5B 与 7B 各两行），省略了 SFT、+Force-R、+Force-R&amp;EDA。数值本身没错，但读者会看不到「在 Force-R 基础上再加 EDA 在 7B Random 上反而低于 GRPO」这个消融反例；页面补全了 Table 1/2。</li>
+      <li>笔记写「强制模型反思的成功率极低，大部分低于 5%」。Figure 2 右下是强制反思的准确率，原文称 most models 低于 5%；Table 5 按四个触发词分别统计，多数纠正率低于 10%，0.1 档最高为 11.059%（DeepSeek-R1-Distill-Qwen-7B，Hmm），全表最高为 0.6 档的 12.097%。页面把两个口径分开写。</li>
+      <li>笔记第 49 行把 GRPO 优势写成 <code>A_i = r_i − mean(...)</code>，漏了 Eq. 2 的 <code>std(...)</code> 分母；论文 Eq. 2 为 <code>(r_i − mean) / std</code>。</li>
+    </ul>
+    <p><strong>原文内部并列（不替原文消解）：</strong></p>
+    <ul>
+      <li>Table 2（Hard-1K）7B EDGE-GRPO 的 Avg 是 53.21；Table 6 的 EDGE-GRPO-7B 写 53.01，差 0.20 个百分点。Table 6 的 EDGE-GRPO-1.5B 行 48.08 与 Table 1 Random-1K 行数值完全相同，但 7B 行的 53.01 既不同于 Table 1 的 49.30（差 3.71 个百分点），也不同于 Table 2 的 53.21（差 0.20 个百分点）；Table 6 未注明两行各自的训练集。</li>
+      <li>Table 1 的 7B EDGE-GRPO 行按表内各基准题目数加权为 49.04（答对数由表内百分比还原 <span class="infer">推断</span>：AIME 5/30 + AMC 42/83 + MATH 378/500 + Minerva 90/272 + Olympiad 250/675 = 765/1560），原文 Avg 写 49.30，差 0.26 个百分点。页面保留原文 49.30；正文的 20.26、69.8%、3.71 都是基于原文 49.30 的派生值。</li>
+      <li>Table 6 的 EDGE-GRPO-7B AMC 是 49.40，等于 Table 1 的 +Force-R&amp;EDA 行 49.40，但 Table 1 的 EDGE-GRPO 是 50.60、Table 2 的 EDGE-GRPO 是 53.01；即它与两张主表的 EDGE-GRPO 行不同，而与 Table 1 的消融行相同。页面原样保留。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  // ---- EDA calculator ----
+  var a = document.getElementById('eda-a');
+  var p = document.getElementById('eda-p');
+  var av = document.getElementById('eda-a-v');
+  var pv = document.getElementById('eda-p-v');
+  var out = document.getElementById('eda-out');
+  var quad = document.getElementById('eda-quad');
+
+  if (a && p && out && quad) {
+    function updateEda() {
+      var A = parseFloat(a.value);
+      var P = parseFloat(p.value);
+      var Ahat = A / P;
+      if (av) av.textContent = A.toFixed(1);
+      if (pv) pv.textContent = P.toFixed(2);
+      out.textContent = (Math.round(Ahat * 1000) / 1000).toFixed(3);
+      if (A === 0) {
+        quad.textContent = 'A = 0：组内无差异，EDA 无法产生信号';
+      } else if (A > 0 && P < 1) {
+        quad.textContent = '正确且自信：放大奖励';
+      } else if (A > 0 && P > 1) {
+        quad.textContent = '正确但不自信：缩小奖励，容忍探索';
+      } else if (A < 0 && P < 1) {
+        quad.textContent = '错误但自信：放大惩罚';
+      } else if (A < 0 && P > 1) {
+        quad.textContent = '错误但不自信：缩小惩罚';
+      } else {
+        quad.textContent = 'P̂ = 1：优势不变';
+      }
+    }
+    a.addEventListener('input', updateEda);
+    p.addEventListener('input', updateEda);
+    updateEda();
+  }
+
+  // ---- results chart ----
+  var chart = document.getElementById('edge-chart');
+  var chartOut = document.getElementById('edge-chart-out');
+  var viewTabs = document.getElementById('edge-view-tabs');
+  var metricTabs = document.getElementById('edge-metric-tabs');
+
+  if (chart && chartOut && viewTabs && metricTabs) {
+    var METHODS = ['SFT', 'GRPO', '+Force-R', '+Force-R&EDA', 'EDGE-GRPO'];
+    var METRICS = {
+      avg: 'Avg', aime: 'AIME', amc: 'AMC', math: 'MATH', min: 'Minerva', oly: 'Olympiad'
+    };
+    var DATA = {
+      '15r': {
+        avg: [30.13, 40.32, 42.63, 45.83, 48.08],
+        aime: [10.00, 13.33, 10.00, 10.00, 13.33],
+        amc: [30.12, 39.76, 36.14, 37.35, 44.58],
+        math: [47.20, 65.60, 71.40, 73.60, 76.40],
+        min: [14.71, 19.49, 21.69, 23.90, 28.68],
+        oly: [24.59, 31.26, 32.00, 36.74, 36.89]
+      },
+      '7r': {
+        avg: [41.99, 46.47, 47.76, 45.71, 49.30],
+        aime: [6.67, 23.33, 23.33, 23.33, 16.67],
+        amc: [43.37, 55.42, 53.01, 49.40, 50.60],
+        math: [69.00, 72.40, 74.60, 67.00, 75.60],
+        min: [22.06, 27.94, 23.16, 32.35, 33.09],
+        oly: [31.41, 34.67, 38.22, 35.85, 37.04]
+      },
+      '15h': {
+        avg: [29.17, 40.26, 41.55, 42.44, 47.24],
+        aime: [6.67, 10.00, 13.33, 10.00, 10.00],
+        amc: [28.92, 46.99, 31.33, 34.94, 44.58],
+        math: [46.40, 65.00, 70.00, 69.60, 73.20],
+        min: [12.87, 20.59, 22.06, 23.53, 29.04],
+        oly: [24.00, 30.37, 30.81, 32.30, 37.33]
+      },
+      '7h': {
+        avg: [37.37, 47.69, 40.26, 45.19, 53.21],
+        aime: [3.33, 26.67, 13.33, 26.67, 16.67],
+        amc: [44.58, 53.01, 40.96, 50.60, 53.01],
+        math: [68.00, 74.20, 67.60, 68.00, 79.00],
+        min: [19.85, 25.74, 19.85, 28.68, 36.03],
+        oly: [22.37, 37.19, 29.33, 35.11, 42.67]
+      }
+    };
+    var VIEW_LABELS = {
+      '15r': '1.5B · Random-1K',
+      '7r': '7B · Random-1K',
+      '15h': '1.5B · Hard-1K',
+      '7h': '7B · Hard-1K'
+    };
+    var readout = document.getElementById('edge-readout');
+    var activeView = '15r';
+    var activeMetric = 'avg';
+
+    function renderEdge() {
+      var values = DATA[activeView][activeMetric];
+      var max = Math.max.apply(null, values);
+      var best = [];
+      for (var i = 0; i < values.length; i++) {
+        if (Math.abs(values[i] - max) < 1e-9) best.push(i);
+      }
+      for (var j = 0; j < values.length; j++) {
+        var fill = document.getElementById('edge-fill-' + j);
+        var num = document.getElementById('edge-num-' + j);
+        if (fill) {
+          var pct = Math.round(values[j] / max * 1000) / 10;
+          if (pct < 1.2) pct = 1.2;
+          fill.style.height = pct + '%';
+        }
+        if (num) num.textContent = values[j].toFixed(2);
+      }
+      var bestNames = [];
+      for (var b = 0; b < best.length; b++) {
+        bestNames.push(METHODS[best[b]] + ' ' + values[best[b]].toFixed(2));
+      }
+      var tail = [];
+      if (best.indexOf(1) === -1) tail.push('GRPO ' + values[1].toFixed(2));
+      if (best.indexOf(4) === -1) tail.push('EDGE-GRPO ' + values[4].toFixed(2));
+      chartOut.innerHTML = VIEW_LABELS[activeView] + ' · ' +
+        METRICS[activeMetric] + '：<strong>' + bestNames.join(' / ') + '</strong>（' +
+        (best.length > 1 ? '并列最高' : '最高') + '）' +
+        (tail.length ? '；' + tail.join('；') : '') + '。';
+      if (readout) readout.setAttribute('data-src', activeView.slice(-1) === 'r' ? 'Table 1' : 'Table 2');
+    }
+
+    var vb = viewTabs.querySelectorAll('.tab');
+    var mb = metricTabs.querySelectorAll('.tab');
+    for (var v = 0; v < vb.length; v++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          activeView = btn.getAttribute('data-view');
+          for (var k = 0; k < vb.length; k++) vb[k].classList.toggle('active', vb[k] === btn);
+          renderEdge();
+        });
+      })(vb[v]);
+    }
+    for (var m = 0; m < mb.length; m++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          activeMetric = btn.getAttribute('data-metric');
+          for (var k = 0; k < mb.length; k++) mb[k].classList.toggle('active', mb[k] === btn);
+          renderEdge();
+        });
+      })(mb[m]);
+    }
+    renderEdge();
+  }
+})();
+</script>
+</body>
+</html>

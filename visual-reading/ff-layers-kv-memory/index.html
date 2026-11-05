@@ -1,0 +1,798 @@
+<!-- LEDGER
+| 65536 | §3.1 | 4096*16 |
+| 160 | §3.1 | 10*16 |
+| 8750 | §4 | 3.5/0.0004 |
+| 20 | §3.2 | 100-80 |
+| 35 | §3.2 | 100-65 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transformer Feed-Forward Layers Are Key-Value Memories · FFN 是键值记忆</title>
+<meta name="description" content="FFN 是非归一化键值记忆：键对应输入模式，值对应下一词分布；一层输出由多条记忆加权组合，再经残差逐层修正。基于 EMNLP 2021 论文与 arXiv v2。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页只放局部微调，公共样式全部来自 base.css */
+.slot-sub{font-size:10.5px;color:var(--text-soft);margin-top:5px;line-height:1.4;font-family:"JetBrains Mono",monospace}
+.query-wrap{margin:14px 0 8px}
+.query-wrap label{display:block;font-size:12.5px;color:var(--text-muted);margin-bottom:6px;font-family:"JetBrains Mono",monospace}
+.query{width:100%;padding:11px 13px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:"JetBrains Mono",monospace;font-size:13px;line-height:1.5}
+.query:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.query-toks{font-size:11.5px;color:var(--text-soft);margin-top:6px;font-family:"JetBrains Mono",monospace;line-height:1.6;overflow-wrap:anywhere}
+.sim-label{font-size:12.5px;color:var(--text-muted);margin:18px 0 4px;font-family:"JetBrains Mono",monospace}
+.dist{margin-top:6px}
+.dist-row{display:grid;grid-template-columns:110px minmax(0,1fr) 58px;gap:10px;align-items:center;margin:7px 0;font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.dist-name{color:var(--text);overflow-wrap:anywhere}
+.dist-track{height:14px;background:var(--bg-soft);border-radius:100px;overflow:hidden}
+.dist-fill{height:100%;background:var(--accent);border-radius:100px;transition:width .3s ease}
+.dist-pct{text-align:right;color:var(--text-muted)}
+.table-cap{font-size:12.5px;color:var(--text-soft);margin:20px 0 8px;font-family:"JetBrains Mono",monospace}
+.quote{border-left:3px solid var(--border-strong);padding:2px 0 2px 14px;color:var(--text-muted);font-size:14px;margin:16px 0}
+.infer{font-size:11px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;margin-left:4px;font-family:"JetBrains Mono",monospace}
+.errata{margin-top:18px;font-size:12.5px;color:var(--text-soft);line-height:1.8}
+.errata strong{color:var(--text-muted)}
+@media (max-width:880px){
+  .slots.s3{grid-template-columns:repeat(2,1fr)}
+  .dist-row{grid-template-columns:88px minmax(0,1fr) 52px}
+}
+@media (max-width:520px){
+  .dist-row{grid-template-columns:72px minmax(0,1fr) 46px;font-size:11.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">FFN = KV Memory</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">旧类比</a>
+      <a href="#mechanism">机制</a>
+      <a href="#experiments">验证</a>
+      <a href="#flow">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · EMNLP 2021 · arXiv 2012.14913v2</span>
+  <h1>FFN 不是黑箱：一排键记住输入模式，一排值给出下一个词</h1>
+  <p class="hero-sub">
+    Transformer 三分之二的参数在 FFN 里，但它的作用长期被注意力研究遮住。这篇论文把 FFN 的
+    <code>ReLU(xKᵀ)V</code> 读成一张<strong>非归一化的键值记忆表</strong>：键负责识别输入里的模式，
+    值负责给出该模式之后最可能出现的词；一层输出由成百上千条记忆加权组合，再经残差逐层修正。
+  </p>
+  <div class="meta">
+    <span>Mor Geva, Roei Schuster, Jonathan Berant, Omer Levy · Tel Aviv University / Allen Institute for AI / Cornell Tech</span>
+    <a href="https://arxiv.org/abs/2012.14913v2" target="_blank" rel="noopener">arXiv 2012.14913v2 ↗</a>
+    <a href="https://github.com/mega002/ff-layers/" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>FFN 的公式和神经记忆几乎一样</strong>：<code>FF(x)=ReLU(x·Kᵀ)·V</code>，
+    <code>MN(x)=softmax(x·Kᵀ)·V</code>。差别只在归一化：softmax 把系数压成一个和为 1 的分布，
+    ReLU 不归一化。于是 FFN 允许很多条记忆同时以不同强度激活，输出是它们的加权和，而不是一次只挑一条。
+  </p>
+  <p>
+    <strong>键对应输入模式，值对应输出分布</strong>。论文在一个 16 层、<code>d=1024</code>、
+    <code>d<sub>m</sub>=4096</code> 的 WikiText-103 语言模型上，按激活值取每个键的 top-25 触发前缀，
+    让人工标注：平均每个键能识别出 3.6 种模式；低层偏浅层 n-gram，高层偏语义话题。
+  </p>
+  <p>
+    <strong>值不是词，是词表分布</strong>。把值向量乘输出嵌入再 softmax，得到
+    <code>p<sub>i</sub>=softmax(v<sub>i</sub>·E)</code>。第 16 层里，值分布的头号词与键的 top-1
+    触发样本的下一词一致率达到 3.5%，而随机猜只有 0.0004%；低层（1-10）几乎为零。
+  </p>
+  <p>
+    <strong>一层不是一条记忆，而是组合</strong>。约 10%-50% 的记忆单元会被激活；至少约 68% 的样本里，
+    层输出与层内任何单条记忆的预测都不同。残差连接再把每层输出逐层“修正”成最终预测。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§3.2">3.6</div>
+      <div class="k">平均每个键可识别出的模式数<br>160 个采样键（10 个/层）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4">3.5<small>%</small></div>
+      <div class="k">第 16 层 value 顶词与 key 触发样本下一词的一致率<br>随机为 0.0004%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 8">≥68<small>%</small></div>
+      <div class="k">层输出与层内所有单条记忆预测都不同的样本比例<br>4,000 个验证集前缀</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>三分之二的参数，缺少一个可检验的功能解释</h2></div>
+  <p class="sec-sub">读完这节要知道：FFN 不是注意力的附属品，它占了模型大部分参数，却长期没有一个能落到具体记忆内容上的解释。</p>
+
+  <p>
+    一个标准 Transformer 层里，自注意力大约占 <span class="mono" data-src="§1">4d²</span> 个参数，
+    FFN 占 <span class="mono" data-src="§1">8d²</span>——按论文的算法，FFN 是参数的大头，整体约占三分之二（摘要；4d²/8d² 见 §1）。
+    但可解释性研究长期集中在注意力：注意力头在看哪里、是否学到句法，这些都有大量工作；FFN 则常被当作一个逐位置的
+    “特征变换”，很少被问“它到底存了什么”。
+  </p>
+
+  <p>
+    FFN 的形式很简单：<code>FF(x) = f(x·K<sup>⊤</sup>)·V</code>，其中
+    <code>K, V ∈ ℝ<sup>dₘ×d</sup></code>，<code>f</code> 通常是 ReLU。它是一个逐位置函数，不混合 token；
+    输入是残差流里的一个向量，输出再写回残差流。真正的问题是：<code>K</code> 的每一行和 <code>V</code>
+    的每一行，分别在表示什么？
+  </p>
+
+  <p>
+    论文要回答的不是“FFN 是否像记忆”这种类比问题，而是更具体的一步：如果它真是键值记忆，那么键里存的是哪些输入模式、
+    值里存的是哪些输出分布、一层里的多条记忆怎么合成一个输出。为了能回答，作者选了一个可控的模型：
+    Baevski &amp; Auli 2019 的 16 层 Transformer 语言模型，<code>d=1024</code>、<code>d<sub>m</sub>=4096</code>、
+    247M 参数，训练数据是 WikiText-103（§3.1、Appendix B）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键前提</span><h4>结论绑定在一个 16 层、247M 参数的 WikiText-103 语言模型上</h4></div>
+    <p>
+      论文的分析对象是 Baevski &amp; Auli 2019 的模型，不是今天的大模型。§7 的原话是：这个「FFN 即键值记忆」的表述
+      「generalizes to any transformer model, e.g. BERT encoders and neural translation models」，作者
+      「expect our qualitative empirical observations to hold across diverse settings, and leave verification of this for
+      future work」——即预期可推广到其他 transformer，但验证留待以后。原文没有点名「其他语言」或「其他规模」。
+      读后面的数字时，模型规模、层数、数据集这三个条件不能丢。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>旧类比只差一个 softmax，但没人打开记忆看内容</h2></div>
+  <p class="sec-sub">读完这节要知道：把 FFN 叫“键值记忆”不是这篇论文的新发明；它的新意在于把记忆内容逐条读出来。</p>
+
+  <p>
+    把 FFN 看成键值记忆并不是这篇论文第一次提出。Sukhbaatar et al. (2015) 的神经记忆把记忆写成
+    <code>MN(x)=softmax(x·Kᵀ)·V</code>；Sukhbaatar et al. (2019) 还把 FFN 的参数当作 persistent memory
+    塞进自注意力。前一个给出了公式上的对应，后一个证明了这种重参数化能工作。但它们都没有回答：在标准 Transformer 里，
+    这些记忆到底存了什么？
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">神经记忆</span><h4>softmax：归一化读取</h4></div>
+      <p>
+        <code>MN(x)=softmax(x·Kᵀ)·V</code>。系数被 softmax 压成和为 1 的分布，读出的是键分布的期望值。
+        它倾向于把概率集中在一小部分键上，输出是这些值的凸组合。
+      </p>
+      <p class="sub">Sukhbaatar et al. 2015 · Eq. 2</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Transformer FFN</span><h4>ReLU：非归一化读取</h4></div>
+      <p>
+        <code>FF(x)=ReLU(x·Kᵀ)·V</code>。系数非负，但可以大于 1，也不需要加起来等于 1。
+        多条记忆可以同时以不同强度激活，输出是非归一化加权和。
+      </p>
+      <p class="sub">Vaswani et al. 2017 · Eq. 1</p>
+    </div>
+  </div>
+
+  <div class="eq">
+    MN(x) = softmax(x · K<sup>⊤</sup>) · V
+    &nbsp;&nbsp;&nbsp;vs&nbsp;&nbsp;&nbsp;
+    FF(x) = ReLU(x · K<sup>⊤</sup>) · V
+  </div>
+  <div class="eq-cap">Eq. 1 与 Eq. 2 · 论文原话：两者几乎相同，差别是神经记忆用 softmax 归一化，而标准 Transformer 的 FFN 不做归一化（§2）</div>
+
+  <p>
+    这个差别不是细节：softmax 让记忆读成一个和为 1 的凸组合，ReLU 让记忆读成一个可叠加的稀疏组合。
+    后者为后文的组合性观察提供了一个机制解释<span class="infer">推断</span>（依据：§2 的 ReLU 非归一化定义 + §5.1 的多记忆加权和）。
+    论文的新意不在于重复这个类比，而在于用触发样本、人工标注和一致率，把“记忆内容”变成可检验的对象。
+  </p>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="mechanism">
+  <div class="sec-head"><span class="sec-num">03</span><h2>键是模式探测器，值是下一个词的分布</h2></div>
+  <p class="sec-sub">读完这节要知道：K 的行怎么读、V 的行怎么读，以及为什么“多条记忆同时激活”不是比喻而是公式的直接结果。</p>
+
+  <p>把公式拆开，FFN 的一次前向就是三步：</p>
+  <ul>
+    <li><strong>匹配：</strong><code>m<sub>i</sub> = ReLU(x · k<sub>i</sub>)</code>，第 <code>i</code> 条记忆的系数。</li>
+    <li><strong>读取：</strong><code>y = Σ<sub>i</sub> m<sub>i</sub> v<sub>i</sub></code>，用系数加权所有值向量。</li>
+    <li><strong>写回：</strong><code>o = y + r</code>，FFN 输出加回残差流。</li>
+  </ul>
+
+  <div class="eq">
+    FF(x) = ReLU(x · K<sup>⊤</sup>) · V<br>
+    m<sub>i</sub> = ReLU(x · k<sub>i</sub>)<br>
+    y = Σ<sub>i</sub> m<sub>i</sub> v<sub>i</sub>
+  </div>
+  <div class="eq-cap">Eq. 1 与 §5.1 · <code>d<sub>m</sub></code> 是记忆条数；<code>K</code> 的每一行是一个键，<code>V</code> 的每一行是一个值</div>
+
+  <h3>键怎么读：找最能激活它的前缀</h3>
+  <p>
+    对每个键 <code>k<sub>i</sub></code>，论文在训练集的所有句子上计算每个前缀的 <code>m<sub>i</sub></code>，
+    取激活最高的 top-25 前缀，交给 NLP 研究生标注。标注规则要求一个模式至少出现在 3 个前缀里，才认定为该键的模式；
+    每个模式再标成 shallow（重复 n-gram）或 semantic（重复话题）。Table 1 是几个例子：第 1 层的
+    <code>k<sub>449</sub><sup>1</sup></code> 对以 “substitutes” 结尾的前缀敏感；第 16 层的
+    <code>k<sub>1935</sub><sup>16</sup></code> 对电视剧/剧集话题敏感（§3.1、Table 1）。
+  </p>
+
+  <h3>值怎么读：投影到输出词表</h3>
+  <p>
+    <code>v<sub>i</sub></code> 本身是一个 <code>d</code> 维向量，不是词。论文把它乘上输出嵌入矩阵 <code>E</code>
+    再 softmax，得到词表分布 <code>p<sub>i</sub> = softmax(v<sub>i</sub>·E)</code>（§4）。
+    这个分布是未校准的：推理时 <code>v<sub>i</sub></code> 还会乘上 <code>m<sub>i</sub></code>，系数会改变分布的陡峭程度；
+    但排序不受系数影响，所以仍可比较。这个转换还假设所有层共享同一个嵌入空间——论文自己称这个假设是 naïve 的（§4）。
+  </p>
+
+  <h3>自己动手：输入一段前缀，看六条记忆怎么被检索、怎么组合</h3>
+  <p>
+    下面的模拟把六条来自 Table 2 的记忆放在一起：每条记忆有一个触发示例（键）和一个顶词预测（值）。
+    输入一段前缀，先按实词重叠算相似度，再按相似度加权投票，看哪条记忆被检索、输出由谁主导。
+    六条记忆的触发示例、顶词和 precision@50 都逐字取自 Table 2；相似度计算是本页的简化，不是论文模型的复现。
+  </p>
+
+  <div class="sim" data-src="Table 2">
+    <div class="sim-top" id="preset-btns">
+      <button class="rule-btn" data-preset="0">单条记忆<span class="r-sub">bees / wasps</span></button>
+      <button class="rule-btn" data-preset="1">另一条记忆<span class="r-sub">ship of the line</span></button>
+      <button class="rule-btn active" data-preset="2">组合输入<span class="r-sub">两句拼接</span></button>
+    </div>
+
+    <div class="query-wrap">
+      <label for="query">输入前缀 <span id="tok-count">10 个实词</span></label>
+      <input class="query" id="query" type="text" autocomplete="off" spellcheck="false" value="But when bees and wasps resemble each other, like a ship of the line">
+      <div class="query-toks" id="query-toks"></div>
+    </div>
+
+    <div class="slots s3" id="mem-slots"></div>
+
+    <div class="sim-label">组合输出（每条值压成顶词 one-hot 后加权）</div>
+    <div class="dist" id="dist"></div>
+
+    <div class="readout" id="sim-readout" data-src="Table 2">
+      <div class="r-head">检索结果</div>
+      <div id="sim-msg"></div>
+    </div>
+  </div>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">公式、手算与简化边界</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>§2 的 <code>FF(x)=ReLU(x·Kᵀ)·V</code> 结构；§5.1 的
+        <code>y=Σ m<sub>i</sub>v<sub>i</sub></code> 加权和；Table 2 六条记忆的触发示例、顶词和 precision@50；
+        ReLU 后多条记忆同时激活。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>真实的 1024 维稠密键/值（这里用触发示例的去停用词词集合代替）；
+        真实的全词表分布（这里把每条值压成顶词 one-hot）；自适应 softmax；偏置项；16 层堆叠与残差 refine；
+        自注意力输入。因此这是<strong>简化模拟</strong>，不是对论文模型的复现。
+      </p>
+      <p>
+        <strong>相似度定义：</strong>小写，非字母数字转空格，按空格切分，去停用词，去重；用 binary bag-of-words
+        余弦 <code>cos(A,B)=|A∩B|/√(|A|·|B|)</code>，再取 <code>m<sub>i</sub>=max(0,cos)</code>。
+        真实模型是 <code>ReLU(x·k<sub>i</sub>)</code>，键是学习到的稠密向量，不是词集合。
+        去停用词表：<code>a, an, and, are, as, at, be, been, by, for, from, in, is, it, its, of, on, or, that, the, these, those, to, was, were, with</code>。
+      </p>
+      <p>
+        <strong>组合输出：</strong><code>p(token)=Σ<sub>i:pred<sub>i</sub>=token</sub> m<sub>i</sub> / Σ<sub>i</sub> m<sub>i</sub></code>，
+        这是把每条值压成 one-hot 后的加权投票，不是 <code>softmax(y·E)</code>。
+        相似度显示保留 3 位小数，百分比保留 1 位，百分比用未舍入的 cos 计算。
+      </p>
+      <p><strong>手算 1（单条记忆）</strong>：输入 <code>But when bees and wasps resemble each</code>。</p>
+      <ul>
+        <li>分词并去停用词后：<code>{bees, but, each, resemble, wasps, when}</code>，|A| = 6。</li>
+        <li><code>v<sub>222</sub><sup>15</sup></code> 的触发示例分词后同样是这 6 个词，|B| = 6，交集 = 6；cos = 6 / √(6×6) = 1.000。</li>
+        <li>其余五条记忆的交集都是 0，cos = 0。</li>
+        <li>权重：v222 = 1.000，total = 1.000；输出 <code>each</code> = 1.000 / 1.000 = 100.0%。</li>
+      </ul>
+      <p><strong>手算 2（组合）</strong>：输入 <code>But when bees and wasps resemble each other, like a ship of the line</code>。</p>
+      <ul>
+        <li>分词后：<code>{bees, but, each, like, line, other, resemble, ship, wasps, when}</code>，|A| = 10。</li>
+        <li><code>v<sub>222</sub><sup>15</sup></code>：|B| = 6，交集 = {bees, but, each, resemble, wasps, when} = 6；cos = 6 / √(10×6) = 6 / √60 = 0.7746。</li>
+        <li><code>v<sub>2070</sub><sup>16</sup></code>：|B| = 7，交集 = {line, ship} = 2；cos = 2 / √(10×7) = 2 / √70 = 0.2390。</li>
+        <li>其余四条：交集 = 0，cos = 0。</li>
+        <li>total = 0.7746 + 0.2390 = 1.0136；<code>each</code> = 0.7746 / 1.0136 = 76.4%；<code>line</code> = 0.2390 / 1.0136 = 23.6%。</li>
+      </ul>
+      <p>
+        <strong>precision@50 不参与组合。</strong>卡片上的 P@50 是 Table 2 的原始指标，表示该值的顶词在对应键的
+        top-50 触发示例中命中多少比例；它只用来对照，不进入上面的加权投票。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="experiments">
+  <div class="sec-head"><span class="sec-num">04</span><h2>三类实验：先读键，再读值，最后读聚合</h2></div>
+  <p class="sec-sub">读完这节要知道：每个结论对应哪类实验、样本量多大、指标怎么定义；条件丢了，数字就会变形。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">键</span><h4>触发样本 + 人工标注</h4></div>
+      <p>
+        16 层模型，每层随机抽 10 个键，共 160 个；每个键取激活最高的 top-25 前缀；模式必须出现在至少 3 个前缀里；
+        标成 shallow 或 semantic（§3.1）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">值</span><h4>投影到词表 + 一致率</h4></div>
+      <p>
+        <code>p<sub>i</sub>=softmax(v<sub>i</sub>·E)</code>；比较 <code>argmax(p<sub>i</sub>)</code>
+        与键的 top-1 触发样本的下一词；统计一致率（§4）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">聚合</span><h4>层内组合 + 层间残差</h4></div>
+      <p>
+        4,000 个验证集前缀；统计激活记忆比例；比较层输出与所有单条记忆的预测；再看残差预测与最终输出的关系（§5）。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    模型条件是共同的：Baevski &amp; Auli 2019，16 层，<code>d=1024</code>，<code>d<sub>m</sub>=4096</code>，
+    每层 4096 条记忆，16 层共 <span class="mono" data-src="§3.1">65,536</span> 个潜在键；
+    247M 参数，WikiText-103（§3.1、Appendix B）。这是下面所有数字的背景，不是可省略的脚注。
+  </p>
+
+  <p>
+    键的实验还做了一个扰动测试：另外采样 1,600 个随机键（每层 100 个），对每个键的 top-50 触发示例分别删除第一个、
+    最后一个或随机一个 token，看记忆系数怎么变（Figure 3）。结果是模型把示例的结尾看得比开头更重；到了上层，
+    删除最后一个 token 的影响变小，这和“上层键不再那么依赖表面 n-gram”的判断一致（§3.2）。
+  </p>
+
+  <p class="table-cap">主张—证据对照 · 引文来自 §3.2 / §4 / §5.1 / §5.2</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>主张</th><th>页面用到的数字</th><th>原文原句（节选）</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>键捕获可解释的输入模式</td>
+          <td>平均 3.6 个模式/键；65%-80% 的触发前缀至少命中一个模式</td>
+          <td>“Experts were able to identify at least one pattern for every key, with an average of 3.6 identified patterns per key. Furthermore, the vast majority of retrieved prefixes (65%-80%) were associated with at least one identified pattern (Figure 2).”</td>
+        </tr>
+        <tr>
+          <td>值诱导输出词表分布，且与键模式相关</td>
+          <td>第 16 层一致率 3.5%；随机 0.0004%；低层 1-10 接近 0</td>
+          <td>“the agreement rate is close to zero in the lower layers (1-10), but starting from layer 11, the agreement rate quickly rises until 3.5%, showing higher agreement between keys and values on the identity of the top-ranked token.”</td>
+        </tr>
+        <tr>
+          <td>一层输出是多条记忆的组合</td>
+          <td>至少约 68% 的样本；10%-50% 的记忆被激活</td>
+          <td>“Figure 8 shows that, for any layer in the network, the layer’s final prediction is different than every one of the memories’ predictions in at least ∼68% of the examples.”</td>
+        </tr>
+        <tr>
+          <td>残差连接逐层 refine 预测</td>
+          <td>约三分之一的预测在底部几层确定；从第 10 层起快速上升</td>
+          <td>“Figure 9 shows that roughly a third of the model’s predictions are determined in the bottom few layers. This number grows rapidly from layer 10 onwards.”</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 05 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一层里发生了什么：从残差流到加权和</h2></div>
+  <p class="sec-sub">读完这节要知道：FFN 的输入不是一个孤立的词向量，而是残差流里的当前状态；输出也不是最终预测，而是写回残差流的一次修正。</p>
+
+  <figure>
+    <svg role="img" aria-label="FFN 键值记忆流程与 16 层浅层/语义分层示意图" viewBox="0 0 780 440" style="width:100%;height:auto;font-family:Inter,'Noto Sans SC',sans-serif">
+      <defs>
+        <marker id="ffn-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <!-- 左侧：一个 FFN block 的五步 -->
+      <rect x="40" y="24" width="320" height="58" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="200" y="50" text-anchor="middle" font-size="17" font-weight="600" fill="var(--text)">x = LayerNorm(r)</text>
+      <text x="200" y="70" text-anchor="middle" font-size="13" fill="var(--text-muted)">残差流中的当前向量</text>
+
+      <line x1="200" y1="82" x2="200" y2="100" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ffn-arrow)"></line>
+
+      <rect x="40" y="104" width="320" height="58" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="200" y="130" text-anchor="middle" font-size="17" font-weight="600" fill="var(--text)">Kᵀ：键矩阵</text>
+      <text x="200" y="150" text-anchor="middle" font-size="13" fill="var(--text-muted)">k1, k2, …, km（每行一个键）</text>
+
+      <line x1="200" y1="162" x2="200" y2="180" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ffn-arrow)"></line>
+
+      <rect x="40" y="184" width="320" height="58" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="200" y="210" text-anchor="middle" font-size="17" font-weight="600" fill="var(--text)">ReLU：记忆系数</text>
+      <text x="200" y="230" text-anchor="middle" font-size="13" fill="var(--text-muted)">m1=0.2, m2=1.5, mm=0（Figure 1）</text>
+
+      <line x1="200" y1="242" x2="200" y2="260" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ffn-arrow)"></line>
+
+      <rect x="40" y="264" width="320" height="58" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="200" y="290" text-anchor="middle" font-size="17" font-weight="600" fill="var(--text)">V：值矩阵</text>
+      <text x="200" y="310" text-anchor="middle" font-size="13" fill="var(--text-muted)">v1, v2, …, vm；v2 的分布偏向 “while”</text>
+
+      <line x1="200" y1="322" x2="200" y2="340" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#ffn-arrow)"></line>
+
+      <rect x="40" y="344" width="320" height="58" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="200" y="370" text-anchor="middle" font-size="17" font-weight="600" fill="var(--accent-deep)">y = Σ mᵢvᵢ；o = y + r</text>
+      <text x="200" y="390" text-anchor="middle" font-size="13" fill="var(--text-muted)">加权和写回残差流</text>
+
+      <!-- 右侧：16 层堆叠 -->
+      <rect x="470" y="60" width="90" height="140" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <rect x="470" y="200" width="90" height="180" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="515" y="118" text-anchor="middle" font-size="16" font-weight="600" fill="var(--accent-deep)">层 10-16</text>
+      <text x="515" y="142" text-anchor="middle" font-size="14" fill="var(--text-muted)">semantic</text>
+      <text x="515" y="282" text-anchor="middle" font-size="16" font-weight="600" fill="var(--c1)">层 1-9</text>
+      <text x="515" y="306" text-anchor="middle" font-size="14" fill="var(--text-muted)">shallow</text>
+
+      <text x="590" y="118" font-size="14" fill="var(--text-muted)">语义话题 / 模式更常见</text>
+      <text x="590" y="282" font-size="14" fill="var(--text-muted)">浅层 n-gram / 模式更常见</text>
+
+      <line x1="440" y1="392" x2="440" y2="52" stroke="var(--text-soft)" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#ffn-arrow)"></line>
+      <text x="432" y="420" text-anchor="middle" font-size="13" fill="var(--text-soft)">残差流逐层 refine</text>
+      <text x="590" y="420" font-size="13" fill="var(--text-soft)">每个 block 重复左侧流程</text>
+    </svg>
+    <figcaption>
+      图：按 §2、§5.1 与 Figure 1 重绘。左侧是一个 FFN block 内部：输入来自残差流，经 Kᵀ 得到记忆系数，ReLU 后加权 V，写回残差流。
+      右侧是 16 层堆叠中浅层/语义的分层（§3.2）。系数 0.2 / 1.5 / 0 与 “while” 取自 Figure 1 的示例
+      （k2 由描述时间、以 “a” 结尾的输入触发，v2 的分布偏向 “while”）；本图不是原文图，是示意重绘。
+    </figcaption>
+  </figure>
+
+  <p>
+    这张图解释了为什么“FFN 是记忆”不能理解成“查表取一个词”：一次前向会同时算出 <code>d<sub>m</sub></code> 个系数，
+    每个系数都乘上对应的值向量。系数为 0 的记忆不贡献，系数为正的记忆都进入加权和。下一节的效果分析，就是在这个结构上
+    问三个问题：键是否可读、值是否有预测性、一层输出是否真的由多条记忆组合。
+  </p>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>一致率只有 3.5%，但随机只有 0.0004%；组合才是常态</h2></div>
+  <p class="sec-sub">读完这节要知道：键的模式、值的预测、层内组合和层间 refine 分别有什么证据；哪些数字是条件性的，不能单独引用。</p>
+
+  <p class="table-cap">Table 1 · 键的触发模式示例（原文每行 3 个触发前缀，此处各摘 1 个；完整表见原文）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>键</th><th>层</th><th>模式</th><th>触发前缀（摘录）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>k<sub>449</sub><sup>1</sup></code></td><td class="num">1</td><td>以 “substitutes” 结尾（shallow）</td><td>In German service, they were used as substitutes</td></tr>
+        <tr><td><code>k<sub>2546</sub><sup>6</sup></code></td><td class="num">6</td><td>军事语境，以 “base”/“bases” 结尾（shallow + semantic）</td><td>Bombers flying missions to Rabaul and other Japanese bases</td></tr>
+        <tr><td><code>k<sub>2997</sub><sup>10</sup></code></td><td class="num">10</td><td>“part of” 关系（semantic）</td><td>He was also a part of the Indian delegation</td></tr>
+        <tr><td><code>k<sub>2989</sub><sup>13</sup></code></td><td class="num">13</td><td>以时间范围结尾（semantic）</td><td>Weekend tolls are in effect from 7:00 pm Friday until</td></tr>
+        <tr><td><code>k<sub>1935</sub><sup>16</sup></code></td><td class="num">16</td><td>电视剧/剧集话题（semantic）</td><td>Time shifting viewing added 57 percent to the episode’s</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="table-cap">Table 2 · 值向量投影到词表后的顶词、precision@50 与一个匹配的触发示例（完整转录）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>值</th><th>顶词</th><th>precision@50</th><th>触发示例（顶词加粗）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>v<sub>222</sub><sup>15</sup></code></td><td><strong>each</strong></td><td class="num">68%</td><td>But when bees and wasps resemble <strong>each</strong></td></tr>
+        <tr><td><code>v<sub>752</sub><sup>16</sup></code></td><td><strong>played</strong></td><td class="num">16%</td><td>Her first role was in Vijay Lalwani’s psychological thriller Karthik Calling Karthik, where Padukone was cast as the supportive girlfriend of a depressed man ( <strong>played</strong></td></tr>
+        <tr><td><code>v<sub>2601</sub><sup>13</sup></code></td><td><strong>extratropical</strong></td><td class="num">4%</td><td>Most of the winter precipitation is the result of synoptic scale, low pressure weather systems (large scale storms such as <strong>extratropical</strong></td></tr>
+        <tr><td><code>v<sub>881</sub><sup>15</sup></code></td><td><strong>part</strong></td><td class="num">92%</td><td>Comet served only briefly with the fleet, owing in large <strong>part</strong></td></tr>
+        <tr><td><code>v<sub>2070</sub><sup>16</sup></code></td><td><strong>line</strong></td><td class="num">84%</td><td>Sailing from Lorient in October 1805 with one ship of the <strong>line</strong></td></tr>
+        <tr><td><code>v<sub>3186</sub><sup>12</sup></code></td><td><strong>jail</strong></td><td class="num">4%</td><td>On May 11, 2011, four days after scoring 6 touchdowns for the Slaughter, Grady was sentenced to twenty days in <strong>jail</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">键</span><h4>模式可读，且浅层/语义分层</h4></div>
+      <p>
+        专家为每个键都找到了至少一个模式，平均每个键 <span class="mono" data-src="§3.2">3.6</span> 个；
+        <span class="mono" data-src="§3.2">65%-80%</span> 的触发前缀至少命中一个模式（§3.2、Figure 2）。
+      </p>
+      <p>
+        低层（1-9）以 shallow 模式为主，常共享最后一个词；高层（10-16）以 semantic 模式为主，前缀来自相似语境，
+        没有明显的表面相似性（§3.2）。Figure 2 的堆叠柱还包含 “shallow + semantic” 与 “not-covered” 两类，
+        所以不能把某一层的比例简单读成“浅层 vs 语义”二分。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">值</span><h4>上层值有预测性，但绝对一致率低</h4></div>
+      <p>
+        第 16 层的一致率达到 <span class="mono" data-src="§4">3.5%</span>，随机从约 27 万词表里猜只有
+        <span class="mono" data-src="§4">0.0004%</span>；按原文两个一致率相除，约
+        <span class="mono" data-src="§4">8750</span> 倍。低层 1-10 的一致率接近 0，从第 11 层开始快速上升（§4、Figure 4）。
+        词表规模约 27 万，见 Figure 5 的图注。
+      </p>
+      <p>
+        被最大概率挑出的 100 个值里，<span class="mono" data-src="§4">97/100</span> 在 11-16 层；
+        其中 <span class="mono" data-src="§4">46/100</span> 至少有一个触发示例与顶词一致（§4、Table 2）。
+        这些分布未校准，排序仍可比较。
+      </p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">聚合</span><h4>层内是组合，层间是 refine</h4></div>
+    <p>
+      4,000 个验证集前缀里，每层被激活的记忆占 <span class="mono" data-src="Figure 7">10%-50%</span>（Figure 7）；
+      但至少约 <span class="mono" data-src="Figure 8">68%</span> 的样本里，层输出与层内所有单条记忆的预测都不同（Figure 8）。
+      换句话说，大多数时候不是某一条记忆在“拍板”，而是多条记忆的加权结果。
+    </p>
+    <p>
+      在至少一条记忆与层预测一致的样本里，<span class="mono" data-src="§5.1">60%</span> 的目标词是常见停用词，
+      <span class="mono" data-src="§5.1">43%</span> 的前缀少于 5 个 token（§5.1）。作者据此推测，非常常见的模式可能被单条记忆
+      “缓存”，不需要组合；这个解释是推测，不是实验证明。
+    </p>
+    <p>
+      层间看残差：约三分之一的预测在底部几层就已确定，从第 10 层起快速上升（§5.2、Figure 9）。Figure 11 的分解显示，
+      残差预测最常见的结局是保持不变；当它改变时，往往是 residual 与 FFN 的折中，而不是直接采纳 FFN 的预测（§5.2）。
+      最后一层 100 个 composition 案例中，66 个变成语义上更远的词，34 个变成相关词（§5.2）。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>3.5% 不是“很高”，但它不是随机</h4></div>
+    <p>
+      在一个约 27 万词的词表里（Figure 5 图注），值分布的头号词能命中触发样本的下一词，3.5% 听起来很小；但随机猜只有 0.0004%，
+      两者相差约 8750 倍（3.5 / 0.0004，按原文两个一致率计算）。论文的结论不是“FFN 已经解决了下一个词预测”，
+      而是“上层值里确实有与键模式相关的、非随机的预测信息”。低层接近 0 也不等于低层没有记忆：论文在 §4 的 Discussion
+      里提出，低层可能不在同一个输出嵌入空间里，并把这个现象留作开放问题。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：这是对一个 16 层小模型的相关性分析，不是因果证明</h2></div>
+  <p class="sec-sub">读完这节要知道：哪些结论可以带走，哪些一旦外推就会过头；论文自己列出的开放问题也要算进边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>模型与数据范围很窄</h4></div>
+    <p>
+      全部实验基于 Baevski &amp; Auli 2019 的 16 层、247M 参数模型和 WikiText-103（英文维基文本）。
+      论文在 §7 说这套表述可推广到任意 transformer（举例 BERT 编码器、神经翻译模型），并「leave verification of this
+      for future work」；<strong>其他语言、其他规模是本页按此做的外推</strong><span class="infer">推断</span>，原文没有点名。
+      把 3.5% 或 68% 直接搬到今天的
+      大模型上，是没有原文依据的外推。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>相关不等于因果</h4></div>
+    <p>
+      论文的做法是：找出最能激活某个键的前缀，再看对应值的顶词是否与这些前缀的下一词一致。这是观察性证据，
+      不是对键或值做消融/干预后的因果证据。论文的用词也是 “correlates”“suggests”，没有声称“键导致了预测”。
+      页面里的“键是模式探测器”应理解为一种有实验支持的功能描述，而不是已经证明的因果机制。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>一致率的绝对水平低，且只在上层明显</h4></div>
+    <p>
+      第 16 层 3.5% 的一致率是在“值顶词 vs 键的 top-1 触发样本下一词”这个定义下得到的；低层 1-10 接近 0。
+      值分布还是未校准的，投影到词表时假设所有层共享同一个嵌入空间，论文自己称这个假设是 naïve 的（§4）。
+      所以 3.5% 不能读成“FFN 的输出有 3.5% 是正确的”，它只是一个特定一致性指标。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界四</span><h4>模式标签依赖人工判断</h4></div>
+    <p>
+      模式由 NLP 研究生标注，要求至少出现在 3 个前缀里；每个键由一个专家标注。65%-80% 的触发前缀被至少一个模式覆盖，
+      这意味着仍有 20%-35% 没有被覆盖（100 − 80 与 100 − 65）。shallow / semantic 的划分也是人的分类，不是模型内部的自然类别。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界五</span><h4>聚合分析是描述性的，且条件很多</h4></div>
+    <p>
+      “至少约 68% 的层输出与所有单条记忆预测不同”说明组合是常态，但没有说明组合具体怎么算。60% / 43% 这两个数字
+      只在“至少一条记忆与层预测一致”的子样本里成立，不能当成全体样本的比例。最后一层 66 / 34 的语义远近判断，
+      是 100 个随机案例的人工分析，不是大规模自动评估。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界六</span><h4>FFN 与注意力的交互没有解决</h4></div>
+    <p>
+      论文把 FFN 单独拿出来分析；但 FFN 的输入来自残差流，残差流里已经混入了自注意力的输出。作者在 §7 把
+      “层的嵌入空间如何随层变化”列为开放问题，并指出这不可能只靠 FFN 的键值读取解释，可能涉及 FFN 与注意力的相互作用。
+      所以“FFN 是键值记忆”是一个局部解释，不是对整个 Transformer 的完整解释。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>Transformer Feed-Forward Layers Are Key-Value Memories · Mor Geva, Roei Schuster, Jonathan Berant, Omer Levy · EMNLP 2021</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2012.14913v2" target="_blank" rel="noopener">arXiv 2012.14913v2</a>（本页以 v2 为准）<br>
+    代码：<a href="https://github.com/mega002/ff-layers/" target="_blank" rel="noopener">mega002/ff-layers</a><br>
+    笔记：<a href="/transformer-feed-forward-layers-are-key-value-memories/">Transformer Feed-Forward Layers Are Key-Value Memories</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改原笔记）：</strong>
+    <ul>
+      <li>笔记称 <code>k<sub>449</sub></code> 在第 4 层；Table 1 与 §3.2 标为 <code>k<sub>449</sub><sup>1</sup></code>，即第 1 层。</li>
+      <li>笔记称第 16 层的键为 <code>k<sub>1635</sub></code>；Table 1 为 <code>k<sub>1935</sub><sup>16</sup></code>。</li>
+      <li>笔记称 Figure 2 第 1 层浅层占 80% 以上、第 16 层语义约 70%；图中还有 shallow + semantic 与 not-covered 两类，堆叠比例与这两个数字对不上。</li>
+      <li>笔记称 Figure 9 第 10 层高于 60%；图中第 10 层明显低于 60%，约 60% 出现在更靠后的层。</li>
+      <li>笔记把 3.5% 写成高层（11-16 层）的整体一致率；原文的 3.5% 是第 16 层的值，11 层起快速上升（§4、Figure 4）。</li>
+      <li>笔记中的图 2 链接写作 <code>httpsa://i.imgur.com/uG9Xo0T.png</code>，协议名多了一个 a，无法打开；本页未引用该图。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var STOP = {
+    a: 1, an: 1, and: 1, are: 1, as: 1, at: 1, be: 1, been: 1,
+    by: 1, for: 1, from: 1, in: 1, is: 1, it: 1, its: 1, of: 1,
+    on: 1, or: 1, that: 1, the: 1, these: 1, those: 1, to: 1,
+    was: 1, were: 1, with: 1
+  };
+
+  var MEM = [
+    { idx: 222, layer: 15, pred: 'each', prec: 68, trig: 'But when bees and wasps resemble each' },
+    { idx: 752, layer: 16, pred: 'played', prec: 16, trig: 'Her first role was in Vijay Lalwani’s psychological thriller Karthik Calling Karthik, where Padukone was cast as the supportive girlfriend of a depressed man ( played' },
+    { idx: 2601, layer: 13, pred: 'extratropical', prec: 4, trig: 'Most of the winter precipitation is the result of synoptic scale, low pressure weather systems (large scale storms such as extratropical' },
+    { idx: 881, layer: 15, pred: 'part', prec: 92, trig: 'Comet served only briefly with the fleet, owing in large part' },
+    { idx: 2070, layer: 16, pred: 'line', prec: 84, trig: 'Sailing from Lorient in October 1805 with one ship of the line' },
+    { idx: 3186, layer: 12, pred: 'jail', prec: 4, trig: 'On May 11, 2011, four days after scoring 6 touchdowns for the Slaughter, Grady was sentenced to twenty days in jail' }
+  ];
+
+  var PRESETS = [
+    'But when bees and wasps resemble each',
+    'Sailing from Lorient in October 1805 with one ship of the line',
+    'But when bees and wasps resemble each other, like a ship of the line'
+  ];
+
+  var queryEl = document.getElementById('query');
+  var slotsEl = document.getElementById('mem-slots');
+  var distEl = document.getElementById('dist');
+  var msgEl = document.getElementById('sim-msg');
+  var toksEl = document.getElementById('query-toks');
+  var countEl = document.getElementById('tok-count');
+  if (!queryEl || !slotsEl || !distEl || !msgEl || !toksEl || !countEl) return;
+
+  function tokenize(text) {
+    var s = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+    var parts = s.split(' ');
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < parts.length; i++) {
+      var t = parts[i];
+      if (!t || STOP[t] || seen[t]) continue;
+      seen[t] = 1;
+      out.push(t);
+    }
+    return out;
+  }
+
+  function cosine(a, b) {
+    if (!a.length || !b.length) return 0;
+    var setB = {};
+    var i;
+    for (i = 0; i < b.length; i++) setB[b[i]] = 1;
+    var inter = 0;
+    for (i = 0; i < a.length; i++) {
+      if (setB[a[i]]) inter++;
+    }
+    return Math.max(0, inter / Math.sqrt(a.length * b.length));
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  for (var j = 0; j < MEM.length; j++) {
+    MEM[j].tokens = tokenize(MEM[j].trig);
+  }
+
+  function render() {
+    var A = tokenize(queryEl.value);
+    var scores = [];
+    var total = 0;
+    var i;
+
+    for (i = 0; i < MEM.length; i++) {
+      var s = cosine(A, MEM[i].tokens);
+      scores.push({ mem: MEM[i], sim: s });
+      total += s;
+    }
+
+    countEl.textContent = A.length + ' 个实词';
+    toksEl.textContent = A.length ? '分词（去停用词）：' + A.join(' · ') : '分词（去停用词）：（空）';
+
+    var slotHtml = '';
+    for (i = 0; i < scores.length; i++) {
+      var item = scores[i];
+      var m = item.mem;
+      var sim = item.sim;
+      var width = Math.min(100, sim * 100);
+      slotHtml += '<div class="slot' + (sim > 0 ? ' hit' : '') + '">'
+        + '<div class="slot-name">v<sub>' + m.idx + '</sub><sup>' + m.layer + '</sup></div>'
+        + '<div class="slot-val">sim ' + sim.toFixed(3) + '</div>'
+        + '<div class="bar"><i class="b1" style="width:' + width.toFixed(1) + '%"></i></div>'
+        + '<div class="slot-sub">预测 ' + escapeHtml(m.pred) + ' · P@50 ' + m.prec + '%</div>'
+        + '</div>';
+    }
+    slotsEl.innerHTML = slotHtml;
+
+    var dist = {};
+    var active = [];
+    for (i = 0; i < scores.length; i++) {
+      if (scores[i].sim > 0) {
+        active.push(scores[i]);
+        var key = scores[i].mem.pred;
+        dist[key] = (dist[key] || 0) + scores[i].sim;
+      }
+    }
+
+    var keys = Object.keys(dist).sort(function (a, b) { return dist[b] - dist[a]; });
+    var sum = 0;
+    for (i = 0; i < keys.length; i++) sum += dist[keys[i]];
+
+    if (!sum) {
+      distEl.innerHTML = '<div class="muted" style="font-size:13px;color:var(--text-soft)">没有记忆被激活：当前输入与六条触发示例没有共同实词。</div>';
+      msgEl.innerHTML = '没有记忆被激活。可以点上面的预设，或输入包含 wasps / ship / line / jail 等实词的前缀。';
+      return;
+    }
+
+    var distHtml = '';
+    for (i = 0; i < keys.length; i++) {
+      var pct = dist[keys[i]] / sum * 100;
+      distHtml += '<div class="dist-row">'
+        + '<div class="dist-name">' + escapeHtml(keys[i]) + '</div>'
+        + '<div class="dist-track"><div class="dist-fill" style="width:' + Math.min(100, pct).toFixed(1) + '%"></div></div>'
+        + '<div class="dist-pct">' + pct.toFixed(1) + '%</div>'
+        + '</div>';
+    }
+    distEl.innerHTML = distHtml;
+
+    var top = keys[0];
+    var topPct = (dist[top] / sum * 100).toFixed(1);
+    var activeText = active.map(function (x) {
+      return 'v' + x.mem.idx + ' (sim ' + x.sim.toFixed(3) + ')';
+    }).join('；');
+    msgEl.innerHTML = '命中 ' + active.length + ' 条记忆：' + activeText
+      + '。组合输出 top-1 是 <strong>' + escapeHtml(top) + '</strong>（' + topPct + '%）。';
+  }
+
+  var presetBtns = document.querySelectorAll('#preset-btns .rule-btn');
+  for (var k = 0; k < presetBtns.length; k++) {
+    presetBtns[k].addEventListener('click', function () {
+      var idx = parseInt(this.getAttribute('data-preset'), 10);
+      queryEl.value = PRESETS[idx];
+      for (var n = 0; n < presetBtns.length; n++) presetBtns[n].classList.remove('active');
+      this.classList.add('active');
+      render();
+    });
+  }
+
+  queryEl.addEventListener('input', function () {
+    for (var n = 0; n < presetBtns.length; n++) presetBtns[n].classList.remove('active');
+    render();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

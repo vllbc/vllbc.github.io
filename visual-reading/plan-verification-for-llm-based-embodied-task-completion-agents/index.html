@@ -1,0 +1,433 @@
+<!-- LEDGER
+| 27 | §4.2 | 89-62 |
+| 7.5 | §4.2 | 96.5-89 |
+| 3.5 | §4.2 | 3.5 |
+| 2.0 | Figure 3 | 98.5-96.5 |
+| 3.2 | Figure 3 | 99.7-96.5 |
+| 0.3 | Figure 3 | 100-99.7 |
+| 58 | Table 1 | 80-22 |
+| 7 | Table 1 | 100-93 |
+| 5 | Table 1/Table 2 | 85-80 |
+| 10 | Table 1/Table 2 | 90-80 |
+| 10 | Table 1/Table 2 | 84-74 |
+| 15 | Table 1/Table 2 | 89-74 |
+| 0 | Table 1/Table 2 | 68-68 |
+| -6 | Table 1/Table 2 | 62-68 |
+| 89.0 | Table 2 | 2*88*90/(88+90) |
+| 80.9 | Table 2 | 2*68*100/(68+100) |
+| 81.0 | Table 2 | 2*68*100/(68+100) |
+| 93.7 | Table 2 | 2*89*99/(89+99) |
+| 84.7 | Table 2 | 2*90*80/(90+80) |
+| 83.2 | Table 2 | 2*76*92/(76+92) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v4">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>计划验证：用 Judge–Planner 对话清洗具身任务轨迹</title>
+<meta name="description" content="Judge LLM 逐条挑错，Planner LLM 按反馈修改，循环直到没有新批评。TEACh 子集上最高 90% recall、100% precision，96.5% 的序列 3 轮内收敛。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b2{background:var(--c1)}
+.cbar .fill.b3{background:var(--c2)}
+.cbar .fill.b4{background:var(--c3)}
+.cbar .num{color:var(--text-muted)}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.arrow-head{fill:var(--text-soft)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:17px;font-weight:600;fill:var(--text)}
+.svg-tt{font-family:"Noto Sans SC",sans-serif;font-size:15px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text-muted)}
+.tbl-scroll .tbl-wide{min-width:860px}
+.tbl-scroll .tbl-mid{min-width:760px}
+.tbl-center td,.tbl-center th{text-align:center}
+.model-row td{background:var(--bg-soft);font-weight:700;color:var(--text)}
+.model-row td.cell-rp{font-weight:400}
+.cell-rp{font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.5;font-weight:400}
+.pill.pn{background:var(--bg-soft);color:var(--text-soft);border:1px solid var(--border)}
+@media(max-width:560px){figure{padding:10px}.svg-t{font-size:22px}.svg-tt{font-size:19px}.svg-s,.svg-l{font-size:20px}.cell-rp{font-size:11px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Plan Verification</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">代价</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>具身计划验证 · NeurIPS 2025 Workshop</span>
+  <h1>计划验证：用 Judge–Planner 对话清洗具身任务轨迹</h1>
+  <p class="hero-sub">人类演示的具身任务轨迹常有多余动作、冗余导航和漏掉的步骤。论文让一个 Judge LLM 逐条挑错、一个 Planner LLM 按批评修改，循环到 Judge 不再提新问题；全程只用自然语言 prompt，不接模拟器、不看视觉输入。TEACh 子集上最高 <span data-src="Table 2">90</span>% recall、<span data-src="Table 2">100</span>% precision，<span data-src="Figure 3">96.5</span>% 的序列在 3 轮内收敛。</p>
+  <div class="meta">
+    <span>Ananth Hariharan、Vardhan Dongre、Dilek Hakkani-Tür、Gokhan Tur · UIUC · NeurIPS 2025 Workshop</span>
+    <a href="https://arxiv.org/abs/2509.02761" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/AnanthHariharan/Task-Agents" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>论文把“清洗具身任务演示”写成一个双智能体验证循环：Planning Agent 先给出计划 π；Judge LLM 按目标 g 逐条检查，用 <code>#REMOVE</code> 标多余/矛盾动作、用 <code>#MISSING</code> 标缺失步骤，并给自然语言理由；Planning Agent 按这些批评生成 π′；重复到 Judge 不再提新问题，或达到 5 轮上限。</p>
+  <p>方法不改模型参数，也不依赖环境模拟器或视觉输入；它把 LLM 当作零样本评审器，直接处理已有的 TEACh 人类演示。实验用 100 个 episode、15 个家务任务、1,408 个人类动作，人工标注错误动作作为 ground truth，比较 4 个 Judge LLM 与 4 个 Planner LLM 的 16 种组合。</p>
+  <p>结果是明显的 precision–recall 权衡：GPT o4-mini 做 Judge 时 recall 最高（单次 <span data-src="Table 1">80</span>%，迭代后 <span data-src="Table 2">90</span>%），但 precision 会降到 <span data-src="Table 2">80</span>%；DeepSeek-R1 做 Judge 时 precision 可到 <span data-src="Table 2">100</span>%，recall 只有 <span data-src="Table 2">62–68</span>%（与自家 Planner 配对时为 <span data-src="Table 2">68</span>%）；Gemini 2.5 的 F1 最稳，最高 <span data-src="Table 2">93.9</span>。收敛很快：<span data-src="Figure 3">62</span>% 的序列第一轮后不再需要修改，3 轮累计 <span data-src="Figure 3">96.5</span>%。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 2">90<small>%</small></div><div class="k">最高 recall：GPT o4-mini 做 Judge、DeepSeek-R1 做 Planner</div></div>
+    <div class="metric"><div class="v" data-src="Table 2">93.9<small></small></div><div class="k">最高 F1：Gemini 2.5 同时做 Judge 与 Planner</div></div>
+    <div class="metric"><div class="v" data-src="Figure 3">96.5<small>%</small></div><div class="k">3 轮内累计收敛的序列比例</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>演示数据不是教科书：多余动作、矛盾动作、漏步都会污染模仿学习</h2></div>
+  <p class="sec-sub">读完这节应该知道：为什么具身任务需要“计划验证”，以及论文把哪些东西算作错误。</p>
+  <p>具身智能体通常从人类演示里学任务，例如 TEACh 数据集里的家庭交互。人类演示并不最优：可能拿起与目标无关的物品、来回走动、先把电器关掉再打开，或者因为指令理解错误而漏掉关键步骤。这些轨迹直接用于模仿学习，会把噪声写进策略。</p>
+  <p>论文把错误分成三类（§3.1）：</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">Redundant</span><h4>多余 / 重复</h4></div><p>不必要的重复动作，或互相抵消的操作。例如拿起一个目标不需要的物品，或把已经关掉的设备再关一次。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">Contradictory</span><h4>矛盾</h4></div><p>与之前的动作或任务目标相反。论文把矛盾动作归入 <code>REMOVE</code> 处理，不单独设第三类修正类型。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p3">Missing</span><h4>缺失</h4></div><p>完成任务所必需、但计划里没有的步骤。Judge 用 <code>#MISSING</code> 标出，Planner 负责补上。</p></div>
+  </div>
+  <p>形式化地，计划 π = (a<sub>1</sub>, …, a<sub>T</sub>) 是原子操作序列，例如 PickUp、ToggleOn、Place。目标是给定自然语言目标 g 和初始计划 π<sup>(0)</sup>，输出一个仍能完成 g、但长度更短的计划：</p>
+  <div class="eq">π* = arg min<sub>π̃</sub> |π̃| &nbsp; s.t. &nbsp; π̃ 完成 g</div>
+  <div class="eq-cap">§3.1 的目标：允许插入必要步骤，但惩罚多余动作；论文把“完成 g”作为约束，把长度作为优化目标。</div>
+  <p>这个定义有两个隐含条件。第一，必须有一个“完成 g”的判定；论文用人工标注的动作级错误作为评估 ground truth，但没有在方法里给出自动的任务成功判定器。第二，长度最短不等于执行最优；论文主要评估 Judge 找错的能力，任务级成功率与长度缩减在 §3.2 说“另行报告”。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>规则、LTL、Reflexion 各管一段，Judge–Planner 想做后处理层</h2></div>
+  <p class="sec-sub">论文的位置不是“更好的计划生成器”，而是“计划生成之后的验证与清洗”。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-mid">
+    <caption>表 0A · 计划验证相关路线与论文差异（页面整理，依据 §2、§4.1 与 Table 1 的 Rule-based 22%）</caption>
+    <thead><tr><th>路线</th><th>做法</th><th>主要限制</th><th>论文差异</th></tr></thead>
+    <tbody>
+      <tr><td>Rule-based</td><td>用预定义规则或启发式检查动作序列</td><td>覆盖的错误类型有限；Table 1 的 recall 只有 22%</td><td>不写规则，用零样本自然语言 prompt</td></tr>
+      <tr><td>VerifyLLM</td><td>用 Linear Temporal Logic 作为形式化中间表示，检查逻辑不一致、缺失前提与冗余</td><td>需要把任务和动作形式化；论文称其依赖 LTL</td><td>只用自然语言批评，不构造 LTL</td></tr>
+      <tr><td>Reflexion</td><td>Actor 执行、Evaluator 评价、Self-Reflection 生成口头反馈，迭代改进行为</td><td>面向单智能体策略改进，不是数据集清洗；不做 precision/recall 记账</td><td>把批评外化成独立 Judge，可替换、可逐条计数</td></tr>
+      <tr><td>论文</td><td>Judge LLM 逐条挑错，Planner LLM 按批评修改，循环到收敛</td><td>仍依赖人工标注评估；只验证计划，不执行</td><td>后处理、模型无关、可解释的 plan verification</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">§2 的 related work：论文把自身定位为 post-hoc verification，与计划生成方法正交；它不改进初始计划生成器，而是清洗已有轨迹。</p>
+  <p>这个定位带来一个直接好处：框架可以套在任何计划来源上<span class="infer">推断</span>（依据：§2 把它定位为 post-hoc verification，§3 的输入只有目标与计划，不依赖生成器），包括人类演示和别的 LLM 生成的计划。代价是它继承了初始计划的质量上限<span class="infer">推断</span>（依据：验证循环只读目标与当前计划，不引入外部知识）——如果 Judge 和 Planner 都看不出某个领域错误，循环不会凭空创造正确知识。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Judge 输出批评集合，Planner 确定性执行，合成验证算子 V = P ∘ J</h2></div>
+  <p class="sec-sub">方法本身是一个很薄的循环；真正决定效果的是 Judge 的批评质量与 Planner 的执行忠实度。</p>
+  <p>Judge 是一个函数 J，把目标 g 和当前计划 π 映射成批评集合：</p>
+  <div class="eq">J(g, π) = C = { (i, type, reason) }<br>type ∈ { REMOVE, MISSING }</div>
+  <div class="eq-cap">§3.1：每条批评包含动作索引 i、修正类型和自然语言理由；矛盾动作被归入 REMOVE，不单独设类型。</div>
+  <p>Planner 是另一个函数 P，把计划与批评映射成新计划；两者复合得到验证算子 V：</p>
+  <div class="eq">P(π, C) = π′<br>V = P ∘ J &nbsp; ⇒ &nbsp; π′ = V(g, π)</div>
+  <div class="eq-cap">§3.1：论文假设 V 是保守的，即 E[E(V(π))] ≤ E(π)，其中 E(π) 是计划中的错误数；在这个假设下误差序列非增，并存在 δ &gt; 0 使 E[E<sup>(k+1)</sup>] ≤ (1−δ) E[E<sup>(k)</sup>]。</div>
+  <p>迭代形式就是重复应用 V：</p>
+  <div class="eq">C<sup>(k)</sup> = J(g, π<sup>(k)</sup>)<br>π<sup>(k+1)</sup> = P(π<sup>(k)</sup>, C<sup>(k)</sup>)</div>
+  <div class="eq-cap">§3.1 / Algorithm 1：最多 5 轮；若 Judge 返回空批评集合，直接返回当前计划；否则 Planner 应用批评并重新编号，进入下一轮。</div>
+  <p>这里有两个容易被忽略的点。第一，“保守”是假设，不是定理：论文没有证明 Judge 与 Planner 一定满足 E[E(V(π))] ≤ E(π)，只把它作为收敛分析的前提。第二，Planner 被描述为“deterministically”应用批评，但实现上仍是 LLM 按 prompt 修改<span class="infer">推断</span>（依据：§3.1 与 Appendix A.2 的 Planner 是 LLM prompt，Algorithm 1 的 <code>P.apply_critiques</code> 没有确定性规则）；哪些批评被采纳、是否引入新错误，取决于模型。</p>
+
+  <h3>评估口径</h3>
+  <p>Judge 的输出与人工标注逐动作比较。正例是“错误动作”，包括 REMOVE 与 MISSING；矛盾错误被归入 REMOVE。指标是：</p>
+  <div class="eq">Recall = TP / (TP + FN)<br>Precision = TP / (TP + FP)<br>F1 = 2 × Precision × Recall / (Precision + Recall)</div>
+  <div class="eq-cap">§3.2：recall 是所有真实错误动作中被标出的比例；precision 是所有被标出的动作中真正错误的比例；F1 是两者的调和平均。</div>
+  <p>这个口径只衡量“找错”，不衡量“改对”。一个 Judge 可以高 recall 地把所有可疑动作都标出来，但 Planner 可能改错；论文的 Table 2 同时报告 recall 与 precision，但没有单独的“修正后计划正确率”表。</p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>不训练、不接模拟器：成本主要是 Judge/Planner 的推理与人工标注</h2></div>
+  <p class="sec-sub">这是一篇评测型论文：没有模型训练，也没有环境执行；它的“计算”是 16 种模型组合的零样本推理。</p>
+  <div class="tbl-scroll">
+  <table class="tbl-mid tbl-center">
+    <caption>表 0B · 数据、模型与评测配置（页面整理，数字取自 §3–§4、Algorithm 1、Conclusion 的 1,408 个动作）</caption>
+    <thead><tr><th>项目</th><th>设置</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>数据集</td><td>TEACh 子集</td><td>100 个 episode，15 个家务任务，1,408 个人类动作</td></tr>
+      <tr><td>错误标注</td><td>人工逐动作标注</td><td>作为 precision / recall 的 ground truth；论文承认标注有主观性</td></tr>
+      <tr><td>Judge / Planner</td><td>GPT o4-mini、DeepSeek-R1、Gemini 2.5、LLaMA 4 Scout</td><td>4 × 4 = 16 种组合；Table 1 只看 Judge，Table 2 看组合</td></tr>
+      <tr><td>提示方式</td><td>零样本自然语言 prompt</td><td>Judge 用 <code>#REMOVE</code> / <code>#MISSING</code> 标签；Planner 保留原格式，只做必要修改</td></tr>
+      <tr><td>迭代轮数</td><td>最多 5 轮</td><td>Judge 返回空批评即提前停止；Algorithm 1 每轮重新编号</td></tr>
+      <tr><td>环境依赖</td><td>无模拟器、无视觉输入</td><td>Judge 只看目标与动作文本；方法不执行计划</td></tr>
+      <tr><td>训练</td><td>无</td><td>不改模型参数；论文建议未来用 fine-tuning / 混合方法缓解 LLM 偏见</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">§3–§4 / Algorithm 1：论文没有给每次 Judge/Planner 调用的 token 数、延迟、费用或总 API 成本；只在 Limitations 里说 Judge 响应缓存后迭代很轻，但首次生成 Judge 响应的开销可能很大。</p>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">零训练</span></div><p>不需要收集错误标签训练验证器；直接用现成 LLM 的零样本判断。代价是效果受模型偏见、知识截止与幻觉影响。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">可缓存</span></div><p>论文说 Judge 响应缓存后，迭代循环的计算很轻；但首次为大规模数据生成 Judge 响应仍有可观开销。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pn">人工瓶颈</span></div><p>评估仍要人工标注 1,408 个动作；方法本身不提供自动 ground truth，也没有报告标注者一致性。</p></div>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>计划 → 批评 → 修改 → 再批评，直到空集或第 5 轮</h2></div>
+  <p class="sec-sub">流程图只有两个角色和一条回路；关键分支是 Judge 返回空批评时停止。</p>
+  <figure>
+    <svg viewBox="0 0 900 400" role="img" aria-label="Judge–Planner 迭代验证：计划送入 Judge，Judge 输出批评集合；Planner 按批评修改计划并回到 Judge；Judge 无批评时直接输出最终计划；Planner 到第 5 轮也输出最终计划">
+      <defs><marker id="pv-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" class="arrow-head"/></marker></defs>
+      <rect class="svg-box" x="30" y="150" width="170" height="80" rx="10"/>
+      <text x="115" y="181" text-anchor="middle" class="svg-t">计划 π(k)</text>
+      <text x="115" y="207" text-anchor="middle" class="svg-s">动作序列 + 目标</text>
+
+      <rect class="svg-hot" x="270" y="150" width="180" height="80" rx="10"/>
+      <text x="360" y="181" text-anchor="middle" class="svg-t">Judge LLM</text>
+      <text x="360" y="207" text-anchor="middle" class="svg-s">逐条检查，给理由</text>
+
+      <rect class="svg-box" x="270" y="285" width="180" height="70" rx="10"/>
+      <text x="360" y="313" text-anchor="middle" class="svg-t">批评集合 C</text>
+      <text x="360" y="337" text-anchor="middle" class="svg-s">REMOVE/MISSING</text>
+
+      <rect class="svg-hot" x="540" y="285" width="180" height="70" rx="10"/>
+      <text x="630" y="313" text-anchor="middle" class="svg-t">Planner LLM</text>
+      <text x="630" y="337" text-anchor="middle" class="svg-s">应用批评并重编号</text>
+
+      <rect class="svg-box" x="540" y="40" width="180" height="80" rx="10"/>
+      <text x="630" y="71" text-anchor="middle" class="svg-t">最终计划</text>
+      <text x="630" y="97" text-anchor="middle" class="svg-s">C = ∅ 或 k = 5</text>
+
+      <path class="svg-ln" d="M200 190 L266 190" marker-end="url(#pv-ar)"/>
+      <path class="svg-ln" d="M360 230 L360 281" marker-end="url(#pv-ar)"/>
+      <path class="svg-ln" d="M450 320 L536 320" marker-end="url(#pv-ar)"/>
+      <path class="svg-ln" d="M630 285 L630 124" marker-end="url(#pv-ar)"/>
+      <path class="svg-ln" d="M720 320 L750 320 L750 380 L115 380 L115 234" marker-end="url(#pv-ar)"/>
+      <path class="svg-ln" d="M450 190 L500 190 L500 80 L536 80" marker-end="url(#pv-ar)"/>
+      <text x="455" y="180" class="svg-l">C = ∅</text>
+      <text x="640" y="205" class="svg-l">k = 5</text>
+      <text x="470" y="376" class="svg-l">π(k+1) 回到 Judge</text>
+    </svg>
+    <figcaption>图：Judge–Planner 迭代验证。Judge 对当前计划逐条给出 REMOVE / MISSING 批评；Planner 按批评修改并重新编号，修改后的计划回到 Judge。Judge 返回空批评集合（C = ∅）时直接输出最终计划；否则 Planner 在第 5 轮（k = 5）也输出最终计划。图按 Figure 1 与 Algorithm 1 重绘，未展开 prompt 模板、缓存策略与模型调用细节。</figcaption>
+  </figure>
+  <div class="two-col">
+    <div class="card"><div class="card-head"><span class="pill p1">Judge 的角色</span><h4>只看文本，不看执行</h4></div><p>Judge 接收目标与动作序列，逐条分析每个动作是否服务于目标；它不调用模拟器、不检查前置条件是否真的满足<span class="infer">推断</span>（依据：§3.1 的 Judge 输入只有 g 与 π，Limitations 与 Appendix 都没有模拟器调用），也不看视觉场景。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">Planner 的角色</span><h4>执行批评，不重新规划</h4></div><p>Planner 按 Judge 的 REMOVE / MISSING 修改计划，保留原格式；它不是从目标重新生成计划，因此输出质量受批评集合约束。</p></div>
+  </div>
+  <p>这套分工的优点是模块化：Judge 和 Planner 可以来自不同模型，Table 2 因此能逐格比较 16 种组合。缺点是错误会沿链路传播：Judge 漏掉的错误，Planner 不会主动发现；Judge 错标的动作，Planner 可能直接删掉。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>单次验证已超规则基线，迭代主要抬 recall；代价是 precision 的权衡</h2></div>
+  <p class="sec-sub">先看 Table 1 的单次验证，再看 Table 2 的 16 种组合与 Figure 3 的收敛曲线。</p>
+
+  <h3>Table 1 · 单次零样本验证</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-mid tbl-center">
+    <caption>Table 1 · 单次计划验证性能（原文 Table 1 转录，单位为 %）</caption>
+    <thead><tr><th>Judge LLM</th><th>Recall</th><th>Precision</th></tr></thead>
+    <tbody>
+      <tr class="best"><td>GPT o4-mini</td><td class="num">80</td><td class="num">93</td></tr>
+      <tr><td>DeepSeek-R1</td><td class="num">68</td><td class="num">100</td></tr>
+      <tr><td>Gemini 2.5</td><td class="num">74</td><td class="num">90</td></tr>
+      <tr><td>LLaMA 4 Scout</td><td class="num">74</td><td class="num">85</td></tr>
+      <tr><td>Rule-based</td><td class="num">22</td><td class="num">71</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 1：单次验证，不迭代。GPT o4-mini 的 recall 最高，DeepSeek-R1 的 precision 最高，规则基线两项都低。这里“正例”是人工标注的错误动作，包含 REMOVE 与 MISSING。</p>
+  <p>单次结果已经说明两件事。第一，零样本自然语言判断明显强于规则基线：GPT o4-mini 的 recall 是 <span data-src="Table 1">80</span>%，规则基线是 <span data-src="Table 1">22</span>%，绝对差 58 个百分点（80 − 22，见 LEDGER）。第二，模型风格差异很大：DeepSeek-R1 的 precision 是 <span data-src="Table 1">100</span>%，但 recall 只有 <span data-src="Table 1">68</span>%；GPT o4-mini 反过来，recall 高但 precision 低 7 个百分点（<span data-src="Table 1">93</span> 对 <span data-src="Table 1">100</span>）。</p>
+
+  <h3>Table 2 · 16 种 Judge–Planner 组合</h3>
+  <div class="tbl-scroll">
+  <table class="tbl-wide tbl-center">
+    <caption>Table 2 · 迭代验证的 recall / precision / F1（原文 Table 2 转录，单位为 %）</caption>
+    <thead><tr><th>Judge \ Planner</th><th>GPT o4-mini</th><th>DeepSeek-R1</th><th>Gemini 2.5</th><th>LLaMA 4 Scout</th></tr></thead>
+    <tbody>
+      <tr class="model-row"><td>GPT o4-mini</td><td class="cell-rp">88 / 90 / 89.0</td><td class="cell-rp">90 / 80 / 84.7</td><td class="cell-rp">85 / 91 / 87.8</td><td class="cell-rp">89 / 87 / 87.9</td></tr>
+      <tr class="model-row"><td>DeepSeek-R1</td><td class="cell-rp">65 / 99 / 78.5</td><td class="cell-rp">68 / 100 / 80.9</td><td class="cell-rp">62 / 100 / 76.5</td><td class="cell-rp">66 / 98 / 78.9</td></tr>
+      <tr class="model-row"><td>Gemini 2.5</td><td class="cell-rp">84 / 98 / 90.7</td><td class="cell-rp">86 / 97 / 91.2</td><td class="cell-rp">89 / 99 / 93.9</td><td class="cell-rp">89 / 96 / 92.2</td></tr>
+      <tr class="model-row"><td>LLaMA 4 Scout</td><td class="cell-rp">76 / 92 / 83.5</td><td class="cell-rp">81 / 90 / 85.3</td><td class="cell-rp">79 / 93 / 85.9</td><td class="cell-rp">75 / 89 / 81.6</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Table 2：每格是 recall / precision / F1。Judge 行、Planner 列。论文正文说迭代平均把 recall 提高 <span data-src="§4.2">5–10%</span>（原文未说明是绝对还是相对）；按表值看，GPT o4-mini 做 Judge 时从 <span data-src="Table 1">80</span>% 升到 <span data-src="Table 2">85–90</span>%（+5 到 +10 个百分点），Gemini 2.5 从 <span data-src="Table 1">74</span>% 升到 <span data-src="Table 2">84–89</span>%（+10 到 +15 个百分点），但 DeepSeek-R1 做 Judge 时反而从 <span data-src="Table 1">68</span>% 降到 <span data-src="Table 2">62–68</span>%（−6 到 0 个百分点）。</p>
+
+  <div class="sim">
+    <div class="tabs" id="pv-judge-tabs">
+      <button class="tab active" data-judge="gpt">Judge · GPT o4-mini</button>
+      <button class="tab" data-judge="ds">Judge · DeepSeek-R1</button>
+      <button class="tab" data-judge="gem">Judge · Gemini 2.5</button>
+      <button class="tab" data-judge="llama">Judge · LLaMA 4 Scout</button>
+    </div>
+    <div class="tabs" id="pv-planner-tabs">
+      <button class="tab active" data-planner="gpt">Planner · GPT</button>
+      <button class="tab" data-planner="ds">Planner · DeepSeek</button>
+      <button class="tab" data-planner="gem">Planner · Gemini</button>
+      <button class="tab" data-planner="llama">Planner · LLaMA</button>
+    </div>
+    <div class="readout" data-src="Table 2"><div class="r-head">当前组合</div><div id="pv-out"></div></div>
+    <div class="chart" id="pv-chart">
+      <div class="crow"><div class="cname">GPT o4-mini</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="pv-fill-0"></div></div><div class="num" id="pv-num-0">89.0</div></div></div></div>
+      <div class="crow"><div class="cname">DeepSeek-R1</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="pv-fill-1"></div></div><div class="num" id="pv-num-1">84.7</div></div></div></div>
+      <div class="crow"><div class="cname">Gemini 2.5</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="pv-fill-2"></div></div><div class="num" id="pv-num-2">87.8</div></div></div></div>
+      <div class="crow"><div class="cname">LLaMA 4 Scout</div><div class="cbars"><div class="cbar"><div class="track"><div class="fill b2" id="pv-fill-3"></div></div><div class="num" id="pv-num-3">87.9</div></div></div></div>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>当前选中 Planner</span><span><i style="background:var(--c1)"></i>其他 Planner</span><span>柱高按 100 满量程；R / P / F1 逐字取自 Table 2，页面不重算 F1</span></div>
+  </div>
+  <details class="handcalc">
+    <summary>手算：两个对角组合 <span class="sum-sub">GPT/GPT 一致；DS/DS 不一致</span></summary>
+    <div class="details-body">
+      <p><strong>GPT o4-mini + GPT o4-mini。</strong>Table 2 给 R = 88、P = 90、F1 = 89.0；调和平均 2 × 88 × 90 / (88 + 90) = 15840 / 178 = 88.99，四舍五入 89.0，与表中一致。</p>
+      <p><strong>DeepSeek-R1 + DeepSeek-R1。</strong>Table 2 给 R = 68、P = 100、F1 = 80.9；2 × 68 × 100 / (68 + 100) = 13600 / 168 = 80.952…；严格四舍五入应为 81.0，表中写 80.9。这是原表 F1 与显示 R/P 的又一处不一致（可能原表用未舍入的 R/P 计算，或 F1 列单独舍入），不能称为逐位一致。</p>
+      <p><strong>原表多格 F1 与 R/P 不自洽（至少 9/16）。</strong>按表中显示的整数 R/P 直接算，16 格中至少 9 格与表列 F1 相差 0.1–0.5。例如 Gemini 2.5 + Gemini 2.5 的 R = 89、P = 99，按调和平均是 2 × 89 × 99 / 188 = 93.73，应显示 93.7，但 Table 2 写 93.9；LLaMA 4 Scout + GPT o4-mini 的 76/92 算出 83.2，表中写 83.5。这更像是原表用未舍入的 R/P 计算 F1、再把 R/P 单独舍入显示，而不是逐格手抄错误<span class="infer">推断</span>（依据：9/16 格相差 0.1–0.5，且差值有正有负）。页面按原表转录，交互读数也直接取原表，不把重算值混进去。</p>
+      <p>柱高 = F1 数值本身（满量程 100），低于 1.2% 时按 1.2% 显示；本页 F1 最低 76.5（DeepSeek-R1 Judge × Gemini 2.5 Planner），不会触发这个下限。</p>
+    </div>
+  </details>
+
+  <h3>收敛：62% → 89% → 96.5%</h3>
+  <div class="three-col">
+    <div class="card"><div class="card-head"><span class="pill p1">第 1 轮</span><h4><span data-src="Figure 3">62</span>% 不再需要修改</h4></div><p>大多数序列的错误是表面级、局部可判的；Judge 一轮就能指出，Planner 一轮就能改完。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">第 2 轮累计</span><h4>89%（+<span data-src="§4.2">27</span> 个百分点）</h4></div><p>剩下 <span data-src="§4.2">27</span>% 的序列需要第二轮<span class="infer">推断</span>（依据：89% − 62%，§4.2 的两个累计值反推）；论文把这部分归因于动作之间的依赖关系，单看一步看不出问题。</p></div>
+    <div class="card"><div class="card-head"><span class="pill pa">第 3 轮累计</span><h4>96.5%（+<span data-src="§4.2">7.5</span> 个百分点）</h4></div><p>第 4–5 轮只有 <span data-src="§4.2">3.5</span>% 的序列受益；继续迭代的边际收益很小，但论文仍保留最多 5 轮的设置。</p></div>
+  </div>
+  <p class="eq-cap">Figure 3 / §4.2：62% 是“第一轮后不需要进一步修改”的比例；89% 与 96.5% 是累计收敛比例，+27 与 +7.5 来自 §4.2 的 bullet。第 4–5 轮的 3.5% 只出现在 §4.2 文字里；Figure 3 的标注是第 3/4/5 轮 96.5%、98.5%、99.7%，没有直接写 3.5%，按 96.5→99.7 反推是 3.2 个百分点的累计增益。论文没有给每一轮的 per-model 分解，也没有给“收敛”与“改对”的联合分布。</p>
+
+  <h3>模型风格：保守、激进、均衡</h3>
+  <div class="two-col">
+    <div class="card"><div class="card-head"><span class="pill p1">DeepSeek-R1：保守</span></div><p>Judge 侧 precision 在 98–100%，recall 只有 62–68%。它只在非常确定时标错，漏掉约三分之一的错误；优点是几乎不误删有效动作。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p1">GPT o4-mini：激进</span></div><p>Judge 侧 recall 85–90%，precision 80–91%。它抓错多，但会把一些必要动作标成多余；在与 DeepSeek-R1 做 Planner 的组合里 recall 达到 90%，precision 掉到 80%。</p></div>
+  </div>
+  <div class="two-col">
+    <div class="card"><div class="card-head"><span class="pill p2">Gemini 2.5：均衡</span></div><p>作为 Judge，F1 在 90.7–93.9，四个 Planner 列里都是最高；recall 84–89%，precision 96–99%。论文称它最稳。</p></div>
+    <div class="card"><div class="card-head"><span class="pill p2">LLaMA 4 Scout：中间</span></div><p>recall 75–81%，precision 89–93%，没有单项最高，但跨 Planner 波动较小。它做 Judge 时与自己的 Planner 配对 F1 最低（81.6），是“同模型配对更好”的一个反例。</p></div>
+  </div>
+  <p>论文的定性分析还列了三类系统性失败：Judge 对“很早拿起、很晚才用”的长程冗余不敏感；会把多步准备动作误判为多余；会把同一物体的第二次使用误删。这些错误说明当前 Judge 擅长表面逻辑，不擅长长程依赖与上下文敏感判断。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>只在 TEACh 子集上验证，任务级结果在 v4 中没有对应表</h2></div>
+  <p class="sec-sub">论文的边界比结论更值得记住：单数据集、人工标注、零样本 Judge、无下游训练。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">数据范围窄</span><h4>15 个家务任务、100 个 episode</h4></div>
+      <p>全部实验在 TEACh 子集上，覆盖 15 个常见家务目标；工业、医疗、户外等场景没有测试。论文自己在 Limitations 里说，泛化性未验证。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">标注主观</span><h4>ground truth 是人工判断</h4></div>
+      <p>哪些动作算“必要”、哪些算“多余”，由人工逐动作标注；论文承认这会引入主观性与不一致，但没有报告标注者间一致性。</p>
+    </div>
+  </div>
+  <p>方法层面的限制更关键。第一，论文报告的是 Judge 与人工标注的逐动作对照；§3.2 说任务级结果（plan success rate、平均长度缩减）“另行报告”，但 v4 正文与附录没有给出对应的表。§4 另有一句“These results are obtained by manual annotations that assess the final Planning Agent output based on the action sequence accurately achieving the goal set by the Commander…”，字面上涉及最终计划是否达成目标；它与 §3.2 的“另行报告”并列时口径不清。页面因此只把 Table 1/2 当作找错评估，不把“清洗后数据更好”当作已验证结论。</p>
+  <p>第二，Judge 完全依赖文本，不接环境模拟器、不看视觉输入，也不检查动作前置条件是否真的满足。它能发现“看起来多余”的动作，但无法确认“拿起杯子”时杯子是否真的在桌上。论文把视觉 grounding 与物理模拟列为未来工作。</p>
+  <p>第三，零样本 LLM 的判断受偏见、知识截止与幻觉影响；论文建议用 fine-tuning 或混合外部知识库缓解，但没有给出这样的实验。Judge 与 Planner 同源时也可能共享同一盲区，Table 2 的对角线并不总是最好（LLaMA 4 Scout 做 Judge 时，配 GPT Planner 的 F1 83.5 高于自配 81.6）。</p>
+  <p>最后，迭代上限是 5 轮，但 96.5% 的序列 3 轮内已收敛；§4.2 称继续跑到第 4–5 轮只对 3.5% 的序列有边际收益（Figure 3 第 4/5 轮的标注为 98.5%/99.7%）。论文没有给“何时停止”的自适应准则，也没有分析第 4–5 轮是否可能引入新错误。</p>
+</section>
+
+<footer>
+  <div>Plan Verification for LLM-Based Embodied Task Completion Agents · Ananth Hariharan、Vardhan Dongre、Dilek Hakkani-Tür、Gokhan Tur · University of Illinois Urbana-Champaign · NeurIPS 2025 Workshop · arXiv 2509.02761v4</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2509.02761">https://arxiv.org/abs/2509.02761</a><br>
+    代码：<a href="https://github.com/AnanthHariharan/Task-Agents">https://github.com/AnanthHariharan/Task-Agents</a><br>
+    笔记：<a href="/plan-verification-for-llm-based-embodied-task-completion-agents/">Plan Verification for LLM-Based Embodied Task Completion Agents</a><br>
+    本页以 arXiv 2509.02761v4 为准；上方链接不带版本号。
+  </div>
+  <div class="errata">
+    <p><strong>笔记勘误（只改页面，不动笔记）：</strong></p>
+    <ul>
+      <li>笔记把模型名写成“GPT 04-mini”。原文是 <strong>GPT o4-mini</strong>（字母 o，不是数字 0）；页面按原文写。</li>
+      <li>笔记引原文“iterative refinement boosts recall by 5–10%”，转述成“提高了5-10%”（未说明绝对/相对）；原文写的是 5–10%，没有说明口径，笔记也没有写成“5–10 个百分点”。Table 2 显示 DeepSeek-R1 做 Judge 时 recall 从静态 68% 降到 62–68%，并非所有组合都上升；论文正文的“all Judge–Planner combinations”与 Table 2 的 DeepSeek 行并列时存在张力。页面按原文“5–10%（未说明口径）”写，并按表值另算绝对差。</li>
+      <li>笔记说 DeepSeek-R1 “召回率较低（68%）”。68% 是 Table 1 的单次结果；Table 2 迭代后是 62–68%，其中与 Gemini Planner 配对是 62%。TL;DR 里的 68 指 Table 2 的 DeepSeek-R1 × DeepSeek-R1（同模型配对），Table 1 的静态 68 是另一处；两处数值相同、来源不同，页面分别锚定。</li>
+      <li>笔记写“超过 62%”（不是百分点差；原文恰好 62%）的序列在第一轮迭代后就已修正完毕。原文 §4.2 与 Figure 3 都写 62%，不是“超过”；原文的 62% 指“require no further modifications”（不需要进一步修改），不等于“已修正完毕”。页面按 62% 与“第一轮后不再需要修改”写。</li>
+      <li>笔记说“模型与自身配对时通常表现很好”。Table 2 多数对角线确实高，但 LLaMA 4 Scout 做 Judge 时，自配 F1 81.6 低于配 GPT Planner 的 83.5；页面保留“同模型配对更好”的说法，并给出反例。</li>
+      <li>笔记说框架具有“极强的模型无关性”和“通用性极强”。论文只验证了 4 个模型与 TEACh 子集，Limitations 明确说泛化性未测试；页面用“模型无关、可替换”，不写“极强”。</li>
+      <li>笔记用“扎实的实证研究”“实验结果令人信服”“非常出色”“最有价值”等评价性表述，并说论文“为构建更智能、更鲁棒的 AI 系统提供了宝贵的见解和可行的工程范式”。这些是评价性表述，不是论文结论；页面只保留可核对的结果与作者自己的 limitation。</li>
+    </ul>
+    <p><strong>原文内部并列（不替原文消解）：</strong></p>
+    <ul>
+      <li>摘要说「up to 90% recall and 100% precision across four state-of-the-art LLMs」。这两个上界不是同一组合：90% recall 来自 GPT o4-mini Judge + DeepSeek-R1 Planner（precision 80%），100% precision 来自 DeepSeek-R1 Judge（recall 62–68%）。页面并列，不把它们写成同一配置。</li>
+      <li>§4.2 与 Conclusion 都称迭代把 recall 提高 5–10%（未说明绝对/相对）；按 Table 2 表值，GPT o4-mini 行是 +5 到 +10 个百分点，Gemini 2.5 行是 +10 到 +15，DeepSeek-R1 行是 −6 到 0。原文的“all Judge–Planner combinations”与 DeepSeek-R1 行下降并列存在张力。</li>
+      <li>§4.2 举例说 GPT o4-mini 的 recall 从 80% 升到 88–90%；Table 2 里 GPT o4-mini 行的四格是 88、90、85、89，范围 85–90。原文的 88–90 与 Table 2 不完全对上。</li>
+      <li>Table 2 的 F1 与同格 R/P 的调和平均有多格不一致：按表中显示的整数 R/P 复算，16 格中至少 9 格相差 0.1–0.5。例如 DeepSeek-R1 + DeepSeek-R1 的 68/100 算出 80.952…，严格四舍五入 81.0，表中写 80.9；Gemini 2.5 + Gemini 2.5 的 89/99 算出 93.7，表中写 93.9；LLaMA 4 Scout + GPT o4-mini 的 76/92 算出 83.2，表中写 83.5。页面按原表转录，并在手算块指出差异。</li>
+      <li>§4.2 的 bullet 称第 4–5 轮只有 3.5% 的序列受益；Figure 3 的标注是第 3/4/5 轮 96.5%、98.5%、99.7%（第 4 轮 +2.0，第 3→5 轮累计 +3.2，到第 5 轮仍有 0.3% 未收敛）。3.5% 只出现在 §4.2 文字里，Figure 3 没有 100%。两处口径并列，不替原文合并。</li>
+      <li>§4 说“These results are obtained by manual annotations that assess the final Planning Agent output based on the action sequence accurately achieving the goal set by the Commander…”；§3.2 却说 task-level outcomes（plan success rate、平均长度缩减）另行报告，v4 未给对应表。页面只把 Table 1/2 当作 Judge 找错评估，不把它当作任务级成功率。</li>
+      <li>§3.1 的收敛分析假设 V 保守（E[E(V(π))] ≤ E(π)），但论文没有证明 Judge/Planner 一定满足这个假设；页面把“保守”写成假设，不写成定理。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var out = document.getElementById('pv-out');
+  var judgeTabs = document.getElementById('pv-judge-tabs');
+  var plannerTabs = document.getElementById('pv-planner-tabs');
+  if (!out || !judgeTabs || !plannerTabs) return;
+
+  var NAMES = {
+    gpt: 'GPT o4-mini',
+    ds: 'DeepSeek-R1',
+    gem: 'Gemini 2.5',
+    llama: 'LLaMA 4 Scout'
+  };
+  var DATA = {
+    gpt: {gpt: [88, 90, 89.0], ds: [90, 80, 84.7], gem: [85, 91, 87.8], llama: [89, 87, 87.9]},
+    ds: {gpt: [65, 99, 78.5], ds: [68, 100, 80.9], gem: [62, 100, 76.5], llama: [66, 98, 78.9]},
+    gem: {gpt: [84, 98, 90.7], ds: [86, 97, 91.2], gem: [89, 99, 93.9], llama: [89, 96, 92.2]},
+    llama: {gpt: [76, 92, 83.5], ds: [81, 90, 85.3], gem: [79, 93, 85.9], llama: [75, 89, 81.6]}
+  };
+  var judge = 'gpt';
+  var planner = 'gpt';
+
+  function render() {
+    var row = DATA[judge];
+    var vals = ['gpt', 'ds', 'gem', 'llama'];
+    for (var i = 0; i < vals.length; i++) {
+      var fill = document.getElementById('pv-fill-' + i);
+      var num = document.getElementById('pv-num-' + i);
+      var f1 = row[vals[i]][2];
+      if (fill) {
+        var pct = Math.round(f1 * 10) / 10;
+        if (pct < 1.2) pct = 1.2;
+        fill.className = 'fill ' + (vals[i] === planner ? 'b1' : 'b2');
+        fill.style.height = pct + '%';
+      }
+      if (num) num.textContent = f1.toFixed(1);
+    }
+    var cell = row[planner];
+    out.innerHTML = 'Judge ' + NAMES[judge] + ' × Planner ' + NAMES[planner] +
+      '：recall ' + cell[0] + '%，precision ' + cell[1] + '%，F1 ' + cell[2].toFixed(1) +
+      '。柱状图显示当前 Judge 下四个 Planner 的 F1。';
+  }
+
+  function wire(tabs, attr, setter) {
+    var btns = tabs.querySelectorAll('.tab');
+    for (var i = 0; i < btns.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          setter(btn.getAttribute(attr));
+          for (var k = 0; k < btns.length; k++) btns[k].classList.toggle('active', btns[k] === btn);
+          render();
+        });
+      })(btns[i]);
+    }
+  }
+  wire(judgeTabs, 'data-judge', function (v) { judge = v; });
+  wire(plannerTabs, 'data-planner', function (v) { planner = v; });
+  render();
+})();
+</script>
+</body>
+</html>

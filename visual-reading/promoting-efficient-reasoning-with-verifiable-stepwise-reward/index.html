@@ -1,0 +1,791 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 44.0 | Table 2 | (12605-7065)/12605*100 |
+| 5540 | Table 2 | 12605-7065 |
+| 51.4 | Table 2 | (9249-4499)/9249*100 |
+| 36.6 | Table 2 | (10529-6675)/10529*100 |
+| 36.6 | Table 2 | (10909-6920)/10909*100 |
+| 3854 | Table 2 | 10529-6675 |
+| 20.8 | Table 2 | (8515-6744)/8515*100 |
+| 67.2 | Table 2 | (6929-2273)/6929*100 |
+| 59.6 | Table 1 & Table 4 | (312-126)/312*100 |
+| 52.7 | Table 1 & Table 4 | (279-132)/279*100 |
+| 1.3 | Table 2 | 53.1-51.8 |
+| 1.0 | Table 2 | 90.6-89.6 |
+| 1.5 | Table 2 | 40.7-39.2 |
+| 18 | Table 2 | 3*6 |
+| 50 | Appendix B | 10*5 |
+| 100 | Appendix B | 20*5 |
+| 0.4 | §3 Eq.2 | 0.60-0.20 |
+| 0.1372 | §3 Eq.3 | 0.4*0.7*0.7*0.7 |
+| 0.196 | §3 Eq.3 | 0.4*0.7*0.7 |
+| 0.28 | §3 Eq.3 | 0.4*0.7 |
+| 0.1 | §3 Eq.3 | 0.4*0.5*0.5 |
+| 0.2 | §3 Eq.3 | 0.4*0.5 |
+| 1.0132 | §3 Eq.3 | 0.1372+0.196+0.28+0.4 |
+| 0.7 | §3 Eq.3 | 0+0.1+0.2+0.4 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VSRM · 用子轨迹准确率差给每一步发可验证奖励</title>
+<meta name="description" content="VSRM 把推理链按特殊词切成子轨迹，用子轨迹答案的平均正确率之差作为步进奖励，再按 γ 折扣向未来传播；在数学基准上压缩输出长度，代价是训练采样开销与部分基准上的准确率波动。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+blockquote{
+  margin:18px 0;padding:14px 18px;border-left:3px solid var(--c2);
+  background:var(--bg-surface);border-radius:0 var(--radius) var(--radius) 0;
+  font-size:14px;color:var(--text-muted);font-style:italic;line-height:1.8;
+}
+blockquote .quote-src{
+  display:block;margin-top:8px;font-style:normal;
+  font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);
+}
+.prop-out{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:14px}
+.prop-out > div{
+  background:var(--bg);border:1px solid var(--border);border-radius:7px;
+  padding:7px 9px;font-family:"JetBrains Mono",monospace;font-size:12px;
+  line-height:1.5;display:flex;flex-direction:column;gap:2px;
+}
+.prop-out b{font-weight:600;color:var(--text-muted)}
+.prop-out span{color:var(--text)}
+.table-note{font-size:12.5px;color:var(--text-soft);margin-top:-6px}
+.errata{margin-top:14px;padding-top:14px;border-top:1px solid var(--border);font-size:13px;line-height:1.8}
+.errata p{margin:8px 0 0}
+.len{color:var(--text-soft);font-size:12px;font-family:"JetBrains Mono",monospace}
+.grp td{background:var(--bg-soft);font-weight:600;font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-muted)}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.04em;padding:0 6px;border-radius:100px;background:var(--c2-soft);color:var(--c2);white-space:nowrap;vertical-align:1px}
+@media (max-width:880px){.prop-out{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">VSRM</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2025 · 2508.10293v2</span>
+  <h1>VSRM：把「这一步有没有用」变成一次可验证的采样</h1>
+  <p class="hero-sub">
+    RLVR 只用最终答案的对错发奖励，模型于是用更长的推理链换正确率。VSRM 把推理链按特殊词切成子轨迹，让每个中间状态各自答五次，用平均正确率的相邻差当步骤奖励；差太小就向未来看几步，按 γ 折扣把收益传回来。代价是训练时要为每条主轨迹额外采样大量答案。
+  </p>
+  <div class="meta">
+    <span>Chuhuai Yue 等 · 数学推理 · 2025</span>
+    <a href="https://arxiv.org/abs/2508.10293v2" target="_blank" rel="noopener">arXiv 2508.10293v2 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    RLVR 的二元结果奖励只看最后答案，模型学会了「宁可多写，不可写错」。论文把过度思考定位在推理链中段：大量步骤既不提高正确率，也不帮助模型走到正确答案。
+  </p>
+  <p>
+    <strong>VSRM</strong> 不训练 PRM。它用 however / thus / so / but / wait 等特殊词把主轨迹切成子轨迹，每个子轨迹补一个 <code>&lt;/think&gt;</code> 后让模型再答 <code>N=5</code> 次，用平均正确率 <code>A<sub>i</sub></code> 代表这个中间状态的价值。
+  </p>
+  <p>
+    单步奖励取相邻 <code>A<sub>i</sub></code> 的差；差的绝对值 <code>|d|</code> 小于 ε 就向未来看最多 <code>L<sub>max</sub>=4</code> 步，用 <code>γ=0.7</code> 的折扣把未来收益传回来。最终得到一条与 response 等长的奖励向量，直接接 PPO / Reinforce++。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">44.0<small>%</small></div>
+      <div class="k">AIME24 输出长度相对下降<br>12605 → 7065 · DS-Distill-1.5B</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">51.4<small>%</small></div>
+      <div class="k">OlympiadBench 长度相对下降<br>9249 → 4499 · 同设置</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1 &amp; Table 4">59.6<small>%</small></div>
+      <div class="k">过度思考样本相对减少<br>312/500 → 126/500（Table 1 / Table 4）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>过度思考不是「写太长」，而是中段大量步骤不改变正确率</h2></div>
+  <p class="sec-sub">读完这节应知道：论文把 overthinking 定位在推理链中段的无效步骤，而不是单纯的长度。</p>
+
+  <p>RLVR 的常见做法是只看最终答案：答对给 1，答错给 0。论文认为这会塑造一种偏好——宁可多写，也不要写错。</p>
+  <blockquote>“the binary reward function used in R1 encourages the model to over-generate content in the pursuit of correctness, fostering a preference for being overly redundant rather than potentially wrong.”<span class="quote-src">§1 Introduction</span></blockquote>
+
+  <p data-src="§3 Rethink the Essence">论文在 MATH-500 上让 DeepScaleR 和 DS-Distill-1.5B 各生成 500 条回答，随机抽 10% 人工标注，论文发现推理过程可分为三个阶段：问题重述、逐步解答、答案总结。过度思考主要发生在「逐步解答」阶段。</p>
+  <blockquote>“the reasoning process of LRMs can generally be divided into three stages: problem restatement, step-by-step answering, and answer summary. The overthinking issue mainly occurs during the step-by-step answering stage.”<span class="quote-src">§3 Rethink the Essence</span></blockquote>
+
+  <p>为了把个案变成统计，论文让 DeepSeek-R1 检测全部 500 条回答里的无效步骤，并与人工标注对照。R1 不能精确标出所有无效步骤，但被认为能识别过度思考现象，因此这些数字是粗粒度统计。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 1 转录：DeepSeek-R1 检测到的过度思考样本（每模型 500 条 MATH-500 回答）</caption>
+      <thead><tr><th>模型</th><th class="num">检测到过度思考</th></tr></thead>
+      <tbody>
+        <tr><td>DeepScaleR</td><td class="num">279/500</td></tr>
+        <tr><td>DS-Distill-1.5B</td><td class="num">312/500</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>两个模型都在超过一半的样本里出现明显无效步骤。论文由此把优化目标定为：鼓励提高正确率的中间步骤，惩罚不改变正确率的步骤。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键区分</span><h4>惩罚「无效」，不是惩罚「长」</h4></div>
+    <p>论文的论点是：长度惩罚可能连带压掉必要的长步骤。VSRM 的奖励直接看「这一步之后，模型答对的估计概率有没有变」，因此长步骤只要有用就可以保留。</p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条主流路线都要先猜长度，PRM 又要先训一个不稳定的裁判</h2></div>
+  <p class="sec-sub">前人不是没想到过程监督，而是过程监督要么依赖预估，要么依赖一个难训的奖励模型。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>预设 token budget</h4></div>
+      <p>给任务设输出长度约束，模型在固定预算内作答。论文的论点是：预算要事先猜，猜错就会在简单题上分配过多计算，面对动态场景也缺乏灵活性。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>difficulty-adaptive reasoning</h4></div>
+      <p>先判断题目难度，再分配推理模式或预算。看起来更合理，但论文指出它仍是隐式的 token budgeting，同样依赖对任务的预评估。</p>
+    </div>
+  </div>
+
+  <p data-src="§2 Related Work">论文把这两类方法共同的问题总结为：需要预评估任务来确定输出目标，既依赖预估准确率，也缺乏对动态场景的灵活性。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">过程监督</span><h4>PRM：给每个阶段打分</h4></div>
+    <p>PRM 把推理链分解成阶段并逐步打分，在数学推理上有成功案例（Lightman et al. 2023）。但论文引用 DeepSeek-R1 的经验：PRM 难训练，可靠性无法保证。于是作者绕开 PRM，改用规则切分加子轨迹采样验证。</p>
+  </div>
+
+  <p>此外，还有一类做法是在奖励里加长度惩罚。Table 3 的对照显示，显式长度惩罚并没有带来更强的压缩：DS-Distill-1.5B 的 AIME24 长度是 7533，而 VSRM-PPO 是 7065；MATH-500 是 2615 对 2400。论文的推测是，复杂的结果奖励会干扰过程级奖励。</p>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把「这一步值不值」变成一次可验证的采样</h2></div>
+  <p class="sec-sub">VSRM 用规则切分和子轨迹采样，把「这一步值不值」变成一个可计算的准确率差，再用折扣传播把稀疏信号变密；整条链路不需要额外的奖励模型。</p>
+
+  <h3>第一步：用特殊词把主轨迹切成子轨迹</h3>
+  <p data-src="Appendix D Algorithm 1">先从 response 中用正则取出 <code>&lt;think&gt;…&lt;/think&gt;</code> 里的推理正文。跳过开头一段（<code>C<sub>min</sub>=200</code>）避免把问题重述切碎；然后用预定义的特殊词表匹配切点，例如 “however”“thus”“so”“but”“wait”。为了让每一步语义完整，论文加了两条规则：相邻切点至少间隔 <code>I<sub>min</sub>=100</code> 个 token；切点对齐到包含该特殊词的完整句子的句首。</p>
+  <p>切分结果是切点集合 <code>P={p<sub>1</sub>,…,p<sub>K</sub>}</code>。Appendix D 的 Algorithm 1 给出了完整伪代码。</p>
+
+  <h3>第二步：每个子轨迹各自答 N 次</h3>
+  <p data-src="Appendix B">对每个切点 <code>p<sub>i</sub></code>，把「问题 + 从开头到 p<sub>i</sub> 的推理前缀」拼成新 prompt，末尾补一个 <code>&lt;/think&gt;</code>，让当前策略生成 <code>N=5</code> 条候选答案（每条最多 <code>768</code> token）。这个子轨迹的平均正确率就是 <code>A<sub>i</sub></code>：</p>
+  <div class="eq">A<sub>i</sub> = (1/N) · Σ<sub>j=1</sub><sup>N</sup> I[ IsCorrect( LRM(T<sub>i</sub>)<sub>j</sub> ) ]</div>
+  <div class="eq-cap">Eq. 1 · N=5；I 是指示函数，答对为 1、答错为 0。原文 Eq.1 求和下标印作 j=i；按正文 N 条候选答案，页面按 j=1 呈现。</div>
+  <p>论文把 <code>A<sub>i</sub></code> 称为中间状态价值的 proxy：它不直接判断「这段推理写得好不好」，而是看「从这段推理出发，模型能不能答对」。</p>
+
+  <h3>第三步：奖励取相邻两步的准确率差</h3>
+  <p>如果直接把 <code>A<sub>i</sub></code> 当奖励，所有位置都非负，无法惩罚无效步骤。论文改用相邻差：</p>
+  <div class="eq">d<sub>i−1</sub> = A<sub>i</sub> − A<sub>i−1</sub></div>
+  <div class="eq-cap">Eq. 2 · 边界情况 r<sub>k</sub> 用 A<sub>T</sub> − A<sub>k</sub>，A<sub>T</sub> 是完整主轨迹的平均准确率</div>
+  <p>一个步骤提高正确率就得到正奖励，不改变就得到 0，降低就得到负奖励。问题在于：真实推理里，正确率往往连续多步不变，相邻差大多是 0，奖励非常稀疏。</p>
+
+  <h3>第四步：向未来看几步，按 γ 折扣传回来</h3>
+  <p>当 <code>|d<sub>i−1</sub>| &lt; ε</code> 时，论文在最多 <code>L<sub>max</sub>=4</code> 步的窗口内找第一个超过阈值的变化 <code>|d<sub>i+q−1</sub>| ≥ ε</code>。找到就把未来收益按 <code>γ<sup>q</sup></code> 贴现给当前步骤：</p>
+  <div class="eq">r<sub>i−1</sub> = sgn(d<sub>i+q−1</sub>) · |d<sub>i+q−1</sub>| · γ<sup>q</sup></div>
+  <div class="eq-cap">Eq. 3 · γ=0.7，L<sub>max</sub>=4，ε=10<sup>−5</sup>；窗口内找不到超过阈值的变化则 r<sub>i−1</sub>=0</div>
+  <p>如果一路看到序列末尾都没有超过阈值的变化，论文用 Eq. 4 把最终准确率与当前准确率的差按剩余步数贴现：</p>
+  <div class="eq">r<sub>i−1</sub> = sgn(d<sub>k</sub>) · |d<sub>k</sub>| · γ<sup>k−i+1</sup></div>
+  <div class="eq-cap">Eq. 4 · 序列末尾没有超过阈值的变化时的处理</div>
+  <p>这就是「衰减传播」：它把稀疏的 0 变成有方向、有折扣的密集信号。</p>
+
+  <h3>第五步：和结果奖励拼成一条与 token 对齐的向量</h3>
+  <p data-src="§3 Reinforcement Learning with VSRM">最终奖励不是单个标量，而是一条与 response token 数等长的向量：各切点位置放步进奖励，最后一个位置额外加结果奖励 <code>r<sup>result</sup></code> 和格式奖励 <code>r<sup>format</sup></code>，其余位置为 0。</p>
+  <div class="eq">R<sub>T</sub> = [ …, r<sub>1</sub>, …, r<sub>t</sub>, …, r<sub>k</sub>, …, r<sub>T</sub><sup>result</sup> + r<sub>T</sub><sup>format</sup> ]</div>
+  <div class="eq-cap">Eq. 5 · 向量长度与总 response 长度一致，直接交给 PPO / Reinforce++ 做 advantage 估计</div>
+
+  <h3>自己动手：看传播怎么把稀疏的差变成密集奖励</h3>
+  <p>下面用一条<strong>构造的</strong>准确率序列演示 Eq. 2 与 Eq. 3。序列不是论文数据；γ、L<sub>max</sub>、ε 取自 Appendix B。切换「只看相邻差」可以看到不做传播时奖励有多稀疏；Table 3 的 w/o decay 消融检验的正是这条机制。</p>
+
+  <div class="sim" id="prop-sim">
+    <div class="sim-top" id="prop-modes">
+      <button class="rule-btn active" data-mode="on">启用衰减传播<span class="r-sub">Eq. 3</span></button>
+      <button class="rule-btn" data-mode="off">只看相邻差<span class="r-sub">无传播</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>γ 折扣因子 <span class="v" id="gamma-v">0.70</span></label>
+        <input type="range" id="gamma" min="0.1" max="0.9" step="0.1" value="0.7">
+      </div>
+      <div class="ctrl">
+        <label>L_max 前看步数 <span class="v" id="lmax-v">4</span></label>
+        <input type="range" id="lmax" min="1" max="6" step="1" value="4">
+      </div>
+    </div>
+
+    <div class="slots" id="prop-slots"></div>
+
+    <div class="readout" id="prop-readout" data-src="Eq. 3 / Appendix B">
+      <div class="r-head">示例序列 · 当前参数</div>
+      <div id="prop-msg">加载中…</div>
+    </div>
+
+    <div class="prop-out" id="prop-out"></div>
+  </div>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">简化模拟，不是原文复现</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>Eq. 2 的相邻差；Eq. 3 的 |d|&lt;ε 判定、最多 L<sub>max</sub> 步前看、γ<sup>q</sup> 折扣、找不到则置 0；边界步按 A<sub>T</sub>−A<sub>k</sub> 处理（序列最后一项当作 A<sub>T</sub>）。</p>
+      <p><strong>未覆盖：</strong>Eq. 4 的序列末尾特例（本模拟在最后一步无超过阈值的变化时直接置 0）；子轨迹的真实采样与 A<sub>i</sub> 估计；结果奖励与格式奖励；PPO / Reinforce++ 的 advantage 计算。准确率序列是构造值，不是论文数据。</p>
+      <p>因此这个模拟只用来观察「传播如何改变奖励稀疏度」，不能用来复现论文的训练结果。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>手算对照：两组参数下每一步的奖励<span class="sum-sub">与页面模拟输出逐位一致</span></summary>
+    <div class="details-body">
+      <p>示例准确率序列 <code>A = [0.20, 0.20, 0.20, 0.20, 0.60, 0.60, 0.60, 0.60]</code>，最后一项 A<sub>7</sub> 视为主轨迹终点的平均准确率。相邻差 <code>d = [0, 0, 0, 0.40, 0, 0, 0]</code>（0.60−0.20=0.40）。这不是论文数据，是为看清传播规则构造的序列。</p>
+      <p><strong>参数组 1：γ=0.7，L_max=4。</strong> r<sub>0</sub>=0.4×0.7<sup>3</sup>=0.1372；r<sub>1</sub>=0.4×0.7<sup>2</sup>=0.196；r<sub>2</sub>=0.4×0.7=0.28；r<sub>3</sub>=0.4；r<sub>4..6</sub>=0（窗口内无超过阈值的变化）。合计 1.0132。</p>
+      <p><strong>参数组 2：γ=0.5，L_max=2。</strong> r<sub>0</sub>=0（两步窗口内无超过阈值的变化）；r<sub>1</sub>=0.4×0.5<sup>2</sup>=0.1；r<sub>2</sub>=0.4×0.5=0.2；r<sub>3</sub>=0.4；r<sub>4..6</sub>=0。合计 0.7。</p>
+      <p>本模拟不涉及标准差；A<sub>i</sub> 是 N=5 条候选答案的平均正确率，不做 ÷N 或 ÷(N−1) 的方差估计。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>奖励向量能接 PPO，但采样开销是真的</h2></div>
+  <p class="sec-sub">工程上它不需要改 RL 算法，只需要能接收逐 token 奖励；代价在 rollout 阶段。</p>
+
+  <p>实现基于 VeRL。VSRM 输出的奖励向量长度与 response 一致，因此可以直接接支持 stepwise reward 的 PPO 和 Reinforce++，不需要额外的奖励模型。下文的 VSRM-R++ 指 VSRM 接 Reinforce++。</p>
+
+  <p data-src="§4 Experimental Setup">训练数据来自 DeepScaleR 数据集：1984–2023 年历史 AIME、2023 年前的 AMC、Omni-MATH 与 Still。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Appendix B 部分转录：训练与实现超参数</caption>
+      <tbody>
+        <tr><td>训练 batch</td><td class="num">512</td></tr>
+        <tr><td>max prompt / max response</td><td class="num">768 / 8192</td></tr>
+        <tr><td>PPO mini-batch</td><td class="num">256</td></tr>
+        <tr><td>epochs</td><td class="num">3</td></tr>
+        <tr><td>n_sub（每个子轨迹候选答案数）</td><td class="num">5</td></tr>
+        <tr><td>max_tokens_sub</td><td class="num">768</td></tr>
+        <tr><td>每条主轨迹的子轨迹数</td><td class="num">10–20</td></tr>
+        <tr><td>C_min / I_min</td><td class="num">200 / 100</td></tr>
+        <tr><td>γ / L_max / ε</td><td class="num">0.7 / 4 / 10<sup>−5</sup></td></tr>
+        <tr><td>硬件 / 每训练步耗时</td><td class="num">8×A100 / ≈20 min（逐步下降）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p data-src="Appendix B">每条主轨迹平均包含 10–20 个子轨迹；每个子轨迹采 5 条候选答案，每条最多 768 token。按 10×5 到 20×5 算，一条主轨迹要额外生成 50–100 条候选答案。</p>
+
+  <p data-src="§4 Experimental Setup">评测时最大生成长度设为 20000 token，temperature 0.6，top-p 0.95；MATH-500 和 OlympiadBench 的 pass@1 取 16 次运行的平均，其余基准取 32 次。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么能直接接</span><h4>奖励不是标量，而是逐 token 的向量</h4></div>
+    <p>论文称 VSRM 与支持 stepwise reward 的 PPO / Reinforce++ 兼容；逐 token 奖励向量可直接进入这些实现的 advantage 估计。标准 PPO 也可用标量结果奖励，页面不声称 PPO 本身必然要求逐 token 奖励。</p>
+  </div>
+
+  <p>代价也在这里：每个训练样本要额外跑 10–20 次子轨迹生成，每次 5 条答案。论文报告 8×A100 上每个训练步约 20 分钟，并说明 “as training progresses, the time required for each step gradually decreases”。</p>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>奖励落在切点，末位才加结果与格式分</h2></div>
+  <p class="sec-sub">流程分两段：先把轨迹切碎并采样出 A_i，再把 A_i 的差传播成奖励向量。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 330" role="img" aria-label="VSRM 流程：主轨迹切分、子轨迹采样、平均正确率、相邻差、衰减传播、奖励向量、RL 更新">
+      <defs>
+        <marker id="vr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+      <rect x="8" y="16" width="150" height="96" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="22" y="42" font-size="14" font-weight="700" fill="var(--text)">主轨迹 T</text>
+      <text x="22" y="64" font-size="12" fill="var(--text-muted)">policy rollout</text>
+      <text x="22" y="84" font-size="12" fill="var(--text-muted)">取 &lt;think&gt; 正文</text>
+      <line x1="158" y1="64" x2="186" y2="64" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="190" y="16" width="160" height="96" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="204" y="42" font-size="14" font-weight="700" fill="var(--text)">StepSep</text>
+      <text x="204" y="64" font-size="12" fill="var(--text-muted)">特殊词 + 句首对齐</text>
+      <text x="204" y="84" font-size="12" fill="var(--text-muted)">C_min=200 / I_min=100</text>
+      <line x1="350" y1="64" x2="378" y2="64" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="382" y="16" width="182" height="96" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></rect>
+      <text x="396" y="42" font-size="14" font-weight="700" fill="var(--text)">子轨迹 T_pi</text>
+      <text x="396" y="64" font-size="12" fill="var(--text-muted)">问题 + 前缀 + &lt;/think&gt;</text>
+      <text x="396" y="84" font-size="12" fill="var(--text-muted)">每个切点一条</text>
+      <line x1="564" y1="64" x2="592" y2="64" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="596" y="16" width="256" height="96" rx="10" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.2"></rect>
+      <text x="610" y="42" font-size="14" font-weight="700" fill="var(--text)">N=5 次采样</text>
+      <text x="610" y="64" font-size="12" fill="var(--text-muted)">每条最多 768 token</text>
+      <text x="610" y="84" font-size="12" fill="var(--text-muted)">平均正确率 A_i</text>
+      <line x1="724" y1="112" x2="724" y2="184" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="596" y="190" width="256" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="610" y="216" font-size="14" font-weight="700" fill="var(--text)">相邻差</text>
+      <text x="610" y="238" font-size="12" fill="var(--text-muted)">d_(i−1) = A_i − A_(i−1)</text>
+      <text x="610" y="258" font-size="12" fill="var(--text-muted)">边界用 A_T − A_k</text>
+      <line x1="596" y1="238" x2="568" y2="238" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="382" y="190" width="182" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="396" y="216" font-size="14" font-weight="700" fill="var(--text)">衰减传播</text>
+      <text x="396" y="238" font-size="12" fill="var(--text-muted)">γ=0.7 / L_max=4</text>
+      <text x="396" y="258" font-size="12" fill="var(--text-muted)">|d|&lt;ε 时向未来看</text>
+      <line x1="382" y1="238" x2="354" y2="238" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="190" y="190" width="160" height="96" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="204" y="216" font-size="14" font-weight="700" fill="var(--text)">奖励向量 R_T</text>
+      <text x="204" y="238" font-size="12" fill="var(--text-muted)">与 response 对齐</text>
+      <text x="204" y="258" font-size="12" fill="var(--text-muted)">末位加 result + format</text>
+      <line x1="190" y1="238" x2="162" y2="238" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#vr-arrow)"></line>
+      <rect x="8" y="190" width="150" height="96" rx="10" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="1.2"></rect>
+      <text x="22" y="216" font-size="14" font-weight="700" fill="var(--text)">PPO / R++</text>
+      <text x="22" y="238" font-size="12" fill="var(--text-muted)">advantage</text>
+      <text x="22" y="258" font-size="12" fill="var(--text-muted)">策略更新</text>
+      <rect x="470" y="304" width="10" height="10" rx="2" fill="var(--c1)"></rect>
+      <text x="486" y="313" font-size="11" fill="var(--text-soft)">观测</text>
+      <rect x="530" y="304" width="10" height="10" rx="2" fill="var(--c2)"></rect>
+      <text x="546" y="313" font-size="11" fill="var(--text-soft)">子轨迹采样</text>
+      <rect x="620" y="304" width="10" height="10" rx="2" fill="var(--accent)"></rect>
+      <text x="636" y="313" font-size="11" fill="var(--text-soft)">奖励构造</text>
+      <rect x="700" y="304" width="10" height="10" rx="2" fill="var(--c3)"></rect>
+      <text x="716" y="313" font-size="11" fill="var(--text-soft)">RL 更新</text>
+    </svg>
+    <figcaption>本页流程图（非原文插图）：VSRM 的数据流。青灰=观测，紫色=子轨迹采样，红=奖励构造，绿=RL 更新。</figcaption>
+  </figure>
+
+  <p>上半段是「测量」：切分、子轨迹采样、平均正确率。下半段是「记账」：相邻差、折扣传播、拼奖励向量。两段之间没有额外的奖励模型，步进奖励的裁判是答案正确性。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">切分规则</span><h4>规则化，可解释</h4></div>
+      <p>特殊词表、C_min、I_min、句首对齐都是显式规则；不需要另一个模型来识别步骤边界。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">奖励位置</span><h4>与 token 对齐</h4></div>
+      <p>步进奖励落在切点对应的 token 位置，结果与格式奖励只落在末位；其他位置为 0。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>长度普遍下降；AIME24 / MATH-500 上 7B 与 DeepScaleR 出现准确率下降</h2></div>
+  <p class="sec-sub">先看完整表的三个设置，再看过度思考检测与消融。</p>
+
+  <p data-src="Table 2">Table 2 覆盖六个数学基准、三个基座（DeepScaleR 是 1.5B 且已做 RL 训练的模型）。下表只转录 base、VSRM-PPO、VSRM-R++ 三种设置；LC-R1、ThinkPrune、AdaptThink、Efficient Reasoning、GRPO-LEAD 等方法行未转录。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 2 部分转录：每格为 pass@1（%）/ 平均输出长度（token）；只列三种设置</caption>
+      <thead>
+        <tr><th>模型 / 方法</th><th class="num">AIME24</th><th class="num">AIME25</th><th class="num">MATH-500</th><th class="num">AMC23</th><th class="num">Minerva</th><th class="num">OlympiadBench</th></tr>
+      </thead>
+      <tbody>
+        <tr class="grp"><td colspan="7">DS-Distill-1.5B</td></tr>
+        <tr><td>base</td><td class="num">28.8<br><span class="len">12605</span></td><td class="num">22.8<br><span class="len">12444</span></td><td class="num">82.4<br><span class="len">4960</span></td><td class="num">62.9<br><span class="len">8577</span></td><td class="num">34.2<br><span class="len">6929</span></td><td class="num">43.1<br><span class="len">9249</span></td></tr>
+        <tr><td>VSRM-PPO</td><td class="num">29.2<br><span class="len">7065</span></td><td class="num">23.0<br><span class="len">6621</span></td><td class="num">82.2<br><span class="len">2400</span></td><td class="num">64.9<br><span class="len">4153</span></td><td class="num">34.4<br><span class="len">2273</span></td><td class="num">43.2<br><span class="len">4499</span></td></tr>
+        <tr><td>VSRM-R++</td><td class="num">29.5<br><span class="len">6958</span></td><td class="num">22.9<br><span class="len">6892</span></td><td class="num">81.7<br><span class="len">2597</span></td><td class="num">64.7<br><span class="len">4119</span></td><td class="num">34.6<br><span class="len">2172</span></td><td class="num">43.1<br><span class="len">4544</span></td></tr>
+
+        <tr class="grp"><td colspan="7">DS-Distill-7B</td></tr>
+        <tr><td>base</td><td class="num">53.1<br><span class="len">10529</span></td><td class="num">36.0<br><span class="len">10909</span></td><td class="num">90.6<br><span class="len">3796</span></td><td class="num">79.1<br><span class="len">6884</span></td><td class="num">46.1<br><span class="len">5195</span></td><td class="num">55.9<br><span class="len">7602</span></td></tr>
+        <tr><td>VSRM-PPO</td><td class="num">51.8<br><span class="len">6675</span></td><td class="num">36.2<br><span class="len">6920</span></td><td class="num">89.6<br><span class="len">2024</span></td><td class="num">81.0<br><span class="len">3759</span></td><td class="num">45.5<br><span class="len">2002</span></td><td class="num">55.3<br><span class="len">4168</span></td></tr>
+        <tr><td>VSRM-R++</td><td class="num">52.2<br><span class="len">6773</span></td><td class="num">36.4<br><span class="len">6953</span></td><td class="num">89.8<br><span class="len">2044</span></td><td class="num">80.9<br><span class="len">3704</span></td><td class="num">45.8<br><span class="len">2068</span></td><td class="num">55.6<br><span class="len">4103</span></td></tr>
+
+        <tr class="grp"><td colspan="7">DeepScaleR（1.5B，已 RL）</td></tr>
+        <tr><td>base</td><td class="num">40.7<br><span class="len">8515</span></td><td class="num">31.3<br><span class="len">8029</span></td><td class="num">86.5<br><span class="len">3105</span></td><td class="num">73.6<br><span class="len">5487</span></td><td class="num">38.9<br><span class="len">5102</span></td><td class="num">50.0<br><span class="len">5647</span></td></tr>
+        <tr><td>VSRM-PPO</td><td class="num">39.2<br><span class="len">6744</span></td><td class="num">31.3<br><span class="len">6133</span></td><td class="num">85.5<br><span class="len">2391</span></td><td class="num">73.5<br><span class="len">4074</span></td><td class="num">39.5<br><span class="len">2231</span></td><td class="num">50.1<br><span class="len">4414</span></td></tr>
+        <tr><td>VSRM-R++</td><td class="num">39.3<br><span class="len">6668</span></td><td class="num">30.9<br><span class="len">6103</span></td><td class="num">85.8<br><span class="len">2275</span></td><td class="num">74.7<br><span class="len">4082</span></td><td class="num">38.4<br><span class="len">2319</span></td><td class="num">49.4<br><span class="len">4389</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">P=pass@1（%），L=平均输出长度（token）；每格上行为 P、下行为 L。数字逐字来自 Table 2。</p>
+
+  <h3>三个可以直接从表里读出的现象</h3>
+  <ul>
+    <li><strong>长度：表内 18 个模型×基准组合全部低于各自 base。</strong> VSRM-PPO 与 VSRM-R++ 两条训练曲线都满足这一点：Minerva 上 DS-Distill-1.5B 从 6929 降到 2273（相对下降 67.2%），DeepScaleR 的 AIME24 从 8515 降到 6744（相对下降 20.8%）。</li>
+    <li><strong>压缩幅度按 1.5B → 7B → DeepScaleR 的顺序缩小。</strong> AIME24 上，DS-Distill-1.5B 从 12605 降到 7065（相对下降 44.0%）；DS-Distill-7B 从 10529 降到 6675（相对下降 36.6%）；DeepScaleR 从 8515 降到 6744（相对下降 20.8%）。但这三个基座并非准确率单调变强：7B 在六个基准上的 pass@1 都高于 DeepScaleR，不能把压缩率排序当成准确率强度排序。</li>
+    <li><strong>准确率不是全线保持，也不是全线下降。</strong> 1.5B 的 MATH-500 从 82.4 降到 82.2；7B 的 AIME24 从 53.1 降到 51.8（−1.3 个百分点），MATH-500 从 90.6 降到 89.6（−1.0 个百分点）；DeepScaleR 的 AIME24 从 40.7 降到 39.2（−1.5 个百分点；原文 Table 2 该格标 ↓1.4，按表中 40.7−39.2 相减为 1.5，页面按算术值呈现）。但 7B 的 AMC23 从 79.1 升到 81.0（+1.9 个百分点），DeepScaleR 的 Minerva 从 38.9 升到 39.5（+0.6 个百分点），1.5B 的 AIME24 从 28.8 升到 29.2（+0.4 个百分点）、AMC23 从 62.9 升到 64.9（+2.0 个百分点）——不是所有基准、所有基座都下降。</li>
+  </ul>
+
+  <blockquote>“our method consistently reduces redundant output and mitigates the overthinking problem for models of various sizes and types, while preserving the original reasoning capability.”<span class="quote-src">§4 Main Results</span></blockquote>
+
+  <h3>换个基准看：长度与 pass@1 一起变</h3>
+  <p>切换基准，比较三个基座的 base 与 VSRM-PPO。柱高是平均输出长度，读数区给出同一基准的 pass@1。</p>
+
+  <div class="tabs" id="t2-tabs">
+    <button class="tab active" data-bench="AIME24">AIME24</button>
+    <button class="tab" data-bench="AIME25">AIME25</button>
+    <button class="tab" data-bench="MATH-500">MATH-500</button>
+    <button class="tab" data-bench="AMC23">AMC23</button>
+    <button class="tab" data-bench="Minerva">Minerva</button>
+    <button class="tab" data-bench="OlympiadBench">OlympiadBench</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="readout" id="t2-desc" data-src="Table 2" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="t2-chart"></div>
+    <div class="legend">
+      <span><i style="background:var(--c1)"></i>base 长度</span>
+      <span><i style="background:var(--accent)"></i>VSRM-PPO 长度</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对照：两个模型在 AIME24 上的压缩率<span class="sum-sub">与页面柱状图同一组数</span></summary>
+    <div class="details-body">
+      <p>口径：相对下降 = (base − VSRM-PPO) / base × 100。本探索器不涉及标准差。</p>
+      <p>DS-Distill-1.5B：base 12605，VSRM-PPO 7065；差值 5540；相对下降 5540 / 12605 × 100 = 44.0%。</p>
+      <p>DS-Distill-7B：base 10529，VSRM-PPO 6675；差值 3854；相对下降 3854 / 10529 × 100 = 36.6%。</p>
+    </div>
+  </details>
+
+  <h3>过度思考检测：两个基座的样本数都下降</h3>
+  <p>Table 4 用同一个 R1 检测器，对 VSRM-PPO 训练后的模型重新检测 500 条 MATH-500 回答。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 4 转录：VSRM-PPO 训练后模型被检测到的过度思考样本（每模型 500 条）</caption>
+      <thead><tr><th>模型</th><th class="num">检测到过度思考</th></tr></thead>
+      <tbody>
+        <tr><td>VSRM-PPO（DeepScaleR）</td><td class="num">132/500</td></tr>
+        <tr><td>VSRM-PPO（DS-Distill-1.5B）</td><td class="num">126/500</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p data-src="Table 1 &amp; Table 4">DS-Distill-1.5B 从 312/500 降到 126/500（相对下降 59.6%）；DeepScaleR 从 279/500 降到 132/500（相对下降 52.7%）。这是粗粒度检测，不是逐步精确标注。</p>
+
+  <h3>消融：去掉传播衰减，长度压缩明显变弱</h3>
+  <p data-src="§4 Experimental Setup">Table 3 在 DS-Distill-1.5B 上逐项加回组件；原文注明 “All experiments are trained for the same number of steps to ensure fairness”。页面只涉及 AIME24 与 MATH-500 两列的长度与 pass@1；下表只列长度，pass@1 列未转录；其他基准未转录。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 3 部分转录（DS-Distill-1.5B；只列 AIME24 / MATH-500 的长度；base 行与 pass@1 列未转录）</caption>
+      <thead><tr><th>设置</th><th class="num">AIME24 长度</th><th class="num">MATH-500 长度</th></tr></thead>
+      <tbody>
+        <tr><td>Original PPO</td><td class="num">11111</td><td class="num">3968</td></tr>
+        <tr><td>VSRM-PPO w/ penalty</td><td class="num">7533</td><td class="num">2615</td></tr>
+        <tr><td>VSRM-PPO w/o decay</td><td class="num">8638</td><td class="num">2990</td></tr>
+        <tr><td>VSRM-PPO</td><td class="num">7065</td><td class="num">2400</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>完整版 VSRM-PPO 在 AIME24 是 7065、MATH-500 是 2400；去掉传播衰减后分别是 8638 和 2990。论文还对比了长度惩罚版本，AIME24 7533、MATH-500 2615，压缩不如 VSRM-PPO。论文的推测是复杂的结果奖励会干扰过程级奖励。</p>
+
+  <h3>探索能力：pass@k 没有被压掉</h3>
+  <p data-src="Figure 4">Figure 4 比较 DS-Distill-1.5B 与 VSRM-PPO 在 AIME24、AIME25、Minerva、OlympiadBench 上的 pass@k 随 k 增长。论文的结论是两者都稳定增长，VSRM 的趋势与 base 一致，部分设置更高。Figure 4 未转录（正文未列具体点值）。</p>
+  <blockquote>“VSRM does not hinder the model's ability to explore valuable reasoning paths; on the contrary, it encourages the exploration of effective steps.”<span class="quote-src">§4 Analysis on Reasoning Behavior</span></blockquote>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>数学域外，VSRM 仍依赖一个可判定的答案</h2></div>
+  <p class="sec-sub">VSRM 的奖励建立在「答案可以被判定对错」上；这既是它的可验证性，也是它的边界。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>实验范围只有数学</h4></div>
+    <p>Table 2 的实验覆盖六个数学基准：MATH-500、AIME24、AIME25、AMC23、Minerva、OlympiadBench。摘要与引言说的是 mathematical reasoning；本页所读版本没有代码、法律、创意写作等答案不易自动判定任务的实验。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>切分依赖特殊词表</h4></div>
+    <p>正文只给出 however / thus / so / but / wait 等示例；Appendix D 的 Algorithm 1 把特殊词匹配模式 H_p 作为输入，本页所读 v2 没有展开完整词表，也没有给出词表选取依据或跨语言消融。模型表达风格变化时，切分点会跟着变 <span class="infer">推断</span>（依据：切分完全由特殊词表与句首对齐规则决定）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界三</span><h4>训练开销与部分基准上的准确率下降</h4></div>
+    <p>每条主轨迹 10–20 个子轨迹、每个子轨迹 5 条答案，合计 50–100 条候选答案；8×A100 上每步约 20 分钟，论文说明 “as training progresses, the time required for each step gradually decreases”。按 1.5B → 7B → DeepScaleR 的顺序，AIME24 压缩幅度依次为 44.0%、36.6%、20.8%；但这三个基座并非准确率单调变强：7B 在六个基准上的 pass@1 都高于 DeepScaleR，不能把压缩率排序当成准确率强度排序。DeepScaleR（1.5B，已 RL）的 AIME24 pass@1 从 40.7 降到 39.2（−1.5 个百分点；原文 Table 2 该格标 ↓1.4，按表中数值相减为 1.5，页面按算术值呈现，同一注见第 06 节）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界四</span><h4>代理指标可能被优化</h4></div>
+    <p>论文明确把子轨迹答案正确率称为中间状态的 proxy。<span class="infer">推断</span>（依据：proxy 只看子轨迹最终答案是否正确，不检查中间推理是否真实有效）：模型可能学会生成「更容易被答对」的子轨迹，而不一定是更好的推理。本页所读版本没有报告针对这一点的压力测试。</p>
+  </div>
+
+  <p>一句话：VSRM 的前提是答案可自动判定；在 Table 2 里，压缩幅度按 1.5B → 7B → DeepScaleR 的顺序缩小，DeepScaleR 的 AIME24 出现准确率下降（原文标 ↓1.4，页面按算术值呈现），但 AMC23 / Minerva 上也有上升，不能当成普遍规律。任务没有可靠判定器时，Eq. 1 的平均正确率无法计算。</p>
+</section>
+
+<footer>
+  <div>Promoting Efficient Reasoning with Verifiable Stepwise Reward · Chuhuai Yue, Chengqi Dong, Yinan Gao, Hang He, Jiajun Chai, Guojun Yin, Wei Lin · arXiv 2508.10293v2</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.10293v2" target="_blank" rel="noopener">arxiv.org/abs/2508.10293v2</a><br>
+    笔记：<a href="/promoting-efficient-reasoning-with-verifiable-stepwise-reward/">Promoting Efficient Reasoning with Verifiable Stepwise Reward</a><br>
+    代码：摘要称 “All code will be released upon acceptance”，本页未附代码链接。<br>
+    Table 2 只转录 base / VSRM-PPO / VSRM-R++ 三种设置；LC-R1、ThinkPrune、AdaptThink、Efficient Reasoning、GRPO-LEAD 行未转录。Figure 4 未转录（正文未列具体点值）。
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（仅在此说明，不改原笔记）：</strong>
+    <p>笔记写 DS-Distill-7B 在 AIME24 上<code>长度从 10909 压缩至 6675（减少 39%）</code>。Table 2 中 DS-Distill-7B 的 AIME24 base 长度是 10529；10909 是 AIME25 的 base 长度。AIME24 的正确读数是 10529→6675，相对下降 36.6%；AIME25 是 10909→6920，相对下降 36.6%。笔记把 AIME25 的 base 长度和 AIME24 的 PPO 长度拼在了一起，39% 也是用错误分母算的。</p>
+    <p>口径提醒：笔记概括为「保持甚至略微提升原模型的推理性能」。Table 2 中 7B 的 AIME24 pass@1 从 53.1 降到 51.8（−1.3 个百分点），MATH-500 从 90.6 降到 89.6（−1.0 个百分点）；DeepScaleR 的 AIME24 从 40.7 降到 39.2（−1.5 个百分点；原文 Table 2 该格标 ↓1.4，页面按算术值呈现）。「保持」在 1.5B 上较成立，在 7B / DeepScaleR 上要按基准看，而且并非所有基准都下降（如 7B AMC23、DeepScaleR Minerva 均上升）。</p>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   交互 1：奖励传播模拟（Eq. 2 + Eq. 3，构造序列）
+   ============================================================ */
+(function () {
+  var root = document.getElementById('prop-sim');
+  if (!root) return;
+  var slotsHost = document.getElementById('prop-slots');
+  var outHost = document.getElementById('prop-out');
+  var msg = document.getElementById('prop-msg');
+  var gammaEl = document.getElementById('gamma');
+  var lmaxEl = document.getElementById('lmax');
+  var gammaV = document.getElementById('gamma-v');
+  var lmaxV = document.getElementById('lmax-v');
+  if (!slotsHost || !outHost || !msg || !gammaEl || !lmaxEl || !gammaV || !lmaxV) return;
+
+  var ACC = [0.20, 0.20, 0.20, 0.20, 0.60, 0.60, 0.60, 0.60];
+  var EPS = 1e-5;
+  var mode = 'on';
+
+  function fmt4(x) {
+    if (Math.abs(x) < 1e-12) return '0';
+    var s = x.toFixed(4).replace(/\.?0+$/, '');
+    if (s === '' || s === '-0') return '0';
+    return s;
+  }
+  function fmt2(x) {
+    if (Math.abs(x) < 1e-12) return '0.00';
+    return x.toFixed(2);
+  }
+  function sgn(x) { return x > 0 ? 1 : (x < 0 ? -1 : 0); }
+
+  function compute() {
+    var g = parseFloat(gammaEl.value);
+    var L = parseInt(lmaxEl.value, 10);
+    var D = [];
+    var R = [];
+    var i, q;
+    for (i = 0; i < 7; i++) D.push(ACC[i + 1] - ACC[i]);
+    for (i = 0; i < 7; i++) {
+      if (Math.abs(D[i]) >= EPS) {
+        R.push(D[i]);
+      } else if (mode === 'off') {
+        R.push(0);
+      } else {
+        var found = false;
+        for (q = 1; q <= L; q++) {
+          if (i + q <= 6 && Math.abs(D[i + q]) >= EPS) {
+            R.push(sgn(D[i + q]) * Math.abs(D[i + q]) * Math.pow(g, q));
+            found = true;
+            break;
+          }
+        }
+        if (!found) R.push(0);
+      }
+    }
+    return { g: g, L: L, D: D, R: R };
+  }
+
+  function renderSlots() {
+    slotsHost.innerHTML = '';
+    for (var i = 0; i < ACC.length; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot';
+      var name = document.createElement('div');
+      name.className = 'slot-name';
+      name.textContent = i === ACC.length - 1 ? 'A7 = A_T' : 'A' + i;
+      var val = document.createElement('div');
+      val.className = 'slot-val';
+      val.textContent = ACC[i].toFixed(2);
+      slot.appendChild(name);
+      slot.appendChild(val);
+      slotsHost.appendChild(slot);
+    }
+  }
+
+  function renderOut() {
+    var c = compute();
+    outHost.innerHTML = '';
+    var titles = ['步骤 0', '步骤 1', '步骤 2', '步骤 3', '步骤 4', '步骤 5', '步骤 6'];
+    for (var i = 0; i < 7; i++) {
+      var row = document.createElement('div');
+      var b = document.createElement('b');
+      b.textContent = titles[i];
+      var a = document.createElement('span');
+      a.textContent = 'A=' + ACC[i].toFixed(2);
+      var d = document.createElement('span');
+      d.textContent = 'd=' + fmt2(c.D[i]);
+      var r = document.createElement('span');
+      r.textContent = 'r=' + fmt4(c.R[i]);
+      row.appendChild(b);
+      row.appendChild(a);
+      row.appendChild(d);
+      row.appendChild(r);
+      outHost.appendChild(row);
+    }
+    var nz = 0, sum = 0;
+    for (var j = 0; j < c.R.length; j++) {
+      if (Math.abs(c.R[j]) > 1e-9) nz++;
+      sum += c.R[j];
+    }
+    var text;
+    if (mode === 'off') {
+      text = '关闭传播后只按相邻差发奖励：7 个切分点里只有 ' + nz + ' 个非零，示例总奖励 ' + fmt4(sum) + '。';
+    } else {
+      text = '启用传播：γ=' + c.g.toFixed(2) + '，L_max=' + c.L + '，7 个切分点里 ' + nz + ' 个非零，示例总奖励 ' + fmt4(sum) + '。';
+      if (Math.abs(c.g - 0.7) < 1e-9 && c.L === 4) {
+        text += ' 第 0 步的 |d|=0 < ε，向未来看第 3 步才出现 d=0.40，所以 r0=0.40×0.70³=0.1372。';
+      }
+    }
+    msg.textContent = text;
+  }
+
+  function renderAll() {
+    gammaV.textContent = parseFloat(gammaEl.value).toFixed(2);
+    lmaxV.textContent = lmaxEl.value;
+    renderOut();
+  }
+
+  document.querySelectorAll('#prop-modes .rule-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('#prop-modes .rule-btn').forEach(function (b) {
+        b.classList.remove('active');
+      });
+      btn.classList.add('active');
+      mode = btn.dataset.mode;
+      renderOut();
+    });
+  });
+  gammaEl.addEventListener('input', renderAll);
+  lmaxEl.addEventListener('input', renderAll);
+
+  renderSlots();
+  renderAll();
+})();
+
+/* ============================================================
+   交互 2：Table 2 基准切换器
+   ============================================================ */
+(function () {
+  var tabs = document.getElementById('t2-tabs');
+  var desc = document.getElementById('t2-desc');
+  var chart = document.getElementById('t2-chart');
+  if (!tabs || !desc || !chart) return;
+
+  var DATA = {
+    'AIME24': {
+      names: ['1.5B', '7B', 'DeepScaleR'],
+      base: [12605, 10529, 8515],
+      ppo: [7065, 6675, 6744],
+      accBase: [28.8, 53.1, 40.7],
+      accPpo: [29.2, 51.8, 39.2]
+    },
+    'AIME25': {
+      names: ['1.5B', '7B', 'DeepScaleR'],
+      base: [12444, 10909, 8029],
+      ppo: [6621, 6920, 6133],
+      accBase: [22.8, 36.0, 31.3],
+      accPpo: [23.0, 36.2, 31.3]
+    },
+    'MATH-500': {
+      names: ['1.5B', '7B', 'DeepScaleR'],
+      base: [4960, 3796, 3105],
+      ppo: [2400, 2024, 2391],
+      accBase: [82.4, 90.6, 86.5],
+      accPpo: [82.2, 89.6, 85.5]
+    },
+    'AMC23': {
+      names: ['1.5B', '7B', 'DeepScaleR'],
+      base: [8577, 6884, 5487],
+      ppo: [4153, 3759, 4074],
+      accBase: [62.9, 79.1, 73.6],
+      accPpo: [64.9, 81.0, 73.5]
+    },
+    'Minerva': {
+      names: ['1.5B', '7B', 'DeepScaleR'],
+      base: [6929, 5195, 5102],
+      ppo: [2273, 2002, 2231],
+      accBase: [34.2, 46.1, 38.9],
+      accPpo: [34.4, 45.5, 39.5]
+    },
+    'OlympiadBench': {
+      names: ['1.5B', '7B', 'DeepScaleR'],
+      base: [9249, 7602, 5647],
+      ppo: [4499, 4168, 4414],
+      accBase: [43.1, 55.9, 50.0],
+      accPpo: [43.2, 55.3, 50.1]
+    }
+  };
+
+  function render(key) {
+    var d = DATA[key];
+    if (!d) return;
+    desc.innerHTML = '<div class="r-head">' + key + ' · pass@1（%）</div>' +
+      '1.5B ' + d.accBase[0].toFixed(1) + '→' + d.accPpo[0].toFixed(1) + '；' +
+      '7B ' + d.accBase[1].toFixed(1) + '→' + d.accPpo[1].toFixed(1) + '；' +
+      'DeepScaleR ' + d.accBase[2].toFixed(1) + '→' + d.accPpo[2].toFixed(1) + '。柱高为平均输出长度，单位 token。';
+
+    chart.innerHTML = '';
+    var maxV = 0, i;
+    for (i = 0; i < d.base.length; i++) {
+      if (d.base[i] > maxV) maxV = d.base[i];
+      if (d.ppo[i] > maxV) maxV = d.ppo[i];
+    }
+    if (maxV <= 0) maxV = 1;
+
+    for (i = 0; i < d.names.length; i++) {
+      var row = document.createElement('div');
+      row.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = d.names[i];
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      [d.base[i], d.ppo[i]].forEach(function (val, idx) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = idx === 0 ? 'var(--c1)' : 'var(--accent)';
+        fill.style.height = Math.max(2, val / maxV * 100) + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = val;
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+      row.appendChild(name);
+      row.appendChild(bars);
+      chart.appendChild(row);
+    }
+  }
+
+  tabs.querySelectorAll('.tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.querySelectorAll('.tab').forEach(function (b) {
+        b.classList.remove('active');
+      });
+      btn.classList.add('active');
+      render(btn.dataset.bench);
+    });
+  });
+
+  render('AIME24');
+})();
+</script>
+</body>
+</html>

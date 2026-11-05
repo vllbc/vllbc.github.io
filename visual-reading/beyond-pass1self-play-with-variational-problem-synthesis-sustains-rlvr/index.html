@@ -1,0 +1,779 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 18.3 | Table 1 | 70.8-52.5 |
+| 22.8 | Table 1 | 65.2-42.4 |
+| 5.4 | Table 1 | 27.9-22.5 |
+| 5.4 | Table 1 | 22.0-16.6 |
+| 8.5 | Table 1 | 53.1-44.6 |
+| 16.0 | Table 1 | 54.6-38.6 |
+| 10.5 | Table 1 | 39.3-28.8 |
+| 10.5 | Table 1 | 40.5-30.0 |
+| -1.6 | Table 1 | 16.7-18.3 |
+| -3.7 | Table 1 | 43.4-47.1 |
+| -0.8 | Table 1 | 3.3-4.1 |
+| 2.9 | Table 2 | 40.8-37.9 |
+| 1.7 | Table 2 | 35.9-34.2 |
+| 2.5 | Table 2 | 57.3-54.8 |
+| -0.7 | Table 2 | 57.9-58.6 |
+| -11.4 | Table 2 | 75.6-87.0 |
+| -15.8 | Table 2 | 62.9-78.7 |
+| -3.3 | Table 2 | 42.3-45.6 |
+| -8.9 | Table 2 | 45.9-54.8 |
+| 20.0 | Table 2 | 53.3-33.3 |
+| 6.6 | Table 2 | 43.3-36.7 |
+| 6.0 | Table 2 | 19.0-13.0 |
+| 4.9 | Table 2 | 62.8-57.9 |
+| 1.7 | Table 3 | 46.3-44.6 |
+| 6.3 | Table 3 | 50.9-44.6 |
+| -0.8 | Table 3 | 21.7-22.5 |
+| -1.8 | Table 3 | 42.8-44.6 |
+| 2.2 | Table 3 | 53.1-50.9 |
+| 8.5 | Table 3 | 53.1-44.6 |
+| 0.78 | Table 4 | 73.77-72.99 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v4">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beyond Pass@1 · 让模型自己出题，把 RLVR 的熵和 Pass@k 一起托住</title>
+<meta name="description" content="Beyond Pass@1（SvS）：从模型自己的正确解法反推出答案不变的新题，按 12.5%–50% 难度带筛原题、12.5%–62.5% 给合成奖励，维持 RLVR 的策略熵；Qwen2.5-32B/DAPO-17k 上 AIME24/25 的 Pass@32 绝对提升 18.3/22.8 点。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 只放本页特有的微调；公共样式全部来自 base.css */
+
+blockquote{
+  margin:18px 0;padding:14px 18px;border-left:3px solid var(--accent);
+  background:var(--bg-soft);border-radius:var(--radius);
+  font-size:14.5px;color:var(--text-muted);line-height:1.8;
+}
+blockquote .qsrc{
+  display:block;margin-top:6px;font-family:"JetBrains Mono",monospace;
+  font-size:11.5px;color:var(--text-soft);
+}
+
+/* 离散筛选模拟器 */
+.slot-row{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin:14px 0 4px}
+.slot.mini{padding:6px 2px;text-align:center}
+.slot.mini .si{display:block;font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--text-soft);line-height:1.4}
+.slot.mini .sv{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;line-height:1.4}
+.slot.mini.ok{border-color:var(--c3);background:var(--c3-soft)}
+.slot.mini.bad{opacity:.55}
+.slot-row-label{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);margin-top:12px}
+
+/* 数据流 SVG */
+.pipe-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.pipe-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.pipe-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.pipe-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.pipe-line{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.pipe-dash{stroke:var(--border-strong);stroke-width:1.2;fill:none;stroke-dasharray:5 4}
+.pipe-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13.5px;font-weight:600;fill:var(--text)}
+.pipe-s{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11.2px;fill:var(--text-muted)}
+.pipe-m{font-family:"JetBrains Mono",monospace}
+
+.errata{margin-top:18px;font-size:13px;color:var(--text-soft);line-height:1.8}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:7px}
+
+@media (max-width:560px){
+  .slot-row{grid-template-columns:repeat(4,1fr)}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Beyond Pass@1</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ================= HERO ================= -->
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2508.14029 · v4</span>
+  <h1>Beyond Pass@1：让模型给自己出题，把 RLVR 的熵和 Pass@k 一起托住</h1>
+  <p class="hero-sub">
+    固定题库上的 RLVR 会把模型逼进少数高分轨迹：Pass@1 继续涨，策略熵持续掉，Pass@k 很快封顶。
+    SvS 只挑准确率 <strong>12.5%–50%</strong> 的“半懂题”，用模型<strong>自己的正确解法</strong>反推出答案不变的新题，
+    再按变体难度给合成奖励，让同一套 GRPO 持续见到新问题。
+  </p>
+  <div class="meta">
+    <span>Xiao Liang, Zhongzhi Li, Yeyun Gong, Yelong Shen, Ying Nian Wu, Zhijiang Guo, Weizhu Chen · Microsoft / UCLA / UCAS / HKUST</span>
+    <a href="https://arxiv.org/abs/2508.14029v4" target="_blank" rel="noopener">arXiv 2508.14029v4 ↗</a>
+    <a href="https://github.com/MasterVito/SvS" target="_blank" rel="noopener">代码 MasterVito/SvS ↗</a>
+  </div>
+</header>
+
+<!-- ================= TL;DR ================= -->
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    标准 RLVR 在固定题库上训练，奖励是可验证的二值信号。模型很快学会反复产出少数能拿分的轨迹：<strong>Pass@1 继续涨，策略熵却持续下降</strong>，Pass@k 在较大的 k 上不再提升（§2）。
+  </p>
+  <p>
+    SvS 不改 GRPO 的优化目标，改的是每轮喂什么题：从原题里挑出组准确率 <strong>12.5%–50%</strong> 的题，拿模型<strong>自己答对的解法</strong>当上下文，生成 <strong>G<sub>v</sub>=8</strong> 个结构不同、答案不变的新题。
+  </p>
+  <p>
+    关键在合成奖励：如果“变体有一条解对”就给分，模型会把提示甚至答案塞进题干；SvS 改成<strong>变体准确率落在 12.5%–62.5% 才给正分</strong>，太易、太难、不可验证的变体都被压下去（Eq. 3–4）。
+  </p>
+  <p>
+    在 Qwen2.5-32B + DAPO-17k 上，AIME24/25 的 Pass@32 分别从 52.5/42.4 升到 70.8/65.2；代价是开放答案格式的基准会退，补 8k DeepMath 开放题后 9 项平均回到 62.8。以下增益均为绝对百分点差。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">+18.3<small>pp</small></div>
+      <div class="k">AIME24 Pass@32 绝对提升<br>52.5 → 70.8（Qwen2.5-32B / DAPO-17k）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+22.8<small>pp</small></div>
+      <div class="k">AIME25 Pass@32 绝对提升<br>42.4 → 65.2（同一设定）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">+5.4<small>pp</small></div>
+      <div class="k">六项竞赛基准 Pass@1 平均<br>22.5 → 27.9（同一设定）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>固定题库把 RLVR 变成“背答案”：Pass@1 在涨，熵在掉，Pass@k 封顶</h2></div>
+  <p class="sec-sub">先建立共同认知：为什么“再多训几百步”不能解决这个问题。</p>
+
+  <p>
+    RLVR 的奖励是二值的：答案对为 1，错为 0。GRPO 在一个 prompt 的 G 条回答内做组内标准化；如果一个组全对或全错，优势退化为 0，这条 prompt 就不再提供梯度。
+    固定题库训练越久，能提供有效梯度的组越少，模型越倾向于重复已知的高分轨迹（§2）。
+  </p>
+  <p>论文 §2 把这个现象接到两项已有结论上。第一是熵与性能的权衡：</p>
+  <blockquote>
+    “...gains in test accuracy come at the expense of response diversity.”
+    <span class="qsrc">§2，论文转引 Cui et al. (2025b)</span>
+  </blockquote>
+  <p>
+    第二是 Pass@k 的边界：RLVR 只在 k 较小时提升 Pass@k，k 到几十或上千时不再有增益（§2，转引 Yue et al. 2025）。
+    两项合起来说明：固定题库上的 RLVR 是在<strong>收窄</strong>推理轨迹，而不是拓展推理边界。
+  </p>
+
+  <div class="eq">
+    Performance = −a · exp(Entropy + b)
+  </div>
+  <div class="eq-cap">§2 引用并称为 “logarithmic relationship”；原文写作 Performance = −a exp(Entropy + b)</div>
+
+  <p>
+    论文先用一个对照实验确认“换题”确实有用（Figure 2）：基线始终用 MATH-12k；增强组混入 <strong>36k 条 MetaMath 复述题</strong>，并在第 <strong>300 步</strong>把复述题换成另一批。
+    结果是增强组在训练题和测试题上的熵下降都更慢；第 300 步换题后，熵停止下降并开始回升，Pass@32 也随之抬升（Figure 2）。
+  </p>
+  <p>
+    但复述有两个硬伤：外部 LLM 改写可能引入语义偏差，参考答案不再可靠；复述以原题为上下文，多样性也无法保证（§2）。
+    所以论文把“理想的数据增强”写成三条：
+  </p>
+  <blockquote>
+    “...ideal data augmentation for RLVR should be iterative, provide precise reference answers, and be aligned with the policy's capabilities.”
+    <span class="qsrc">§2</span>
+  </blockquote>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">起点</span><h4>Figure 1：AIME 上的 Pass@32 在约 450 步后停住</h4></div>
+    <p>
+      论文报告，标准 RLVR 在竞赛级 AIME 基准上的 Pass@32 与 Pass@1 大约 450 步后进入平台；SvS 则继续上升（Figure 1、§4.2）。
+      这不是“再训久一点”能解的：题库和信息量没有变化，模型只能把已知轨迹压得更熟。<span class="infer">推断</span>（依据：Figure 1 的平台与 §2 的固定题库机制）
+    </p>
+  </div>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有两条路：固定数据训练、外部模型复述；前者塌熵，后者不保答案</h2></div>
+  <p class="sec-sub">论文要的是第三种：题目在线更新、答案可继承、难度贴合当前策略。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>固定数据上的 RLVR</h4></div>
+      <p>每个迭代都从同一个训练集 D 采样，G 条 rollout 做组内归一化。</p>
+      <p><strong>强项：</strong>实现简单、奖励可靠；在 Pass@1 上稳定涨。</p>
+      <p><strong>盲区：</strong>熵持续下降；Pass@k 只在较小 k 上有增益。策略被压向少数高分轨迹，推理路径越训越窄（§2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>外部模型复述题</h4></div>
+      <p>Figure 2 的做法：MATH-12k 混入 <strong>36k 条 MetaMath 复述题</strong>，第 <strong>300 步</strong>换成另一批。</p>
+      <p><strong>强项：</strong>熵下降变慢；换题时熵回升；Pass@32 随之改善（Figure 2）。</p>
+      <p><strong>盲区：</strong>外部 LLM 可能改错语义，参考答案不可靠；以原题为上下文，复述的多样性也有限（§2）。</p>
+    </div>
+  </div>
+
+  <p>Figure 2 证明“题目多样性”这个方向对，但复述不满足后两条。SvS 的出发点是：<strong>模型自己的正确解法里已经包含原题的完整信息</strong>，从它反推新题，答案天然可继承；再用当前模型的组准确率筛难度，就同时满足三条。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">SvS 怎么对上三条</span><h4>在线、可继承答案、贴合当前能力</h4></div>
+    <ul>
+      <li><strong>iterative：</strong>每个训练步重新采样、重新合成，buffer 用完即清（§3.2 / Algorithm 1）。</li>
+      <li><strong>precise reference answers：</strong>变体必须沿用原题答案 a，Eq. 1–2 都用 a 判分。</li>
+      <li><strong>aligned with the policy：</strong>只用组准确率在 <code>[12.5%, 50%]</code> 的原题做种子；变体再按 <code>[12.5%, 62.5%]</code> 给奖励（Appendix D.1）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>SvS 的四步：先算组准确率，再从正确解反推出题，最后按两个难度带给信号</h2></div>
+  <p class="sec-sub">核心不是“生成新题”，而是“只生成当前模型半懂、且答案可继承的题”。</p>
+
+  <h3>第一步：每题采 8 条解，先算组准确率</h3>
+  <p>
+    对每个训练题 <code>(x, a)</code>，策略采 <code>G=8</code> 条回答；每条回答按抽取出的最终答案判对错。
+    组准确率 <code>Acc(x)</code> 就是这 8 条里答对的比例。全对（Acc=1）和全错（Acc=0）的组在 GRPO 里优势为 0，直接丢弃（§3.2）。
+  </p>
+  <div class="eq">
+    R<sub>c</sub>(y<sub>i</sub>, a) = 1[ Extract(y<sub>i</sub>) = a ] &nbsp;&nbsp;(Eq. 1)<br>
+    Acc(x) = (1/G) Σ<sub>i=1</sub><sup>G</sup> R<sub>c</sub>(y<sub>i</sub>, a), &nbsp; G = 8
+  </div>
+  <div class="eq-cap">Eq. 1 与组准确率的定义；Extract(·) 从推理轨迹里抽最终答案</div>
+
+  <h3>第二步：只从“半懂题”里取正确解</h3>
+  <p>
+    论文把 <code>Acc(x)</code> 落在 <code>[12.5%, 50.0%]</code> 的题称为 underperforming problems——既不太易、也没到完全不会。
+    只有这些题的正确解会被拿来当合成种子；0 正确或接近全对的题不参与（§3.2、Appendix D.1）。
+  </p>
+
+  <h3>第三步：正确解 → 8 个变体，答案不变</h3>
+  <p>
+    一条正确回答里包含原题的完整信息（题干、条件、求解过程），所以论文直接把它当上下文，让策略生成 <code>G<sub>v</code>=8</code> 个变体。
+    变体可以换结构、换叙述，但必须继续用原答案 <code>a</code>；这样不需要任何新标注。
+  </p>
+  <blockquote>
+    “Because the variational problems are derived from correct responses to the original problems, they are expected to share the same reference answers.”
+    <span class="qsrc">§3.2</span>
+  </blockquote>
+
+  <h3>第四步：变体再解一遍，按难度给合成奖励</h3>
+  <p>
+    每个变体再采 <code>G=8</code> 条解，仍然用原答案 <code>a</code> 判分。论文先试过“只要有一条解对就给正奖励”，发现模型会把提示甚至答案直接塞进题干，把变体做成送分题（§3.2、Figure 4）。
+    于是改成“变体准确率落在 <code>[12.5%, 62.5%]</code> 才给正奖励”。
+  </p>
+  <div class="eq">
+    <span class="hl-b">naive：R<sub>v</sub>(x̂) = 1[ Acc(x̂, a) &gt; 0 ]</span> &nbsp;&nbsp;(Eq. 3)<br>
+    <span class="hl-c">shaped：R<sub>v</sub>(x̂<sub>i</sub><sup>j</sup>) = 1[ acĉ<sub>l</sub> ≤ Acc(x̂<sub>i</sub><sup>j</sup>, a) ≤ acĉ<sub>h</sub> ]</span> &nbsp;&nbsp;(Eq. 4)
+  </div>
+  <div class="eq-cap">Eq. 4 的 acĉ_l / acĉ_h 在 Appendix D.1 取 12.5% / 62.5%；Eq. 3 是论文先试过、会被“塞提示/塞答案”利用的版本</div>
+
+  <div class="readout" data-src="Figure 4">
+    <div class="r-head">Figure 4 的三个变体</div>
+    <p>
+      0/8：判为 failed synthesis；5/8：保留；7/8 且题干带提示：判为 “With hints, oversimple”。
+      Eq. 4 把后两者区分开；Eq. 3 会把 7/8 也当成正样本，模型于是学会把答案泄漏进题干。
+    </p>
+  </div>
+
+  <h3>自己动手：8 次采样下，哪些题能进合成、哪些变体能拿奖励</h3>
+  <p>
+    <code>G=8</code> 时组准确率只能是 <code>k/8</code>，共 9 个离散档。拖动两个滑块，看同一套阈值如何筛原题和变体。
+    默认按正文的闭区间；切到 Algorithm 1 的严格不等式，边界档会变。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" id="band-btns">
+      <button class="rule-btn active" data-mode="closed">正文口径<span class="r-sub">[acc_l, acc_h] 闭区间</span></button>
+      <button class="rule-btn" data-mode="strict">Algorithm 1<span class="r-sub">acc_l &lt; Acc &lt; acc_h</span></button>
+    </div>
+
+    <div class="slot-row-label">原题：8 条 rollout 的对错</div>
+    <div class="slot-row" id="orig-slots"></div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label for="k">原题正确数 k <span class="v" id="k-v">3</span></label>
+        <input type="range" id="k" min="0" max="8" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label for="kh">变体正确数 k̂ <span class="v" id="kh-v">5</span></label>
+        <input type="range" id="kh" min="0" max="8" step="1" value="5">
+      </div>
+    </div>
+
+    <div class="slot-row-label">合成变体：8 条 rollout 的对错</div>
+    <div class="slot-row" id="var-slots"></div>
+
+    <div class="readout" id="band-readout" data-src="Appendix D.1">
+      <div class="r-head">判定结果</div>
+      <div id="band-msg">拖动滑块查看判定。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算两组：阈值如何落在 8 条解上<span class="sum-sub">k 与 k̂ 的完整判定过程</span></summary>
+    <div class="details-body">
+      <p><strong>常量（Appendix D.1）：</strong>G=G<sub>v</sub>=8；原题难度带 [12.5%, 50.0%]；变体奖励带 [12.5%, 62.5%]。因为正确性奖励是二值，Acc = k/8。</p>
+      <p>
+        <strong>组 A：k=3，k̂=5。</strong>Acc(x) = 3/8 = 37.5%。12.5 ≤ 37.5 ≤ 50，落在难度带（严格口径也成立），所以原题解保留，且用正确解生成 8 个变体。
+        变体 Acc = 5/8 = 62.5%；12.5 ≤ 62.5 ≤ 62.5，R<sub>v</sub>=+1（正好压在带上界）。
+      </p>
+      <p>
+        <strong>组 B：k=4，k̂=1。</strong>Acc(x) = 4/8 = 50.0%。按正文闭区间，它是难度带的上界，仍可作为合成种子；
+        按 Algorithm 1 第 11 行的严格不等式 12.5 &lt; 50 &lt; 50 不成立，边界档被排除。
+        变体 Acc = 1/8 = 12.5%；Eq. 4 用 ≤，12.5 ≤ 12.5 ≤ 62.5，R<sub>v</sub>=+1（正好压在下界）。
+      </p>
+      <p><strong>口径说明：</strong>本模拟只做“离散档位 + 区间判定”，不计算标准差，也不模拟 rollout 的随机采样；所有百分比都是 k/8×100。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">与 §3.2 / Algorithm 1 的分支对照</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>Eq. 1 的二值正确性 → Acc=k/G；§3.2 的 [acc_l, acc_h] 原题筛选；Eq. 4 的 [acĉ_l, acĉ_h] 变体奖励；G=8 的离散档位。</p>
+      <p><strong>未覆盖：</strong>真实 rollout 的采样随机性；从正确解生成变体的语言模型过程；Eq. 6 的 GRPO 更新；变体被保留进 buffer 后对策略的影响。页面只模拟“筛题/给奖励”这两个判定，不声称还原训练动态。</p>
+      <p>
+        <strong>原文内部的三处差异：</strong>
+        ① §3.2 正文把难度带写成闭区间 <code>[acc_l, acc_h]</code>；Algorithm 1 第 11 行写 <code>acc_l &lt; Acc &lt; acc_h</code>（严格）。G=8 时只影响 k=1 与 k=4 两个边界档，模拟器可切换两种口径。
+        ② §3.2 正文说超出奖励带的变体 “receives a negative reward”；Algorithm 1 第 21–27 行的奖励赋值在检索到的 HTML 里显示为 1.0 / 0.0。页面读数并列写出这两种说法。
+        ③ 正文说只保留“正负奖励混合”的合成题对；Algorithm 1 的伪代码按检索结果把全部 (y<sub>i</sub>, x̂) 加入 buffer。这一条只影响训练 buffer，页面未模拟。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 怎么训 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练配方很朴素：GRPO + Clip-Higher，三路 tuple 混进同一个 buffer</h2></div>
+  <p class="sec-sub">SvS 没有新优化器；它改的是每一批数据的来源与配比。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">训练设定</span><h4>Appendix D.1 的全部超参数</h4></div>
+    <ul>
+      <li>算法：GRPO + Clip-Higher（ε=0.28）、Token-Level Loss、Dynamic Sampling。</li>
+      <li>学习率 1e-6 常数；采样温度 1.0。</li>
+      <li>每轮采样 256 道题、更新 256 道；G = G<sub>v</sub> = 8。</li>
+      <li>原题难度带 12.5%–50.0%；变体奖励带 12.5%–62.5%。</li>
+      <li>MATH-12k 训 300 步；32B 在 DAPO-17k 训 600 步。</li>
+      <li>硬件：32 张 H100（§5.5）。</li>
+    </ul>
+  </div>
+
+  <p>策略更新仍用 GRPO 的组内优势和 PPO 式裁剪，没有为“出题”单独加一项损失：</p>
+  <div class="eq">
+    A<sub>i,t</sub> = ( r<sub>i</sub> − mean{r<sub>1</sub>,…,r<sub>G</sub>} ) / std{r<sub>1</sub>,…,r<sub>G</sub>} &nbsp;&nbsp;(Eq. 5)
+  </div>
+  <div class="eq-cap">Eq. 6 是标准 GRPO 目标：ratio clip（ε=0.28）+ KL 约束；SvS 把三路奖励都送进同一个组归一化（Appendix A）</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">三路数据</span><h4>每个 step 的 buffer 由三类 tuple 混成</h4></div>
+    <ul>
+      <li><code>(x, y<sub>i</sub>, R<sub>c</sub>(y<sub>i</sub>, a))</code> —— 原题求解；只保留 0 &lt; Acc(x) &lt; 1 的组。</li>
+      <li><code>(y<sub>i</sub>, x̂<sub>i</sub><sup>j</sup>, R<sub>v</sub>(x̂<sub>i</sub><sup>j</sup>))</code> —— 正确解 → 变体；只从半懂题的正确解出发。</li>
+      <li><code>(x̂<sub>i</sub><sup>j</sup>, ŷ<sub>k</sub>, R<sub>c</sub>(ŷ<sub>k</sub>, a))</code> —— 解变体；用原答案 a 判分，只保留 0 &lt; Acc &lt; 1 的变体。</li>
+    </ul>
+    <p class="sub">§3.2 “Full Training Data”；buffer 在每次更新后清空（Algorithm 1）。</p>
+  </div>
+
+  <p>
+    §5.5 的算力账：32 张 H100。MATH-12k 上 Qwen-32B 的初始准确率约 <strong>80%</strong>，落在难度带的题少，合成量有限，训练时间与标准 RLVR 接近；
+    DAPO-17k 早期大量题落在带内，合成量高，随着准确率越过上界迅速下降（Figure 9）。
+    论文没有报告 GPU 小时数；Figure 9 给出的是每步时间与合成题/回答数量，本页未转录曲线上的具体读数。
+  </p>
+</section>
+
+<!-- ================= 05 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一轮训练的数据流：原题 → 半懂题 → 变体 → 三路混装 → GRPO</h2></div>
+  <p class="sec-sub">SvS 的全部改动都在这条流水线上；优化器本身没有动。</p>
+
+  <figure>
+    <svg viewBox="0 0 840 470" role="img" aria-label="SvS 一轮训练的数据流">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect class="pipe-c1" x="20" y="30" width="180" height="110" rx="10"></rect>
+      <text class="pipe-t" x="110" y="55" text-anchor="middle">① 原题求解</text>
+      <text class="pipe-s" x="110" y="78" text-anchor="middle">采样 (x, a) ~ D</text>
+      <text class="pipe-s" x="110" y="99" text-anchor="middle">G = 8 条解</text>
+      <text class="pipe-s" x="110" y="120" text-anchor="middle">Acc(x) = Σ R_c / G</text>
+
+      <rect class="pipe-c1" x="235" y="30" width="175" height="110" rx="10"></rect>
+      <text class="pipe-t" x="322" y="55" text-anchor="middle">② 筛出半懂题</text>
+      <text class="pipe-s" x="322" y="78" text-anchor="middle">0 &lt; Acc &lt; 1 入 buffer</text>
+      <text class="pipe-s" x="322" y="99" text-anchor="middle">Acc ∈ [12.5%, 50%]</text>
+      <text class="pipe-s" x="322" y="120" text-anchor="middle">只取正确解 y_i 作种子</text>
+
+      <rect class="pipe-accent" x="445" y="30" width="180" height="110" rx="10"></rect>
+      <text class="pipe-t" x="535" y="55" text-anchor="middle">③ 变分合成</text>
+      <text class="pipe-s" x="535" y="78" text-anchor="middle">正确解 y_i 作上下文</text>
+      <text class="pipe-s" x="535" y="99" text-anchor="middle">G_v = 8 个变体</text>
+      <text class="pipe-s" x="535" y="120" text-anchor="middle">参考答案仍为 a</text>
+
+      <rect class="pipe-c2" x="660" y="30" width="160" height="110" rx="10"></rect>
+      <text class="pipe-t" x="740" y="55" text-anchor="middle">④ 变体求解</text>
+      <text class="pipe-s" x="740" y="78" text-anchor="middle">每个变体 G = 8 条解</text>
+      <text class="pipe-s" x="740" y="99" text-anchor="middle">用原答案 a 判分</text>
+      <text class="pipe-s" x="740" y="120" text-anchor="middle">保留 0 &lt; Acc &lt; 1</text>
+
+      <rect class="pipe-accent" x="660" y="205" width="160" height="120" rx="10"></rect>
+      <text class="pipe-t" x="740" y="230" text-anchor="middle">⑤ 合成奖励</text>
+      <text class="pipe-s" x="740" y="253" text-anchor="middle">R_v = +1 当</text>
+      <text class="pipe-s" x="740" y="274" text-anchor="middle">12.5% ≤ Acc ≤ 62.5%</text>
+      <text class="pipe-s" x="740" y="295" text-anchor="middle">否则非正</text>
+
+      <rect class="pipe-c1" x="445" y="205" width="195" height="120" rx="10"></rect>
+      <text class="pipe-t" x="542" y="230" text-anchor="middle">⑥ 三路 buffer</text>
+      <text class="pipe-s pipe-m" x="542" y="253" text-anchor="middle">(x, y, R_c)</text>
+      <text class="pipe-s pipe-m" x="542" y="274" text-anchor="middle">(y, x̂, R_v)</text>
+      <text class="pipe-s pipe-m" x="542" y="295" text-anchor="middle">(x̂, ŷ, R_c)</text>
+
+      <rect class="pipe-c1" x="235" y="205" width="175" height="120" rx="10"></rect>
+      <text class="pipe-t" x="322" y="230" text-anchor="middle">⑦ GRPO 更新</text>
+      <text class="pipe-s" x="322" y="253" text-anchor="middle">Eq. 5 组内优势</text>
+      <text class="pipe-s" x="322" y="274" text-anchor="middle">Eq. 6 clip + KL</text>
+      <text class="pipe-s" x="322" y="295" text-anchor="middle">buffer 清空</text>
+
+      <line class="pipe-line" x1="200" y1="85" x2="228" y2="85" marker-end="url(#arr)"></line>
+      <line class="pipe-line" x1="410" y1="85" x2="438" y2="85" marker-end="url(#arr)"></line>
+      <line class="pipe-line" x1="625" y1="85" x2="653" y2="85" marker-end="url(#arr)"></line>
+      <line class="pipe-line" x1="740" y1="140" x2="740" y2="198" marker-end="url(#arr)"></line>
+      <line class="pipe-line" x1="660" y1="265" x2="647" y2="265" marker-end="url(#arr)"></line>
+      <line class="pipe-line" x1="445" y1="265" x2="417" y2="265" marker-end="url(#arr)"></line>
+
+      <path class="pipe-dash" d="M 400 140 L 400 175 L 470 175 L 470 198" marker-end="url(#arr)"></path>
+      <text class="pipe-s" x="410" y="169">原题 tuple 直接进 buffer</text>
+
+      <path class="pipe-line" d="M 322 325 L 322 410 L 110 410 L 110 148" marker-end="url(#arr)"></path>
+      <text class="pipe-s" x="216" y="432" text-anchor="middle">t+1：buffer 清空，重新采样</text>
+    </svg>
+    <figcaption>
+      图：SvS 一轮训练的数据流，按 §3.2 与 Figure 3 重绘。实线是主路径，虚线是原题 tuple 直接进 buffer 的第二条路；方框⑤的判定见 Eq. 4。
+      <br><span class="fig-toggle" onclick="toggleFig(this)">展开逐段说明 ▸</span>
+    </figcaption>
+    <div class="figure-detail">
+      <div class="figure-detail-in">
+        <ul>
+          <li><strong>① 原题求解：</strong>从训练集采样 <code>(x, a)</code>，每题采 <code>G=8</code> 条解，按 Eq. 1 算对错。</li>
+          <li><strong>② 筛出半懂题：</strong><code>0 &lt; Acc(x) &lt; 1</code> 的组才进 buffer；其中 <code>Acc(x)</code> 落在 <code>[12.5%, 50%]</code> 的题才拿来合成。</li>
+          <li><strong>③ 变分合成：</strong>取这些题的正确解 <code>y_i</code> 当上下文，生成 <code>G<sub>v</sub>=8</code> 个变体，参考答案沿用 <code>a</code>。</li>
+          <li><strong>④ 变体求解：</strong>每个变体再采 <code>G=8</code> 条解，仍按 <code>a</code> 判分；全对或全错的变体不保留。</li>
+          <li><strong>⑤ 合成奖励：</strong>变体准确率落在 <code>[12.5%, 62.5%]</code> 给正奖励；太易（模型把答案写进题干）和太难都被压下去。</li>
+          <li><strong>⑥ 三路 buffer：</strong>原题求解、合成题对、变体求解三类 tuple 混在一起，送入同一次 GRPO 更新。</li>
+          <li><strong>⑦ GRPO 更新：</strong>用 Eq. 5 的组内优势和 Eq. 6 的 clip + KL 目标更新；更新后清空 buffer，进入下一轮。</li>
+        </ul>
+      </div>
+    </div>
+  </figure>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：Pass@32 涨得比 Pass@1 多，但难题子集和开放答案会退</h2></div>
+  <p class="sec-sub">先看主表，再看三个反直觉的地方：难题不涨、开放答案掉、平均分可以降。</p>
+
+  <h3>主结果：竞赛基准上的 Pass@1 与 Pass@32</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.78;padding:0 0 8px">Table 1（节选）：Qwen2.5-32B-Instruct；Pass@1 按每题 32 次评测平均；六项平均 = AIME24、AIME25、BAIME、Math24o、OlymE、OlymH 的均值</caption>
+      <thead>
+        <tr>
+          <th>训练数据 / 方法</th>
+          <th style="text-align:right">AIME24 P@1</th>
+          <th style="text-align:right">AIME25 P@1</th>
+          <th style="text-align:right">六项 P@1 平均</th>
+          <th style="text-align:right">AIME24 P@32</th>
+          <th style="text-align:right">AIME25 P@32</th>
+          <th style="text-align:right">OlymE P@32</th>
+          <th style="text-align:right">OlymH P@32</th>
+          <th style="text-align:right">六项 P@32 平均</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>MATH-12k → RLVR</td><td class="num">22.2</td><td class="num">15.8</td><td class="num">16.6</td><td class="num">47.4</td><td class="num">36.4</td><td class="num">36.2</td><td class="num">16.4</td><td class="num">38.6</td></tr>
+        <tr class="best"><td>MATH-12k → SvS</td><td class="num">30.3</td><td class="num">21.7</td><td class="num">22.0</td><td class="num">63.6</td><td class="num">55.1</td><td class="num">63.6</td><td class="num">24.8</td><td class="num">54.6</td></tr>
+        <tr><td>DAPO-17k → RLVR</td><td class="num">28.8</td><td class="num">30.0</td><td class="num">22.5</td><td class="num">52.5</td><td class="num">42.4</td><td class="num">47.1</td><td class="num">18.3</td><td class="num">44.6</td></tr>
+        <tr class="best"><td>DAPO-17k → SvS</td><td class="num">39.3</td><td class="num">40.5</td><td class="num">27.9</td><td class="num">70.8</td><td class="num">65.2</td><td class="num">43.4</td><td class="num">16.7</td><td class="num">53.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <ul>
+    <li><strong>Pass@32 的增幅大于 Pass@1：</strong>AIME24 是 +18.3 对 +10.5，AIME25 是 +22.8 对 +10.5。论文据此认为提升 Pass@k 会反过来抬 Pass@1（§4.2）。</li>
+    <li><strong>并非所有子集都涨：</strong>DAPO-17k 上 OlymE Pass@32 从 47.1 降到 43.4（−3.7），OlymH 从 18.3 降到 16.7（−1.6）；MATH-12k 的 OlymH Pass@1 也从 4.1 降到 3.3（−0.8）。平均值遮住了这层退步。</li>
+    <li><strong>MATH-12k 的整体更均匀：</strong>六项 Pass@32 平均 38.6→54.6（+16.0），六项 Pass@1 平均 16.6→22.0（+5.4）。</li>
+  </ul>
+
+  <h3>消融：不是“多训”，也不是“多采样”</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.78;padding:0 0 8px">Table 3：Qwen2.5-32B-Instruct / DAPO-17k；checkpoint 按 AIME24+25 平均分选</caption>
+      <thead>
+        <tr><th>策略</th><th>做法</th><th style="text-align:right">Pass@1 平均</th><th style="text-align:right">Pass@32 平均</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>RLVR</td><td>固定 DAPO-17k</td><td class="num">22.5</td><td class="num">44.6</td></tr>
+        <tr><td>Ext</td><td>延长训练到见到与 SvS 同样多的题解对</td><td class="num">24.6</td><td class="num">46.3</td></tr>
+        <tr><td>Eup</td><td>对弱题再加一轮 rollout</td><td class="num">21.7</td><td class="num">50.9</td></tr>
+        <tr><td>SvS-Asp</td><td>增强更简单的题（37.5%–75.0%）</td><td class="num">22.8</td><td class="num">42.8</td></tr>
+        <tr class="best"><td>Full SvS</td><td>半懂题 + 正确解反推 + 难度带奖励</td><td class="num">27.9</td><td class="num">53.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><strong>Ext（多训）</strong>只把 Pass@32 从 44.6 抬到 46.3（+1.7）；把训练拉到同样题量并不是主因。</li>
+    <li><strong>Eup（多采样）</strong>Pass@32 到 50.9（+6.3），但 Pass@1 反降到 21.7（比 RLVR 低 0.8）：更多 rollout 买到了探索，没买到利用。</li>
+    <li><strong>SvS-Asp（选错难度带）</strong>Pass@32 42.8（−1.8），低于 RLVR；增强“更简单的题”方向反了。</li>
+    <li><strong>Full SvS</strong>53.1，比 Eup 高 2.2，比 RLVR 高 8.5；三件事缺一不可。</li>
+  </ul>
+
+  <h3>反直觉：9 项平均可以降，开放答案基准退得更多</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.78;padding:0 0 8px">Table 2（节选）：Pass@1；“平均”为表中 9 项主流基准的均值；M12k / D17k / D25k = MATH-12k / DAPO-17k / DAPO-17k + 8k DeepMath 开放题</caption>
+      <thead>
+        <tr>
+          <th>模型 / 数据</th>
+          <th style="text-align:right">GSM8K</th>
+          <th style="text-align:right">MATH-500</th>
+          <th style="text-align:right">GaoKao23</th>
+          <th style="text-align:right">AIME24</th>
+          <th style="text-align:right">AIME25</th>
+          <th style="text-align:right">9 项平均</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>3B RLVR / M12k</td><td class="num">86.4</td><td class="num">67.4</td><td class="num">57.7</td><td class="num">6.7</td><td class="num">3.4</td><td class="num">37.9</td></tr>
+        <tr><td>3B SvS / M12k</td><td class="num">88.9</td><td class="num">70.8</td><td class="num">61.6</td><td class="num">10.5</td><td class="num">7.8</td><td class="num">40.8</td></tr>
+        <tr><td>8B RLVR / M12k</td><td class="num">90.2</td><td class="num">57.4</td><td class="num">47.8</td><td class="num">8.1</td><td class="num">1.2</td><td class="num">34.2</td></tr>
+        <tr><td>8B SvS / M12k</td><td class="num">90.3</td><td class="num">62.2</td><td class="num">54.8</td><td class="num">8.5</td><td class="num">1.8</td><td class="num">35.9</td></tr>
+        <tr><td>32B RLVR / M12k</td><td class="num">95.8</td><td class="num">86.4</td><td class="num">74.5</td><td class="num">26.7</td><td class="num">23.3</td><td class="num">54.8</td></tr>
+        <tr class="best"><td>32B SvS / M12k</td><td class="num">96.1</td><td class="num">87.2</td><td class="num">78.7</td><td class="num">30.0</td><td class="num">26.7</td><td class="num">57.3</td></tr>
+        <tr><td>32B RLVR / D17k</td><td class="num">95.6</td><td class="num">87.0</td><td class="num">78.7</td><td class="num">33.3</td><td class="num">36.7</td><td class="num">58.6</td></tr>
+        <tr><td>32B SvS / D17k</td><td class="num">95.9</td><td class="num">75.6</td><td class="num">62.9</td><td class="num">53.3</td><td class="num">43.3</td><td class="num">57.9</td></tr>
+        <tr class="best"><td>32B SvS / D25k</td><td class="num">95.2</td><td class="num">88.6</td><td class="num">79.2</td><td class="num">50.0</td><td class="num">40.0</td><td class="num">62.8</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <ul>
+    <li><strong>规模上的常规增益：</strong>MATH-12k 上 3B +2.9、8B +1.7、32B +2.5。论文 §4.2 把这几个点差写成 “2.9%, 1.7%, and 2.5%”；按 Table 2 数值它们是百分点差（40.8−37.9 等），不是相对提升。</li>
+    <li><strong>32B / DAPO-17k 的平均分反而降了 0.7（58.6→57.9）：</strong>开放答案基准掉得最多——MATH-500 87.0→75.6（−11.4）、GaoKao23 78.7→62.9（−15.8）、Minerva 45.6→42.3（−3.3）、Olympiad-Bench 54.8→45.9（−8.9）；同时 AIME24 33.3→53.3（+20.0）、AIME25 36.7→43.3（+6.6）、BeyondAIME 13.0→19.0（+6.0）。</li>
+    <li><strong>D25k 补 8k 开放题后：</strong>9 项平均 62.8（比 D17k SvS 高 4.9），MATH-500 88.6、GaoKao 79.2。论文把 DAPO-17k 上的退步归因于模型在增强时 “overfit to DAPO-17k's integer-only format”（§4.2）。</li>
+  </ul>
+
+  <h3>泛化：通用任务没有明显塌</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.78;padding:0 0 8px">Table 4（Appendix E.3）：Qwen2.5-32B-Instruct / DAPO-17k，9 个通用任务的平均值</caption>
+      <thead>
+        <tr><th>初始化</th><th style="text-align:right">RLVR</th><th style="text-align:right">SvS</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>9 任务平均</td><td class="num">72.99</td><td class="num">73.77</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Table 4 的 9 项平均：初始化 73.35、RLVR 72.99、SvS 73.77；SvS 比 RLVR 高 0.78。具体到单项，SvS 在 MMLU-Pro、ARC-C、HellaSwag、PIQA、AGIEval 上高于两个基线，HumanEval 与初始化持平（Appendix E.3）。
+  </p>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别用：开放答案会退、难题子集不保、种子只能来自已解出的题</h2></div>
+  <p class="sec-sub">论文自己的表里就能读出四条边界，外加一条算力账上的空白。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>开放答案格式是最大受害者</h4></div>
+    <p>
+      32B / DAPO-17k 的 SvS 在 MATH-500 掉 11.4 点、GaoKao23 掉 15.8 点（Table 2）。
+      论文的解释是增强过程让模型过拟合到 DAPO-17k 的整数答案格式；补 8k DeepMath 开放题后平均回到 62.8。
+      如果你的训练集全是整数答案、评测却是开放答案，这个退步会先出现。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>难题子集不保证涨</h4></div>
+    <p>
+      DAPO-17k 上 OlymE Pass@32 −3.7、OlymH −1.6；MATH-12k 上 OlymH Pass@1 −0.8（Table 1）。
+      平均分上升不代表每个难度档都上升；最难的子集仍可能被牺牲。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>合成题没有真标签，奖励是难度代理</h4></div>
+    <p>
+      Eq. 4 奖励的是“变体准确率落在带内”，不是“变体逻辑正确”。Appendix E.5 用 Qwen3-235B-A22B-Instruct-2507 与 OpenAI O3 评了 <strong>6,000</strong> 道合成题（600 步 × 每步 10 道），报告 <strong>more than 80%</strong> 被至少一个评委判为正确，并说人工复查被两个评委标为 invalid 的题，没有发现真正错误的。
+      这仍是评委口径的有效性，不是数学上的真值证明。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界四</span><h4>零正确率的题无法提供种子</h4></div>
+    <p>
+      合成只从“正确解”出发；<code>Acc(x)=0</code> 的题既不进 buffer，也没有正确解可当上下文，因此不能直接为它造变体。
+      方法能围绕当前能力边界扩张，但不能凭空跨到模型从未解出的题。<span class="infer">推断</span>（依据：§3.2 只取正确解作种子，Algorithm 1 第 11–12 行只选 <code>R_c=1</code> 的解）
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界五</span><h4>算力账只给了曲线，没给总账</h4></div>
+    <p>
+      论文报告 32 张 H100，并用 Figure 9 给出每步时间与合成题/回答数量；但没有报告 GPU 小时数或相对 RLVR 的总训练时间增幅。
+      要估算预算，只能自己按 Figure 9 的曲线重算；本页未转录曲线上的具体读数（§5.5）。
+    </p>
+  </div>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>SvS 解决的是“固定题库把策略压窄”这件事，不是“所有基准都变好”。</strong>
+    它最适合答案可验证、且愿意为在线合成付额外 rollout 的数学/代码场景；开放答案、超难题和严格算力预算下，要先验证再采用。
+  </p>
+</section>
+
+<footer>
+  <div>Beyond Pass@1: Self-Play with Variational Problem Synthesis Sustains RLVR · Xiao Liang, Zhongzhi Li, Yeyun Gong, Yelong Shen, Ying Nian Wu, Zhijiang Guo, Weizhu Chen</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.14029v4" target="_blank" rel="noopener">arXiv:2508.14029v4</a>（2025-12-13）· 本页所有表号、图号、数字均以 v4 为准<br>
+    代码：<a href="https://github.com/MasterVito/SvS" target="_blank" rel="noopener">github.com/MasterVito/SvS</a><br>
+    笔记：<a href="/beyond-pass1self-play-with-variational-problem-synthesis-sustains-rlvr/">BEYOND PASS@1：SELF-PLAY WITH VARIATIONAL PROBLEM SYNTHESIS SUSTAINS RLVR</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误（不改原笔记）：</strong>
+    <ul>
+      <li>笔记写于 2025-08-21，早于 v4。笔记称 Table 2 在 3B/8B/32B、MATH-12k/DAPO-17k 上都有“一致的性能提升”（平均约 2.5–2.9 个百分点）；v4 Table 2 中 32B + DAPO-17k 的 9 项平均是 58.6→57.9（−0.7），不是提升。2.9/1.7/2.5 只对应 3B、8B、32B+MATH-12k，且是百分点差。</li>
+      <li>笔记把“通用问答与代码任务”的泛化表写成 Table 3；v4 中该表是 Table 4（Appendix E.3），v4 的 Table 3 是增强策略消融。</li>
+      <li>笔记称论文缺少对合成失败案例的定量分析；v4 Appendix E.5 有 6,000 道合成题的双 LLM 评审，报告 “more than 80%” 被判定为正确。计算开销方面，v4 §5.5 有 Figure 9 的每步时间与合成量，但仍未报告 GPU 小时数，笔记这条批评在 v4 上仍部分成立。</li>
+      <li>笔记用缩写 “SVS”；论文原文缩写是 “SvS”。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) 8 次采样下的难度带筛选器
+   ============================================================ */
+(function () {
+  var G = 8;              // Appendix D.1
+  var ACC_L = 12.5;       // Appendix D.1
+  var ACC_H = 50.0;       // Appendix D.1
+  var RHAT_L = 12.5;      // Appendix D.1
+  var RHAT_H = 62.5;      // Appendix D.1
+
+  var mode = 'closed';
+
+  function acc(k) { return (k / G) * 100; }
+  function fmt(x) { return x.toFixed(1); }
+
+  function inBand(a, lo, hi, strict) {
+    if (strict) return a > lo && a < hi;
+    return a >= lo && a <= hi;
+  }
+
+  function renderSlots(host, k) {
+    if (!host) return;
+    host.innerHTML = '';
+    for (var i = 0; i < G; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot mini ' + (i < k ? 'ok' : 'bad');
+      var si = document.createElement('span');
+      si.className = 'si';
+      si.textContent = '#' + (i + 1);
+      var sv = document.createElement('span');
+      sv.className = 'sv';
+      sv.textContent = i < k ? '对' : '错';
+      slot.appendChild(si);
+      slot.appendChild(sv);
+      host.appendChild(slot);
+    }
+  }
+
+  function render() {
+    var kEl = document.getElementById('k');
+    var khEl = document.getElementById('kh');
+    var msgEl = document.getElementById('band-msg');
+    if (!kEl || !khEl) return;
+
+    var k = parseInt(kEl.value, 10);
+    var kh = parseInt(khEl.value, 10);
+    var a = acc(k);
+    var ah = acc(kh);
+
+    var kv = document.getElementById('k-v');
+    var khv = document.getElementById('kh-v');
+    if (kv) kv.textContent = String(k);
+    if (khv) khv.textContent = String(kh);
+
+    renderSlots(document.getElementById('orig-slots'), k);
+    renderSlots(document.getElementById('var-slots'), kh);
+
+    var keepOrig = k > 0 && k < G;
+    var synth = mode === 'strict'
+      ? inBand(a, ACC_L, ACC_H, true)
+      : inBand(a, ACC_L, ACC_H, false);
+    var keepVar = kh > 0 && kh < G;
+    var reward = inBand(ah, RHAT_L, RHAT_H, false);
+
+    if (!msgEl) return;
+    var msg = '<strong>原题：</strong>Acc(x) = ' + k + '/8 = ' + fmt(a) + '%。';
+    msg += keepOrig
+      ? '0 &lt; Acc &lt; 1，保留进训练 buffer；'
+      : 'Acc = 0 或 1，GRPO 优势为 0，丢弃；';
+    msg += synth
+      ? '<span class="warn">落在难度带 [12.5%, 50%]，可作为合成种子。</span>'
+      : '不在难度带 [12.5%, 50%]，不生成变体。';
+    msg += '<br><strong>变体：</strong>Acc(x̂) = ' + kh + '/8 = ' + fmt(ah) + '%。';
+    msg += keepVar
+      ? '0 &lt; Acc &lt; 1，保留进 buffer；'
+      : '全对或全错，不保留；';
+    msg += reward
+      ? '<span class="warn">R_v = +1（12.5 ≤ ' + fmt(ah) + ' ≤ 62.5）。</span>'
+      : 'R_v 非正：正文说负奖励，Algorithm 1 伪代码写 0.0。';
+
+    if (mode === 'strict' && (k === 1 || k === 4)) {
+      msg += '<br><em>边界档：正文闭区间会选中 k=' + k + '；Algorithm 1 第 11 行的严格不等式不选中。</em>';
+    }
+    msgEl.innerHTML = msg;
+  }
+
+  var btns = document.querySelectorAll('#band-btns .rule-btn');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].addEventListener('click', function () {
+      var all = document.querySelectorAll('#band-btns .rule-btn');
+      for (var j = 0; j < all.length; j++) all[j].classList.remove('active');
+      this.classList.add('active');
+      mode = this.getAttribute('data-mode');
+      render();
+    });
+  }
+
+  var kEl = document.getElementById('k');
+  var khEl = document.getElementById('kh');
+  if (kEl) kEl.addEventListener('input', render);
+  if (khEl) khEl.addEventListener('input', render);
+  render();
+})();
+
+/* ============================================================
+   2) 图注展开
+   ============================================================ */
+function toggleFig(el) {
+  var fig = el.closest ? el.closest('figure') : null;
+  if (!fig) return;
+  var detail = fig.querySelector('.figure-detail');
+  if (!detail) return;
+  var open = detail.classList.toggle('active');
+  el.textContent = open ? '收起说明 ▴' : '展开说明 ▸';
+}
+</script>
+</body>
+</html>

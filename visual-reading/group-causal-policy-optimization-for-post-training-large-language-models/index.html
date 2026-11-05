@@ -1,0 +1,754 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.4 | Table 1 | 66.5-65.1 |
+| 1.4 | Table 1 | 47.4-46.0 |
+| 1.4 | Table 1 | 58.3-56.9 |
+| 1.8 | Table 1 | 56.8-55.0 |
+| 0.8 | Table 1 | 66.5-65.7 |
+| 2.4 | Table 1 | 66.5-64.1 |
+| 0.7 | Table 1 | 56.8-56.1 |
+| 0.5 | Table 1 | 47.4-46.9 |
+| 2.3 | Table 1 | 56.8-54.5 |
+| 2.5 | Table 1 | 47.4-44.9 |
+| 1.3 | Table 1 | 53.0-51.7 |
+| 1.5 | Table 1 | 45.0-43.5 |
+| 0.9 | Table 1 | 58.3-57.4 |
+| 0.7 | Table 1 | 53.0-52.3 |
+| 1.0 | Table 1 | 45.0-44.0 |
+| 0.8 | Table 1 | 58.3-57.5 |
+| 0.9 | Table 1 | 53.0-52.1 |
+| 0.8 | Table 1 | 45.0-44.2 |
+| 1.2 | Table 1 | 58.3-57.1 |
+| 0.6 | Table 1 | 53.0-52.4 |
+| 2.2 | Table 1 | 45.0-42.8 |
+| 1.4 | Table 2 | 56.8-55.4 |
+| 1.2 | Table 2 | 56.8-55.6 |
+| 18 | Appendix · Computational Overhead Analysis | (1.18-1)*100 |
+| 66.54 | Table 1 | (58.3+53.0+87.3+89.1+45.0)/5 |
+| 66.5 | Table 1 | (58.3+53.0+87.3+89.1+45.0)/5 |
+| 47.36 | Table 1 | (31.0+29.0+71.8+81.6+23.4)/5 |
+| 47.4 | Table 1 | (31.0+29.0+71.8+81.6+23.4)/5 |
+| 56.66 | Table 1 | (46.7+40.3+84.1+86.3+25.9)/5 |
+| 56.7 | Table 1 | (46.7+40.3+84.1+86.3+25.9)/5 |
+| 0.14 | Table 1 | 56.8-56.66 |
+| 46.18 | Table 1 | (30.5+28.6+71.1+80.4+20.3)/5 |
+| 46.76 | Table 1 | (30.4+28.4+71.3+80.8+22.9)/5 |
+| 0.22 | Table 1 | 46.4-46.18 |
+| 0.14 | Table 1 | 46.9-46.76 |
+| 2.9 | §Performance + Figure 3（估读） | 65.1-62.2 |
+| 5.5 | §Performance + Figure 3（估读） | 72.0-66.5 |
+| 62.2 | Figure 3（图示估读） | 65.1-2.9 |
+| 66.5 | Figure 3（图示估读） | 72.0-5.5 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GCPO · 把同组答案建成对撞结构，再用因果投影重加权</title>
+<meta name="description" content="GCPO 把 GRPO 的同组候选写成 collider 结构，用因果投影重加权优势并新增 KL 项；7B 数学 Avg 66.5%，训练成本 1.18× GRPO。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.fine{font-size:13px;color:var(--text-soft);line-height:1.75}
+.model-row td{background:var(--bg-soft);font-weight:600;color:var(--text)}
+.scm-host{margin:8px 0 4px}
+.scm-host svg{width:100%;height:auto;display:block}
+.flow-note{font-size:12.5px;color:var(--text-soft);text-align:center;margin-top:8px}
+@media (max-width:520px){.metric .v{font-size:20px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GCPO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Paper · arXiv 2508.05428v1 · 2025</span>
+  <h1>GCPO：把同组答案建成对撞结构，再用因果投影重加权</h1>
+  <p class="hero-sub">
+    GRPO 只用组内相对奖励，等于假设 <code>n</code> 条候选答案互不相干。GCPO 把 <code>q</code>、候选 <code>y_i</code> 与最终融合答案 <code>y_n</code> 写成结构因果模型：<code>y_n</code> 是一个 collider，条件在它上面会让原本独立的候选变得相关。论文据此把每个候选投影到一个因果子空间，用投影对齐度改写优势，并加一个指向因果参考分布的 KL 项。
+  </p>
+  <p class="hero-sub">
+    代价是每组多一轮融合采样与多轮表示前向；论文报告训练成本是 GRPO 的 <strong data-src="Appendix · Computational Overhead Analysis">1.18×</strong>。
+  </p>
+  <div class="meta">
+    <span>Ziyin Gu, Jingyao Wang, Ran Zuo, Chuxiong Sun, Zeen Song, Changwen Zheng, Wenwen Qiang</span>
+    <a href="https://arxiv.org/abs/2508.05428v1" target="_blank" rel="noopener">arXiv 2508.05428v1 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>问题不是「奖励不够好」，而是「组内关系没进目标函数」。</strong> GRPO 对每条候选单独算奖励，再在组内减均值、除标准差；这个操作只用到奖励的相对大小，完全不用候选之间的支持、互补或矛盾。论文用 Figure 1 的 support / conflict 两种链说明：同一题的多条推理并不是 n 个独立样本。</p>
+  <p><strong>因果视角给出的不是一句比喻，而是一个可计算的目标。</strong> 把 <code>q → y_i</code>、<code>q → y_n</code>、<code>y_i → y_n</code> 写成 SCM 后，<code>y_n</code> 是 collider：只给定 <code>q</code> 时 <code>y_i</code> 独立，再给定 <code>y_n</code> 后相关。Theorem 1 / Corollary 2 说，投影 <code>Ψ·π*(x)+π*(q)</code> 的误差不大于 <code>π*(x)</code> 或 <code>π*(q)</code>。</p>
+  <p><strong>GCPO 把这个投影落到两处：</strong> 优势 <code>B_i = A_i·Υ_i</code>，其中 <code>Υ_i = α·cos(z_i, Z̄_i − Z̄′_i + z̄)</code>；以及一个新的 KL 项，把策略拉向由同一组候选构造的 <code>π′_ref</code>。前者改「谁更值得奖励」，后者改「往哪里更新」。</p>
+  <p><strong>结果要按百分点读。</strong> <span data-src="Table 1">三个数学 backbone 的 Avg 都是 GCPO 最高；7B 上是 <code>66.5</code> 对 GRPO <code>65.1</code>（+1.4 个百分点），对最强基线 GVPO / Dr.GRPO <code>65.7</code>（+0.8 个百分点）。</span>代价是 <span data-src="Appendix · Computational Overhead Analysis"><code>1.18×</code></span> 训练成本。</p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">66.5<small>%</small></div>
+      <div class="k">DeepSeek-R1-Distill-Qwen-7B 的 Avg Pass@1<br>Table 1 中三个 backbone 的最高 Avg</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">1.4<small>pp</small></div>
+      <div class="k">7B Avg 相对 GRPO 的绝对差<br>66.5 − 65.1</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Appendix · Computational Overhead Analysis">1.18<small>×</small></div>
+      <div class="k">训练 GPU 小时 / GRPO<br>论文 Appendix 报告</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>GRPO 把同组答案当成互不相干的样本</h2></div>
+  <p class="sec-sub">先看清「组内归一化」到底用了什么、漏了什么；这是后面所有因果话术的落点。</p>
+
+  <p>GRPO 对每个 query 采样 <code>n</code> 条候选 <code>{y_0,…,y_{n−1}}</code>，每条算一个奖励 <code>r_i</code>，再在组内标准化成优势：</p>
+
+  <div class="eq">
+    A<sub>i</sub> = ( r<sub>i</sub> − mean(r<sub>0</sub>,…,r<sub>n−1</sub>) ) / std(r<sub>0</sub>,…,r<sub>n−1</sub>)
+  </div>
+  <div class="eq-cap">Eq. 8 · 组内均值与标准差；这个式子只读单个 <code>r_i</code> 与组统计量，不读 <code>y_i</code> 与 <code>y_j</code> 的关系</div>
+
+  <p>GRPO 的目标函数里没有位置放这种联系。组内归一化把「同题的其他答案」压缩成两个标量（均值和标准差），于是 <code>y_i</code> 与 <code>y_j</code> 是互补、重复还是互相拆台，对 <code>A_i</code> 没有区别。</p>
+
+  <p>论文用 Figure 1 给出两种典型结构：<strong>supportive chains</strong> 里，几条推理分别负责精确计算、几何解释、快速验证，合起来指向同一个答案；<strong>conflicting chains</strong> 里，几条推理因为算错、漏步骤或读错题而互相矛盾，混在一起会把错误带进最终答案。两种结构都说明：同一组的候选不是 n 个独立样本。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么难</span><h4>「关系」既不在奖励里，也不在优势里</h4></div>
+    <p>如果只是把候选拼起来再问一次模型，得到的只是一个新样本；要把「关系」变成训练信号，需要同时回答三件事：关系用什么形式写（因果图）、目标是什么（投影后的预测）、怎么从策略自己的输出里估出来（特征与蒙特卡洛）。论文的三块内容正好对应这三问。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>PPO 学 critic 代价高，GRPO 绕开 critic 却压掉组内关系</h2></div>
+  <p class="sec-sub">理解 GRPO 为什么高效，才能理解 GCPO 为什么选「改优势 + 加 KL」而不是「再学一个 critic」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">PPO 系</span><h4>学一个 value function 来估基线</h4></div>
+      <p>PPO 用 critic 估 <code>V(s)</code>，用 advantage 降方差；代价是要训练和存一个与策略同量级的 value network，显存和计算都上去。</p>
+      <p><strong>卡点：</strong>对 LLM 这种长序列、大词表的策略，critic 的训练稳定性和开销都不便宜。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">GRPO 系</span><h4>用组内相对奖励替代 critic</h4></div>
+      <p>同一 query 采一组答案，用组内均值当基线、组内标准差当尺度；不需要 value function，显存和实现都轻。</p>
+      <p><strong>卡点：</strong>组只用来算均值和标准差，候选之间的关系被压掉了。</p>
+    </div>
+  </div>
+
+  <p data-src="§Related Work">沿 GRPO 往下走的变体不少：GVPO 把 KL 约束奖励最大化的解析解塞进梯度权重；Dr.GRPO 关注 token 效率；LC-R1 加长度与压缩奖励；L2T 用信息论目标减少推理 token。论文对它们的共同判断是：这些方法仍然把候选响应当作独立个体，没有显式建模组内结构。</p>
+
+  <p>所以 GCPO 的位置很清楚：<strong>不引入 critic，保留 GRPO 的组采样框架，另加一轮融合采样</strong>，然后在「优势」和「KL 参考」两个已有接口上做因果修正。这样既能复用 GRPO 的工程栈，又能把组内关系写进目标。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把同组答案建成对撞结构，再把因果投影变成优势权重</h2></div>
+  <p class="sec-sub">这一节有三层：因果图给出「为什么相关」，定理给出「投影为什么更好」，Eq. 11 / Eq. 13 给出「怎么在策略上算出来」。</p>
+
+  <h3>3.1 因果图：<code>y_n</code> 是一个 collider</h3>
+  <p>论文的 SCM 只有三类边：<code>q → y_i</code>、<code>q → y_n</code>、<code>y_i → y_n</code>。前两条让 <code>q</code> 成为 fork，后一组让 <code>{y_i}</code> 共同指向 <code>y_n</code>，形成一个 collider。由此得到两条条件独立关系：</p>
+  <ul>
+    <li>只给定 <code>q</code> 时，<code>y_0,…,y_{n−1}</code> 互相独立；</li>
+    <li>再给定 <code>y_n</code> 时，它们变得互相依赖。</li>
+  </ul>
+
+  <p>把这两条关系做成可切换的图：</p>
+
+  <div class="sim" id="scm-sim">
+    <div class="sim-top" id="scm-btns">
+      <button class="rule-btn active" data-cond="q" type="button">只条件于 q<span class="r-sub">q 是 fork</span></button>
+      <button class="rule-btn" data-cond="yn" type="button">只条件于 y_n<span class="r-sub">对撞节点</span></button>
+      <button class="rule-btn" data-cond="qyn" type="button">同时条件于 q 与 y_n<span class="r-sub">论文的设定</span></button>
+    </div>
+
+    <div class="scm-host" id="scm-graph">
+      <svg viewBox="0 0 760 300" role="img" aria-label="SCM：q 是 fork，y_n 是 collider">
+        <defs>
+          <marker id="scm-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-strong)"></path>
+          </marker>
+        </defs>
+        <rect id="scm-ring-q" x="24" y="104" width="92" height="62" rx="14" fill="none" stroke="var(--accent)" stroke-width="2.5" opacity="0"></rect>
+        <rect id="scm-ring-yn" x="614" y="104" width="102" height="62" rx="14" fill="none" stroke="var(--accent)" stroke-width="2.5" opacity="0"></rect>
+
+        <path d="M110 130 C 200 130, 210 83, 300 83" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+        <path d="M110 145 L 300 163" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+        <path d="M110 160 C 200 160, 210 243, 300 243" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+        <path d="M110 120 C 250 5, 520 5, 620 120" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+        <path d="M420 83 C 520 83, 530 120, 620 135" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+        <path d="M420 163 L 620 150" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+        <path d="M420 243 C 520 243, 530 170, 620 155" fill="none" stroke="var(--border-strong)" stroke-width="1.6" marker-end="url(#scm-arrow)"></path>
+
+        <rect x="30" y="110" width="80" height="50" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.5"></rect>
+        <text x="70" y="140" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--c1)">q</text>
+
+        <rect x="300" y="60" width="120" height="46" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+        <text x="360" y="88" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" fill="var(--text)">y_0</text>
+
+        <rect x="300" y="140" width="120" height="46" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+        <text x="360" y="168" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" fill="var(--text)">y_1</text>
+
+        <rect x="300" y="220" width="120" height="46" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+        <text x="360" y="248" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" fill="var(--text)">y_{n−1}</text>
+
+        <rect x="620" y="110" width="90" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+        <text x="665" y="140" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--accent-deep)">y_n</text>
+
+        <text x="380" y="292" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="11.5" fill="var(--text-soft)">实线：SCM 边；高亮环：当前条件集</text>
+      </svg>
+    </div>
+
+    <div class="readout" id="scm-readout" data-src="Figure 2">
+      <div class="r-head">当前条件集</div>
+      <div id="scm-msg">只给定 q：q 是 fork，y_i 之间没有开放路径 → 互相独立（见 §Causal Analysis 的条件独立陈述）。</div>
+    </div>
+  </div>
+
+  <p>这不是说候选答案在生成时真的互相看过——它们仍然是从 <code>π_old(·|q)</code> 独立采样出来的。变化发生在「用它们共同推断 <code>y_n</code>」之后：<code>y_n</code> 一旦被观察到，<code>y_i</code> 之间就通过它产生了后门以外的第二条路径。</p>
+
+  <details>
+    <summary>手算：d-分离检查两组条件集<span class="sum-sub">与上面的交互同一套图结构</span></summary>
+    <div class="details-body">
+      <p><strong>条件集 {q}：</strong>路径 <code>y_i ← q → y_j</code> 在 <code>q</code> 处被阻断；路径 <code>y_i → y_n ← y_j</code> 在对撞节点 <code>y_n</code> 未条件化时也被阻断。两条路径都关，<code>y_i</code> 与 <code>y_j</code> 独立。</p>
+      <p><strong>条件集 {q, y_n}：</strong>fork 路径仍在 <code>q</code> 处被阻断；但 <code>y_n</code> 被条件化后，collider 路径 <code>y_i → y_n ← y_j</code> 打开。<code>y_i</code> 与 <code>y_j</code> 通过 <code>y_n</code> 变得依赖，这就是论文说的 collider-induced dependency。</p>
+      <p>图结构按 Figure 2 的三类边整理；这里只做 d-分离的路径检查，不涉及数值。</p>
+    </div>
+  </details>
+
+  <h3>3.2 定理：投影后的预测误差不大于两端</h3>
+  <p>论文把 <code>π*(x)</code> 定义为给定完整上下文 <code>x={q,y_1,…,y_n}</code> 的 Bayes 最优预测，把 <code>π*(q)</code> 定义为只看 query 的预测。定义条件期望算子 <code>Φ·π*(x)=E[π*(x)|q,y_1,…,y_{n−1}]</code>，残差算子 <code>Ψ=Id−Φ</code>，于是：</p>
+
+  <div class="eq">
+    π<sub>proj</sub>(x) = <span class="hl-c">Ψ·π*(x) + π*(q)</span>
+  </div>
+  <div class="eq-cap">Eq. 2 + 附录 Eq. 15 · 先把「能被 q 与其他候选解释的部分」投影掉，再把 query-only 基线加回来</div>
+
+  <p>Theorem 1 与 Corollary 2 分别给出：</p>
+
+  <div class="eq">
+    Δ( π*(x), <span class="hl-c">π<sub>proj</sub>(x)</span> ) ≥ 0 &nbsp;&nbsp;&nbsp; Δ( π*(q), <span class="hl-c">π<sub>proj</sub>(x)</span> ) ≥ 0
+  </div>
+  <div class="eq-cap">Eq. 4–5 · Δ 在正文 Eq. 3 写成期望残差之差，附录证明 Eq. 16 用平方误差之差；两处定义并列，见 07 节</div>
+
+  <p>关键细节在附录证明里：当 <code>Φ·π*(x)=π*(q)</code> 严格成立时，<code>π*(x)=π<sub>proj</sub>(x)</code>，Δ 正好为 0；证明随后考虑 <code>Φ·π*(x)≠π*(q)</code>（模型不是完美 Bayes 估计）的情形，得到 <code>Δ=‖Φ·π*(x)−π*(q)‖²≥0</code>。所以定理保证的是「不更差」，严格收益来自近似误差——这一点决定了 07 节的边界。</p>
+
+  <p>这解释了为什么 GCPO 不直接拿 <code>π*(x)</code> 当目标：它要的是一个在「候选互相相关」的结构下仍然可估的投影，而不是一个理论上等于原预测的恒等式。<span class="infer">本页概括</span>（由 Theorem 1 / Corollary 2 的「不更差」性质与 Eq. 11 的构造读出）</p>
+
+  <h3>3.3 优势：<code>B_i = A_i·Υ_i</code>，用余弦对齐度改写权重</h3>
+  <p>论文把 Corollary 2 的「离投影越近越好」落成一个乘在优势上的因子：</p>
+
+  <div class="eq">
+    B<sub>i</sub> = A<sub>i</sub> · <span class="hl-c">Υ<sub>i</sub></span> &nbsp;&nbsp;&nbsp;&nbsp; <span class="hl-c">Υ<sub>i</sub></span> = α · cos( z<sub>i</sub>, <span class="hl-c">Z̄<sub>i</sub> − Z̄′<sub>i</sub> + z̄</span> )
+  </div>
+  <div class="eq-cap">Eq. 11 · <code>α</code> 是缩放系数；<code>z_i</code> 是 <code>o_i = y_i + 中间推理</code> 的末层末 token 表示；括号里的三项分别近似 <code>π*(x)</code>、<code>Φ·π*(x)</code> 与 <code>π*(q)</code>（中间项带负号）</div>
+
+  <p>三个特征量的构造是 Method 小节的 Step 1–5，按顺序是：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">按 §The Proposed Method 的 Step 1–5 整理（非原文表格）</caption>
+      <thead>
+        <tr><th>Step</th><th>构造</th><th>近似对象</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">1</td><td>把 <code>o_i = y_i + 中间推理</code> 喂回 <code>π_θ</code>，取末层末 token 表示 <code>z_i</code>；<code>z̄ = mean(z_0,…,z_{n−1})</code></td><td><code>π*(q)</code></td></tr>
+        <tr><td class="num">2</td><td>构造 <code>x_i</code>：Step 2 散文写 <code>{q,y_0,…,y_n} ∖ {y_i}</code>，Algorithm 1 第 8 行写 <code>{q,y_0,…,y_{n−1}} ∖ {y_i}</code>；本页采用后者。喂入 <code>π_θ</code> n 次，得 <code>{Z_i,j}</code>；<code>Z̄_i = mean(Z_i,1,…,Z_i,n)</code></td><td><code>π*(x)</code></td></tr>
+        <tr><td class="num">3</td><td>令 <code>y_{n,0}=y_n</code>，<code>x_{i,j} = {q,y_0,…,y_{n,j}} ∖ {y_i}</code>，重复 Step 2，得 <code>Z̄′_i</code></td><td><code>Φ·π*(x)</code></td></tr>
+        <tr><td class="num">4</td><td>组合 <code>Z̄_i − Z̄′_i + z̄</code></td><td><code>Ψ·π*(x)+π*(q)</code></td></tr>
+        <tr><td class="num">5</td><td><code>Υ_i = α·cos(z_i, Z̄_i − Z̄′_i + z̄)</code></td><td>Eq. 11</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>直观上，<code>Υ_i</code> 不是「答案对不对」的另一个奖励，而是「这条答案的表示与因果投影方向有多接近」的余弦。它乘在 <code>A_i</code> 上：对齐得好的候选优势被放大，方向相反的候选优势会被压小；按 Eq. 11，<code>cos&lt;0</code> 时 <code>B_i</code> 与 <code>A_i</code> 反号。<span class="infer">推断</span>（α=2&gt;0，故 sign(Υ_i)=sign(cos)）</p>
+
+  <p>这里有一个容易忽略的点：<code>z_i</code> 取的是「答案 + 中间推理」<code>o_i</code> 的表示，不是只看最终答案；<code>Z̄_i</code> 与 <code>Z̄′_i</code> 则是对排除掉 <code>y_i</code> 的上下文做多次采样后的平均。也就是说，因果因子用的是「策略自己的表示空间」，不需要额外的 critic 或人工标注。<span class="infer">推断</span>（由 Step 1–5 只使用 <code>π_θ</code> 的表示与组内采样读出）</p>
+
+  <h3>3.4 KL：把「往哪里更新」也改成因果参考</h3>
+  <p>GCPO 的目标函数在 GRPO 的 clipped 目标上多了一个 KL 项：</p>
+
+  <div class="eq">
+    J<sub>GCPO</sub> = E[ 1/n Σ<sub>i</sub> 1/T<sub>i</sub> Σ<sub>j</sub> { min( R<sub>i,j</sub>(θ) B<sub>i</sub>, Ξ<sub>i,j</sub> B<sub>i</sub> ) − β D<sub>KL</sub>(π<sub>θ</sub>‖π<sub>ref</sub>) } − <span class="hl-c">κ D<sub>KL</sub>(π<sub>θ</sub>‖π′<sub>ref</sub>)</span> ]
+  </div>
+  <div class="eq-cap">Eq. 10 · β KL 在 token 求和的花括号内（token 级）；κ KL 在 <code>1/n Σ_i</code> 之外、期望之内（每组一次）。前一个 KL 是 GRPO 原有的「别离旧策略太远」；后一个 KL 是 GCPO 新增的「靠近因果参考」</div>
+
+  <p>新增参考分布的定义是：</p>
+
+  <div class="eq">
+    π′<sub>ref</sub>(x<sub>i</sub>) = <span class="hl-c">Ψ·π(y<sub>i,j</sub>|x<sub>i</sub>,y<sub>i,&lt;j</sub>)</span> + π(y<sub>i,j</sub>|q,y<sub>i,&lt;j</sub>)
+  </div>
+  <div class="eq-cap">Eq. 12 后的 where 行定义（原文未单独编号）· 与附录 Eq. 15 / 正文 Eq. 4–5 的 Ψ·π*(x)+π*(q) 同构：残差项 + query-only 项</div>
+
+  <p>直接算 <code>Φ·π</code> 需要知道条件期望，论文用同一组候选的 n 个融合输出做蒙特卡洛近似，得到 Eq. 13：</p>
+
+  <div class="eq">
+    π′<sub>ref</sub>(x<sub>i</sub>) ≈ π(y<sub>i,j</sub>|x<sub>i</sub>,y<sub>i,&lt;j</sub>) − Σ<sub>l=0</sub><sup>n−1</sup> π(y<sub>i,j</sub>|x<sub>i</sub>,y<sub>n,l</sub>,y<sub>i,&lt;j</sub>) + π(y<sub>i,j</sub>|q,y<sub>i,&lt;j</sub>)
+  </div>
+  <div class="eq-cap">Eq. 13 · 第二项是 <code>Φ·π</code> 的样本平均；原文注明 Eq. 12 的 KL 估计按 token 级计算</div>
+
+  <p>两个 KL 项的分工可以这样读：β 项防止策略跑太远，κ 项把策略往「因果投影后的参考」拉。前者是稳定性约束，后者是结构性偏置。论文的消融只去掉 advantage weighting 与新增的 κ KL 项（κ=0），β KL 作为 GRPO 原有项保留；两项消融都会掉点（Table 2）。</p>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>每组多一轮融合采样与表示前向，账单是 1.18×</h2></div>
+  <p class="sec-sub">GCPO 的工程改动集中在「采样与特征」这一层；优化器仍是 GRPO 那套 clipped 目标。</p>
+
+  <p>Algorithm 1 的主循环可以拆成四段：</p>
+  <ol>
+    <li><strong>采候选：</strong>对每个 query 从 <code>π_old(·|q)</code> 采 <code>n</code> 条 <code>{y_i}</code>。</li>
+    <li><strong>采融合输出：</strong>把 <code>q</code> 与整组候选再喂回 <code>π_old</code>，共采 n 条：<code>y_n</code>（记 <code>y_{n,0}</code>）与 <code>y_{n,1},…,y_{n,n−1}</code>。</li>
+    <li><strong>算特征：</strong>对每个 <code>y_i</code> 构造排除集 <code>x_i</code> 与 <code>x_{i,j}</code>，按 Step 1–5 取表示、算 <code>Υ_i</code> 与 <code>B_i</code>。</li>
+    <li><strong>更新：</strong>用 <code>B_i</code> 替换 <code>A_i</code>，加上 β KL 与 κ KL，按 Eq. 10 更新 <code>π_θ</code>。</li>
+  </ol>
+
+  <div class="card" data-src="§Implementation Details">
+    <div class="card-head"><span class="pill p1">训练配置</span><h4>论文报告的超参与规模</h4></div>
+    <ul>
+      <li>代码基于 TRL 修改；A100 集群，8×A100-SXM4 40GB / 节点，DeepSpeed 0.13.1 + ZeRO-3，BF16，vLLM。</li>
+      <li>数学训练：DeepScaleR-1.5B 先在 40k 数学题上微调，再用 1989–2023 的 919 道 AIME 继续；DeepSeek-R1-Distill-1.5B 用 NuminaMath 的 4,000 条随机子集。</li>
+      <li data-src="§Experimental Settings">token 预算 16,384；学习率 <code>1e−6</code>，weight decay <code>0.01</code>，batch size <code>256</code>，cosine schedule，warm-up <code>0.1</code>，max prompt <code>4,096</code>，max generation <code>16,384</code>；最多 10 epochs，通常 1 epoch 早停。</li>
+      <li><code>α=2</code>，<code>κ=0.06</code>（正文参数敏感性一句写作 <code>β=0.06</code>；Implementation Details 写 <code>κ=0.06</code>，见 06 节口径备注）。</li>
+    </ul>
+  </div>
+
+  <div class="card" data-src="Appendix · Computational Overhead Analysis">
+    <div class="card-head"><span class="pill pa">成本</span><h4>1.18× 是总 GPU 小时；原文未报告显存峰值</h4></div>
+    <p>Appendix 的 Computational Overhead Analysis 把 GRPO 的总 GPU 小时归一为 1×，报告 GCPO 为 1.18×；论文把这归因于新增的 KL 正则化因果目标。原文只说明这是总 GPU 小时，没有报告显存峰值或推理成本。</p>
+  </div>
+
+  <p>为什么值得多花这 18%？从方法设计看，GCPO 沿用 GRPO 的组相对优势，不引入 critic 或额外的奖励模型；新增的计算主要是「把同一组候选再喂回去取表示」，并复用现有的 GRPO 工程栈。<span class="infer">推断</span>（由 Method 的设计与 Appendix 的成本归因读出；原文没有把这套成本论证逐条写出）这个 trade-off 是否划算，取决于 06 节的增益幅度与 07 节的适用边界。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次更新：从 n 条候选到两个 KL 项</h2></div>
+  <p class="sec-sub">把 Algorithm 1 的数据流画成一张图；重点看「排除集」和「两次平均」分别近似了什么。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 700" role="img" aria-label="GCPO 一次更新的数据流">
+      <defs>
+        <marker id="flow-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect x="70" y="20" width="580" height="78" rx="14" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <circle cx="100" cy="59" r="16" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></circle>
+      <text x="100" y="64" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" font-weight="600" fill="var(--c1)">1</text>
+      <text x="130" y="52" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--text)">
+        <tspan x="130" dy="0">每组采 n 条候选</tspan>
+        <tspan x="130" dy="22" font-size="12.5" font-weight="400" fill="var(--text-muted)">{y_0, …, y_{n−1}} ~ π_old(·|q)</tspan>
+      </text>
+
+      <line x1="360" y1="98" x2="360" y2="120" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+
+      <rect x="70" y="120" width="580" height="78" rx="14" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <circle cx="100" cy="159" r="16" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></circle>
+      <text x="100" y="164" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" font-weight="600" fill="var(--c1)">2</text>
+      <text x="130" y="152" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--text)">
+        <tspan x="130" dy="0">把 q 与整组喂回 π_old，采融合输出</tspan>
+        <tspan x="130" dy="22" font-size="12.5" font-weight="400" fill="var(--text-muted)">y_n 与 {y_{n,i}}</tspan>
+      </text>
+
+      <line x1="360" y1="198" x2="360" y2="220" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+
+      <rect x="70" y="220" width="580" height="78" rx="14" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <circle cx="100" cy="259" r="16" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.2"></circle>
+      <text x="100" y="264" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" font-weight="600" fill="var(--c1)">3</text>
+      <text x="130" y="252" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--text)">
+        <tspan x="130" dy="0">对每个 y_i 构造排除集</tspan>
+        <tspan x="130" dy="22" font-size="12.5" font-weight="400" fill="var(--text-muted)">x_i = {q, y_0, …, y_{n−1}} ∖ {y_i}；x_{i,j} 则再换入 y_{n,j}</tspan>
+      </text>
+
+      <line x1="360" y1="298" x2="360" y2="320" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+
+      <rect x="70" y="320" width="580" height="78" rx="14" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.8"></rect>
+      <circle cx="100" cy="359" r="16" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.2"></circle>
+      <text x="100" y="364" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" font-weight="600" fill="#fff">4</text>
+      <text x="130" y="352" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--accent-deep)">
+        <tspan x="130" dy="0">取末层末 token 表示，算因果目标</tspan>
+        <tspan x="130" dy="22" font-size="12.5" font-weight="400" fill="var(--text-muted)">z_i, Z̄_i, Z̄′_i, z̄；g_i = Z̄_i − Z̄′_i + z̄</tspan>
+      </text>
+
+      <line x1="360" y1="398" x2="360" y2="420" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+
+      <rect x="70" y="420" width="580" height="78" rx="14" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.8"></rect>
+      <circle cx="100" cy="459" r="16" fill="var(--accent)" stroke="var(--accent)" stroke-width="1.2"></circle>
+      <text x="100" y="464" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" font-weight="600" fill="#fff">5</text>
+      <text x="130" y="452" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--accent-deep)">
+        <tspan x="130" dy="0">算因果因子，乘到优势上</tspan>
+        <tspan x="130" dy="22" font-size="12.5" font-weight="400" fill="var(--text-muted)">Υ_i = α·cos(z_i, g_i)；B_i = A_i·Υ_i</tspan>
+      </text>
+
+      <line x1="360" y1="498" x2="360" y2="520" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+
+      <rect x="70" y="520" width="580" height="78" rx="14" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.8"></rect>
+      <circle cx="100" cy="559" r="16" fill="var(--c2)" stroke="var(--c2)" stroke-width="1.2"></circle>
+      <text x="100" y="564" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="14" font-weight="600" fill="#fff">6</text>
+      <text x="130" y="552" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="15" font-weight="600" fill="var(--c2)">
+        <tspan x="130" dy="0">替换 A_i，加两个 KL，更新 π_θ</tspan>
+        <tspan x="130" dy="22" font-size="12.5" font-weight="400" fill="var(--text-muted)">β KL(π_θ‖π_ref) + κ KL(π_θ‖π′_ref)</tspan>
+      </text>
+
+      <text x="360" y="650" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif" font-size="12.5" fill="var(--text-soft)">Step 1–2 采样 · Step 3–5 特征与因果因子 · Step 6 优化</text>
+    </svg>
+    <figcaption>按 Algorithm 1 第 5–16 行整理的数据流；本页自绘，未展开 token 级 clip 与 Eq. 7 / 12 的 KL 估计细节。</figcaption>
+  </figure>
+
+  <p>图里有两个容易混淆的「平均」：<code>Z̄_i</code> 是对「排除 <code>y_i</code> 后的上下文」重复采样 n 次的平均，近似 <code>π*(x)</code>；<code>Z̄′_i</code> 是对「再替换成融合输出 <code>y_{n,l}</code>」的 n 个上下文各取平均后再平均，近似 <code>Φ·π*(x)</code>。两者相减，留下的是「不能被 q 与其他候选解释的部分」，也就是 <code>Ψ·π*(x)</code>；再加上 <code>z̄</code> 的 query-only 基线，才是 Eq. 11 里的目标。</p>
+
+  <p>这也是 GCPO 与「简单地把候选拼进 prompt 再问一次」的区别：后者只产生一个新的 <code>y_n</code>，前者把 <code>y_n</code> 当作条件化工具，反推出每个候选在因果投影下的表示偏移。<span class="infer">本页概括</span>（对照 Algorithm 1 的 Step 3–5 与 Eq. 11）</p>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>三个 backbone 的 Avg 都是 GCPO 最高，但对最强基线只领先 0.5–0.8 个百分点</h2></div>
+  <p class="sec-sub">先看原表，再看「领先多少」和「领先谁」；这两个问题在笔记里容易被合成一句「显著超过」。</p>
+
+  <p>Table 1 是三个数学 backbone × 五个基准的 Pass@1。论文正文与表题都写 Pass@1；附录 Implementation Details 另写 <code>report maj@4 scores</code>，两处指标名不同，读绝对值时要先记住这一点。</p>
+
+  <div class="tabs" id="t1-tabs">
+    <button class="tab active" data-model="ds15" type="button">DeepScaleR-1.5B</button>
+    <button class="tab" data-model="r1_15" type="button">R1-Distill-1.5B</button>
+    <button class="tab" data-model="r1_7" type="button">R1-Distill-7B</button>
+  </div>
+
+  <div class="sim" style="padding:18px">
+    <div class="readout" id="t1-readout" data-src="Table 1" style="margin-top:0;margin-bottom:14px"></div>
+    <div class="chart" id="t1-chart"></div>
+    <div class="cx" id="t1-x"></div>
+    <div class="legend">
+      <span><i style="background:var(--text-soft)"></i>Base</span>
+      <span><i style="background:var(--c1)"></i>GRPO</span>
+      <span><i style="background:var(--c3)"></i>ReST-MCTS</span>
+      <span><i style="background:var(--c2)"></i>GVPO</span>
+      <span><i style="background:var(--text-muted)"></i>Dr.GRPO</span>
+      <span><i style="background:var(--accent)"></i>GCPO</span>
+    </div>
+  </div>
+
+  <details>
+    <summary>完整转录 Table 1（18 行，+ 表示从该 base 微调）<span class="sum-sub">Pass@1</span></summary>
+    <div class="details-body">
+      <div class="tbl-scroll">
+        <table>
+          <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 1 · Pass@1（按原表逐行转录主数值，省略括号内相对 base 的增量；模型名单独成行以便阅读）</caption>
+          <thead>
+            <tr><th>模型 / 方法</th><th style="text-align:right">AIME 2024</th><th style="text-align:right">AIME 2025</th><th style="text-align:right">AMC 2023</th><th style="text-align:right">MATH500</th><th style="text-align:right">MinervaMATH</th><th style="text-align:right">Avg.</th></tr>
+          </thead>
+          <tbody>
+            <tr class="model-row"><td colspan="7">DeepScaleR-1.5B-Preview</td></tr>
+            <tr><td>Base</td><td class="num">42.8</td><td class="num">36.7</td><td class="num">83.0</td><td class="num">85.2</td><td class="num">24.6</td><td class="num">54.5</td></tr>
+            <tr><td>+GRPO</td><td class="num">44.5</td><td class="num">39.3</td><td class="num">81.5</td><td class="num">84.9</td><td class="num">24.7</td><td class="num">55.0</td></tr>
+            <tr><td>+ReST-MCTS</td><td class="num">45.5</td><td class="num">39.5</td><td class="num">83.4</td><td class="num">84.8</td><td class="num">23.9</td><td class="num">55.4</td></tr>
+            <tr><td>+GVPO</td><td class="num">46.1</td><td class="num">39.7</td><td class="num">83.6</td><td class="num">85.7</td><td class="num">25.3</td><td class="num">56.1</td></tr>
+            <tr><td>+Dr.GRPO</td><td class="num">45.8</td><td class="num">39.6</td><td class="num">82.1</td><td class="num">85.3</td><td class="num">25.1</td><td class="num">55.6</td></tr>
+            <tr class="best"><td>+GCPO</td><td class="num">46.7</td><td class="num">40.3</td><td class="num">84.1</td><td class="num">86.3</td><td class="num">25.9</td><td class="num">56.8</td></tr>
+
+            <tr class="model-row"><td colspan="7">DeepSeek-R1-Distill-Qwen-1.5B</td></tr>
+            <tr><td>Base</td><td class="num">28.7</td><td class="num">26.0</td><td class="num">69.9</td><td class="num">80.1</td><td class="num">19.8</td><td class="num">44.9</td></tr>
+            <tr><td>+GRPO</td><td class="num">29.8</td><td class="num">27.3</td><td class="num">70.5</td><td class="num">80.3</td><td class="num">22.1</td><td class="num">46.0</td></tr>
+            <tr><td>+ReST-MCTS</td><td class="num">30.5</td><td class="num">28.6</td><td class="num">71.1</td><td class="num">80.4</td><td class="num">20.3</td><td class="num">46.4</td></tr>
+            <tr><td>+GVPO</td><td class="num">30.6</td><td class="num">28.2</td><td class="num">71.5</td><td class="num">80.5</td><td class="num">23.1</td><td class="num">46.7</td></tr>
+            <tr><td>+Dr.GRPO</td><td class="num">30.4</td><td class="num">28.4</td><td class="num">71.3</td><td class="num">80.8</td><td class="num">22.9</td><td class="num">46.9</td></tr>
+            <tr class="best"><td>+GCPO</td><td class="num">31.0</td><td class="num">29.0</td><td class="num">71.8</td><td class="num">81.6</td><td class="num">23.4</td><td class="num">47.4</td></tr>
+
+            <tr class="model-row"><td colspan="7">DeepSeek-R1-Distill-Qwen-7B</td></tr>
+            <tr><td>Base</td><td class="num">55.5</td><td class="num">50.2</td><td class="num">85.1</td><td class="num">87.4</td><td class="num">42.1</td><td class="num">64.1</td></tr>
+            <tr><td>+GRPO</td><td class="num">56.9</td><td class="num">51.7</td><td class="num">85.5</td><td class="num">87.7</td><td class="num">43.5</td><td class="num">65.1</td></tr>
+            <tr><td>+ReST-MCTS</td><td class="num">57.1</td><td class="num">52.4</td><td class="num">85.7</td><td class="num">87.9</td><td class="num">42.8</td><td class="num">65.2</td></tr>
+            <tr><td>+GVPO</td><td class="num">57.5</td><td class="num">52.1</td><td class="num">86.3</td><td class="num">88.5</td><td class="num">44.2</td><td class="num">65.7</td></tr>
+            <tr><td>+Dr.GRPO</td><td class="num">57.4</td><td class="num">52.3</td><td class="num">86.4</td><td class="num">88.2</td><td class="num">44.0</td><td class="num">65.7</td></tr>
+            <tr class="best"><td>+GCPO</td><td class="num">58.3</td><td class="num">53.0</td><td class="num">87.3</td><td class="num">89.1</td><td class="num">45.0</td><td class="num">66.5</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+
+  <p>把表拆开看，有三条比「Avg 最高」更有信息量的结论：</p>
+  <ul data-src="Table 1">
+    <li><strong>对最强基线的领先是 0.5–0.8 个百分点，不是 1% 以上。</strong> DeepScaleR-1.5B 的 GCPO Avg 56.8，最强基线 GVPO 56.1（+0.7）；DeepSeek-R1-Distill-1.5B 的 GCPO 47.4，最强基线 Dr.GRPO 46.9（+0.5）；7B 的 GCPO 66.5，GVPO / Dr.GRPO 65.7（+0.8）。对 GRPO 的差才是 1.4–1.8 个百分点（DeepScaleR +1.8、1.5B +1.4、7B +1.4）。</li>
+    <li><strong>论文正文的「超过 1%」（按 Table 1 的差值口径，即 1 个百分点）不是对所有基线都成立。</strong> 7B 上 GCPO 对 GRPO 的 AIME24 / AIME25 / Minerva 差是 +1.4 / +1.3 / +1.5 个百分点；对 GVPO 是 +0.8 / +0.9 / +0.8；对 Dr.GRPO 是 +0.9 / +0.7 / +1.0；对 ReST-MCTS 是 +1.2 / +0.6 / +2.2（AIME24 与 Minerva 超过 1，AIME25 没有）。把「超过 1%」写成对所有先进基线成立，会把 GVPO / Dr.GRPO 的对比读错。</li>
+    <li><strong>相对 base 的 Avg 提升是 2.3 / 2.5 / 2.4 个百分点，但正文对 7B 写的是 2.2%。</strong> Table 1 的 7B base 64.1 → GCPO 66.5 是 +2.4；正文 §Performance Analysis 写 <code>2.2%</code>；1.5B 的 44.9 → 47.4 是 +2.5，与正文一致；DeepScaleR 的 54.5 → 56.8 是 +2.3，与正文一致。7B 这一处两个数字并列，原文没有解释差额。</li>
+  </ul>
+  <p class="fine" data-src="Table 1">以上 Avg 差值由 Avg 列相减；AIME24/AIME25/MinervaMATH 的差值由对应列相减。「百分点」不是相对提升。7B 对 GRPO 的 66.5 − 65.1 = 1.4，对 GVPO / Dr.GRPO 的 66.5 − 65.7 = 0.8。</p>
+
+  <p>Table 1 的 Avg 列可以复算，本页主要核对 GCPO 行；1.5B 的 ReST-MCTS / Dr.GRPO 两行见 06 节口径备注。7B GCPO 的五列平均是 (58.3+53.0+87.3+89.1+45.0)/5 = 66.54 → 66.5；1.5B GCPO 是 47.36 → 47.4；DeepScaleR GCPO 是 56.66 → 56.7，但表里印的是 56.8，差 56.8 − 56.66 = 0.14。<span class="infer">推断</span>（由 Table 1 五列复算，四舍五入到 0.1；复算假设 Avg 是五列等权算术平均，原文没有说明加权方式）</p>
+
+  <h3>消融：去掉任一组件都掉点，幅度与最终领先同一量级</h3>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption style="caption-side:top;text-align:left;font-size:13px;opacity:.7;padding-bottom:6px">Table 2 · 组件消融（Pass@1；Table 2 未在表内注明模型；w/o KL Term 指 κ=0，β KL 保留）</caption>
+      <thead>
+        <tr><th>配置</th><th style="text-align:right">AIME 2024</th><th style="text-align:right">AIME 2025</th><th style="text-align:right">AMC 2023</th><th style="text-align:right">MATH500</th><th style="text-align:right">MinervaMATH</th><th style="text-align:right">Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>GCPO (Full)</td><td class="num">46.7</td><td class="num">40.3</td><td class="num">84.1</td><td class="num">86.3</td><td class="num">25.9</td><td class="num">56.8</td></tr>
+        <tr><td>w/o Adv. Weighting</td><td class="num">45.0</td><td class="num">39.0</td><td class="num">83.0</td><td class="num">85.4</td><td class="num">24.6</td><td class="num">55.4</td></tr>
+        <tr><td>w/o KL Term</td><td class="num">45.3</td><td class="num">39.4</td><td class="num">83.3</td><td class="num">85.3</td><td class="num">24.9</td><td class="num">55.6</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Table 2 的 Full 行 56.8 与 Table 1 的 DeepScaleR-1.5B +GCPO 相同，<span class="infer">推断</span>（由两表 Full / Avg 行匹配）该消融在同一模型上。去掉 advantage weighting 从 56.8 掉到 55.4（−1.4 个百分点），去掉新增 κ KL 项（κ=0）掉到 55.6（−1.2 个百分点）。两个组件都不是装饰。</p>
+
+  <p>但把这两个降幅与「对最强基线的 +0.5–0.8」放在一起看，会得到一个不太浪漫的结论：<strong>组件的贡献是真实的，最终相对强基线的净领先却不大</strong>。<span class="infer">推断</span>（Table 1 的 GCPO−最强基线 vs Table 2 的 Full−w/o 组件）。</p>
+
+  <h3>代码：HumanEval 的 5-shot 增益更大，但指标名在原文里不统一</h3>
+  <p><span data-src="§Performance on Code Reasoning Tasks">代码实验用 Qwen2-7B-Instruct，HumanEval。正文说 GCPO 的 0-shot Pass@1 是 65.1%、5-shot 是 72.0%，比基础模型高 2.9% 和 5.5%；原文只给了百分数，未说明是相对提升还是百分点。</span><span data-src="Figure 3">按 Figure 3 的图示点（基础模型约 62.2 / 66.5）读，65.1 − 62.2 = 2.9、72.0 − 66.5 = 5.5，是 Pass@1 的百分点差。</span><span class="infer">推断</span>（Figure 3 图示估读；正文未列基础模型数值）<span data-src="Figure 3 caption">Figure 3 的图注写的是 1-shot 与 5-shot</span>，正文却写 0-shot 与 5-shot。HTML 渲染版正文把这张图称作 Figure 4（图注仍标 Figure 3）。Figure 3 只有图示点，没有基础模型的数字标签，也没有解释 0-shot / 1-shot 的差异。</p>
+
+  <details>
+    <summary>原文口径备注：七处需要并列读的地方<span class="sum-sub">不改原文，只标注位置</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>指标名：</strong>正文 §Performance Analysis 与 Table 1 表题写 <code>Pass@1</code>；附录 Implementation Details 写 <code>report maj@4 scores</code>。本页 Table 1 的数值按正文的 Pass@1 标注。</li>
+        <li><strong>7B 平均提升：</strong>正文写 <code>2.2%</code>；Table 1 的 64.1 → 66.5 是 +2.4 个百分点。</li>
+        <li><strong>消融图号：</strong>正文 Ablation 小节写 <code>The ablation results are shown in Figure 2</code>；Figure 2 是 SCM 示意图，Figure 4 是参数敏感性图，具体数值在 Table 2。</li>
+        <li><strong>KL 系数名：</strong>正文参数敏感性写 <code>α = 2 and β = 0.06</code>；Implementation Details 写 <code>α and κ are set to 2 and 0.06</code>。本页把新增 KL 项系数记作 κ。</li>
+        <li><strong>DeepScaleR 的 Avg：</strong>Table 1 印 56.8；五列算术平均是 56.66（≈56.7），差 0.14。按 GCPO 行看，1.5B 与 7B 的 Avg 与五列平均吻合到 0.1；但 1.5B 的 ReST-MCTS（印 46.4，平均 46.18）与 Dr.GRPO（印 46.9，平均 46.76）分别差 0.22 / 0.14，不能按字面推广到全部行。</li>
+        <li><strong>x / x_i 的三种写法：</strong>Step 2 散文（p.5）写 <code>x_i = {q,y_0,…,y_n} ∖ {y_i}</code>；Algorithm 1 第 8 行（p.10）写 <code>{q,y_0,…,y_{n−1}} ∖ {y_i}</code>；Eq. 1 下方写 <code>x={q,y_1,…,y_n}</code>（且 <code>y_{1:n−1}={y_1,…,y_{n−1}}</code>），附录 Proofs（p.10）则写 <code>x={q,y_1,…,y_{n−1}}</code>。本页 <code>x_i</code> 采用 Algorithm 1 的 <code>y_{n−1}</code> 版本，<code>π*(x)</code> 采用 Eq. 1 的 <code>x={q,y_1,…,y_n}</code>；各处写法并列，不替原文消歧。</li>
+        <li><strong>代码实验：</strong>正文写 0-shot / 5-shot；Figure 3 的图注写 1-shot / 5-shot。arXiv HTML 渲染版正文把这张图称作 Figure 4，PDF v1 正文与图注都是 Figure 3。两处编号并列，本页按 PDF v1 的 Figure 3 指称。<span class="infer">推断</span>（HTML 渲染版与 PDF v1 的图号不同；原文未说明编号差异的原因）。原文未列基础模型的数字标签。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>定理保证的是 ≥0，收益依赖「π* 不完美」</h2></div>
+  <p class="sec-sub">把「能证明什么」与「实验显示了什么」分开，才能判断什么时候不该用 GCPO。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>非严格不等式：理想 Bayes 下 Δ=0</h4></div>
+    <p>附录证明在 <code>Φ·π*(x)=π*(q)</code> 时得到 <code>π*(x)=π_proj(x)</code>，Δ=0；随后考虑 <code>Φ·π*(x)≠π*(q)</code> 才得到 <code>Δ=‖Φ·π*(x)−π*(q)‖²≥0</code>。定理保证的是「不更差」，不是「一定更好」；严格收益来自模型偏离完美 Bayes 估计的近似误差。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界二</span><h4>Δ 的定义在正文与附录不同</h4></div>
+    <p>正文 Eq. 3 把 Δ 写成 <code>E[Y−π₁*(X)] − E[Y−π₂*(X)]</code>（期望残差之差）；附录 Eq. 16 用 <code>E[(Y′−f)²] − E[(Y′−f_proj)²]</code>（平方误差之差）。两处定义并列，证明用的是后者。读定理时要把这个差异带在身上。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界三</span><h4>因果图只有一种 collider</h4></div>
+    <p>Figure 2 的 SCM 只有 <code>q→y_i</code>、<code>q→y_n</code>、<code>y_i→y_n</code>。候选之间的链式依赖、共同原因、多轮对话里的动态结构都没有进模型；论文的结论只覆盖「同一 query 的一组候选共同影响一个融合输出」这一种设定。<span class="infer">推断</span>（Figure 2 只画了三类边；论文未建模链式依赖、共同原因或多轮结构）</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界四</span><h4>表示是压缩的，期望是蒙特卡洛的</h4></div>
+    <p><code>z_i</code> 用末层末 token 的隐藏状态代表整条「答案 + 推理」；<code>Z̄_i</code>、<code>Z̄′_i</code> 用 n 次采样平均近似条件期望。<code>π*</code> 是理想的 Bayes 最优预测，实际只能用策略 <code>π</code> 的表示去近似；论文没有量化这些近似各自带来多少误差。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界五</span><h4>实验域是数学 + HumanEval</h4></div>
+    <p data-src="Table 1">Table 1 是五个数学基准；代码只报了 HumanEval。开放写作、知识问答、多轮 agent 任务都没有覆盖。论文没有做显著性检验，Table 1 的 Avg 差是 0.5–0.8 个百分点（对最强基线）；「显著」不是原文的统计结论。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界六</span><h4>矛盾只被间接惩罚</h4></div>
+    <p>Eq. 11 只奖励「与因果投影对齐」，没有单独的「矛盾检测」项。互相矛盾的候选主要通过低余弦相似度被压低优势；这是间接信号，不是显式的 contradiction loss。<span class="infer">推断</span>（由 Eq. 11 的结构读出）</p>
+  </div>
+
+  <p>一句话：<strong>GCPO 适合「同一题能稳定采出多条有语义差异的候选、且愿意多付约 18% 训练成本」的场景；如果候选几乎一样、或者任务本身没有「融合多条推理」的结构，因果投影能提供的信息就有限。</strong><span class="infer">推断</span>（由 Figure 2 的 SCM 与 Eq. 11 的构造读出）</p>
+</section>
+
+<footer>
+  <div>Group Causal Policy Optimization for Post-Training Large Language Models · Ziyin Gu, Jingyao Wang, Ran Zuo, Chuxiong Sun, Zeen Song, Changwen Zheng, Wenwen Qiang</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2508.05428v1" target="_blank" rel="noopener">arXiv 2508.05428v1</a>（2025-08-07，本页以此版为准）<br>
+    笔记：<a href="/group-causal-policy-optimization-for-post-training-large-language-models/">Group Causal Policy Optimization for Post-Training Large Language Models</a><br>
+    页面：七段结构；Table 1 / Table 2 已转录，Table 3 未转录；Figure 2 的 SCM 用交互图重画；Figure 1 / Figure 3 / Figure 4 / Figure 5 / Figure 6–8 未转录。
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（不改原笔记）：</strong><br>
+    1. 笔记把因果因子写作 <code>γ_i</code>；原文 Eq. 11 用 <code>Υ_i</code>（Upsilon），且 <code>Υ_i = α·cos(...)</code>，笔记漏了缩放系数 <code>α</code>。<br>
+    2. 论文正文（§Performance Analysis）与笔记都称 7B 上「相较于 GRPO 和 GVPO 等先进方法，在 AIME 和 MinervaMATH 上实现了超过 1% 的性能提升」；原文为「Compared to SOTA RL baselines such as GRPO and GVPO ... (e.g., over 1% on AIME and MinervaMATH)」。Table 1：对 GRPO 是 +1.4 / +1.3 / +1.5 个百分点；对 GVPO 是 +0.8 / +0.9 / +0.8；对 Dr.GRPO 是 +0.9 / +0.7 / +1.0；对 ReST-MCTS 是 +1.2 / +0.6 / +2.2。该说法对 GVPO / Dr.GRPO 不成立；对 ReST-MCTS 只在 AIME24 与 MinervaMATH 成立（AIME25 只有 +0.6）；对 GRPO 成立。笔记只是转述。<br>
+    3. 笔记的「0.8% 到 1.4% 的提升」和「近 1 个百分点」混用了不同基线：0.8 对 GVPO / Dr.GRPO（65.7），1.4 对 GRPO（65.1）；这些是百分点差，不是相对提升；笔记写了 65.1 / 65.7，但没有把 0.8 / 1.4 分别对应到具体基线。<br>
+    4. 笔记称「显著超越了包括 GRPO 在内的所有基线方法」；原文没有报告显著性检验，Table 1 对最强基线的 Avg 领先是 0.5–0.8 个百分点。<br>
+    5. 笔记列 base models 时漏了 Qwen2-7B-Instruct（HumanEval 代码实验使用）。原文 §Experimental Settings 自身把「DeepSeek-R1-Distill-Qwen-7B」写成「DeepSeekR1-Distill-Qwen-7B」，Table 1 又用带连字符的写法；笔记沿用前者，不算拼写错误。<br>
+    6. 笔记把目标向量写作 <code>\tilde{Z}_i − \tilde{Z'}_i + \bar{z}</code>；原文用 <code>Z̄_i − Z̄′_i + z̄</code>。符号层级的差异不影响理解，但引用时应以原文为准。<br>
+    7. 笔记称 <code>π′_ref</code> 由两部分「加权构成」；原文 π′_ref 的定义（Eq. 12 后的 where 行，未单独编号）是残差项与 query-only 项的相加，没有可学习权重；Eq. 12 是 KL 估计式，不是这个定义。这里的「加权」应读成「组合」。
+  </div>
+  <div class="src" style="margin-top:12px" data-src="Figure 5">
+    <strong>已核对（非勘误）：</strong>Figure 5 的 462 / 132 与笔记一致；本页未转录 Figure 5，故不引用这两个数。
+  </div>
+</footer>
+
+</div>
+
+<script>
+/* ============================================================
+   1) SCM 条件集切换
+   ============================================================ */
+(function () {
+  var sim = document.getElementById('scm-sim');
+  if (!sim) return;
+  var btns = sim.querySelectorAll('.rule-btn');
+  var ringQ = document.getElementById('scm-ring-q');
+  var ringYn = document.getElementById('scm-ring-yn');
+  var msg = document.getElementById('scm-msg');
+
+  function setCond(cond) {
+    var i;
+    for (i = 0; i < btns.length; i++) {
+      if (btns[i].getAttribute('data-cond') === cond) {
+        btns[i].classList.add('active');
+      } else {
+        btns[i].classList.remove('active');
+      }
+    }
+    if (ringQ) ringQ.style.opacity = (cond === 'q' || cond === 'qyn') ? '1' : '0';
+    if (ringYn) ringYn.style.opacity = (cond === 'yn' || cond === 'qyn') ? '1' : '0';
+    if (!msg) return;
+    if (cond === 'q') {
+      msg.innerHTML = '只给定 q：q 是 fork，<code>y_i</code> 之间没有开放路径 → 互相独立（见 §Causal Analysis 的条件独立陈述）。';
+    } else if (cond === 'yn') {
+      msg.innerHTML = '只给定 y_n：对撞节点被条件化，<code>y_i → y_n ← y_j</code> 打开；同时 q 未条件化，fork 路径也开着 → 两条路径都开放。';
+    } else {
+      msg.innerHTML = '同时给定 q 与 y_n：fork 在 q 处被阻断，但 collider 在 y_n 处打开 → <code>y_i</code> 之间仍然依赖。';
+    }
+  }
+
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].addEventListener('click', function () {
+      setCond(this.getAttribute('data-cond'));
+    });
+  }
+  setCond('q');
+})();
+
+/* ============================================================
+   2) Table 1 三模型切换柱状图
+   ============================================================ */
+(function () {
+  var T1 = {
+    ds15: {
+      name: 'DeepScaleR-1.5B-Preview',
+      avg: { gcpo: 56.8, grpo: 55.0, gvpo: 56.1, drgrpo: 55.6 },
+      rows: [
+        ['Base', [42.8, 36.7, 83.0, 85.2, 24.6], 'var(--text-soft)'],
+        ['GRPO', [44.5, 39.3, 81.5, 84.9, 24.7], 'var(--c1)'],
+        ['ReST-MCTS', [45.5, 39.5, 83.4, 84.8, 23.9], 'var(--c3)'],
+        ['GVPO', [46.1, 39.7, 83.6, 85.7, 25.3], 'var(--c2)'],
+        ['Dr.GRPO', [45.8, 39.6, 82.1, 85.3, 25.1], 'var(--text-muted)'],
+        ['GCPO', [46.7, 40.3, 84.1, 86.3, 25.9], 'var(--accent)']
+      ]
+    },
+    r1_15: {
+      name: 'DeepSeek-R1-Distill-Qwen-1.5B',
+      avg: { gcpo: 47.4, grpo: 46.0, gvpo: 46.7, drgrpo: 46.9 },
+      rows: [
+        ['Base', [28.7, 26.0, 69.9, 80.1, 19.8], 'var(--text-soft)'],
+        ['GRPO', [29.8, 27.3, 70.5, 80.3, 22.1], 'var(--c1)'],
+        ['ReST-MCTS', [30.5, 28.6, 71.1, 80.4, 20.3], 'var(--c3)'],
+        ['GVPO', [30.6, 28.2, 71.5, 80.5, 23.1], 'var(--c2)'],
+        ['Dr.GRPO', [30.4, 28.4, 71.3, 80.8, 22.9], 'var(--text-muted)'],
+        ['GCPO', [31.0, 29.0, 71.8, 81.6, 23.4], 'var(--accent)']
+      ]
+    },
+    r1_7: {
+      name: 'DeepSeek-R1-Distill-Qwen-7B',
+      avg: { gcpo: 66.5, grpo: 65.1, gvpo: 65.7, drgrpo: 65.7 },
+      rows: [
+        ['Base', [55.5, 50.2, 85.1, 87.4, 42.1], 'var(--text-soft)'],
+        ['GRPO', [56.9, 51.7, 85.5, 87.7, 43.5], 'var(--c1)'],
+        ['ReST-MCTS', [57.1, 52.4, 85.7, 87.9, 42.8], 'var(--c3)'],
+        ['GVPO', [57.5, 52.1, 86.3, 88.5, 44.2], 'var(--c2)'],
+        ['Dr.GRPO', [57.4, 52.3, 86.4, 88.2, 44.0], 'var(--text-muted)'],
+        ['GCPO', [58.3, 53.0, 87.3, 89.1, 45.0], 'var(--accent)']
+      ]
+    }
+  };
+  var labels = ['AIME24', 'AIME25', 'AMC23', 'MATH500', 'Minerva'];
+  var tabs = document.getElementById('t1-tabs');
+  var chart = document.getElementById('t1-chart');
+  var xAxis = document.getElementById('t1-x');
+  var readout = document.getElementById('t1-readout');
+  if (!tabs || !chart || !xAxis || !readout) return;
+
+  function render(key) {
+    var cfg = T1[key];
+    if (!cfg) return;
+    var gcpo = cfg.avg.gcpo;
+    var grpo = cfg.avg.grpo;
+    var gvpo = cfg.avg.gvpo;
+    var drgrpo = cfg.avg.drgrpo;
+    readout.innerHTML = '<div class="r-head">Table 1 · ' + cfg.name + '</div>'
+      + 'GCPO Avg <strong>' + gcpo.toFixed(1) + '</strong> · GRPO Avg <strong>'
+      + grpo.toFixed(1) + '</strong> · GVPO Avg <strong>' + gvpo.toFixed(1)
+      + '</strong> · Dr.GRPO Avg <strong>' + drgrpo.toFixed(1)
+      + '</strong>。柱高按 Pass@1 原值绘制，未归一化。';
+
+    chart.innerHTML = '';
+    cfg.rows.forEach(function (row) {
+      var r = document.createElement('div');
+      r.className = 'crow';
+      var name = document.createElement('div');
+      name.className = 'cname';
+      name.textContent = row[0];
+      var bars = document.createElement('div');
+      bars.className = 'cbars';
+      row[1].forEach(function (val) {
+        var bar = document.createElement('div');
+        bar.className = 'cbar';
+        var track = document.createElement('div');
+        track.className = 'track';
+        var fill = document.createElement('div');
+        fill.className = 'fill';
+        fill.style.background = row[2];
+        fill.style.height = Math.max(2, val) + '%';
+        track.appendChild(fill);
+        var num = document.createElement('div');
+        num.className = 'num';
+        num.textContent = val.toFixed(1);
+        bar.appendChild(track);
+        bar.appendChild(num);
+        bars.appendChild(bar);
+      });
+      r.appendChild(name);
+      r.appendChild(bars);
+      chart.appendChild(r);
+    });
+
+    xAxis.innerHTML = labels.map(function (s) {
+      return '<span>' + s + '</span>';
+    }).join('');
+
+    var allTabs = tabs.querySelectorAll('.tab');
+    for (var i = 0; i < allTabs.length; i++) {
+      if (allTabs[i].getAttribute('data-model') === key) {
+        allTabs[i].classList.add('active');
+      } else {
+        allTabs[i].classList.remove('active');
+      }
+    }
+  }
+
+  var btns = tabs.querySelectorAll('.tab');
+  for (var j = 0; j < btns.length; j++) {
+    btns[j].addEventListener('click', function () {
+      render(this.getAttribute('data-model'));
+    });
+  }
+  render('ds15');
+})();
+</script>
+</body>
+</html>

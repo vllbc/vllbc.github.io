@@ -1,0 +1,565 @@
+<!-- LEDGER
+| 9.0 | Table 3 | 64.8-55.8 |
+| 7.8 | Table 4 | 26.1-18.3 |
+| 5.7 | Table 3 | 64.8-59.1 |
+| 19.6 | Table 3 | 64.8-45.2 |
+| 2.3 | Table 4 | 26.1-23.8 |
+| 0.1 | Table 4 | 15.6-15.5 |
+| 31.8 | Table 3 | 64.8-33.0 |
+| 42.6 | Table 4 | (26.1-18.3)/18.3*100 |
+| 2.75 | Table 2 | 32.25-29.50 |
+| 2.33 | Table 6 | 26.14-23.81 |
+| 1.00 | Table 6 | 24.81-23.81 |
+| 1.22 | Table 6 | 25.03-23.81 |
+| 2.52 | Table 6 | 26.33-23.81 |
+| 3.55 | Table 6 | 27.36-23.81 |
+| 1.22 | Table 6 | 27.36-26.14 |
+| 0.48 | Table 5 | 23.81-23.33 |
+| 31.4 | Table 3 | 57.1-25.7 |
+| 15.6 | Table 3 | 85.2-69.6 |
+| 25.8 | Table 3 | 74.1-48.3 |
+| 15.4 | Table 3 | 60.6-45.2 |
+| 5.8 | Table 4 | 40.5-34.7 |
+| 67.8 | Table 4 | 33.9/50*100 |
+| 53.4 | Table 4 | 26.7/50*100 |
+| 31.2 | Table 4 | 15.6/50*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thinking vs. Doing · 把交互步数当作新的测试时扩展轴</title>
+<meta name="description" content="TTI 用交互视界课程和 online filtered BC 训练 Gemma 3 12B；WebVoyager 平均 64.8，WebArena 平均 26.1，提示式 check-again 也胜过单纯加长每步 CoT。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.src-note{font-size:12px;color:var(--text-soft);margin:10px 0 0;font-family:"JetBrains Mono",monospace;line-height:1.6}
+.errata{margin-top:18px;background:var(--bg-soft);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;color:var(--text-muted);font-size:13px;line-height:1.8}
+.errata strong{color:var(--text)}
+.errata ul{margin:8px 0 0;padding-left:18px}
+.errata li{margin-bottom:8px}
+svg text{font-family:"Noto Sans SC","Inter",sans-serif;font-size:13px;fill:var(--text)}
+svg text.sub{font-size:11px;fill:var(--text-soft)}
+svg rect.box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+svg rect.hl{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.token{font-family:"JetBrains Mono",monospace;font-size:12.5px;background:var(--bg-soft);padding:1px 5px;border-radius:4px}
+.tldr .token{background:rgba(255,255,255,.16);color:var(--bg);border:1px solid rgba(255,255,255,.28)}
+.cbar .fill.b0{background:var(--c1)}
+.cbar .fill.b1{background:var(--accent)}
+.cbar .fill.b2{background:var(--c1)}
+.cbar .fill.b3{background:var(--c2)}
+.cbar .fill.b4{background:var(--c3)}
+.infer{display:inline-block;font-size:10.5px;font-weight:600;letter-spacing:.04em;color:var(--c2);background:var(--c2-soft);border-radius:999px;padding:0 6px;margin-left:4px;vertical-align:1px;font-family:"JetBrains Mono",monospace}
+#compute .tbl-scroll table{min-width:520px}
+#compute .tbl-scroll table td.num,#compute .tbl-scroll table th.num{white-space:nowrap}
+#compute .tbl-scroll table th.num{min-width:56px}
+@media(max-width:500px){
+  .chart .crow{grid-template-columns:88px 1fr;gap:8px}
+  .chart .cname{font-size:10.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Thinking vs. Doing</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#compute">开销</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Agent · 测试时扩展 · arXiv 2025 · v1</span>
+  <h1>Thinking vs. Doing：多走几步，可能比多想几步更有用</h1>
+  <p class="hero-sub">
+    当前测试时扩展主要加长每一步的推理链。论文提出另一个轴：<strong>增加 agent 与环境的交互步数</strong>。在 <strong>WebArena 子集（62 题）</strong> 上，纯提示式的 check-again 就能把成功率从 <strong data-src="Table 1">23.81</strong> 提到 <strong data-src="Table 6">26.14</strong>（单次），而把同等算力用于加长 CoT 或 best-of-n 的增益更小。作者进一步提出 TTI：用逐步放开的交互视界课程 + online filtered BC 训练 Gemma 3 12B，在 WebVoyager 上达到 <strong data-src="Table 3">64.8</strong>，在<strong>完整 WebArena（812 题）</strong>上达到 <strong data-src="Table 4">26.1</strong>。
+  </p>
+  <div class="meta">
+    <span>Junhong Shen、Hao Bai 等 · CMU / Scribe / UIUC / Toronto / UC Berkeley / The AGI Company / NYU</span>
+    <a href="https://arxiv.org/abs/2506.07976v1" target="_blank" rel="noopener">arXiv 2506.07976v1 ↗</a>
+    <a href="https://test-time-interaction.github.io" target="_blank" rel="noopener">项目页 ↗</a>
+    <a href="https://github.com/test-time-interaction/TTI" target="_blank" rel="noopener">代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>问题：只加长每步 CoT，不产生新信息。</strong> Agent 在部分可观测、非平稳的网页环境中，必须通过点击、滚动、搜索来获取新信息；闭门思考只能重组已有上下文（§1、§4.2）。</p>
+  <p><strong>方法：把最大交互步数当成课程。</strong> TTI 从 <span class="token">h=10</span> 开始，按乘性课程逐步放宽到 <span class="token">30</span>，每一轮只保留成功轨迹做 filtered BC，并给近期轨迹更高权重（§5.2、Eq.5.2–5.3）。</p>
+  <p><strong>结果：TTI 在 WebVoyager 64.8、WebArena 26.1。</strong> 比 zero-shot 的 <strong data-src="Table 3">55.8</strong> / <strong data-src="Table 4">18.3</strong> 高 <strong data-src="Table 3">9.0</strong> / <strong data-src="Table 4">7.8</strong> 个百分点；比固定 <span class="token">h=10</span> 的 <strong data-src="Table 3">59.1</strong> / <strong data-src="Table 4">23.8</strong> 高 <strong data-src="Table 3">5.7</strong> / <strong data-src="Table 4">2.3</strong> 个百分点。乘性课程在 <strong>WebArena 子集</strong> 上 32.25，加性课程 29.50。</p>
+  <p><strong>代价：只验证了网页域，且训练信号很弱。</strong> 用的是 filtered BC（只学成功轨迹、没有负梯度），不是 PPO/GRPO；交互变长会推高上下文长度；在 Amazon、GitHub 等域 TTI 反而低于基线（§6.1、§7）。</p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 3">64.8<small>%</small></div>
+      <div class="k">WebVoyager 平均成功率<br>Zero-shot 55.8 · Fixed h=10 59.1</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">26.1<small>%</small></div>
+      <div class="k">WebArena 平均成功率<br>Zero-shot 18.3 · Fixed h=10 23.8</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 3">9.0<small>pp</small></div>
+      <div class="k">WebVoyager 相对 zero-shot 的绝对提升<br>64.8 − 55.8</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>“想得更久”不等于“知道得更多”</h2></div>
+  <p class="sec-sub">论文用 WebArena 上的受控实验把这两个轴拆开：同样的总 token 预算，是花在每步推理上，还是花在更多交互步上？</p>
+  <p>当前测试时扩展的主流做法，是在每一步动作前生成更长的思维链。论文指出，这对完全可观测、平稳的任务够用；但网页 agent 面对的是部分可观测和非平稳环境：价格会变、信息藏在后续页面里、按钮点下去才知道结果。无论 CoT 多长，模型都无法凭空得到环境里尚未展示的信息（§1、§3）。</p>
+  <p>作者先做了一个不训练任何模型的受控实验。测试平台是 WebArena 的一个子集：随机抽 <strong data-src="§4">62</strong> 个任务做测试，其余 <strong data-src="§4">750</strong> 个任务留给在线训练；测试时把最大交互步数设为 <span class="token">h=30</span>，远高于多数任务平均约 <strong data-src="§4">6</strong> 步的需求。基座是 Gemma 3 12B，单次模型调用输出动作，不使用检索、验证器或其他外挂模块，因此性能差异只能来自交互步数或提示方式（§4）。</p>
+  <p>先看提示方式。直接输出动作（Action Only）只有 <strong data-src="Table 1">14.76</strong>；让模型先写一段 CoT 再动作，升到 <strong data-src="Table 1">23.81</strong>。作者还试了更复杂的提示，要求模型总结状态、评估进度、反思，但增益不明显：Complex CoT 为 <strong data-src="Table 5">23.33</strong>，反而略低于简单 CoT（<strong data-src="Table 5">0.48</strong> 个百分点）。于是后续实验默认使用简单 CoT（§4、Appendix D.3）。</p>
+  <p>接着是交互扩展。作者设计了一个纯推理时的 “check-again” 机制：agent 一旦发出任务完成信号，就追加提示「你刚说任务完成了，暂停一下，再看看页面，确认或修改答案」。可以从中等强度的 double-check 扩到 triple-check 甚至更多。结果显示，重复检查确实拉长了实际轨迹，并提高了多数 WebArena 域的成功率；在 double-check 后，agent 约有 <strong data-src="§4.1">25%</strong> 的概率改变动作（§4.1、Figure 2）。</p>
+  <p>但提示式扩展也有明显边界：反复要求检查会让模型困惑或幻觉，把本来正确的答案改错，Map 域就出现了性能下降。作者因此把这条路线定位为「有潜力，但不足以可靠地扩展交互」，真正的解法是训练 agent 学会在长视界里探索（§4.1、§4.2）。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>四条已有路线，都没有把“交互长度”当作训练变量</h2></div>
+  <p class="sec-sub">论文把对照方法分成「每步多想」「每步多采样」「固定长视界训练」「按任务难度做课程」四类；TTI 的位置是把视界本身做成课程。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>Per-step budget forcing：逼每一步想更久</h4></div>
+      <p>沿用 s1 一类做法，在初始 CoT 后追加「wait and think again」，强制模型继续推理，再输出动作。论文试了 1 到 4 次强制等待；agent 只有 <strong data-src="§4.2">15%</strong> 的概率改变动作，而且多数改变只是重排子任务，不是探索替代路径或纠错（§4.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>Per-step best-of-n：每步采样多个动作再投票</h4></div>
+      <p>每一步采样 <span class="token">n∈{3,5,7}</span> 个候选动作，用多数投票选一个。成本是基线的 <span class="token">n·h</span> 倍，随交互步数线性放大；论文观察到继续增大 n 的收益递减，因此没有往上扫（§4.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">路线 C</span><h4>固定长视界 + filtered BC：直接训很久</h4></div>
+      <p>把最大步数固定成 <span class="token">h∈{5,10,20}</span>，重点看 <span class="token">h=5</span> 和 <span class="token">h=20</span>，只保留成功轨迹做行为克隆。h=5 学得快但很快过拟合，评估时经常提前终止；h=20 的信用分配噪声大、学得慢，训练早期还会把「返回」「乱点链接」当成高奖励行为（§5.1、Figure 4）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">路线 D</span><h4>按任务难度做课程：需要额外难度估计</h4></div>
+      <p>AutoWebGLM、WebRL 等按 LLM 生成指令的复杂度估计任务难度，先易后难。TTI 不估计任务难度，而是直接用「允许的最大交互步数」作为课程进度；交互长度只是难度的粗略代理，不需要给任务打难度标签（§2、§5.2）。</p>
+    </div>
+  </div>
+  <p>论文的关键判断是：固定长视界把「探索」和「信用分配」绑在一起。视界太短，只看到成功捷径；视界太长，早期大量随机探索把奖励信号冲淡。课程要解决的是这个矛盾，而不是单纯把 h 调大（§5.1）。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>TTI：用交互视界课程，把“学会利用”排在“学会探索”之前</h2></div>
+  <p class="sec-sub">训练算法本身很简单：REINFORCE 的过滤版，只对成功轨迹做最大似然。复杂的是课程表。</p>
+
+  <h3 style="margin-top:26px">3.1 基础算法：成功轨迹上的 filtered behavior cloning</h3>
+  <p>把网页任务写成有限视界序列决策：环境在每一步给出观测 <span class="token">o<sub>t</sub></span>，策略 <span class="token">π<sub>θ</sub></span> 根据观测历史和动作历史输出动作 <span class="token">a<sub>t</sub></span>，任务成功奖励为 1，否则为 0。TTI 使用最简单的 REINFORCE 变体：采样一条轨迹，如果最终成功，就最大化这条轨迹上每个动作的对数似然；失败轨迹直接丢弃（§3、§5.1、Eq.5.1）。</p>
+  <div class="eq">
+    max<sub>θ</sub> &nbsp;E<sub>𝒯∼tasks</sub> E<sub>o<sub>0:h</sub>,a<sub>0:h−1</sub>∼π(·|𝒯)</sub> [ ( Σ<sub>t=0</sub><sup>h−1</sup> log π<sub>θ</sub>(a<sub>t</sub> | o<sub>≤t</sub>, 𝒯) ) · <b>1</b>[ R(o<sub>0:h</sub>, 𝒯)=1 ] ]
+  </div>
+  <div class="eq-cap">Eq.5.1 · 只有奖励为 1 的轨迹进入梯度；没有负梯度，也没有价值函数。论文明确说这是为了稳定训练，而不是因为它是最终方案（§5.1、§7）</div>
+  <p>这种做法的好处是稳定：不会因为负梯度把模型推离数据分布，也不需要 critic。代价是样本效率受限于成功率——尤其在长视界早期，成功轨迹很少，能学的数据也少（§5.1、§7）。</p>
+
+  <h3 style="margin-top:30px">3.2 课程：加性 vs 乘性，两种放开视界的方式</h3>
+  <p>设第 <span class="token">i</span> 轮的最大交互步数为 <span class="token">h<sub>i</sub></span>，下界 <span class="token">h<sub>min</sub></span>、上界 <span class="token">h<sub>max</sub></span>。论文比较两种 schedule（§5.2、Eq.5.2–5.3）：</p>
+  <div class="eq">
+    加性：h<sub>i</sub> := clip(h<sub>min</sub> + i, h<sub>min</sub>, h<sub>max</sub>) &nbsp;&nbsp;&nbsp;&nbsp; 乘性：h<sub>i</sub> := clip(h<sub>min</sub> · i, h<sub>min</sub>, h<sub>max</sub>)
+  </div>
+  <div class="eq-cap">Eq.5.2–5.3 · §5.2 的 WebArena 子集实验取 h<sub>min</sub>=10、h<sub>max</sub>=30；乘性 schedule 为 10、20、30、30…，加性为 10、11、12、13…（Appendix D.5）。全量 WebArena 与 WebVoyager 的 schedule 见 §04。</div>
+  <p>加性课程更保守，给 agent 足够时间把核心技能练稳；乘性课程更激进，假设 agent 能快速掌握基础，尽早接触需要探索的长视界。在 WebArena 子集上训练 10 轮后，加性课程成功率 <strong data-src="Table 2">29.50</strong>，乘性课程 <strong data-src="Table 2">32.25</strong>，高 <strong data-src="Table 2">2.75</strong> 个百分点。论文采用乘性作为默认（§5.2、Table 2）。</p>
+  <p>作者的解释是：乘性课程更早把 agent 暴露在长视界里，避免它过早过拟合「总走最短路径」的捷径行为。论文还说，在约 <strong data-src="§5.2">700</strong> 个训练任务上，TTI 比 Figure 4 中固定 <span class="token">h=20</span> 的 agent 高近 3%（原文写 nearly 3%，未注明是点差还是相对口径），同时 10 轮内少用 <strong data-src="§5.2">40%</strong> 的训练步数；固定 h=20 的具体分数只画在 Figure 4，正文没有给数值（§5.2）。</p>
+  <p>实现上还有一个 replay buffer：每轮把成功轨迹存进去，并按新鲜度给更高权重。这样课程推进后，agent 不会立刻忘掉短视界阶段学到的基本技能（§5.2、Appendix C）。</p>
+
+  <h3 style="margin-top:30px">3.3 大规模训练：合成任务 + 自动验证器</h3>
+  <p>要把 TTI 从 700 个任务的子集推到完整 benchmark，需要更多在线任务。论文采用 PAE 风格的合成任务生成：一方面用种子示例提示 LLM 生成任务，另一方面部署一个探索 agent 自由浏览网站，提出更接地气、更多样的任务。WebVoyager 侧得到 <strong data-src="§6">128K</strong> 个合成任务，覆盖约 20 个真实域；WebArena 自托管域得到 <strong data-src="§6">11K</strong> 个任务（§6）。</p>
+  <p>训练时用 Gemma 3 27B 做提示式验证器，输入动作历史和截图，判断轨迹是否成功。论文报告它与 WebArena 官方评估器的一致率为 <strong data-src="§6">88.9%</strong>。两个 benchmark 分别训练独立的 agent，避免把合成环境数据混进真实域 agent 的训练集（§6）。</p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>工程账本：12B 模型、4–6 张 H100、每轮 512 条成功轨迹</h2></div>
+  <p class="sec-sub">论文给了训练超参和任务规模，但没有给美元成本、总 GPU 小时或 wall-clock；三组实验的轮数、学习率和 GPU 数并不相同。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">模型与观测</span><h4>Gemma 3 12B，单次调用出动作</h4></div>
+      <p>基座是 Gemma 3 12B。观测包括任务目标、URL、页面可访问性树和带 set-of-marks 的截图；历史观测只保留最近 <strong data-src="§3">3</strong> 步以控制上下文，但保留全部动作历史。动作空间是 6 个离散动作：click、type、scroll、go back、search、stop（§3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">训练循环</span><h4>每轮 512 个任务 / 512 条成功轨迹，轮数与 lr 分三组</h4></div>
+      <p>三组实验共享 rollout_size=<strong data-src="§6">512</strong>、num_update_sample_per_iteration=<strong data-src="§6">512</strong>、AdamW、batch size 4（D.5/D.6 为 batch_size；E.3 为 batch_size_per_gpu）、梯度累积 2、评估视界 30；但轮数、学习率和 GPU 数不同（Appendix D.5、D.6、E.3），见下表。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">采样与训练框架</span><h4>vLLM rollout + DeepSpeed ZeRO-3</h4></div>
+      <p>rollout 用 vLLM 采样，训练用 DeepSpeed ZeRO-3，硬件是 NVIDIA H100。初期的 WebArena 子集实验也在这套配置上跑，评估视界固定为 <strong data-src="Appendix D.5">30</strong>（§6、Appendix D.5）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">评测规模</span><h4>WebVoyager 427 题 / WebArena 812 题</h4></div>
+      <p>WebVoyager 有 <strong data-src="§6">427</strong> 个任务、13 个域，论文把 Google 搜索换成 Bing 以避开 ReCaptcha；WebArena 用完整 <strong data-src="§6">812</strong> 个任务。训练只用非测试任务，评测用 benchmark 官方评估器（§6、§6.3）。</p>
+    </div>
+  </div>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>实验</th><th>对应结果</th><th class="num">轮数</th><th class="num">学习率</th><th class="num">GPU</th><th>视界 schedule</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>WebArena 全量</td><td>Table 4</td><td class="num">10</td><td class="num">1e-6</td><td class="num">4</td><td>10, 20, 20, 30, 30, 30, …</td></tr>
+        <tr><td>WebVoyager</td><td>Table 3、Figure 6</td><td class="num">12</td><td class="num">4e-6</td><td class="num">6</td><td>10, 20, 20, 30, 30, 30, …（之后保持 30）</td></tr>
+        <tr><td>WebArena 子集</td><td>Table 2、Figure 4/7</td><td class="num">10</td><td class="num">1e-6</td><td class="num">4</td><td>乘性 10, 20, 30, 30, …；加性 10, 11, 12, …</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">三组超参分别见 Appendix D.6（WebArena 全量）、E.3（WebVoyager）、D.5（WebArena 子集）；共同项为 rollout_size=512、num_update_sample_per_iteration=512、batch size 4、grad_accum_steps=2、eval_horizon=30。Figure 6 的 WebVoyager 训练在 iteration 6（第 6 次迭代）首次出现全部轨迹 h=30（Appendix E.3）。</div>
+  <p>一个容易被忽略的成本是验证器：每轮 512 条轨迹都要由 Gemma 3 27B 读动作历史和截图并打成功/失败标签。论文说验证器与官方评估器的一致率是 88.9%，但没有报告验证器本身的 token 消耗或误判对训练的影响（§6）。</p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一轮训练：生成任务 → 按课程 rollout → 验证 → 只学成功轨迹</h2></div>
+  <p class="sec-sub">下图是 TTI 的在线回路，超参按 WebArena 全量实验（Appendix D.6）绘制。课程只改变每轮允许的最大步数，不改奖励、不改模型结构。</p>
+  <div class="card" style="padding:10px 8px 4px">
+    <svg viewBox="0 0 900 430" role="img" aria-label="TTI 训练回路：合成任务生成器产生任务池，每轮采样 512 个任务，按课程给定的最大步数 rollout，Gemma 3 27B 验证器过滤成功轨迹，成功轨迹进入 replay buffer 并用于 filtered BC 更新，下一轮提高最大步数，循环直到 10 轮结束">
+      <defs>
+        <marker id="ta" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="tb" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <rect class="box" x="20" y="40" width="170" height="64" rx="8"></rect>
+      <text x="105" y="64" text-anchor="middle">合成任务生成</text>
+      <text class="sub" x="105" y="82" text-anchor="middle">LLM 种子示例 + 探索 agent</text>
+      <text class="sub" x="105" y="96" text-anchor="middle">PAE 风格</text>
+
+      <rect class="box" x="230" y="40" width="170" height="64" rx="8"></rect>
+      <text x="315" y="64" text-anchor="middle">任务池</text>
+      <text class="sub" x="315" y="82" text-anchor="middle">WebVoyager 128K</text>
+      <text class="sub" x="315" y="96" text-anchor="middle">WebArena 11K</text>
+
+      <rect class="box" x="440" y="40" width="170" height="64" rx="8"></rect>
+      <text x="525" y="64" text-anchor="middle">每轮采样 512 任务</text>
+      <text class="sub" x="525" y="82" text-anchor="middle">10 轮</text>
+      <text class="sub" x="525" y="96" text-anchor="middle">只用非测试任务</text>
+
+      <rect class="hl" x="650" y="40" width="220" height="64" rx="8"></rect>
+      <text x="760" y="64" text-anchor="middle">按课程 hᵢ rollout</text>
+      <text class="sub" x="760" y="82" text-anchor="middle">10 → 20 → 20 → 30 → 30 → 30</text>
+      <text class="sub" x="760" y="96" text-anchor="middle">vLLM 采样，Gemma 3 12B</text>
+
+      <rect class="box" x="650" y="165" width="220" height="64" rx="8"></rect>
+      <text x="760" y="189" text-anchor="middle">Gemma 3 27B 验证器</text>
+      <text class="sub" x="760" y="207" text-anchor="middle">动作历史 + 截图</text>
+      <text class="sub" x="760" y="221" text-anchor="middle">与官方评估器一致率 88.9%</text>
+
+      <rect class="box" x="440" y="165" width="170" height="64" rx="8"></rect>
+      <text x="525" y="189" text-anchor="middle">过滤失败轨迹</text>
+      <text class="sub" x="525" y="207" text-anchor="middle">只保留 reward = 1</text>
+      <text class="sub" x="525" y="221" text-anchor="middle">最多 512 条</text>
+
+      <rect class="hl" x="230" y="165" width="170" height="64" rx="8"></rect>
+      <text x="315" y="189" text-anchor="middle">Filtered BC 更新</text>
+      <text class="sub" x="315" y="207" text-anchor="middle">成功轨迹的对数似然</text>
+      <text class="sub" x="315" y="221" text-anchor="middle">lr 1e-6，10 轮</text>
+
+      <rect class="box" x="20" y="165" width="170" height="64" rx="8"></rect>
+      <text x="105" y="189" text-anchor="middle">Replay buffer</text>
+      <text class="sub" x="105" y="207" text-anchor="middle">保留历史成功轨迹</text>
+      <text class="sub" x="105" y="221" text-anchor="middle">近期轨迹权重更高</text>
+
+      <rect class="box" x="20" y="300" width="170" height="58" rx="8"></rect>
+      <text x="105" y="324" text-anchor="middle">下一轮迭代</text>
+      <text class="sub" x="105" y="342" text-anchor="middle">课程推进，回到采样</text>
+
+      <rect class="box" x="440" y="300" width="430" height="58" rx="8"></rect>
+      <text x="655" y="324" text-anchor="middle">最终评测：WebVoyager 427 题 / WebArena 812 题</text>
+      <text class="sub" x="655" y="342" text-anchor="middle">用 benchmark 官方评估器，不用提示式验证器</text>
+
+      <path d="M190 72 L230 72" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M400 72 L440 72" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M610 72 L650 72" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M760 104 L760 165" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M650 197 L610 197" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M440 197 L400 197" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M230 197 L190 197" stroke="var(--text-soft)" stroke-width="1.4" fill="none" marker-end="url(#ta)"></path>
+      <path d="M105 229 L105 300" stroke="var(--accent)" stroke-width="1.5" fill="none" marker-end="url(#tb)"></path>
+      <text class="sub" x="114" y="270" fill="var(--accent)">进入下一轮</text>
+      <path d="M190 329 L330 329 L330 104" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="6 4" fill="none" marker-end="url(#tb)"></path>
+      <text class="sub" x="340" y="150" fill="var(--accent)">课程推进后重新采样</text>
+      <path d="M760 229 L760 300" stroke="var(--text-soft)" stroke-width="1.4" stroke-dasharray="5 4" fill="none" marker-end="url(#ta)"></path>
+      <text class="sub" x="770" y="270">训练结束后评测</text>
+    </svg>
+  </div>
+  <p>图中最值得注意的是「验证器」在回路里的位置：它不是只在最后打分，而是每轮都参与，决定哪些轨迹能进入训练。验证器把成功判定从稀疏的环境奖励变成了一个可批量调用的模型判断，这是 TTI 能在大规模合成任务上跑起来的前提<span class="infer">推断</span>（依据：§6 的验证器设计与 88.9% 一致率；论文未做去掉验证器的消融）；同时，<strong data-src="§6">88.9%</strong> 的一致率也意味着约一成的轨迹标签可能与官方评估器不同（§6）。</p>
+  <p>上图按 WebArena 全量配置：10 轮、lr 1e-6、4 张 GPU、schedule 10→20→20→30→30→30。WebVoyager 是 12 轮、lr 4e-6、6 张 GPU；WebArena 子集实验是 10 轮、lr 1e-6、4 张 GPU、schedule 10→20→30→30（Appendix D.5、D.6、E.3）。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>结果：交互扩展在网页 benchmark 上抬高了上限，但不是每个域都赢</h2></div>
+  <p class="sec-sub">先看两张主表，再看交互与每步推理的对照，最后看课程消融和训练动态。</p>
+
+  <h3 style="margin-top:26px">6.1 WebVoyager：TTI 64.8，高于固定视界与 zero-shot</h3>
+  <p>Table 3 的 13 个域上，TTI 平均 <strong data-src="Table 3">64.8</strong>；zero-shot Gemma 3 12B 是 <strong data-src="Table 3">55.8</strong>，固定 <span class="token">h=10</span> 是 <strong data-src="Table 3">59.1</strong>，固定 <span class="token">h=30</span> 是 <strong data-src="Table 3">45.2</strong>。因此 TTI 比固定 h=10 高 <strong data-src="Table 3">5.7</strong> 个百分点，比固定 h=30 高 <strong data-src="Table 3">19.6</strong> 个百分点；固定 h=30 甚至低于 zero-shot，说明「允许更长」本身不等于「学会利用更长」（§6.1、Table 3）。</p>
+  <p>与公开数据训练的开源 agent 比，最强的先前结果是 PAE-LLaVa-34B 的 <strong data-src="Table 3">33.0</strong>，TTI 比它高 <strong data-src="Table 3">31.8</strong> 个百分点。Table 3 的 caption 写「improves over the best prior open-model, open-source data approach by 30%」，与表内点差 31.8 不完全对齐；页面按表内数值呈现，并保留原文的 30% 说法（Table 3）。UI-TARS-1.5 的 <strong data-src="Table 3">84.8</strong> 更高，但它使用私有、人工标注数据；论文的对比限定在「开源权重 + 开源合成数据」这一组（§6.1）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th class="num">平均</th><th class="num">Allrecipes</th><th class="num">Amazon</th><th class="num">Apple</th><th class="num">ArXiv</th><th class="num">GitHub</th><th class="num">ESPN</th><th class="num">Coursera</th><th class="num">Cambridge</th><th class="num">BBC</th><th class="num">Map</th><th class="num">Search</th><th class="num">HuggingFace</th><th class="num">WolframAlpha</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>LLaVa-34B SFT</td><td class="num">22.2</td><td class="num">6.8</td><td class="num">26.8</td><td class="num">23.3</td><td class="num">16.3</td><td class="num">4.9</td><td class="num">8.6</td><td class="num">26.8</td><td class="num">67.4</td><td class="num">16.7</td><td class="num">12.2</td><td class="num">23.3</td><td class="num">20.9</td><td class="num">38.1</td></tr>
+        <tr><td>PAE-LLaVa-7B</td><td class="num">22.3</td><td class="num">14.3</td><td class="num">37.5</td><td class="num">17.5</td><td class="num">19.0</td><td class="num">14.6</td><td class="num">0.0</td><td class="num">33.3</td><td class="num">52.4</td><td class="num">18.6</td><td class="num">22.5</td><td class="num">23.3</td><td class="num">19.0</td><td class="num">24.4</td></tr>
+        <tr><td>PAE-LLaVa-34B</td><td class="num">33.0</td><td class="num">22.7</td><td class="num">53.7</td><td class="num">38.5</td><td class="num">25.6</td><td class="num">14.6</td><td class="num">13.6</td><td class="num">42.9</td><td class="num">74.4</td><td class="num">39.0</td><td class="num">22.0</td><td class="num">18.6</td><td class="num">25.6</td><td class="num">42.9</td></tr>
+        <tr><td>Gemma 3 12B（zero-shot）</td><td class="num">55.8</td><td class="num">25.7</td><td class="num">32.3</td><td class="num">45.5</td><td class="num">60.6</td><td class="num">54.8</td><td class="num">60.6</td><td class="num">56.3</td><td class="num">69.6</td><td class="num">65.6</td><td class="num">54.8</td><td class="num">72.7</td><td class="num">66.7</td><td class="num">61.1</td></tr>
+        <tr><td>Fixed h=10</td><td class="num">59.1</td><td class="num">25.7</td><td class="num">74.1</td><td class="num">51.5</td><td class="num">75.7</td><td class="num">70.9</td><td class="num">44.1</td><td class="num">59.3</td><td class="num">66.7</td><td class="num">50.0</td><td class="num">41.9</td><td class="num">60.6</td><td class="num">75.5</td><td class="num">72.2</td></tr>
+        <tr><td>Fixed h=30</td><td class="num">45.2</td><td class="num">20.0</td><td class="num">41.9</td><td class="num">60.6</td><td class="num">42.4</td><td class="num">41.9</td><td class="num">50.0</td><td class="num">34.4</td><td class="num">60.6</td><td class="num">25.0</td><td class="num">29.0</td><td class="num">63.6</td><td class="num">45.5</td><td class="num">69.4</td></tr>
+        <tr><td><strong>TTI（Ours）</strong></td><td class="num"><strong>64.8</strong></td><td class="num">57.1</td><td class="num">48.3</td><td class="num">69.6</td><td class="num">66.6</td><td class="num">45.2</td><td class="num">56.3</td><td class="num">46.9</td><td class="num">85.2</td><td class="num">81.2</td><td class="num">66.7</td><td class="num">72.7</td><td class="num">75.7</td><td class="num">79.4</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">Table 3 · 转录 Open Model / Open Synthetic Data 组的全部先前方法（LLaVa-34B SFT、PAE-LLaVa-7B、PAE-LLaVa-34B）、Gemma 与 fixed-horizon 基线、TTI；Claude 3.7、Claude 3.5、OpenAI CUA、Agent E、UI-TARS-1.5 等私有/人工数据行未列入表内，其中正文只单独提及 UI-TARS-1.5。TTI 平均 64.8 与 fixed h=10 的差为 5.7 个百分点，与 fixed h=30 的差为 19.6 个百分点（本页复算，见 LEDGER）。</div>
+  <p>分域看，TTI 在 Allrecipes 比固定 h=10 高 <strong data-src="Table 3">31.4</strong> 个百分点（57.1 对 25.7），在 Cambridge 比 zero-shot 高 <strong data-src="Table 3">15.6</strong> 个百分点（85.2 对 69.6）；论文推测，这可能因为信息密集的域更受益于延长探索。反过来，Amazon 上 TTI 的 48.3 比固定 h=10 的 74.1 低 <strong data-src="Table 3">25.8</strong> 个百分点，GitHub 上 45.2 比 zero-shot 的 60.6 低 <strong data-src="Table 3">15.4</strong> 个百分点。论文的观察是：这些域的基础模型本来就有较强的领域词汇知识，TTI 学到的探索行为（比如跳去 Bing 搜索、访问外部站点）反而引入噪声（§6.1）。</p>
+
+  <h3 style="margin-top:34px">6.2 交互：切换基线，看 TTI 在每个域的相对位置</h3>
+  <div class="sim">
+    <div class="sim-top" id="voyager-tabs">
+      <button class="rule-btn active" data-base="gemma">对比 Gemma 3 12B<span class="r-sub">zero-shot</span></button>
+      <button class="rule-btn" data-base="h10">对比 Fixed h=10<span class="r-sub">短视界</span></button>
+      <button class="rule-btn" data-base="h30">对比 Fixed h=30<span class="r-sub">长视界</span></button>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>TTI</span><span><i id="voyager-base-dot" style="background:var(--c1)"></i><span id="voyager-base-name">Gemma 3 12B</span></span></div>
+    <div class="chart" id="voyager-chart" data-src="Table 3"></div>
+    <div class="readout" id="voyager-readout" data-src="Table 3">切到不同基线，比较 13 个域上 TTI 与基线的成功率；柱高按 0–100 的绝对成功率绘制。</div>
+  </div>
+
+  <h3 style="margin-top:34px">6.3 WebArena：TTI 26.1，比 zero-shot 高 7.8 个百分点</h3>
+  <p>完整 WebArena 上，TTI 平均 <strong data-src="Table 4">26.1</strong>，zero-shot 是 <strong data-src="Table 4">18.3</strong>，固定 h=10 是 <strong data-src="Table 4">23.8</strong>，固定 h=30 是 <strong data-src="Table 4">19.0</strong>。TTI 比 zero-shot 高 <strong data-src="Table 4">7.8</strong> 个百分点（相对提升 <strong data-src="Table 4">42.6%</strong>），比固定 h=10 高 <strong data-src="Table 4">2.3</strong> 个百分点。论文指出 WebArena 的增益比 WebVoyager 小，推测原因可能是任务更复杂、每轮成功轨迹更少，且部分真实域动作在自托管环境里会因环境 bug 失败（§6.3）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th class="num">平均</th><th class="num">Shopping</th><th class="num">CMS</th><th class="num">Reddit</th><th class="num">GitLab</th><th class="num">Maps</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>IBM CUGA（专有）</td><td class="num">61.7</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>OpenAI CUA（专有）</td><td class="num">58.1</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>ScribeAgent（GPT-4o + Qwen2.5 32B）</td><td class="num">53.0</td><td class="num">45.8</td><td class="num">37.9</td><td class="num">73.7</td><td class="num">59.7</td><td class="num">56.3</td></tr>
+        <tr><td colspan="6"><strong>Fully Open-Source（Self-Improvement）</strong></td></tr>
+        <tr><td>Learn-by-Interact（Codestral 22B）</td><td class="num">24.2</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>AgentTrek（Qwen2.5 32B）</td><td class="num">22.4</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>AutoWebGLM（ChatGLM3 6B）</td><td class="num">18.2</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+        <tr><td>NNetnav（Llama 3.1 8B）</td><td class="num">7.2</td><td class="num">7.4</td><td class="num">4.2</td><td class="num">0</td><td class="num">0</td><td class="num">28.5</td></tr>
+        <tr><td>Gemma 3 12B（zero-shot）</td><td class="num">18.3</td><td class="num">26.7</td><td class="num">8.7</td><td class="num">30.9</td><td class="num">5.5</td><td class="num">27.7</td></tr>
+        <tr><td>Fixed h=10</td><td class="num">23.8</td><td class="num">28.4</td><td class="num">15.6</td><td class="num">26.0</td><td class="num">13.2</td><td class="num">34.7</td></tr>
+        <tr><td>Fixed h=30</td><td class="num">19.0</td><td class="num">25.7</td><td class="num">9.7</td><td class="num">29.8</td><td class="num">8.7</td><td class="num">28.57</td></tr>
+        <tr><td><strong>TTI（Ours）</strong></td><td class="num"><strong>26.1</strong></td><td class="num">33.9</td><td class="num">15.5</td><td class="num">35.3</td><td class="num">15.7</td><td class="num">40.5</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">Table 4 · 已转录部分专有对照（IBM CUGA、OpenAI CUA、ScribeAgent）与全部 Fully Open-Source (Self-Improvement) 对照；其余专有/混合基座行（Jace AI 57.1、AgentSymbiotic 48.5、Learn-by-Interact 48.0、AgentOccam-Judge 45.7、WebPilot 37.2）未逐行转录。Table 4 caption 称 TTI 在 CMS 域「especially better」，但表内 TTI 为 15.5、固定 h=10 为 15.6，低 0.1 个百分点；页面按表内数值并列这一出入。</div>
+  <p>分域看，TTI 在 Maps 上 40.5，比固定 h=10 的 34.7 高 <strong data-src="Table 4">5.8</strong> 个百分点；在 Reddit 上 35.3 对 26.0，在 Shopping 上 33.9 对 28.4。CMS 是唯一的例外：TTI 15.5，固定 h=10 15.6，低 <strong data-src="Table 4">0.1</strong> 个百分点。Table 4 caption 说 TTI 在 CMS 上「especially better」，与表内这一格不完全对齐；更准确的说法是 TTI 在 CMS 上高于 zero-shot 的 8.7 和固定 h=30 的 9.7，但不及固定 h=10（Table 4）。</p>
+  <div class="sim">
+    <div class="sim-top" id="arena-tabs">
+      <button class="rule-btn active" data-base="gemma">对比 Gemma 3 12B<span class="r-sub">zero-shot</span></button>
+      <button class="rule-btn" data-base="h10">对比 Fixed h=10<span class="r-sub">短视界</span></button>
+      <button class="rule-btn" data-base="h30">对比 Fixed h=30<span class="r-sub">长视界</span></button>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>TTI</span><span><i id="arena-base-dot" style="background:var(--c1)"></i><span id="arena-base-name">Gemma 3 12B</span></span></div>
+    <div class="chart" id="arena-chart" data-src="Table 4"></div>
+    <div class="readout" id="arena-readout" data-src="Table 4">切到不同基线，比较 5 个域上 TTI 与基线的成功率；柱高按 0–50 的相对刻度绘制。</div>
+  </div>
+
+  <details>
+    <summary>手算对账：WebArena 柱高与两组基线差 <span class="sum-sub">JS 输出与页面数字逐位核对</span></summary>
+    <div class="details-body">
+      <p>柱高公式（JS 的 <code>pct(v, 50)</code>）：<code>round(v / 50 * 1000) / 10</code>，即 1 个单位 = 2%，柱高最低 1.2%。抽三格核对：TTI Shopping 33.9 → 678/10 = 67.8%；Gemma Shopping 26.7 → 534/10 = 53.4%；Fixed h=10 CMS 15.6 → 312/10 = 31.2%。chart 数值标签按原表位数显示（Fixed h=30 的 Maps 为 28.57，不四舍五入到 28.6）。</p>
+      <p><strong>Gemma vs TTI：</strong>平均 26.1 − 18.3 = 7.8 个百分点；5 个域逐格为 33.9 &gt; 26.7、15.5 &gt; 8.7、35.3 &gt; 30.9、15.7 &gt; 5.5、40.5 &gt; 27.7，TTI 全部高于 Gemma。</p>
+      <p><strong>Fixed h=10 vs TTI：</strong>平均 26.1 − 23.8 = 2.3 个百分点；Shopping 33.9 &gt; 28.4、CMS 15.5 &lt; 15.6（低 0.1）、Reddit 35.3 &gt; 26.0、GitLab 15.7 &gt; 13.2、Maps 40.5 &gt; 34.7，只有 CMS 一格低于基线。</p>
+    </div>
+  </details>
+
+  <h3 style="margin-top:34px">6.4 交互 vs 每步推理：同样的算力，花在步数上更划算</h3>
+  <p>Figure 3 把总 token 预算相同的三种策略画在一起：交互扩展（check-again）的成功率随预算上升最快；budget forcing 在约 <strong data-src="Figure 3">0.26</strong> 附近进入平台期；best-of-n 成本最高，增益却最小。作者的解释是：交互每一步都带来新信息，而更长的 CoT 只是重组已有信息（§4.2、Figure 3）。</p>
+  <p>Table 6 把各策略在 WebArena 子集上各施加一次（Table 6 caption 注明结果是 3 次运行的平均），基线是 CoT 的 <strong data-src="Table 6">23.81</strong>。check-again 单独用是 <strong data-src="Table 6">26.14</strong>（+<strong data-src="Table 6">2.33</strong>）；budget forcing 是 <strong data-src="Table 6">24.81</strong>（+<strong data-src="Table 6">1.00</strong>）；best-of-n 是 <strong data-src="Table 6">25.03</strong>（+<strong data-src="Table 6">1.22</strong>）。组合里最好的是 check-again + best-of-n，<strong data-src="Table 6">27.36</strong>（+<strong data-src="Table 6">3.55</strong>），比单独 check-again 再高 <strong data-src="Table 6">1.22</strong> 个百分点。注意 Table 6 全部是「各施加一次」；引言说提示式交互扩展能把成功率提到 ≥28%，那个数字来自多次 re-check 的 Figure 2/3，不在 Table 6 的单次组合里（§4、§6、Table 6）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>推理时策略（各一次）</th><th class="num">Task SR (%)</th><th class="num">相对 Baseline</th></tr></thead>
+      <tbody>
+        <tr><td>Baseline（CoT）</td><td class="num">23.81</td><td class="num">—</td></tr>
+        <tr><td>Check-again</td><td class="num">26.14</td><td class="num">+2.33</td></tr>
+        <tr><td>Budget-forcing</td><td class="num">24.81</td><td class="num">+1.00</td></tr>
+        <tr><td>Best-of-n</td><td class="num">25.03</td><td class="num">+1.22</td></tr>
+        <tr><td>Check-again + Budget-forcing</td><td class="num">26.33</td><td class="num">+2.52</td></tr>
+        <tr><td>Check-again + Best-of-n</td><td class="num"><strong>27.36</strong></td><td class="num">+3.55</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src-note">Table 6 · 原文说明所有方法只施加一次；Table 5 与 Table 6 的 caption 均注明 averaged over 3 runs（WebArena 子集，3 次平均）。差值是本页用 Table 6 的 Baseline 23.81 复算，不是原文列。Table 5 另给出 Action Only 14.76、CoT 23.81、Complex CoT 23.33。</div>
+
+  <h3 style="margin-top:34px">6.5 课程消融：乘性 32.25，加性 29.50</h3>
+  <p>在 WebArena 子集、约 700 个训练任务、10 轮训练的设置下，乘性课程成功率 <strong data-src="Table 2">32.25</strong>，加性课程 <strong data-src="Table 2">29.50</strong>，差 <strong data-src="Table 2">2.75</strong> 个百分点。论文还报告乘性课程比固定 h=20 的 Figure 4 结果高近 3%（原文写 nearly 3%，未注明点差还是相对口径），并少用 40% 的训练步数；固定 h=20 的具体数值只在图中，正文没有列表（§5.2、Table 2、Figure 4）。</p>
+
+  <h3 style="margin-top:34px">6.6 训练动态：先学会少走，再学会多走</h3>
+  <p>Figure 6 记录 TTI 训练过程中的行为变化。随着课程把最大视界推到 30，轨迹长度和 GoBack、Bing 动作的比例开始上升；与此同时，每步 CoT 的 token 数反而下降。论文的解读是：agent 自动把算力从「每步想更久」转移到「多走几步」，并且这种转移与成功率上升相关（§6.1、Figure 6）。</p>
+  <p>固定 h=10 的对照则相反：轨迹长度和探索动作持续下降，agent 学会尽快结束；固定 h=30 的轨迹长度过早飙升，成功率反而更差。Figure 7 把 check-again 加到 TTI 的中间 checkpoint 上：早期 checkpoint 受益更明显，因为此时 agent 还倾向于提前终止；训练后期收益变小，但仍为正，作者把它当作一个安全网（§6.3、Figure 7）。</p>
+  <p>最后是案例。强项是复杂的信息检索任务：例如找「4 星以上、50 条以上评论的苹果派配方烘焙温度」，agent 遇到无法关闭的弹窗后会换一个配方，再回到列表找到满足全部条件的选项；早期短视界训练时，它只会反复重试第一个配方。论文也指出它在简单、路径确定的任务上会直接完成、不会过度探索；真正的失败模式是：动作失败时把 Bing 搜索当成万能兜底、反复重置，而不是在目标域内恢复，且对最终动作的自验证不足。此外，在 Amazon、GitHub 这类基础模型已有强先验的域上，探索行为会引入噪声（§6.1、§6.2）。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：交互扩展不是免费午餐，TTI 也不是通用 RL 算法</h2></div>
+  <p class="sec-sub">论文自己列了失败模式和未来工作；下面把方法边界与结果口径分开写。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">边界 1</span><h4>只验证了网页域和一个模型家族</h4></div>
+      <p>所有实验都在 WebVoyager / WebArena 上，基座都是 Gemma 3 12B。论文把机器人控制、开放世界计算机使用等域列为未来工作，但没有给出跨模型、跨域的泛化实验（§6、§7）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">边界 2</span><h4>训练信号只有成功轨迹，没有负梯度</h4></div>
+      <p>TTI 用的是 online filtered BC，本质是 REINFORCE 的过滤版：失败轨迹被丢弃，不做负梯度更新。论文明确说这只是「第一选择」，并建议未来用 GRPO/PPO 或带价值函数的方法改善长视界的信用分配（§5.1、§7）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">边界 3</span><h4>交互变长，上下文成本上升</h4></div>
+      <p>观测历史只保留最近 3 步，但动作历史保留全部；视界继续加长时，上下文窗口和验证器的调用成本都会成为瓶颈<span class="infer">推断</span>（依据：§6 的 Gemma 3 27B 验证器每轮读动作历史和截图；论文只讨论上下文/记忆）。论文把记忆与上下文长度列为未来挑战，没有给出扩展到更长视界的成本曲线（§3、§7）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界 4</span><h4>探索行为可能是「穷举」而非「启发式」</h4></div>
+      <p>失败案例分析显示，agent 会把 Bing 搜索当成万能退路，反复重置，而不是在目标域内做更细致的恢复；它也会在已经发现答案与任务要求不符时仍然提交（例如把 2021 年的仓库当成 2022 年的答案）。论文把这两点归为过度依赖重置和自验证不足（§6.2）。</p>
+    </div>
+  </div>
+  <p>结果口径上还有三处需要并列。第一，<strong>摘要/引言说「提升 9% 和 8%」——按百分点口径，§6.3 与 Table 4 的算术是 7.8 个百分点</strong>（18.3→26.1）；WebVoyager 的 9.0 也是百分点（55.8→64.8），不是相对提升。页面统一写「个百分点」，并保留原文的 9%/8% 说法。第二，<strong>Table 3 caption 的「by 30%」与表内 33.0→64.8 的 31.8 个百分点不完全对齐</strong>；页面按表内数值复算。第三，<strong>Table 3/4 的 caption 没有注明重复次数</strong>；Table 1 明确说结果平均 3 次，Table 3/4 没有同样的说明，因此页面不把小数点后的差异当作统计显著（Table 1、Table 3、Table 4）。</p>
+  <p>还有一个方法层面的限制：合成数据由基座模型自己生成，论文把它称为一种 self-improvement，但也承认它与真实、多样的人类交互数据仍有差距。这也可能是 TTI 与使用私有数据的 UI-TARS-1.5（84.8）之间存在差距的原因<span class="infer">推断</span>（依据：§6.1 的合成/私有数据对比；论文未做控制变量实验）；论文没有做实验来分离数据质量、模型规模和训练方法的影响（§6.1、§7）。</p>
+
+</section>
+
+<footer>
+  <div>Thinking vs. Doing: Agents that Reason by Scaling Test-Time Interaction</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2506.07976v1">https://arxiv.org/abs/2506.07976v1</a>（arXiv 2025 · v1）<br>
+    项目页：<a href="https://test-time-interaction.github.io">https://test-time-interaction.github.io</a><br>
+    代码：<a href="https://github.com/test-time-interaction/TTI">https://github.com/test-time-interaction/TTI</a><br>
+    笔记：<a href="/thinking-vs.-doingagents-that-reason-by-scaling-test-time-interaction/">Thinking vs. Doing：Agents that Reason by Scaling Test-Time Interaction</a>
+  </div>
+  <div class="errata">
+    <strong>笔记勘误与原文矛盾（只记录，不修改原笔记）</strong>
+    <ul>
+      <li><strong>笔记写「比之前最好的开源模型提升了 19.6%」，但参照物错了：</strong>这里的 19.6 个百分点是 TTI 相对固定 h=30 的 45.2 的差（64.8−45.2），不是相对先前最好开源模型 PAE-LLaVa-34B 的 33.0。相对 PAE-LLaVa-34B 的差是 31.8 个百分点（Table 3）。</li>
+      <li><strong>WebArena 的「提升了 7.8%」应写成 7.8 个百分点：</strong>18.3→26.1 的绝对差是 7.8 个百分点；相对提升是 42.6%。两者不能混用（Table 4）。</li>
+      <li><strong>笔记表格里的「Interaction Scaling ~29%」不是 Table 6 的数：</strong>Table 6 单次 check-again 是 26.14，最好的单次组合是 27.36；≥28% 来自多次 re-check 的 Figure 2/3，笔记没有说明这个口径（§4、Table 6）。</li>
+      <li><strong>「完美符合世界模型的重要性」是笔记的延伸，不是论文内容：</strong>论文没有使用世界模型，也没有做「生成多个动作再由世界模型预测后果」的实验；论文的主线是交互步数课程（§1、§5）。</li>
+      <li><strong>CMS 的「尤其更好」与 Table 4 单格有出入：</strong>TTI 在 CMS 上 15.5，固定 h=10 是 15.6，低 0.1 个百分点；这一说法出自 Table 4 caption，不在 §6.3 正文。页面并列两者，不替原文消解（Table 4）。</li>
+    </ul>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var NAMES = ['Allrecipes', 'Amazon', 'Apple', 'ArXiv', 'GitHub', 'ESPN', 'Coursera', 'Cambridge', 'BBC', 'Map', 'Search', 'HuggingFace', 'WolframAlpha'];
+  var TTI = [57.1, 48.3, 69.6, 66.6, 45.2, 56.3, 46.9, 85.2, 81.2, 66.7, 72.7, 75.7, 79.4];
+  var V = {
+    gemma: {name: 'Gemma 3 12B', avg: 55.8, vals: [25.7, 32.3, 45.5, 60.6, 54.8, 60.6, 56.3, 69.6, 65.6, 54.8, 72.7, 66.7, 61.1]},
+    h10: {name: 'Fixed h=10', avg: 59.1, vals: [25.7, 74.1, 51.5, 75.7, 70.9, 44.1, 59.3, 66.7, 50.0, 41.9, 60.6, 75.5, 72.2]},
+    h30: {name: 'Fixed h=30', avg: 45.2, vals: [20.0, 41.9, 60.6, 42.4, 41.9, 50.0, 34.4, 60.6, 25.0, 29.0, 63.6, 45.5, 69.4]}
+  };
+  var ANAMES = ['Shopping', 'CMS', 'Reddit', 'GitLab', 'Maps'];
+  var ATTI = [33.9, 15.5, 35.3, 15.7, 40.5];
+  var A = {
+    gemma: {name: 'Gemma 3 12B', avg: 18.3, vals: [26.7, 8.7, 30.9, 5.5, 27.7]},
+    h10: {name: 'Fixed h=10', avg: 23.8, vals: [28.4, 15.6, 26.0, 13.2, 34.7]},
+    h30: {name: 'Fixed h=30', avg: 19.0, vals: [25.7, 9.7, 29.8, 8.7, 28.57]}
+  };
+  var voyagerBase = 'gemma';
+  var arenaBase = 'gemma';
+
+  function fmtNum(v) {
+    return Number.isInteger(v) ? v.toFixed(1) : String(v);
+  }
+
+  function pct(v, max) {
+    var p = Math.round(v / max * 1000) / 10;
+    if (p < 1.2) p = 1.2;
+    return p.toFixed(1);
+  }
+
+  function row2(label, tti, base, bt, max) {
+    return '<div class="crow"><div class="cname">' + label + '</div><div class="cbars">' +
+      '<div class="cbar"><div class="track"><span class="fill b1" style="height:' + pct(tti, max) + '%"></span></div><div class="num">TTI ' + fmtNum(tti) + '</div></div>' +
+      '<div class="cbar"><div class="track"><span class="fill b0" style="height:' + pct(base, max) + '%"></span></div><div class="num">' + bt + ' ' + fmtNum(base) + '</div></div>' +
+      '</div></div>';
+  }
+
+  function renderVoyager() {
+    var cfg = V[voyagerBase];
+    var chart = document.getElementById('voyager-chart');
+    var out = document.getElementById('voyager-readout');
+    if (!chart || !out) return;
+    var html = '';
+    for (var i = 0; i < NAMES.length; i++) html += row2(NAMES[i], TTI[i], cfg.vals[i], cfg.name, 100);
+    chart.innerHTML = html;
+    var dot = document.getElementById('voyager-base-dot');
+    var name = document.getElementById('voyager-base-name');
+    if (dot) dot.style.background = 'var(--c1)';
+    if (name) name.textContent = cfg.name;
+    out.innerHTML = 'WebVoyager 13 个域：TTI 平均 64.8，' + cfg.name + ' 平均 ' + cfg.avg.toFixed(1) + '。柱高按 0–100 的绝对成功率绘制；逐域高低不同，切换基线查看对照。';
+  }
+
+  function renderArena() {
+    var cfg = A[arenaBase];
+    var chart = document.getElementById('arena-chart');
+    var out = document.getElementById('arena-readout');
+    if (!chart || !out) return;
+    var html = '';
+    for (var i = 0; i < ANAMES.length; i++) html += row2(ANAMES[i], ATTI[i], cfg.vals[i], cfg.name, 50);
+    chart.innerHTML = html;
+    var dot = document.getElementById('arena-base-dot');
+    var name = document.getElementById('arena-base-name');
+    if (dot) dot.style.background = 'var(--c1)';
+    if (name) name.textContent = cfg.name;
+    var worse = [];
+    for (var j = 0; j < ANAMES.length; j++) {
+      if (ATTI[j] < cfg.vals[j]) worse.push(ANAMES[j]);
+    }
+    var cmp;
+    if (worse.length === 0) {
+      cmp = 'TTI 在 5 个域上均高于所选基线。';
+    } else if (worse.length === ANAMES.length) {
+      cmp = 'TTI 在 5 个域上均低于所选基线。';
+    } else {
+      cmp = 'TTI 在 5 个域中 ' + (ANAMES.length - worse.length) + ' 个高于所选基线，' + worse.join('、') + ' 是例外。';
+    }
+    out.innerHTML = 'WebArena 5 个域：TTI 平均 26.1，' + cfg.name + ' 平均 ' + cfg.avg.toFixed(1) + '。柱高按 0–50 的相对刻度绘制；' + cmp;
+  }
+
+  var vt = document.getElementById('voyager-tabs');
+  if (vt) {
+    vt.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      Array.prototype.forEach.call(vt.querySelectorAll('.rule-btn'), function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      voyagerBase = btn.getAttribute('data-base');
+      renderVoyager();
+    });
+  }
+
+  var at = document.getElementById('arena-tabs');
+  if (at) {
+    at.addEventListener('click', function (e) {
+      var btn = e.target.closest('.rule-btn');
+      if (!btn) return;
+      Array.prototype.forEach.call(at.querySelectorAll('.rule-btn'), function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      arenaBase = btn.getAttribute('data-base');
+      renderArena();
+    });
+  }
+
+  renderVoyager();
+  renderArena();
+})();
+</script>
+</body>
+</html>
