@@ -1,0 +1,582 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 6 | docs/design/arch_overview.md:117 | 1+1+4 |
+| 17 | docs/design/arch_overview.md:125 | 4+4+8+1 |
+| 32 | §06 | 2048/64 |
+| 1984 | §03 手算 A | 2048-64 |
+| 31 | §03 手算 A | 1984/64 |
+| 2 | §03 手算 A | 3968/1984 |
+| 1921 | §03 手算 B | 2048-127 |
+| 30 | §03 手算 B | 1920/64 |
+| 14 | §03 手算 B | 30-16 |
+| 1920 | §06 | 2048-128 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="e740bad">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vLLM V1 请求生命周期 · 三段流水线与一条 token 预算</title>
+<meta name="description" content="按 commit e740bad 的源码拆解 vLLM V1：API server、Engine Core、GPU worker 的进程分工，请求从 HTTP 到流式返回的完整路径，以及调度与执行如何解耦。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的少量微调；公共样式全部来自 base.css */
+.tbl-cap{font-size:12.5px;color:var(--text-soft);margin:18px 0 -6px}
+.proc-svg text{font-family:Inter,"Noto Sans SC",sans-serif}
+.proc-svg .t{font-weight:600}
+.proc-svg .s{fill:var(--text-muted)}
+.actions .act:disabled{opacity:.42;cursor:not-allowed}
+.life-note{font-size:12.5px;color:var(--text-soft);margin-top:10px}
+.legend-src{font-size:12px;color:var(--text-soft);line-height:1.9}
+.limit-list li{margin-bottom:12px}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">vLLM V1</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心机制</a>
+      <a href="#compute">进程与线程</a>
+      <a href="#pipeline">请求路径</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>系统精读 · vLLM V1 · commit e740bad</span>
+  <h1>vLLM V1 把请求拆成三段流水线：API 进程收、Engine Core 排、Worker 算</h1>
+  <p class="hero-sub">一个请求从 HTTP 进入到流式返回，要跨过四次进程边界，并在 Engine Core 里把「调度」和「执行」拆成两步。本文按源码把这条路径逐段拆开，重点看每一步发生在哪个进程、跨了什么数据。</p>
+  <div class="meta">
+    <span>vLLM project · V1 source</span>
+    <a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">源码 ↗</a>
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/arch_overview.md" target="_blank" rel="noopener">架构文档 ↗</a>
+    <a href="/nano-vllm%E9%98%85%E8%AF%BB%E7%AC%94%E8%AE%B0/">博客笔记 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>V1 的第一刀切在进程边界。</strong>API server 进程负责 HTTP、分词、多模态加载、增量反分词与流式返回；Engine Core 进程只跑调度器、KV cache 管理与执行编排；每个 GPU 一个 worker 进程跑前向。官方文档把这套布局写成 <code>1 API server + 1 engine core + 4 workers</code> 的单机 TP=4 示例（docs/design/arch_overview.md:117）。</p>
+  <p><strong>第二刀切在调度循环。</strong>Engine Core 的忙循环每轮做三件事：<code>scheduler.schedule</code> 选出这一步的 batch，<code>execute_model</code> 把 <code>SchedulerOutput</code> 交给 worker，<code>update_from_output</code> 收回采样结果并推进请求状态（vllm/v1/engine/core.py:709）。调度器里没有独立的 prefill / decode 阶段，只有一条 token 预算（vllm/v1/core/sched/scheduler.py:721）。</p>
+  <p><strong>第三刀切在「先 running、后 waiting」。</strong>每步先把预算分给 running 请求（decode 通常每请求 1 token），再把剩下的预算给 waiting 请求做 chunked prefill；KV block 不够就停下 waiting，必要时抢占 running（vllm/v1/core/sched/scheduler.py:815、vllm/v1/core/sched/scheduler.py:1071、vllm/v1/core/sched/scheduler.py:1876）。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="vllm/engine/arg_utils.py:3032">2048<small> tokens/step</small></div><div class="k">小显存 / A100 档默认 2048；三档为 <span data-src="vllm/engine/arg_utils.py:3004-3013">16384</span> / <span data-src="vllm/engine/arg_utils.py:3014-3027">8192</span> / 2048（≥160GiB / H100·H200 / 其他 GPU）</div></div>
+    <div class="metric"><div class="v" data-src="vllm/config/cache.py:185">64<small> tokens/block</small></div><div class="k">KV cache block 默认大小：块是分配、回收与抢占的最小单位</div></div>
+    <div class="metric"><div class="v" data-src="docs/design/arch_overview.md:117">6<small> processes</small></div><div class="k">TP=4 单机示例：1 API server + 1 Engine Core + 4 GPU workers</div></div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>请求的真正难点，是让每个请求停在不同的生命周期位置</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 vLLM 不能把「生成」当成一次普通函数调用，以及为什么这三类工作应该待在不同进程。</p>
+
+  <p>一个在线推理请求不是一个同步函数。它先要分词，再占据 KV cache 的若干块，然后进入一个可能持续几百步的循环：每一步通常只生成一个 token（投机解码时多几个），直到遇到停止符或 <code>max_tokens</code>。同一时刻，一个实例里可能同时存在：刚提交、还没分配到 KV block 的新请求；正在做 chunked prefill 的长 prompt；已经生成了一段 token 的短对话；以及已经结束、但文本还没反分词完的请求。</p>
+
+  <p>调度器必须用一个统一坐标描述这些请求。V1 的做法是给每个请求记两个数：<code>num_computed_tokens</code> 和 <code>num_tokens_with_spec</code>（prompt + 已生成 + 投机 token）；每一步只决定「给这个请求补多少 token」，让它追上前者（vllm/v1/core/sched/scheduler.py:723-731 的注释把这件事讲得很直白）。这也意味着 batch 的组成每步都在变，不能按静态 batch 的方式预排。</p>
+
+  <p>KV cache 又把这个循环和显存绑在一起。V1 把 KV cache 切成固定大小的 block，调度器在接纳请求时必须调用 <code>KVCacheManager.allocate_slots</code>（vllm/v1/core/kv_cache_manager.py:401）；分配失败时，waiting 请求这一步就不能进 batch，running 请求则可能被抢占、释放 block、退回 waiting，进度重置后重新计算（prefix cache / KV connector 可恢复部分进度）（docs/design/arch_overview.md:156）。</p>
+
+  <p>最后，输出还得边生成边还原成文本。增量 detokenizer 要处理 UTF-8 边界和多字节字符，还要在 stop string 可能跨 token 时把尾部字符先扣住（vllm/v1/engine/detokenizer.py:87-93、98-157、245-260）。这是纯 CPU 工作，却发生在每一个输出 token 上。调度、GPU 前向、分词/反分词三者的资源画像完全不同；把它们塞进同一个循环，最慢的 CPU 步骤就会成为 GPU 的空转来源。</p>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>V0 把调度器和 Worker 0 绑在一起，V1 先把 CPU 工作挪出核心循环</h2></div>
+  <p class="sec-sub">读完这节你应该知道：V1 的进程拆分不是「多开几个进程」，而是针对 V0 四个具体问题的重新分工。</p>
+
+  <p>官方 V1 用户指南对 V0 的评价是：功能覆盖很广，但各能力独立演进后系统越来越复杂，技术债拖慢了新能力的集成；V1 重新设计了 scheduler、KV cache manager、worker、sampler 和 API server，目标是「近零 CPU 开销」和「零配置」（docs/usage/v1_guide.md:9-22）。官方 V1 发布博客则把 V0 的具体问题列为四条：调度器与 Worker 0 同进程造成的 TP 布局不对称；CPU 侧的 tokenization、多模态处理、反分词和请求流式返回与 GPU 步进争抢时间；每一步重建输入张量与元数据；prefix caching 因低命中率下的额外开销而默认关闭。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">V0 · 耦合</span><h4>一个进程里塞下太多角色</h4></div>
+      <ul>
+        <li>张量并行时，调度器与 Worker 0 放在同一进程，避免进程间传输入，但让 0 号 worker 的进程布局与其他 worker 不对称。</li>
+        <li>官方博客把拆分动机写得很直接：CPU 侧的 tokenization、多模态处理、detokenization 和流式返回应该与 Engine Core 的循环重叠，而不是让 GPU 等 Python。</li>
+        <li>每步重建输入张量和元数据，Python 对象分配进入稳态开销。</li>
+        <li>prefix caching 的默认状态受开销影响：低命中率时收益抵不过成本，所以默认关闭。</li>
+      </ul>
+      <p class="legend-src">来源：<a href="https://vllm.ai/blog/2025-01-27-v1-alpha-release" target="_blank" rel="noopener">vLLM V1 发布博客</a>（Why vLLM V1? / Optimized Execution Loop &amp; API Server / Zero-Overhead Prefix Caching / Clean Architecture for Tensor-Parallel Inference / Efficient Input Preparation）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">V1 · 拆分</span><h4>让每个进程只做一类工作</h4></div>
+      <ul>
+        <li><strong>Engine Core</strong> 独立成进程，只保留 scheduler + model executor 的忙循环；官方博客称之为 isolated <code>EngineCore</code> execution loop。</li>
+        <li><strong>API server</strong> 保留 tokenization、多模态输入处理、detokenization 和 request streaming，CPU 工作与 GPU 步进可以重叠。</li>
+        <li><strong>Worker</strong> 持有请求状态，Engine Core 每步只发差分输入，不再重建整批张量。</li>
+        <li><strong>Scheduler</strong> 取消 prefill / decode 的阶段区分，统一成 token 预算（docs/design/arch_overview.md:142）。</li>
+      </ul>
+      <p class="legend-src">来源：同上博客；另见 <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/arch_overview.md" target="_blank" rel="noopener">架构文档</a>。</p>
+    </div>
+  </div>
+
+  <p>这个拆分有一个直接的行为后果：V1 里 chunked prefill 默认开启，而 V0 是按模型特征有条件开启（docs/usage/v1_guide.md:39）。当 prefill 可以被切成任意大小的 chunk，调度器就不再需要「先等整段 prompt 算完」的独立阶段，token 预算循环才有条件成立。</p>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>调度器只做一件事：在 2048 token 的示例预算里，先补 running，再补 waiting</h2></div>
+  <p class="sec-sub">读完这节你应该知道：一个 step 的 batch 是怎么被选出来的，以及 KV block 不足时为什么是「抢占并重算」而不是换出。</p>
+  <p class="life-note">路径简写：<code>scheduler.py</code> = <code>vllm/v1/core/sched/scheduler.py</code>；<code>kv_cache_manager.py</code> = <code>vllm/v1/core/kv_cache_manager.py</code>；<code>core.py</code> = <code>vllm/v1/engine/core.py</code>；<code>multiproc_executor.py</code> = <code>vllm/v1/executor/multiproc_executor.py</code>；<code>gpu_worker.py</code> = <code>vllm/v1/worker/gpu_worker.py</code>；<code>output_processor.py</code> = <code>vllm/v1/engine/output_processor.py</code>；<code>async_llm.py</code> = <code>vllm/v1/engine/async_llm.py</code>；<code>core_client.py</code> = <code>vllm/v1/engine/core_client.py</code>。前文首次出现时用完整路径。</p>
+
+  <p><code>Scheduler.schedule</code> 一进来就把 <code>token_budget</code> 设为 <code>max_num_scheduled_tokens</code>；这个值默认等于 <code>max_num_batched_tokens</code>（scheduler.py:139-143），也就是 <code>SchedulerConfig</code> 的字段默认值 <code data-src="vllm/config/scheduler.py:41">2048</code>；<code>EngineArgs</code> 会按设备和用途覆盖这个字段（见 §06 的表 4）。预算不是「最多几个请求」，而是这一步所有请求新增 token 的总和。</p>
+
+  <p>第一轮遍历 <code>self.running</code>（scheduler.py:815）。每个 running 请求带着自己的 <code>num_computed_tokens</code> 和 <code>num_tokens_with_spec</code> 进来；调度器给它分配足够多的 token 去追上后者。普通 decode 请求只差一个 token，所以通常只拿 1 个；处于 chunked prefill 中途的请求则可能拿一大段。预算被这些「补课」消耗掉一部分。</p>
+
+  <p>第二轮才遍历 waiting 队列（scheduler.py:1071）。新请求先做 prefix cache 查找：<code>get_computed_blocks</code> 找出已经缓存的完整 block（kv_cache_manager.py:288），再把「新 block + lookahead」交给 <code>allocate_slots</code>（kv_cache_manager.py:401）。如果返回 <code>None</code>，说明 KV block 不够，这个 waiting 请求本步不接纳；如果 running 已经占满 <code>max_num_active_reqs</code>（默认等于 <code>max_num_seqs</code>）的槽位，waiting 也不会被接纳，只有已在途的异步 KV load 还能推进（scheduler.py:134-138、scheduler.py:1102）。</p>
+
+  <p>当 running 请求需要新 block 而池子已空，调度器会调用 <code>_preempt_request</code>（scheduler.py:1876）：释放该请求的 block，把它放回 waiting 队首，进度重置后等待重新计算。V1 不把 KV cache 换出到 CPU 再换回来；恢复进度的手段是 prefix cache 或外部 KV connector（docs/design/arch_overview.md:156-171）。这也是为什么 block 大小和块数会直接影响尾延迟：一次抢占的代价是重算。<span class="infer">推断</span>（由 <code>_preempt_request</code> 释放 block 后请求回到 waiting 的路径推出）</p>
+
+  <div class="eq">
+    token_budget = <span class="hl-a">max_num_batched_tokens</span><br>
+    decode_tokens = Σ 1（每个 running decode 请求）<br>
+    prefill_tokens = min(prompt_remaining, token_budget − decode_tokens)<br>
+    new_blocks = ⌈prefill_tokens / block_size⌉
+  </div>
+  <div class="eq-cap">本页用于解释交互的简化关系；真实路径还叠加投机 token、encoder 输入、prefix cache 命中与异步 KV load（scheduler.py:721、kv_cache_manager.py:401）。</div>
+
+  <h3>自己动手：拖动负载，看一个 step 的预算怎么被分完</h3>
+  <p>三个滑块分别控制 running decode 请求数、waiting 请求的 prompt 长度、以及空闲 KV block 数。预算固定为 <code data-src="vllm/engine/arg_utils.py:3032">2048</code>（小显存档 API server 默认），block 固定为 <code data-src="vllm/config/cache.py:185">64</code> tokens，示例并发上限设为 <code data-src="vllm/engine/arg_utils.py:3036">256</code>（同档 max_num_seqs）。读数直接对应调度器「先 running、后 waiting」的顺序。</p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <span class="pill pa">简化模拟</span>
+      <span class="pill p1">decode 优先</span>
+      <span class="pill p2">waiting 用剩余预算</span>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">DECODE</div><div class="slot-val" id="bs-dec">64 tokens</div><div class="bar"><i class="b1" id="bs-dec-bar" style="width:0"></i></div></div>
+      <div class="slot"><div class="slot-name">PREFILL 首块</div><div class="slot-val" id="bs-chunk">1984 tokens</div><div class="bar"><i class="b2" id="bs-pre-bar" style="width:0"></i></div></div>
+      <div class="slot"><div class="slot-name">KV 首块</div><div class="slot-val" id="bs-blocks">31 blocks</div><div class="bar"><i class="b3" id="bs-kv-bar" style="width:0"></i></div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>running decode 请求数 <span class="v" id="bs-run-v">64</span></label>
+        <input type="range" id="bs-run" min="0" max="256" step="1" value="64">
+      </div>
+      <div class="ctrl">
+        <label>waiting prompt 长度 <span class="v" id="bs-prompt-v">3968</span></label>
+        <input type="range" id="bs-prompt" min="64" max="8192" step="64" value="3968">
+      </div>
+      <div class="ctrl">
+        <label>空闲 KV blocks <span class="v" id="bs-free-v">64</span></label>
+        <input type="range" id="bs-free" min="0" max="64" step="1" value="64">
+      </div>
+    </div>
+
+    <div class="readout" id="bs-readout" data-src="vllm/engine/arg_utils.py:3032">
+      <div class="r-head">本步 batch 组成</div>
+      <div id="bs-msg">读数为组 A 的默认参数：1984 tokens 的 prefill 首块需要 31 个 block，空闲 64 块，本步可接纳。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 <span class="sum-sub">两组参数，逐位与 JS 输出相同</span></summary>
+    <div class="details-body">
+      <p><strong>组 A：run=64，prompt=3968，free=64。</strong>decode = 64；prefill 预算 = 2048 − 64 = 1984；首块 = min(3968, 1984) = 1984；分块数 = 3968 ÷ 1984 = 2；首块 KV = 1984 ÷ 64 = 31 块；31 ≤ 64，本步接纳。</p>
+      <p><strong>组 B：run=127，prompt=1920，free=16。</strong>decode = 127；预算 = 2048 − 127 = 1921；首块 = min(1920, 1921) = 1920；分块数 = 1；首块 KV = 1920 ÷ 64 = 30 块；30 &gt; 16，差 14 块，本步不接纳该 waiting 请求。</p>
+      <p>两组都没有触到 <code data-src="vllm/engine/arg_utils.py:3036">256</code> 的示例并发上限；两组结果均为整数，组 B 的分块数由 <code>ceil(1920/1921)=1</code> 得到，JS 用 <code>Math.ceil(a / b)</code> 计算，结果与手算一致。模拟只覆盖「running decode 每请求 1 token」与「prefill 新块」；未覆盖 prefix cache 命中、投机 token、decode 跨 block、异步调度与抢占后的重算。真实调度路径见 <code>vllm/v1/core/sched/scheduler.py:721</code>。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>调度与执行分居两个进程，中间只传这一步的差分</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每个角色在哪个进程/线程里跑，以及一步推理跨了几次边界。</p>
+
+  <p>官方架构文档把 V1 的进程分成四类：API server、Engine Core、GPU worker，以及数据并行时才出现的 DP coordinator（docs/design/arch_overview.md:67-101）。API server 默认 1 个，开启 DP 后自动扩到 DP 个，可用 <code>--api-server-count</code> 覆盖；每个 API server 通过 ZMQ 与所有 Engine Core 做多对多连接（docs/design/arch_overview.md:75）。Engine Core 每个 DP rank 一个（docs/design/arch_overview.md:83），GPU worker 每个 GPU 一个，数量等于 <code>TP × PP</code>（docs/design/arch_overview.md:91）。</p>
+
+  <p class="tbl-cap">表 1 · 角色分工（源码锚点见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>角色</th><th>所在进程 / 线程</th><th>每个 step 的动作</th><th>源码锚点</th></tr></thead>
+      <tbody>
+        <tr><td>API server</td><td>API 进程 · asyncio 事件循环</td><td>HTTP、分词、多模态、反分词、SSE / JSON</td><td><code>docs/design/arch_overview.md:71</code></td></tr>
+        <tr><td>Engine Core</td><td>Engine Core 进程 · 主线程 busy loop</td><td>收请求、调度、发 RPC、更新输出</td><td><code>vllm/v1/engine/core.py:1764</code></td></tr>
+        <tr><td>socket IO</td><td>Engine Core 进程 · 两个后台线程</td><td>ZMQ 收包 / 发包；input 线程解 ADD 并调 <code>preprocess_add_request</code>，再队列化交给 busy loop</td><td><code>vllm/v1/engine/core.py:1393</code>、<code>vllm/v1/engine/core.py:2203</code></td></tr>
+        <tr><td>Executor</td><td>Engine Core 进程</td><td>把 SchedulerOutput 广播给 worker，聚合 ModelRunnerOutput</td><td><code>vllm/v1/executor/multiproc_executor.py:430</code></td></tr>
+        <tr><td>Worker</td><td>每 GPU 一个进程</td><td>前向、采样、管理本卡显存</td><td><code>vllm/v1/worker/gpu_worker.py:1541</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Engine Core 的忙循环在 <code>run_busy_loop</code> 里（core.py:1764）：先 <code>_process_input_queue</code> 把输入队列清到「有活可干」（core.py:1790），再 <code>_process_engine_step</code> 调一次 <code>step()</code> 并把输出塞进输出队列（core.py:1825）。<code>step()</code> 本身分四步：<code>scheduler.schedule</code> 生成 <code>SchedulerOutput</code>；<code>model_executor.execute_model(scheduler_output, non_block=True)</code> 发起异步执行；<code>_wait_for_output</code> 等结果，若模型输出为 <code>None</code> 再单独 <code>sample_tokens</code>；最后 <code>scheduler.update_from_output</code> 把采样结果并回请求状态（core.py:719-733）。</p>
+
+  <p>跨进 worker 进程的不是整批 prompt，而是 <code>SchedulerOutput</code> 里的「这一步每个请求要算多少 token」以及新增 block 的差分。MultiprocExecutor 在初始化时为每个本地 rank 启动一个 worker 进程（multiproc_executor.py:234），执行时通过 <code>collective_rpc</code> 把 <code>SchedulerOutput</code> 广播下去（multiproc_executor.py:430）；worker 的 <code>execute_model</code> 直接调用 model runner 做前向（gpu_worker.py:1541）。这条路径就是官方博客说的「worker 持有请求状态，只收差分」。</p>
+
+  <p>进程数的公式是 <code>A + DP + N</code>，DP &gt; 1 时再加 1 个 coordinator；其中 <code>N = DP × PP × TP</code>（docs/design/arch_overview.md:103-113）。代入单机 TP=4：1 个 API server + 1 个 Engine Core + 4 个 worker = 6 个进程（docs/design/arch_overview.md:117）。代入 TP=2、DP=4：4 个 API server + 4 个 Engine Core + 8 个 worker + 1 个 coordinator = 17 个进程（docs/design/arch_overview.md:125）。</p>
+
+  <p>这套布局把 Python 开销集中到了 Engine Core 的主循环，把分词、反分词和 HTTP 流式返回放回 API 进程；但 Engine Core 与 worker 之间的 RPC、以及 API 与 Engine Core 之间的 ZMQ 序列化并没有消失，只是被移到了「不在 GPU 关键路径上」的线程和进程里。socket IO 由两个后台线程处理（core.py:1393、core.py:1405），input 线程负责 ADD 请求的 <code>preprocess_add_request</code>（core.py:2203），busy loop 只碰队列；源码注释的说法是，这两个线程释放 GIL，从而把 ZMQ socket IO 与 GPU 执行重叠（core.py:1387-1389）。</p>
+</section>
+
+<!-- ================= 05 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>请求的一生要跨四次进程边界，文本只在 API 进程还原</h2></div>
+  <p class="sec-sub">读完这节你应该能指出：每个阶段发生在哪个进程，跨边界时传的是对象、张量，还是只有 token id。</p>
+
+  <figure>
+    <svg class="proc-svg" viewBox="0 0 960 330" role="img" aria-labelledby="procTitle procDesc">
+      <title id="procTitle">vLLM V1 进程与请求路径</title>
+      <desc id="procDesc">API server 进程通过 ZMQ 把 EngineCoreRequest 发给 Engine Core；Engine Core 调度后把 SchedulerOutput 交给 GPU worker；worker 返回 ModelRunnerOutput；Engine Core 再用 ZMQ 把 EngineCoreOutputs 发回 API 进程做反分词和流式返回。</desc>
+      <defs>
+        <marker id="arrHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect x="20" y="30" width="270" height="200" rx="14" fill="var(--bg-surface)" stroke="var(--border)" stroke-width="1.5"></rect>
+      <text class="t" x="42" y="64" font-size="21" fill="var(--text)">API Server 进程</text>
+      <text class="s" x="42" y="98" font-size="16">HTTP / OpenAI 路由</text>
+      <text class="s" x="42" y="126" font-size="16">InputProcessor 分词</text>
+      <text class="s" x="42" y="154" font-size="16">OutputProcessor 反分词</text>
+      <text class="s" x="42" y="182" font-size="16">AsyncLLM.generate 流式返回</text>
+      <text class="s" x="42" y="210" font-size="16">asyncio · 1 个进程（默认）</text>
+
+      <rect x="345" y="30" width="270" height="200" rx="14" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1.5"></rect>
+      <text class="t" x="367" y="64" font-size="21" fill="var(--text)">Engine Core 进程</text>
+      <text class="s" x="367" y="98" font-size="16">Scheduler：token 预算</text>
+      <text class="s" x="367" y="126" font-size="16">KVCacheManager：块分配</text>
+      <text class="s" x="367" y="154" font-size="16">EngineCore.step 忙循环</text>
+      <text class="s" x="367" y="182" font-size="16">input / output socket 线程</text>
+      <text class="s" x="367" y="210" font-size="16">主线程 + 2 个 IO 线程</text>
+
+      <rect x="670" y="30" width="270" height="200" rx="14" fill="var(--bg-surface)" stroke="var(--border)" stroke-width="1.5"></rect>
+      <text class="t" x="692" y="64" font-size="21" fill="var(--text)">GPU Worker 进程 × N</text>
+      <text class="s" x="692" y="98" font-size="16">WorkerProc / ModelRunner</text>
+      <text class="s" x="692" y="126" font-size="16">执行 SchedulerOutput</text>
+      <text class="s" x="692" y="154" font-size="16">前向、采样</text>
+      <text class="s" x="692" y="182" font-size="16">返回 ModelRunnerOutput</text>
+      <text class="s" x="692" y="210" font-size="16">N = TP × PP（每 core）</text>
+
+      <line x1="290" y1="92" x2="338" y2="92" stroke="var(--text-soft)" stroke-width="1.6" marker-end="url(#arrHead)"></line>
+      <circle cx="314" cy="92" r="13" fill="var(--accent-soft)"></circle>
+      <text x="314" y="97" font-size="14" text-anchor="middle" fill="var(--accent-deep)">1</text>
+
+      <line x1="615" y1="92" x2="663" y2="92" stroke="var(--text-soft)" stroke-width="1.6" marker-end="url(#arrHead)"></line>
+      <circle cx="639" cy="92" r="13" fill="var(--accent-soft)"></circle>
+      <text x="639" y="97" font-size="14" text-anchor="middle" fill="var(--accent-deep)">2</text>
+
+      <line x1="663" y1="182" x2="615" y2="182" stroke="var(--text-soft)" stroke-width="1.6" marker-end="url(#arrHead)"></line>
+      <circle cx="639" cy="182" r="13" fill="var(--accent-soft)"></circle>
+      <text x="639" y="187" font-size="14" text-anchor="middle" fill="var(--accent-deep)">3</text>
+
+      <line x1="338" y1="182" x2="290" y2="182" stroke="var(--text-soft)" stroke-width="1.6" marker-end="url(#arrHead)"></line>
+      <circle cx="314" cy="182" r="13" fill="var(--accent-soft)"></circle>
+      <text x="314" y="187" font-size="14" text-anchor="middle" fill="var(--accent-deep)">4</text>
+
+      <text x="20" y="272" font-size="15" fill="var(--text-muted)">1 · EngineCoreRequest（ZMQ）　　2 · SchedulerOutput（collective RPC）</text>
+      <text x="20" y="300" font-size="15" fill="var(--text-muted)">3 · ModelRunnerOutput　　4 · EngineCoreOutputs（ZMQ）　　5 · API 进程内：RequestOutput → SSE</text>
+    </svg>
+    <figcaption>图 1 · V1 在线 serving 的进程与数据流。API server 默认 1 个（docs/design/arch_overview.md:75）；worker 数 = TP × PP（docs/design/arch_overview.md:91）；API 与 Engine Core 之间走 ZMQ，Engine Core 与 worker 之间由 Executor 广播 SchedulerOutput（vllm/v1/executor/multiproc_executor.py:430）。文本的反分词不在这条 GPU 路径上，而在 API 进程完成（vllm/v1/engine/output_processor.py:731）。</figcaption>
+  </figure>
+
+  <p>下面的逐步展开把这条路径拆成 10 个可核对的阶段。每一步都标注了所在进程、动作和跨界对象；按钮只切换阶段，不改变任何参数。</p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <span class="pill pa">请求生命周期</span>
+      <span class="pill p1" id="life-count">阶段 1 / 10</span>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">进程 / 线程</div><div class="slot-val" id="life-proc">API Server 进程</div></div>
+      <div class="slot"><div class="slot-name">动作</div><div class="slot-val" id="life-action">OpenAI 路由</div></div>
+      <div class="slot"><div class="slot-name">跨界数据</div><div class="slot-val" id="life-data">JSON / SSE</div></div>
+    </div>
+
+    <div class="bar"><i class="b1" id="life-bar" style="width:0"></i></div>
+
+    <div class="readout" id="life-readout" data-src="vllm/entrypoints/openai/chat_completion/serving.py:397">
+      <div class="r-head" id="life-head">第 1 / 10 步 · HTTP 到达</div>
+      <div id="life-msg">请求进入 OpenAI chat completion 路由（vllm/entrypoints/openai/chat_completion/api_router.py:59），handler 调用 engine_client.generate（vllm/entrypoints/openai/chat_completion/serving.py:397）；此时还没有 token id。</div>
+    </div>
+
+    <div class="actions">
+      <button class="act" id="life-prev" disabled>上一步</button>
+      <button class="act primary" id="life-next">下一步</button>
+      <button class="act ghost" id="life-reset">回到起点</button>
+    </div>
+    <p class="life-note">阶段说明里的路径与行号都对应 commit e740bad；不是所有部署都走同一条路径，离线 <code>LLMEngine</code> 默认用 InprocClient（core_client.py:388），不经过 ZMQ。</p>
+  </div>
+
+  <p class="tbl-cap">表 2 · 四次进程边界的载体与方向</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>边界</th><th>方向</th><th>载体</th><th>源码锚点</th></tr></thead>
+      <tbody>
+        <tr><td>API → Engine Core</td><td>请求进入</td><td><code>EngineCoreRequest</code>（ZMQ）</td><td><code>vllm/v1/engine/core_client.py:1363</code> → <code>vllm/v1/engine/core.py:2131</code></td></tr>
+        <tr><td>Engine Core → Worker</td><td>调度下发</td><td><code>SchedulerOutput</code>（collective RPC）</td><td><code>vllm/v1/executor/multiproc_executor.py:430</code></td></tr>
+        <tr><td>Worker → Engine Core</td><td>执行返回</td><td><code>ModelRunnerOutput</code></td><td><code>vllm/v1/worker/gpu_worker.py:1541</code></td></tr>
+        <tr><td>Engine Core → API</td><td>输出回传</td><td><code>EngineCoreOutputs</code>（ZMQ）</td><td><code>vllm/v1/engine/core.py:2240</code> → <code>vllm/v1/engine/async_llm.py:894</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>注意最后一个边界的载荷：Engine Core 回传的最外层是 <code>EngineCoreOutputs</code>，其中包含每个请求的 <code>EngineCoreOutput</code>，字段是 <code>new_token_ids</code>、<code>finish_reason</code>、<code>new_logprobs</code> 等（scheduler.py:2607），不是文本。文本要到 API 进程的 <code>OutputProcessor.process_outputs</code> 里才由增量 detokenizer 还原（output_processor.py:731、output_processor.py:828）：fast detokenizer 走 Rust tokenizers 的 <code>DecodeStream</code>，只有 slow 路径才在 Python 里解码。这条分工把「每个输出 token 的文本解码」从 Engine Core 的关键路径上拿掉了。</p>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>拆开之后，行为落在进程数、预算和块数三个可核对处</h2></div>
+  <p class="sec-sub">读完这节你应该知道：这套结构改变了哪些可观察行为，哪些数字能直接对上文档和源码。</p>
+
+  <p>V1 是一个系统实现，不是一篇带 benchmark 表的论文；这一节不引用吞吐提升数字，只核对结构带来的三个可计算后果。第一个后果是进程数。按 <code>A + DP + N</code>（DP &gt; 1 时再加 coordinator）的公式，单机与多 DP 的进程数如下。</p>
+
+  <p class="tbl-cap">表 3 · 进程数（按 docs/design/arch_overview.md:103-125 的公式与示例）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>部署</th><th>API server</th><th>Engine Core</th><th>GPU worker</th><th>Coordinator</th><th>总计</th></tr></thead>
+      <tbody>
+        <tr><td>TP=4，DP=1</td><td class="num">1</td><td class="num">1</td><td class="num">4</td><td class="num">0</td><td class="num">6</td></tr>
+        <tr><td>TP=2，DP=4</td><td class="num">4</td><td class="num">4</td><td class="num">8</td><td class="num">1</td><td class="num">17</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>2048 只是一个档位，不是所有部署的生效值。<code>SchedulerConfig</code> 的字段默认值（2048 / 128，vllm/config/scheduler.py:41、vllm/config/scheduler.py:43）会在 <code>EngineArgs</code> 创建配置时按设备显存和 usage context 覆盖：同一个 OpenAI API server 入口，在 ≥160GiB 的 GPU 上默认 16384 tokens / 1024 seqs，在 H100/H200 上默认 8192 / 1024，在其他 GPU（含 A100）上默认 2048 / 256（vllm/engine/arg_utils.py:3004-3037）。本页交互固定用 2048 / 256 这一档做算术示例；换档后预算和单步可处理的最大块数按同一比例放大（受 prompt 长度限制），调度顺序不变。</p>
+
+  <p class="tbl-cap">表 4 · EngineArgs 按设备与 usage context 解析的 API server 默认值（源码：vllm/engine/arg_utils.py）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>设备档位</th><th>max_num_batched_tokens</th><th>max_num_seqs</th><th>源码锚点</th></tr></thead>
+      <tbody>
+        <tr><td>≥160GiB GPU（如 B200 / B300）</td><td class="num">16384</td><td class="num">1024</td><td><code>arg_utils.py:3004-3013</code></td></tr>
+        <tr><td>≥70GiB 且非 A100 / GB10（如 H100 / H200）</td><td class="num">8192</td><td class="num">1024</td><td><code>arg_utils.py:3014-3027</code></td></tr>
+        <tr><td>其他 GPU（含 A100）</td><td class="num">2048</td><td class="num">256</td><td><code>arg_utils.py:3028-3037</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>第二个后果是预算和块的换算。在本页的 2048 档示例里，一个满预算的 step 最多新算 <code data-src="vllm/engine/arg_utils.py:3032">2048</code> 个 token，按 <code data-src="vllm/config/cache.py:185">64</code> tokens/block 切分；不考虑 prefix cache 命中时，最多涉及 32 个新 block（2048 ÷ 64 = 32）。假设这一步有 128 个 running decode 请求，它们先吃掉 128 个 token，留给 waiting prefill 的预算是 1920 个 token；chunked prefill 因此可以和 decode 共享同一个 token 预算。反过来说，running 越多，单个 waiting 请求单步能拿到的 prefill chunk 越短，长 prompt 的完成步数就越多。<span class="infer">推断</span>（由预算固定、chunk 变小推出）</p>
+
+  <p>第三个后果是默认行为的组合。V1 的 prefix caching 默认开启（vllm/config/cache.py:260）；调度器在接纳 waiting 请求前先查 <code>get_computed_blocks</code>（kv_cache_manager.py:288），命中部分直接从 <code>num_computed_tokens</code> 里扣掉，不重复计算。chunked prefill 也默认开启（vllm/config/scheduler.py:147），所以长 prompt 可以被切进多个 step，而不是占住整条 GPU 直到算完。两者叠加，调度器才有条件把「一个新请求」和「一批 decode」放进同一个 token 预算里。</p>
+
+  <p>这三条也解释了为什么 V1 的 API 进程仍然重要：它承担了所有请求的分词与反分词、HTTP 连接和流式输出。官方文档专门提醒，V1 的进程布局会直接影响 CPU 资源的配置（docs/design/arch_overview.md:67-69）；把 Engine Core 独立出来后，CPU 预算要按 API 进程与 Engine Core 分别计算，而不是按一个进程估算。<span class="infer">推断</span>（由进程拆分后的 CPU 归属推出）</p>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：每个 DP rank 仍是一条串行调度线，预算和块数仍是硬约束</h2></div>
+  <p class="sec-sub">读完这节你应该知道：什么时候这套架构会卡住，以及哪些问题不在本页的覆盖范围内。</p>
+
+  <ul class="limit-list">
+    <li><strong>单 rank 内调度仍是串行。</strong>每个 DP rank 只有一个 Engine Core 进程（docs/design/arch_overview.md:83），<code>schedule()</code> 在主线程里一次处理一个 step。横向扩展的单位是 DP rank：每个 rank 一个 Engine Core，各自持有独立的 KV 池<span class="infer">推断</span>（由每 rank 独立进程与各自的 KV cache manager 推出）。跨 rank 的负载均衡由 DP coordinator 负责（docs/design/arch_overview.md:95）。</li>
+    <li><strong>token 预算封顶每步工作量。</strong>本页示例档的预算是 <code data-src="vllm/engine/arg_utils.py:3032">2048</code> 个 token（H100/H200 档为 8192，见 §06 表 4）；更长的 prompt 会被切成多个 chunk，首 token 延迟随之拉长。<span class="infer">推断</span>（由 token 预算与 chunked prefill 的定义推出）：预算调大能减少 chunk 数，但会增加单步的 GPU 时间与调度粒度；预算调小则相反。这个权衡不是架构能消除的，只能按负载选择。</li>
+    <li><strong>KV block 不足时只能不接纳或抢占。</strong>block 的 <code>CacheConfig</code> 字段默认值是 <code data-src="vllm/config/cache.py:185">64</code> tokens；<code>allocate_slots</code> 返回 <code>None</code> 时，waiting 请求本步不进入 batch（kv_cache_manager.py:401）；running 请求需要新块而池子已空时，调度器抢占并让请求回到 waiting（scheduler.py:1876）。V1 不做 CPU swap，恢复靠重算或 prefix cache / KV connector（docs/design/arch_overview.md:156-171）。长上下文、高并发、低显存三者同时出现时，<code>allocate_slots</code> 会先返回 <code>None</code>。</li>
+    <li><strong>API 进程仍要逐 token 反分词。</strong>每个输出 token 都要经过 <code>OutputProcessor.process_outputs</code> 的增量 detokenizer（output_processor.py:731、output_processor.py:828）；请求数很多时，这部分 CPU 成本会回到 API 进程。V1 把它移出了 Engine Core，但没有让它在端到端路径上消失。</li>
+    <li><strong>进程数本身是开销。</strong>TP=4 单机就有 6 个进程（docs/design/arch_overview.md:117）；TP=2、DP=4 是 17 个（docs/design/arch_overview.md:125）。每个进程有自己的 Python 解释器；每个 GPU worker 有自己的 CUDA context；跨进程还有 ZMQ / RPC 序列化成本。<span class="infer">推断</span>（由进程数公式与每进程固定开销推出）：小模型、单卡、低并发时，进程拆分的收益可能抵不过固定开销；离线 <code>LLMEngine</code> 默认走 InprocClient（core_client.py:388），就是把 Engine Core 放回同进程的路径。</li>
+    <li><strong>本页未覆盖的分支。</strong>异步调度（<code>async_scheduler.py</code>）、投机解码、KV connector、disaggregated prefill/decode、多模态 encoder cache 都会改变上面的时序或载荷。第 03 节的交互是简化模型：只算 running decode 每请求 1 token 与 prefill 新块，不含 prefix cache 命中、投机 token、decode 跨 block 与抢占重算；它对应 <code>scheduler.py:721</code> 的主干，不对应所有分支。</li>
+  </ul>
+</section>
+
+<footer>
+  <div>vLLM V1 · 整体架构与请求生命周期（commit e740badc2e3df13a5c2abfca04ed0ac917985c5f）</div>
+  <div class="src">
+    源码：<a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">github.com/vllm-project/vllm</a><br>
+    文档：<a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/arch_overview.md" target="_blank" rel="noopener">docs/design/arch_overview.md · commit e740bad</a><br>
+    笔记：<a href="/nano-vllm%E9%98%85%E8%AF%BB%E7%AC%94%E8%AE%B0/">nano-vllm 全代码精读笔记</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var stages = [
+    {
+      proc: 'API Server 进程',
+      action: 'OpenAI 路由',
+      data: 'JSON / SSE',
+      title: 'HTTP 到达',
+      msg: '请求进入 OpenAI chat completion 路由（vllm/entrypoints/openai/chat_completion/api_router.py:59），handler 调用 engine_client.generate（chat_completion/serving.py:397）；此时还没有 token id。'
+    },
+    {
+      proc: 'API Server · InputProcessor',
+      action: '分词 / 多模态',
+      data: 'prompt → token ids',
+      title: '变成 EngineCoreRequest',
+      msg: 'AsyncLLM.add_request 调 InputProcessor.process_inputs_async（vllm/v1/engine/async_llm.py:514）；该异步包装由 make_async 提供（input_processor.py:82），分词不阻塞事件循环。最终返回 EngineCoreRequest（input_processor.py:554）。'
+    },
+    {
+      proc: 'API Server · OutputProcessor',
+      action: '建 RequestState',
+      data: 'RequestOutputCollector',
+      title: '注册输出状态',
+      msg: 'output_processor.add_request（async_llm.py:595）为请求创建 RequestState；若 tokenizer 可用，同时创建增量 detokenizer（vllm/v1/engine/detokenizer.py:52）。这一步发生在请求发给 Engine Core 之前。'
+    },
+    {
+      proc: 'API → Engine Core · ZMQ',
+      action: 'add_request_async',
+      data: 'EngineCoreRequest',
+      title: '跨进程递交',
+      msg: 'AsyncMPClient.add_request_async（vllm/v1/engine/core_client.py:1363）把 EngineCoreRequest 编码后经 ZMQ 发往 Engine Core。API server 与所有 Engine Core 是多对多连接（docs/design/arch_overview.md:75）。'
+    },
+    {
+      proc: 'Engine Core · input socket 线程',
+      action: '收包、解 ADD、预处理',
+      data: 'msgpack → (Request, request_wave)',
+      title: '预处理后进入输入队列',
+      msg: 'process_input_sockets（vllm/v1/engine/core.py:2131）收取 ZMQ 消息，解出 EngineCoreRequestType.ADD，并在 core.py:2203 调 preprocess_add_request 把 EngineCoreRequest 转成 (Request, request_wave)，随后在 core.py:2238 投递 input_queue；busy loop 的 _process_input_queue 随后取走。'
+    },
+    {
+      proc: 'Engine Core · 主线程 busy loop',
+      action: '分派已预处理的 ADD',
+      data: 'Request 进入 waiting',
+      title: '调度器入队',
+      msg: 'busy loop 的 _handle_client_request（core.py:1933-1937）从 input_queue 取出已预处理的 (Request, request_wave)，分派 ADD；随后调用 EngineCore.add_request（core.py:560）→ Scheduler.add_request（vllm/v1/core/sched/scheduler.py:3097），请求进入 waiting 队列。'
+    },
+    {
+      proc: 'Engine Core · Scheduler',
+      action: '组 batch',
+      data: 'SchedulerOutput',
+      title: '按 token 预算调度',
+      msg: 'Scheduler.schedule（scheduler.py:721）先遍历 running（scheduler.py:815），再遍历 waiting（scheduler.py:1071）；KV 分配由 KVCacheManager.allocate_slots 完成（vllm/v1/core/kv_cache_manager.py:401）。输出的 SchedulerOutput 核心字段是每请求这一步要算多少 token。'
+    },
+    {
+      proc: 'Engine Core → GPU Worker',
+      action: 'execute_model',
+      data: 'SchedulerOutput → ModelRunnerOutput',
+      title: 'Worker 执行前向',
+      msg: 'EngineCore.step 调 model_executor.execute_model（core.py:720）；MultiprocExecutor 通过 collective_rpc 把 SchedulerOutput 广播给 worker（multiproc_executor.py:430），worker 的 execute_model（gpu_worker.py:1541）在 GPU 上做前向和采样。'
+    },
+    {
+      proc: 'Engine Core · Scheduler',
+      action: 'update_from_output',
+      data: 'EngineCoreOutputs',
+      title: '更新请求并回传',
+      msg: 'scheduler.update_from_output（scheduler.py:2335）把采样的 token 追加到请求、检查停止条件，生成 EngineCoreOutput（scheduler.py:2607）；Engine Core 的 output socket 线程再把 EngineCoreOutputs 发回 API 进程（core.py:2240）。'
+    },
+    {
+      proc: 'API Server · output_handler',
+      action: '反分词 / 流式返回',
+      data: 'RequestOutput → SSE',
+      title: '文本回到客户端',
+      msg: 'AsyncLLM 的 output_handler（async_llm.py:894）拉取 EngineCoreOutputs，OutputProcessor.process_outputs（vllm/v1/engine/output_processor.py:731）做增量反分词并检查 stop string（output_processor.py:828），把 RequestOutput 放入队列；generate() 取到后 yield 给 HTTP 层（async_llm.py:809-816）。'
+    }
+  ];
+
+  var procEl = document.getElementById('life-proc');
+  var actionEl = document.getElementById('life-action');
+  var dataEl = document.getElementById('life-data');
+  var headEl = document.getElementById('life-head');
+  var msgEl = document.getElementById('life-msg');
+  var countEl = document.getElementById('life-count');
+  var barEl = document.getElementById('life-bar');
+  var prevBtn = document.getElementById('life-prev');
+  var nextBtn = document.getElementById('life-next');
+  var resetBtn = document.getElementById('life-reset');
+  if (!procEl || !actionEl || !dataEl || !headEl || !msgEl || !countEl || !barEl || !prevBtn || !nextBtn || !resetBtn) return;
+
+  var idx = 0;
+
+  function renderLife() {
+    var s = stages[idx];
+    procEl.textContent = s.proc;
+    actionEl.textContent = s.action;
+    dataEl.textContent = s.data;
+    headEl.textContent = '第 ' + (idx + 1) + ' / ' + stages.length + ' 步 · ' + s.title;
+    msgEl.textContent = s.msg;
+    countEl.textContent = '阶段 ' + (idx + 1) + ' / ' + stages.length;
+    barEl.style.width = ((idx + 1) / stages.length * 100) + '%';
+    prevBtn.disabled = idx === 0;
+    nextBtn.disabled = idx === stages.length - 1;
+  }
+
+  prevBtn.addEventListener('click', function () {
+    if (idx > 0) { idx -= 1; renderLife(); }
+  });
+  nextBtn.addEventListener('click', function () {
+    if (idx < stages.length - 1) { idx += 1; renderLife(); }
+  });
+  resetBtn.addEventListener('click', function () {
+    idx = 0; renderLife();
+  });
+
+  renderLife();
+})();
+
+(function () {
+  var runInput = document.getElementById('bs-run');
+  var promptInput = document.getElementById('bs-prompt');
+  var freeInput = document.getElementById('bs-free');
+  var runVal = document.getElementById('bs-run-v');
+  var promptVal = document.getElementById('bs-prompt-v');
+  var freeVal = document.getElementById('bs-free-v');
+  var decEl = document.getElementById('bs-dec');
+  var chunkEl = document.getElementById('bs-chunk');
+  var blocksEl = document.getElementById('bs-blocks');
+  var decBar = document.getElementById('bs-dec-bar');
+  var preBar = document.getElementById('bs-pre-bar');
+  var kvBar = document.getElementById('bs-kv-bar');
+  var msgEl = document.getElementById('bs-msg');
+  if (!runInput || !promptInput || !freeInput || !runVal || !promptVal || !freeVal || !decEl || !chunkEl || !blocksEl || !decBar || !preBar || !kvBar || !msgEl) return;
+
+  var BUDGET = 2048;
+  var BLOCK = 64;
+  var MAX_SEQS = 256;
+
+  function ceilDiv(a, b) {
+    return Math.floor((a + b - 1) / b);
+  }
+
+  function renderBatch() {
+    var running = parseInt(runInput.value, 10);
+    var prompt = parseInt(promptInput.value, 10);
+    var free = parseInt(freeInput.value, 10);
+
+    var decode = Math.min(running, BUDGET);
+    var prefillBudget = BUDGET - decode;
+    var chunk = Math.min(prompt, prefillBudget);
+    var chunks = ceilDiv(prompt, prefillBudget);
+    var blocks = ceilDiv(chunk, BLOCK);
+    var seqsFull = running >= MAX_SEQS;
+    var fits = !seqsFull && blocks <= free;
+
+    runVal.textContent = String(running);
+    promptVal.textContent = String(prompt);
+    freeVal.textContent = String(free);
+
+    decEl.textContent = decode + ' tokens';
+    chunkEl.textContent = chunk + ' tokens';
+    blocksEl.textContent = blocks + ' blocks';
+    decBar.style.width = (decode / BUDGET * 100) + '%';
+    preBar.style.width = (chunk / BUDGET * 100) + '%';
+    kvBar.style.width = Math.min(blocks / 64 * 100, 100) + '%';
+
+    var head = '预算 ' + BUDGET + ' = decode ' + decode + ' + prefill ' + chunk + '；首块需 ' + blocks + ' 个 KV block（' + BLOCK + ' tokens/块）。';
+    var tail;
+    if (seqsFull) {
+      tail = 'running 已达 max_num_seqs=' + MAX_SEQS + '，本步不接纳新的 waiting 请求；调度器只允许已在途的异步 KV load 推进（scheduler.py:1102）。';
+    } else if (!fits) {
+      tail = '首块需 ' + blocks + ' 块，空闲只有 ' + free + ' 块：本步不接纳该 waiting 请求（allocate_slots 返回 None，kv_cache_manager.py:401）。';
+    } else {
+      tail = '首块 ' + blocks + ' 块 ≤ 空闲 ' + free + ' 块：本步可接纳该 waiting 请求；prompt 共需 ' + chunks + ' 个 prefill step。';
+    }
+    msgEl.textContent = head + ' ' + tail;
+  }
+
+  runInput.addEventListener('input', renderBatch);
+  promptInput.addEventListener('input', renderBatch);
+  freeInput.addEventListener('input', renderBatch);
+
+  renderBatch();
+})();
+</script>
+</body>
+</html>

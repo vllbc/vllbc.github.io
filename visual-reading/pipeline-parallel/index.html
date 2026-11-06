@@ -1,0 +1,901 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 17.9 | §2.3 | (8-1)/(32+8-1)*100 |
+| 27.3 | §2.3 | (4-1)/(8+4-1)*100 |
+| 22 | §2.3 | 2*(8+4-1) |
+| 16 | §2.3 | 2*8 |
+| 6 | §2.3 | 2*(8+4-1)-2*8 |
+| 78 | §2.3 | 2*(32+8-1) |
+| 64 | §2.3 | 2*32 |
+| 14 | §2.3 | 2*(32+8-1)-2*32 |
+| 2.80 | Table 1 | 6.26-3.46 |
+| 44.7 | Table 1 | (6.26-3.46)/6.26*100 |
+| 3.5 | Table 2 | 6.3/1.8 |
+| 2.9 | Table 2 | 3.48/1.21 |
+| 72.7 | §2.3 | 2*8/(2*(8+4-1))*100 |
+| 82.1 | §2.3 | 2*32/(2*(32+8-1))*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v5">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Parallel · 气泡、micro-batch 与 1F1B 调度</title>
+<meta name="description" content="GPipe 的 all-F-all-B、1F1B 与交错 1F1B：用 p 和 m 算气泡比例，用 Megatron 源码看 schedule 怎么排。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的时间线与 SVG 微调；公共样式一律来自 base.css */
+.pp-tl{display:flex;flex-direction:column;gap:3px;margin:12px 0 4px}
+.pp-row{display:flex;align-items:center;gap:8px;min-width:0}
+.pp-lab{flex:0 0 28px;width:28px;text-align:right;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft)}
+.pp-cells{flex:1 1 auto;min-width:0;display:grid;gap:1px}
+.pp-cell{display:block;height:13px;border-radius:1px;background:var(--border)}
+.pp-cell.f{background:var(--c1);opacity:.88}
+.pp-cell.b{background:var(--c2);opacity:.88}
+.pp-cell.idle{background:repeating-linear-gradient(135deg,var(--border-strong) 0 1px,var(--bg-soft) 1px 4px)}
+.pp-axis{display:flex;justify-content:space-between;margin:2px 0 0 36px;font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--text-soft)}
+.pp-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--text-soft);margin:8px 0 0}
+.pp-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.pp-legend i.f{background:var(--c1)}
+.pp-legend i.b{background:var(--c2)}
+.pp-legend i.idle{background:repeating-linear-gradient(135deg,var(--border-strong) 0 1px,var(--bg-soft) 1px 4px)}
+.pp-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:8px}
+.pp-stats > div{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px}
+.pp-stats span{display:block;font-size:10.5px;color:var(--text-soft);font-family:"JetBrains Mono",monospace}
+.pp-stats strong{display:block;font-family:"JetBrains Mono",monospace;font-size:18px;color:var(--accent-deep);line-height:1.3}
+.pp-svg-title{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:600;fill:var(--text)}
+.pp-svg-sub{font-family:"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-soft)}
+.pp-svg-lab{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+.pp-svg-tick{font-family:"JetBrains Mono",monospace;font-size:9px;fill:var(--text-soft)}
+.pp-svg-axis{stroke:var(--border-strong);stroke-width:1}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+th.num{text-align:right}
+.tbl-scroll table.wide{min-width:680px}
+@media (max-width:880px){
+  .pp-stats{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:500px){
+  .pp-cells{gap:0}
+  .pp-cell{height:10px}
+  .pp-lab{flex-basis:22px;width:22px;font-size:9px}
+  .pp-axis{margin-left:30px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Pipeline Parallel</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">气泡公式</a>
+      <a href="#train">Megatron 实现</a>
+      <a href="#timeline">时间线</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Systems · Pipeline Parallel · NeurIPS 2019</span>
+  <h1>Pipeline Parallel：把模型切成段，让 micro-batch 排进流水线</h1>
+  <p class="hero-sub">
+    单卡放不下模型时，最直接的办法是按层切成 <code>p</code> 段，段间只传边界 activation。但流水线会空转（bubble），而且
+    GPipe 的 all-F-all-B 必须同时留住 <code>m</code> 个 micro-batch 的激活。1F1B 不减少气泡，却把激活驻留从
+    <code>O(m)</code> 压到 <code>O(p)</code>；interleaved 1F1B 再用 extra communication 换更小的气泡。
+  </p>
+  <div class="meta">
+    <span>Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Mia Xu Chen, Dehao Chen, et al.</span>
+    <a href="https://arxiv.org/abs/1811.06965v5" target="_blank" rel="noopener">arXiv 1811.06965v5 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a269ddf45b6f5b237aff6668fd1ddd79ef2d" target="_blank" rel="noopener">Megatron-Core @ 70f7a26 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    Pipeline parallelism 不减少总计算量。它把模型按层切成 <code>p</code> 段，把 mini-batch 切成 <code>m</code> 个
+    micro-batch，让不同段同时开工。它解决的是「模型放不下」，不是「单卡算得慢」。
+  </p>
+  <p>
+    <strong>GPipe</strong> 的 schedule 最保守：先把 <code>m</code> 个 micro-batch 的 forward 全做完，再统一做 backward，
+    梯度累积后一次更新。好处是语义和串行训练等价；代价是首尾各有 <code>p−1</code> 段空转，而且要把 <code>m</code>
+    个 micro-batch 的激活都留着。
+  </p>
+  <p>
+    <strong>1F1B</strong> 把 steady state 改成一 forward 一 backward，在飞的 micro-batch 最多 <code>p</code> 个，
+    激活显存从 <code>O(m)</code> 降到 <code>O(p)</code>；气泡总量不变。Megatron 默认走这条。
+  </p>
+  <p>
+    <strong>Interleaved 1F1B</strong> 让每张卡持有 <code>v</code> 个 model chunk，气泡约按 <code>1/v</code> 缩小，
+    但 p2p 通信约按 <code>v</code> 增加，而且 <code>m</code> 要按 <code>p</code> 分组。三种 schedule 的取舍，
+    最终由「显存、气泡、互连」三者谁先卡住决定。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§2.3">17.9<small>%</small></div>
+      <div class="k">p=8、m=32 时的气泡占比<br>(8−1)/(32+8−1) = 7/39</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">32</div>
+      <div class="k">K=8 时取 M=32（=4K）<br>§2.3 实验观察：M ≥ 4K 时气泡可忽略</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">3.46<small>GB</small></div>
+      <div class="k">AmoebaNet-D 重算后的峰值激活显存<br>未重算为 6.26 GB</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>模型放不下时，切层是最直接的路——但流水线会空转</h2></div>
+  <p class="sec-sub">先把 <code>p</code>、<code>m</code>、<code>F</code>、<code>B</code> 四个量定清楚；后面所有时间线都只用它们。</p>
+
+  <p>
+    数据并行（DP）把 batch 切开，每张卡仍要放一份完整模型，显存不降。张量并行（TP）把每层的 GEMM 切开，
+    每层都要 all-reduce，跨节点带宽吃不消。流水线并行（PP）换一个维度：按层把模型切成 <code>p</code> 段，
+    每段放一张卡（或一组卡），段间只传边界 activation。
+  </p>
+
+  <p>
+    为了让 <code>p</code> 段同时忙起来，PP 把 mini-batch 再切成 <code>m</code> 个 micro-batch。每个 stage
+    对每个 micro-batch 做一次 forward（<code>F</code>）和一次 backward（<code>B</code>）。stage s 的 F 要等
+    stage s−1 的输出，B 要等 stage s+1 的梯度——这就是流水线的依赖链。
+  </p>
+
+  <p>
+    依赖链的代价是<strong>气泡（bubble）</strong>：开始时要等 <code>p−1</code> 个 stage 依次拿到第一个 activation，
+    结束时要等 <code>p−1</code> 个 stage 依次把梯度传回去。m 越大，这段固定开销越容易被摊薄；p 越大，首尾空转越长。
+  </p>
+
+  <p>
+    第二个代价是<strong>激活显存</strong>。做 B 的时候要用 F 时留下的 activation。GPipe 把 m 个 micro-batch 的 F
+    全做完才做 B，所以这 m 份激活都得留着；1F1B 在 steady state 里一 forward 一 backward，最多只留 p 份。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">两个成本</span><h4>气泡决定吞吐，激活决定能不能开得动</h4></div>
+    <p><strong>气泡：</strong>p 段流水线在首尾各有 p−1 段空转；m 越大越不明显。公式见 03 节。</p>
+    <p><strong>激活：</strong>GPipe 需要保留 m 个 micro-batch 的激活；1F1B 只保留至多 p 个。后者是 Megatron 默认 1F1B 的直接原因。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>GPipe 用同步换正确性，1F1B 用调度换显存</h2></div>
+  <p class="sec-sub">两条路线的分歧不在数学，而在「什么时候做 backward」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">GPipe</span><h4>all-F → all-B</h4></div>
+      <p>先把 m 个 micro-batch 的 forward 全部跑完，再按相反顺序做 backward；所有梯度在 mini-batch 结束时累加并更新一次。</p>
+      <p><strong>优点：</strong>同步语义，结果与把整个 batch 放一张卡上训练等价（同样的数值精度下）。论文 §2.2 的原话是 “gradients from all M micro-batches are accumulated and applied to update the model parameters”。</p>
+      <p><strong>代价：</strong>激活驻留 <code>O(m)</code>，首尾气泡集中。论文 §2.3 说气泡时间是 <code>O((K−1)/(M+K−1))</code>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">1F1B</span><h4>warmup → steady → cooldown</h4></div>
+      <p>首 stage（rank 0）的 warmup 做 p−1 个 forward；steady state 每步一 forward 一 backward；cooldown 再做 p−1 个 backward。一般 stage 的 warmup/cooldown 数为 p−rank−1（见 04 节）。</p>
+      <p><strong>优点：</strong>在飞的 micro-batch 最多 p 个，激活从 <code>O(m)</code> 降到 <code>O(p)</code>；steady state 里每个 stage 交替干活，PipeDream §3.3 称其在 balanced pipeline 中“no GPU is idle in steady state”。</p>
+      <p><strong>代价：</strong>气泡总量不变。SC21 §2.2.1 明确说 “The time spent in the bubble is the same for this new schedule”，省下来的是显存。Megatron 用的是带 batch 末尾 flush 的同步版本（PipeDream-Flush）。</p>
+    </div>
+  </div>
+
+  <p>三种 schedule 的差别可以压成一张表（据 GPipe §2.3、PipeDream §3.3、SC21 §2.2 与 Megatron 源码整理；不是原文表格）：</p>
+  <div class="tbl-scroll">
+    <table class="wide">
+      <thead>
+        <tr><th>schedule</th><th>执行顺序</th><th>气泡</th><th>激活驻留</th><th>语义 / 用在</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GPipe</td><td>all-F → all-B</td><td>(p−1)/(m+p−1)</td><td>m 个 micro-batch</td><td>同步；GPipe</td></tr>
+        <tr><td>1F1B</td><td>首 stage：warmup p−1 F → steady F/B → cooldown p−1 B</td><td>与 GPipe 相同</td><td>≤ p 个</td><td>同步 flush；Megatron 默认</td></tr>
+        <tr><td>Interleaved 1F1B</td><td>每卡 v 个 chunk，按 chunk 交错</td><td>约 1/v</td><td>与非交错相当</td><td>同步；Megatron VPP</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这里要区分 PipeDream 原版和 Megatron 的 1F1B：PipeDream 用 weight stashing 让异步流水线的权重版本一致
+    （PipeDream §3.4，按 arXiv 1806.03377v1 的编号；SOSP 版章节号可能不同），而 Megatron 的 1F1B 在每个 batch 末尾做 flush，保持同步语义（SC21 §2.2.1 称之为
+    PipeDream-Flush）。本页的时间线按后者画。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>气泡的公式只有一行，难的是把它排进时间线</h2></div>
+  <p class="sec-sub">调 p 和 m，直接看气泡怎么被摊薄；再切换 GPipe/1F1B，看同样的气泡被放在哪里。</p>
+
+  <div class="eq">
+    bubble fraction = <span class="hl-a">(p − 1)</span> / <span class="hl-b">(m + p − 1)</span>
+  </div>
+  <div class="eq-cap">GPipe §2.3：气泡时间 O((K−1)/(M+K−1))，本页用 p、m 代替 K、M；假设每个 F/B 各占 1 个时间单位</div>
+
+  <p>
+    p 是 stage 数，m 是 micro-batch 数。总时间线长度是 <code>2(m+p−1)</code> 个时间单位：m 个 F + m 个 B +
+    首尾各 p−1 个空转。理想时间是 <code>2m</code>；差值 <code>2(p−1)</code> 就是气泡。m 相对 p 越大，气泡占比越低。
+  </p>
+
+  <p>
+    论文的实验观察是 <strong>M ≥ 4×K 时气泡开销可忽略</strong>（§2.3）。这是吞吐实验的结论；上面的 1:1 公式给的是
+    时间线占比，两者不是同一把尺子<span class="infer">推断</span>（§2.3 同时给出公式与实验观察，未说明二者如何换算）。
+    公式用来比较 p、m 的相对影响，不用来复现论文的实测吞吐。
+  </p>
+
+  <h3>自己动手：拖 p 和 m，切换 GPipe / 1F1B</h3>
+  <p>
+    下面是最小时间线模拟：每个 stage 一行，横轴是时间；绿色是 forward，紫色是 backward，斜线格是 bubble。
+    切换 schedule 只改变 F/B 的顺序，不改变总计算量。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" id="pp-modes">
+      <button class="rule-btn active" data-mode="1f1b">1F1B<span class="r-sub">warmup → steady → cooldown</span></button>
+      <button class="rule-btn" data-mode="gpipe">GPipe<span class="r-sub">all-F → all-B</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label for="pp-p">pipeline stages <span class="v" id="pp-p-v">4</span></label>
+        <input type="range" id="pp-p" min="2" max="8" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label for="pp-m">micro-batches <span class="v" id="pp-m-v">8</span></label>
+        <input type="range" id="pp-m" min="2" max="32" step="1" value="8">
+      </div>
+    </div>
+
+    <div id="pp-timeline" aria-live="polite"></div>
+    <div class="pp-legend">
+      <span><i class="f"></i>forward</span>
+      <span><i class="b"></i>backward</span>
+      <span><i class="idle"></i>bubble</span>
+    </div>
+
+    <div class="readout" data-src="§2.3">
+      <div class="r-head">时间线与气泡</div>
+      <div class="pp-stats">
+        <div><span>气泡占比</span><strong id="pp-bubble">27.3%</strong></div>
+        <div><span>总时长</span><strong id="pp-total">22</strong></div>
+        <div><span>理想时长</span><strong id="pp-ideal">16</strong></div>
+        <div><span>气泡格</span><strong id="pp-idle">6</strong></div>
+        <div><span>有效计算</span><strong id="pp-eff">72.7%</strong></div>
+      </div>
+    </div>
+
+    <div class="readout" data-src="SC21 §2.2.1">
+      <div class="r-head">激活驻留（micro-batch 数，示意）</div>
+      <div class="pp-stats">
+        <div><span>GPipe</span><strong id="pp-act-gpipe">8</strong></div>
+        <div><span>1F1B</span><strong id="pp-act-1f1b">4</strong></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act" id="pp-reset">恢复默认 p=4, m=8</button>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两组参数<span class="sum-sub">与上方读数逐位一致</span></summary>
+    <div class="details-body">
+      <p>口径：F 和 B 各占 1 个时间单位；p 个 stage；m 个 micro-batches；忽略通信与重算。气泡比例 = (p−1)/(m+p−1)。</p>
+      <p><strong>① p=4, m=8</strong><br>
+      气泡 = (4−1)/(8+4−1) = 3/11 = 0.272727… → <code>27.3%</code><br>
+      总时长 = 2×(8+4−1) = <code>22</code>；理想 = 2×8 = <code>16</code>；气泡格 = 22−16 = <code>6</code><br>
+      有效计算 = 16/22 = 0.727272… → <code>72.7%</code><br>
+      激活驻留：GPipe <code>8</code>；1F1B <code>min(4,8)=4</code>。</p>
+      <p><strong>② p=8, m=32</strong><br>
+      气泡 = (8−1)/(32+8−1) = 7/39 = 0.179487… → <code>17.9%</code><br>
+      总时长 = 2×(32+8−1) = <code>78</code>；理想 = 2×32 = <code>64</code>；气泡格 = 78−64 = <code>14</code><br>
+      有效计算 = 64/78 = 0.820512… → <code>82.1%</code><br>
+      激活驻留：GPipe <code>32</code>；1F1B <code>min(8,32)=8</code>。</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个时间线简化了什么？<span class="sum-sub">不是 Megatron 的完整实现</span></summary>
+    <div class="details-body">
+      <p><strong>覆盖：</strong>GPipe 的 all-F→all-B 全局屏障；1F1B 的 warmup/steady/cooldown 顺序；stage 间 F/B 依赖；
+      两种 schedule 在同样 p、m 下的总时长与空转格数。</p>
+      <p><strong>未覆盖：</strong>真实 F/B 时间不相等（通常 backward 更贵）；p2p 通信与计算的重叠；re-materialization；
+      负载不均衡；interleaved 的 virtual chunks；MoE、CP 等额外并行轴。</p>
+      <p>因此这里只模拟「调度顺序」对气泡位置和总量的影响，不模拟吞吐绝对值。真实实现见 Megatron
+      <code>schedules.py</code> 与 <code>p2p_communication.py</code>。</p>
+    </div>
+  </details>
+
+  <h3>Interleaved 1F1B：把气泡再除以 v，但通信乘上 v</h3>
+  <p>
+    每张卡不再只持有一段连续层，而是持有 <code>v</code> 个 model chunk（例如 4 层变成 2 个 chunk，每块 2 层）。
+    调度时按 chunk 交错，设备在等某个 chunk 的梯度时可以先算另一个 chunk 的 forward。SC21 §2.2.2 给的近似是：
+    气泡时间变为原来的 <code>1/v</code>，通信量增加 <code>v</code> 倍。
+  </p>
+  <p>
+    代价是 m 必须按 p 分组：SC21 要求 m 是 p 的整数倍；Megatron 的实现允许最后一组有余数，但余数必须为 0 或
+    ≥ p，否则会报 “dependency bubbles” 错误（<code>schedules.py:1164-1174</code>）。
+  </p>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Megatron 把三种 schedule 写成一个入口</h2></div>
+  <p class="sec-sub">看代码怎么选 schedule、怎么算 warmup、怎么发 p2p。</p>
+
+  <p>
+    入口是 <code>get_forward_backward_func</code>（<code>schedules.py:53</code>）。非 MultiModule 路径下，它只看两个配置：pipeline parallel
+    size 和 virtual pipeline size。pp_size &gt; 1 时，有 virtual pipeline 就走 interleaved，否则走 non-interleaved
+    1F1B；pp_size = 1 走 no_pipelining（<code>schedules.py:161-167</code>）。
+  </p>
+
+  <div class="eq" style="text-align:left;font-size:13px;line-height:1.9">
+    if pp_size &gt; 1:<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;if vp_size is not None:<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;forward_backward_func = forward_backward_pipelining_with_interleaving<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;else:<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;forward_backward_func = forward_backward_pipelining_without_interleaving<br>
+    else:<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;forward_backward_func = forward_backward_no_pipelining
+  </div>
+  <div class="eq-cap">schedules.py:161-167（154-155 是 MultiModule 早退、157-159 是 None fallback；去掉类型标注与注释）</div>
+
+  <p>
+    <strong>warmup 怎么算。</strong>non-interleaved 的 warmup 数是
+    <code>total_stages - current_stage - 1</code>（<code>schedules.py:2301</code>），也就是 p−rank−1；
+    steady loop 跑 <code>m - warmup</code> 次「一 forward 一 backward」（<code>schedules.py:2409</code>），
+    最后 cooldown 把 warmup 阶段留下的 backward 做完（<code>schedules.py:2488</code>）。
+  </p>
+
+  <p>
+    interleaved 的 warmup 数更复杂：
+    <code>(pp_size - rank - 1) * 2 + (num_model_chunks - 1) * microbatch_group_size_per_vp_stage</code>
+    （<code>schedules.py:958-959</code>）。代码里前一项固定乘 2；后一项按
+    <code>(num_model_chunks - 1) * microbatch_group_size_per_vp_stage</code> 填充。schedule 的 (microbatch, chunk) 顺序由
+    <code>get_schedule_table</code> 生成（<code>schedules.py:983</code>），warmup/steady/cooldown 的主循环分别起于
+    <code>schedules.py:1567</code>、<code>:1727</code>、<code>:1965</code>（对应的段起始注释在 1536、1725、1948）。
+  </p>
+
+  <p>
+    <strong>p2p 怎么发。</strong><code>P2PCommunicator</code>（<code>p2p_communication.py:148</code>）封装 pp group；
+    <code>_batched_p2p_ops</code>（<code>:22</code>）用 <code>torch.distributed.batch_isend_irecv</code> 批量提交
+    isend/irecv；steady state 用 <code>send_forward_recv_backward</code>（<code>:521</code>）和
+    <code>send_backward_recv_forward</code>（<code>:554</code>）把两个方向的重叠起来。通信只发生在 stage 边界，
+    传的是 activation / gradient 的张量，不传整层参数。
+  </p>
+
+  <p>
+    <strong>激活怎么省。</strong>non-interleaved 循环里维护 <code>input_tensors</code> 和 <code>output_tensors</code>
+    两个列表：warmup append 见 <code>schedules.py:2393-2394</code>；steady append + <code>pop(0)</code>
+    见 <code>schedules.py:2453-2461</code>，cooldown 继续 drain。列表长度由在飞 micro-batch 数决定，
+    不会增长到 m。这就是 1F1B 在代码层面的省显存机制。
+  </p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">TP</span><h4>层内切 GEMM</h4></div>
+      <p>每层两次 all-reduce；适合节点内 NVLink；切得太细会让 GEMM 变小。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PP</span><h4>层间切 stage</h4></div>
+      <p>段间只传边界 activation；可以跨节点；代价是 bubble 与激活驻留。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">DP</span><h4>复制模型切 batch</h4></div>
+      <p>每张卡一份完整模型；梯度 all-reduce；实现简单，显存不降。</p>
+    </div>
+  </div>
+
+  <p>
+    Megatron 用 <code>parallel_state</code> 里的 group 函数把三维并行拼起来：
+    <code>get_tensor_model_parallel_world_size</code>（<code>parallel_state.py:2151</code>）、
+    <code>get_pipeline_model_parallel_world_size</code>（<code>:2159</code>）、
+    <code>get_pipeline_model_parallel_rank</code>（<code>:2187</code>）、
+    <code>get_virtual_pipeline_model_parallel_world_size</code>（<code>:2257</code>）、
+    <code>get_data_parallel_world_size</code>（<code>:2321</code>）。PP 只是其中一个轴。
+  </p>
+
+  <p>
+    论文 §3 把 TP 描述为 “orthogonal and complementary to pipeline model parallelism”；Appendix B 讲的是
+    model+data parallel 的 group 划分。论文的 8.3B / 512 GPU 实验是 8-way TP + 64-way DP，不含 PP；
+    论文 §6 明确说更大的模型需要把 intra-layer 和 inter-layer model parallelism 叠加起来。
+  </p>
+</section>
+
+<section class="block" id="timeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>同一组 p、m，两条时间线的差别在哪</h2></div>
+  <p class="sec-sub">空格就是 bubble；GPipe 把气泡堆在首尾，1F1B 把它切碎摊开。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 390" role="img" aria-labelledby="pptl-title pptl-desc" style="width:100%;height:auto">
+<title id="pptl-title">GPipe 与 1F1B 的流水线时间线对比</title>
+<desc id="pptl-desc">4 个流水线 stage、8 个 microbatches。绿色为 forward，紫色为 backward，斜线格为 bubble。两者总时长都是 22 个时间单位，每行都有 6 个 bubble 格；GPipe 的 bubble 集中在首尾，1F1B 的 bubble 被打散。</desc>
+<defs><pattern id="bubbleHatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--bg-soft)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--border-strong)" stroke-width="2"/></pattern></defs>
+<g><rect x="452" y="2" width="12" height="12" rx="2" fill="var(--c1)"/><text x="470" y="12" class="pp-svg-tick">forward</text><rect x="536" y="2" width="12" height="12" rx="2" fill="var(--c2)"/><text x="554" y="12" class="pp-svg-tick">backward</text><rect x="628" y="2" width="12" height="12" rx="2" fill="url(#bubbleHatch)" stroke="var(--border-strong)"/><text x="646" y="12" class="pp-svg-tick">bubble</text></g>
+<text x="0" y="26" class="pp-svg-title">GPipe · all-F → all-B</text>
+<text x="0" y="42" class="pp-svg-sub">前 8 个 micro-batch 全部 forward，再全部 backward</text>
+<text x="54" y="66.0" text-anchor="end" class="pp-svg-lab">S0</text>
+<rect x="64" y="52" width="206" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="272" y="52" width="154" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="428" y="52" width="206" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<text x="54" y="89.0" text-anchor="end" class="pp-svg-lab">S1</text>
+<rect x="64" y="75" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="90" y="75" width="206" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="298" y="75" width="102" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="402" y="75" width="206" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="610" y="75" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<text x="54" y="112.0" text-anchor="end" class="pp-svg-lab">S2</text>
+<rect x="64" y="98" width="50" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="116" y="98" width="206" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="324" y="98" width="50" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="376" y="98" width="206" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="584" y="98" width="50" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<text x="54" y="135.0" text-anchor="end" class="pp-svg-lab">S3</text>
+<rect x="64" y="121" width="76" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="142" y="121" width="206" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="350" y="121" width="206" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="558" y="121" width="76" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<line x1="64" y1="154" x2="634" y2="154" class="pp-svg-axis"/>
+<line x1="64" y1="154" x2="64" y2="158" class="pp-svg-axis"/>
+<text x="64" y="171" text-anchor="middle" class="pp-svg-tick">0</text>
+<line x1="194" y1="154" x2="194" y2="158" class="pp-svg-axis"/>
+<text x="194" y="171" text-anchor="middle" class="pp-svg-tick">5</text>
+<line x1="324" y1="154" x2="324" y2="158" class="pp-svg-axis"/>
+<text x="324" y="171" text-anchor="middle" class="pp-svg-tick">10</text>
+<line x1="454" y1="154" x2="454" y2="158" class="pp-svg-axis"/>
+<text x="454" y="171" text-anchor="middle" class="pp-svg-tick">15</text>
+<line x1="584" y1="154" x2="584" y2="158" class="pp-svg-axis"/>
+<text x="584" y="171" text-anchor="middle" class="pp-svg-tick">20</text>
+<text x="634" y="171" text-anchor="end" class="pp-svg-tick">t</text>
+<text x="0" y="206" class="pp-svg-title">1F1B · warmup → steady → cooldown</text>
+<text x="0" y="222" class="pp-svg-sub">先做 p−1 个 forward，之后一 forward 一 backward</text>
+<text x="54" y="246.0" text-anchor="end" class="pp-svg-lab">S0</text>
+<rect x="64" y="232" width="102" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="168" y="232" width="76" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="246" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="272" y="232" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="298" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="324" y="232" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="350" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="376" y="232" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="402" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="428" y="232" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="454" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="480" y="232" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="506" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="532" y="232" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="558" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="584" y="232" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="610" y="232" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<text x="54" y="269.0" text-anchor="end" class="pp-svg-lab">S1</text>
+<rect x="64" y="255" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="90" y="255" width="76" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="168" y="255" width="50" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="220" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="246" y="255" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="272" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="298" y="255" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="324" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="350" y="255" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="376" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="402" y="255" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="428" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="454" y="255" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="480" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="506" y="255" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="532" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="558" y="255" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="584" y="255" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="610" y="255" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<text x="54" y="292.0" text-anchor="end" class="pp-svg-lab">S2</text>
+<rect x="64" y="278" width="50" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="116" y="278" width="50" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="168" y="278" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="194" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="220" y="278" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="246" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="272" y="278" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="298" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="324" y="278" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="350" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="376" y="278" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="402" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="428" y="278" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="454" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="480" y="278" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="506" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="532" y="278" width="24" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="558" y="278" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="584" y="278" width="50" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<text x="54" y="315.0" text-anchor="end" class="pp-svg-lab">S3</text>
+<rect x="64" y="301" width="76" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<rect x="142" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="168" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="194" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="220" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="246" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="272" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="298" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="324" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="350" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="376" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="402" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="428" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="454" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="480" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="506" y="301" width="24" height="20" rx="2" fill="var(--c1)" class="pp-svg-f"/>
+<rect x="532" y="301" width="24" height="20" rx="2" fill="var(--c2)" class="pp-svg-b"/>
+<rect x="558" y="301" width="76" height="20" rx="2" fill="url(#bubbleHatch)" class="pp-svg-idle"/>
+<line x1="64" y1="334" x2="634" y2="334" class="pp-svg-axis"/>
+<line x1="64" y1="334" x2="64" y2="338" class="pp-svg-axis"/>
+<text x="64" y="351" text-anchor="middle" class="pp-svg-tick">0</text>
+<line x1="194" y1="334" x2="194" y2="338" class="pp-svg-axis"/>
+<text x="194" y="351" text-anchor="middle" class="pp-svg-tick">5</text>
+<line x1="324" y1="334" x2="324" y2="338" class="pp-svg-axis"/>
+<text x="324" y="351" text-anchor="middle" class="pp-svg-tick">10</text>
+<line x1="454" y1="334" x2="454" y2="338" class="pp-svg-axis"/>
+<text x="454" y="351" text-anchor="middle" class="pp-svg-tick">15</text>
+<line x1="584" y1="334" x2="584" y2="338" class="pp-svg-axis"/>
+<text x="584" y="351" text-anchor="middle" class="pp-svg-tick">20</text>
+<text x="634" y="351" text-anchor="end" class="pp-svg-tick">t</text>
+</svg>
+
+    <figcaption>
+      本页重绘（非原文 Figure）：p=4、m=8、F/B 各 1 个时间单位。斜线格 = bubble；绿色 = forward，紫色 = backward。
+    </figcaption>
+  </figure>
+
+  <p>
+    GPipe 的时间线是两块三角形：前 8 个 F 依次填满 4 个 stage，最后 8 个 B 再依次退出。每个 stage 的空转都集中在首尾，
+    共 6 个时间单位。1F1B 的时间线是锯齿：stage 0 先做 3 个 warmup F，再做 1 个 steady F，然后等梯度做 B……空转被切碎，
+    但每个 stage 仍然是 6 个时间单位。两者的总时长都是 22。
+  </p>
+
+  <p>
+    真正的差别不在时间线长度，而在激活：GPipe 要同时保留 <code>m=8</code> 个 micro-batch 的激活，1F1B 最多
+    <code>p=4</code> 个。Interleaved 没有画进来：它会把每个 stage 的工作再切成 v 份，气泡缩小，但 p2p 消息变多；
+    时间线更碎，不改变总计算量。
+  </p>
+
+  <details>
+    <summary>为什么 1F1B 的空转看起来更分散，但总数一样？<span class="sum-sub">把每个 stage 的空转格数相加</span></summary>
+    <div class="details-body">
+      <p>1F1B 在 warmup 之后保持「一 F 一 B」的节奏；某个 stage 等上游梯度时，其他 stage 可能正在算。空转没有被消除，
+      只是从连续的两段变成了分散的格子。</p>
+      <p>在这个 4×8 的例子里，每个 stage 有 2×8=16 个计算格、22−16=6 个空转格；4 个 stage 合计 24 个空转格，
+      占 4×22=88 个格子的 27.3%。GPipe 和 1F1B 的这两个总数相同，差别只在空转的位置。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>吞吐几乎线性，但只在大 m 时成立</h2></div>
+  <p class="sec-sub">GPipe 的两张吞吐表，和 Megatron 的 3D 组合数据。</p>
+
+  <p>
+    Table 2 是 GPipe 在 TPU 上的归一化训练吞吐：每个分区一张 accelerator，batch size 按显存调整。行是
+    micro-batch 数 M，列是分区数 K。M=1 表示没有 pipeline parallelism。
+  </p>
+  <div class="tbl-scroll">
+    <table class="wide">
+      <thead>
+        <tr><th>TPU</th><th class="num">AmoebaNet K=2</th><th class="num">K=4</th><th class="num">K=8</th><th class="num">Transformer K=2</th><th class="num">K=4</th><th class="num">K=8</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>M=1</td><td class="num">1</td><td class="num">1.13</td><td class="num">1.38</td><td class="num">1</td><td class="num">1.07</td><td class="num">1.3</td></tr>
+        <tr><td>M=4</td><td class="num">1.07</td><td class="num">1.26</td><td class="num">1.72</td><td class="num">1.7</td><td class="num">3.2</td><td class="num">4.8</td></tr>
+        <tr class="best"><td>M=32</td><td class="num">1.21</td><td class="num">1.84</td><td class="num">3.48</td><td class="num">1.8</td><td class="num">3.4</td><td class="num">6.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap">Table 2：归一化训练吞吐（TPU；batch size 按显存调整）</p>
+
+  <p>
+    M=1 时，K 从 2 到 8，AmoebaNet 只从 1 到 1.38，Transformer 从 1 到 1.3：只有一张卡在算，pipeline 没有并行度。
+    M=32 时，Transformer 在 K=8 达到 6.3，是 K=2 时 1.8 的 3.5 倍（6.3/1.8；论文 §3 也写 3.5× speedup）；
+    AmoebaNet 从 K=2 的 1.21 到 K=8 的 3.48，只有 3.48/1.21≈2.9×，低于 4× 线性，论文归因于各层参数量/计算量不均衡。
+  </p>
+
+  <p>
+    Table 3 在没有 NVLink 的 GPU 上，M=32、K 从 2 到 8：AmoebaNet 2.7×，Transformer 3.3×。GPipe 只在分区边界传
+    activation，所以 PCIe 也能跑出接近线性的趋势；论文 §3 说 communication bandwidth 不再是 model parallelism 的瓶颈。
+  </p>
+  <div class="tbl-scroll">
+    <table class="wide">
+      <thead>
+        <tr><th>GPU</th><th class="num">AmoebaNet K=2</th><th class="num">K=4</th><th class="num">K=8</th><th class="num">Transformer K=2</th><th class="num">K=4</th><th class="num">K=8</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>M=32</td><td class="num">1</td><td class="num">1.7</td><td class="num">2.7</td><td class="num">1</td><td class="num">1.8</td><td class="num">3.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="eq-cap">Table 3：无 NVLink 的 GPU 归一化吞吐（M=32）</p>
+
+  <p>
+    Table 1 未完整转录，只取关键行；其余分区/显存行未转录。AmoebaNet-D 从 82M（Naive-1）到 318M（Pipeline-1，重算后），
+    峰值激活 6.26 GB → 3.46 GB，减少 2.80 GB（相对减少 44.7%）；同一张表里，AmoebaNet 用 8 个分区到 1.8B，
+    Transformer 用 128 个分区到 83.9B。表头条件：AmoebaNet 行是 8GB NVIDIA GPU，Transformer 行是 16GB TPUv3。
+    这里的 82M / 318M / 1.8B / 83.9B 都是 Table 1 的直接读数，不需要二次换算。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>1F1B 不减少气泡，interleaved 才减少</h4></div>
+    <p>1F1B 的卖点是显存：在飞 micro-batch 从 m 降到 p，时间线总长不变（SC21 §2.2.1）。真正缩短气泡的是
+    interleaved 1F1B，代价是通信量约乘 v（SC21 §2.2.2）。如果只看到「1F1B」三个字就以为气泡没了，选型会跑偏。</p>
+  </div>
+
+  <p>
+    Megatron 1909.08053 的 8.3B / 512 GPU 结果是 8-way TP + 64-way DP，15.1 PFLOPS、76% scaling efficiency；
+    论文没有把这个实验说成 PP 的结果，而是明确说 TP 与 PP 正交，>16B 需要把两者叠加（§6）。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别用 pipeline</h2></div>
+  <p class="sec-sub">PP 解决的是「放不下」，不是「算得快」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界一</span><h4>模型能单卡放下时，PP 只会更慢</h4></div>
+    <p>PP 增加 bubble 和 p2p，不减少单卡计算量。GPipe 的 Table 2 里 M=1 这一行就是证据：K 从 2 到 8，
+    归一化吞吐只到 1.13 / 1.38（AmoebaNet）和 1.07 / 1.3（Transformer），因为没有 micro-batch 可以填满流水线。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>m 太小，气泡吃不掉</h4></div>
+    <p>气泡比例是 (p−1)/(m+p−1)；m 接近 p 时，首尾空转占比很高。论文的实验观察是 M ≥ 4K 时气泡可忽略（§2.3）；interleaved 还要求
+    m 按 p 分组，最后一组余数必须为 0 或 ≥ p，否则 Megatron 直接报 dependency bubbles（schedules.py:1164-1174）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界三</span><h4>p 受互连和负载均衡限制</h4></div>
+    <p>PP 的通信量只和边界 activation 有关，比 TP 更适合跨节点；但 p2p 延迟、stage 间负载不均衡都会变成空转。
+    GPipe 用 cost estimator 尽量把计算均分到各 partition；AmoebaNet 的 sub-linear 吞吐就是参数分布不均的结果
+    （Table 2 与 §3）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界四</span><h4>1F1B 不是免费降气泡</h4></div>
+    <p>1F1B 省的是激活，不是气泡；如果瓶颈是 bubble，应该增大 m、减少 p，或者上 interleaved。interleaved 的
+    代价是通信量约乘 v，网络没有余量时收益会被吃掉（SC21 §2.2.2）。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界五</span><h4>顺序层图假设</h4></div>
+    <p>PP 假设模型可以表达成顺序的层序列；分支、多模态 tower、非均匀层需要自定义 partition 和 schedule。
+    Megatron 的 multi-module 支持能处理一部分，但这已经是额外的工程复杂度，不是开箱即用。</p>
+  </div>
+
+  <p>把上面的条件压成一张决策表（据 GPipe §2.3、SC21 §2.2 与 Megatron 源码整理；不是原文表格）：</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>情况</th><th>建议</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>单卡放得下</td><td>不用 PP；DP 或 TP 更直接</td></tr>
+        <tr><td>放不下，节点内带宽高</td><td>TP + PP；TP 放节点内，PP 跨节点</td></tr>
+        <tr><td>激活显存是瓶颈</td><td>1F1B（激活 O(p)）</td></tr>
+        <tr><td>气泡是瓶颈，网络有余量</td><td>interleaved 1F1B（气泡约 1/v，通信约 v×）</td></tr>
+        <tr><td>batch 很小</td><td>先增大 m 或减少 p；否则 bubble 占比很高</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    一句话：<strong>p 决定能放多大，m 决定气泡被摊多薄，schedule 决定激活留多少。</strong>先看哪个成本在卡你，
+    再调对应的旋钮；不要默认「上了 PP 就一定更快」。
+  </p>
+</section>
+
+<footer>
+  <div>
+    GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism（NeurIPS 2019）。本页数字以
+    arXiv 1811.06965v5 为准；v5 PDF 首页标题为 “GPipe: Easy Scaling with Micro-Batch Pipeline Parallelism”；
+    arXiv abs 元数据仍显示 NeurIPS 标题。
+  </div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/1811.06965v5" target="_blank" rel="noopener">arXiv 1811.06965v5</a><br>
+    代码：<a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a269ddf45b6f5b237aff6668fd1ddd79ef2d" target="_blank" rel="noopener">Megatron-LM @ 70f7a26</a>（<code>schedules.py</code> / <code>p2p_communication.py</code> / <code>parallel_state.py</code>）<br>
+    参考：<a href="https://arxiv.org/abs/1806.03377" target="_blank" rel="noopener">PipeDream（arXiv 1806.03377v1）</a> ·
+    <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">Megatron-LM（arXiv 1909.08053）</a> ·
+    <a href="https://arxiv.org/abs/2104.04473v5" target="_blank" rel="noopener">Megatron-LM SC21（v5）</a>（interleaved schedule 与 PipeDream-Flush）<br>
+    笔记：<a href="/pipeline-parallelism/">pipeline parallelism</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var pInput = document.getElementById('pp-p');
+  var mInput = document.getElementById('pp-m');
+  var host = document.getElementById('pp-timeline');
+  if (!pInput || !mInput || !host) return;
+
+  var pVal = document.getElementById('pp-p-v');
+  var mVal = document.getElementById('pp-m-v');
+  var bubbleEl = document.getElementById('pp-bubble');
+  var totalEl = document.getElementById('pp-total');
+  var idealEl = document.getElementById('pp-ideal');
+  var idleEl = document.getElementById('pp-idle');
+  var effEl = document.getElementById('pp-eff');
+  var actGpipeEl = document.getElementById('pp-act-gpipe');
+  var act1f1bEl = document.getElementById('pp-act-1f1b');
+  var mode = '1f1b';
+
+  function buildOrders(p, m, mode) {
+    var orders = [];
+    for (var s = 0; s < p; s++) {
+      var ops = [];
+      var j, i;
+      if (mode === 'gpipe') {
+        for (j = 0; j < m; j++) ops.push(['F', j]);
+        for (j = m - 1; j >= 0; j--) ops.push(['B', j]);
+      } else {
+        var w = Math.min(p - s - 1, m);
+        for (j = 0; j < w; j++) ops.push(['F', j]);
+        for (i = 0; i < m - w; i++) {
+          ops.push(['F', w + i]);
+          ops.push(['B', i]);
+        }
+        for (j = m - w; j < m; j++) ops.push(['B', j]);
+      }
+      orders.push(ops);
+    }
+    return orders;
+  }
+
+  function simulate(p, m, mode) {
+    var orders = buildOrders(p, m, mode);
+    var idx = [];
+    var endF = [];
+    var endB = [];
+    var rows = [];
+    var s, j;
+    for (s = 0; s < p; s++) {
+      idx.push(0);
+      endF.push(new Array(m).fill(null));
+      endB.push(new Array(m).fill(null));
+      rows.push(new Array(2 * m + 2 * p + 4).fill(null));
+    }
+
+    var t = 0;
+    var done = 0;
+    var total = p * 2 * m;
+    var barrier = false;
+    var guard = 0;
+
+    while (done < total && guard < 20000) {
+      var progressed = false;
+      if (mode === 'gpipe' && !barrier) {
+        var allF = true;
+        for (s = 0; s < p; s++) if (idx[s] < m) allF = false;
+        if (allF) barrier = true;
+      }
+      for (s = 0; s < p; s++) {
+        if (idx[s] >= orders[s].length) continue;
+        var op = orders[s][idx[s]];
+        var typ = op[0];
+        var mb = op[1];
+        var ok = true;
+        if (typ === 'F') {
+          if (s > 0 && (endF[s - 1][mb] === null || endF[s - 1][mb] > t)) ok = false;
+        } else {
+          if (mode === 'gpipe' && !barrier) ok = false;
+          if (endF[s][mb] === null || endF[s][mb] > t) ok = false;
+          if (s < p - 1 && (endB[s + 1][mb] === null || endB[s + 1][mb] > t)) ok = false;
+        }
+        if (ok) {
+          if (typ === 'F') endF[s][mb] = t + 1;
+          else endB[s][mb] = t + 1;
+          rows[s][t] = typ;
+          idx[s] += 1;
+          done += 1;
+          progressed = true;
+        }
+      }
+      t += 1;
+      guard += 1;
+      if (!progressed && t > 10000) break;
+    }
+    return { rows: rows, T: t };
+  }
+
+  function render() {
+    var p = parseInt(pInput.value, 10);
+    var m = parseInt(mInput.value, 10);
+    pVal.textContent = p;
+    mVal.textContent = m;
+
+    var sim = simulate(p, m, mode);
+    var T = sim.T;
+    var ideal = 2 * m;
+    var bubbleSlots = 2 * (p - 1);
+    var total = ideal + bubbleSlots;
+    var ratio = (p - 1) / (m + p - 1);
+
+    bubbleEl.textContent = (ratio * 100).toFixed(1) + '%';
+    totalEl.textContent = total;
+    idealEl.textContent = ideal;
+    idleEl.textContent = bubbleSlots;
+    effEl.textContent = (100 - ratio * 100).toFixed(1) + '%';
+    actGpipeEl.textContent = m;
+    act1f1bEl.textContent = Math.min(p, m);
+
+    host.innerHTML = '';
+    var wrap = document.createElement('div');
+    wrap.className = 'pp-tl';
+
+    for (var s = 0; s < p; s++) {
+      var row = document.createElement('div');
+      row.className = 'pp-row';
+      var lab = document.createElement('div');
+      lab.className = 'pp-lab';
+      lab.textContent = 'S' + s;
+      row.appendChild(lab);
+
+      var cells = document.createElement('div');
+      cells.className = 'pp-cells';
+      cells.style.gridTemplateColumns = 'repeat(' + T + ', minmax(0, 1fr))';
+      for (var t = 0; t < T; t++) {
+        var c = document.createElement('i');
+        var typ = sim.rows[s][t];
+        c.className = 'pp-cell ' + (typ === 'F' ? 'f' : (typ === 'B' ? 'b' : 'idle'));
+        if (typ === 'F') c.title = 'S' + s + ' · t=' + t + ' · forward';
+        else if (typ === 'B') c.title = 'S' + s + ' · t=' + t + ' · backward';
+        else c.title = 'S' + s + ' · t=' + t + ' · bubble';
+        cells.appendChild(c);
+      }
+      row.appendChild(cells);
+      wrap.appendChild(row);
+    }
+    host.appendChild(wrap);
+
+    var axis = document.createElement('div');
+    axis.className = 'pp-axis';
+    var a0 = document.createElement('span');
+    a0.textContent = '0';
+    var a1 = document.createElement('span');
+    a1.textContent = 't = ' + T;
+    axis.appendChild(a0);
+    axis.appendChild(a1);
+    host.appendChild(axis);
+  }
+
+  var buttons = document.querySelectorAll('#pp-modes .rule-btn');
+  for (var b = 0; b < buttons.length; b++) {
+    buttons[b].addEventListener('click', function () {
+      for (var k = 0; k < buttons.length; k++) buttons[k].classList.remove('active');
+      this.classList.add('active');
+      mode = this.getAttribute('data-mode');
+      render();
+    });
+  }
+
+  pInput.addEventListener('input', render);
+  mInput.addEventListener('input', render);
+
+  var reset = document.getElementById('pp-reset');
+  if (reset) {
+    reset.addEventListener('click', function () {
+      pInput.value = 4;
+      mInput.value = 8;
+      mode = '1f1b';
+      for (var k = 0; k < buttons.length; k++) {
+        buttons[k].classList.toggle('active', buttons[k].getAttribute('data-mode') === '1f1b');
+      }
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,946 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.76 | NoPE Appendix F.3 | 1800/1024 |
+| 6.9 | ALiBi Table 2 | 3512/512 |
+| 9.7 | ALiBi Table 2 | 178.97/18.40 |
+| 576 | DeepSeek-V2 §3.1.2（每层） | 512+64 |
+| 0.75 | DeepSeek-V2 §3.1.2 | 96/128 |
+| 0.5 | DeepSeek-V2 §3.1.2 | 64/128 |
+| 0.9705 | RoPE §3.2.2 | (2*14.113666+96)/128 |
+| 0.7378 | RoPE §3.2.2 | (2*(-0.782669)+96)/128 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="NoPE-v2; others-2026-11">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoPE 变体：Partial RoPE / NoPE / ALiBi · 位置预算的三种花法</title>
+<meta name="description" content="从 RoPE 的相对位移恒等式出发，比较 Partial RoPE 只旋转前 d_r 维、NoPE 完全去掉位置编码、ALiBi 在 attention logits 上加线性偏置三种做法：各自的位置项、计算与 KV 开销，以及长度外推的证据与边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.slot-val{overflow-wrap:anywhere}
+@media (max-width:560px){.sim{padding:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">RoPE Variants</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">开销</a>
+      <a href="#flow">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 架构 · 位置编码</span>
+  <h1>RoPE 变体：少转几维、干脆不转，还是改成线性偏置</h1>
+  <p class="hero-sub">
+    Full RoPE 把每一个二维子空间都拧上位置；<strong>Partial RoPE</strong> 只旋转前 <code>d<sub>r</sub></code> 维，<strong>NoPE</strong> 一维都不旋转，<strong>ALiBi</strong> 不旋转 q/k 而是在 attention logits 上加一个按距离线性递减的偏置。
+    三种做法对应三种位置预算：一个子空间、零维、以及一个固定的 recency 先验。
+  </p>
+  <div class="meta">
+    <span>RoPE 2104.09864 · ALiBi 2108.12409 · NoPE 2305.19466 · GPT-NeoX 2204.06745 · DeepSeek-V2 2405.04434</span>
+    <a href="https://arxiv.org/abs/2104.09864" target="_blank" rel="noopener">RoPE ↗</a>
+    <a href="https://arxiv.org/abs/2108.12409" target="_blank" rel="noopener">ALiBi ↗</a>
+    <a href="https://arxiv.org/abs/2305.19466" target="_blank" rel="noopener">NoPE 论文 ↗</a>
+    <a href="https://arxiv.org/abs/2204.06745" target="_blank" rel="noopener">GPT-NeoX ↗</a>
+    <a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener">DeepSeek-V2 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    RoPE 的全部结论压在一个恒等式上：<code>q<sub>m</sub> = R<sub>m</sub>W<sub>q</sub>x<sub>m</sub></code>、<code>k<sub>n</sub> = R<sub>n</sub>W<sub>k</sub>x<sub>n</sub></code>，
+    因为 <code>R<sub>m</sub><sup>T</sup>R<sub>n</sub> = R<sub>n−m</sub></code>，所以 <code>q<sub>m</sub><sup>T</sup>k<sub>n</sub></code> 只依赖相对位移 <code>n−m</code>。
+    Full RoPE 把 <code>d/2</code> 个二维子空间全部旋转，默认 base 是 <span data-src="RoPE §3.2.2">10000</span>。
+  </p>
+  <p>
+    Partial RoPE 只对前 <code>d<sub>r</sub></code> 维做同样的旋转，剩下的维度继续参与点积但不携带位置。
+    GPT-NeoX 只旋转前 <span data-src="GPT-NeoX §2.1.1">25%</span> 的维度；DeepSeek-V2 把 RoPE 隔离到 <span data-src="DeepSeek-V2 §3.1.2">64</span> 维的 decoupled key 上（key 在头间共享），让 <span data-src="DeepSeek-V2 §3.1.2">512</span> 维的压缩内容路径保持可吸收。
+  </p>
+  <p>
+    NoPE 连旋转都不做，只靠 causal mask 打破排列对称性；论文证明它<strong>能</strong>表示绝对与相对位置，但训练后更像 T5 的相对偏置。
+    ALiBi 也不加位置嵌入，改为在每层 logits 上加 <code>m(j−i)</code>，斜率按 <code>2<sup>−8i/n</sup></code> 取几何序列。
+  </p>
+  <p>
+    代价各不相同：Partial RoPE 只给一个子空间位置，NoPE 的位置能力完全靠学习，ALiBi 则把 recency 先验写死。
+    下面的数字卡分别标出旋转比例、ALiBi 的外推 PPL，以及 NoPE 在十亿级代码模型上的有效外推倍数。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="GPT-NeoX §2.1.1">25%</div>
+      <div class="k">GPT-NeoX 的 partial RoPE<br>只旋转前四分之一的维度</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="ALiBi Table 2">18.40</div>
+      <div class="k">ALiBi 的 WikiText-103 PPL<br>训练 <span data-src="ALiBi Table 2">512</span>、评估 <span data-src="ALiBi Table 2">3512</span> token</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="NoPE Appendix F.3">1.76<small>×</small></div>
+      <div class="k">NoPE 在十亿级代码模型上的<br>有效外推倍数</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>注意力本身不知道顺序；难的是位置在训练长度之外还成立</h2></div>
+  <p class="sec-sub">先分清两件事：把位置信息注入注意力并不难，难的是注入方式在训练长度之外仍然可用。</p>
+
+  <p>
+    自注意力对 token 的排列是等变的：只做 <code>q<sup>T</sup>k</code> 时，模型看到的是一袋向量，谁在前谁在后没有区别。
+    位置编码的任务就是把「第几个」写进表示或 logits。绝对位置嵌入直接给每个位置一个向量，加到词嵌入上；
+    相对位置方法则让注意力分数依赖两个 token 的距离。
+  </p>
+
+  <p>
+    绝对位置表有一个硬边界：训练时只见过 <code>0..L−1</code>，推理时出现位置 <code>L</code> 就没有对应的表项。
+    正弦位置编码理论上可以算到任意位置，但 ALiBi 论文的实测结论是：sinusoidal 模型在超过训练长度后只能多外推几十个 token（ALiBi §2.1）。
+    「公式能算」和「模型能用」是两件事。
+  </p>
+
+  <p>
+    相对位置方法没有这张表，但它也要决定把位置放在哪里：旋转 q/k、给每个距离学一个 bias、还是加一个固定的线性惩罚。
+    这些选择影响三笔账：位置信息占多少维、每层多多少计算与显存、以及训练长度之外还剩多少有效性。
+    Partial RoPE、NoPE、ALiBi 正好代表三种极端的分配方式。
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">绝对位置</span>：位置 → 加到词嵌入的表<br>
+    <span class="hl-b">相对位置</span>：位置 → 只进入 q·k 的距离函数<br>
+    <span class="hl-c">本文比较</span>：位置 → 一个子空间 / 零维 / 一个 logits 偏置
+  </div>
+  <div class="eq-cap">三种位置预算的抽象；具体实现分别见 RoPE §3.2.2、GPT-NeoX §2.1.1、ALiBi §3</div>
+
+  <p>
+    还有一个容易被忽略的事实：decoder-only 的 causal mask 本身就打破了排列对称性。
+    NoPE 论文 §2 指出，带因果掩码的 decoder-only Transformer 并不是排列不变的，因此即使没有显式位置编码，也能建模序列。
+    这为「完全去掉位置编码」提供了结构基础，但也意味着 NoPE 的位置信息是隐式学出来的，不像 RoPE 那样有一个可写的公式。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>全维 RoPE 已经是相对编码；三种变体改的是位置预算的分配</h2></div>
+  <p class="sec-sub">先看三条已有路线各自的注入点与瓶颈，再看它们为什么都没有回答「位置该占多少维」。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">APE</span><h4>按位置查表</h4></div>
+      <p>
+        绝对位置嵌入把位置 <code>i</code> 映射成一个向量，加到词嵌入上。可学习表在训练长度之外没有条目；
+        正弦表虽然能外推计算，但 ALiBi 论文 §2.1 的实测显示，模型在超过训练长度后只能多走几十个 token。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">T5 bias</span><h4>按距离学一个标量</h4></div>
+      <p>
+        T5 的相对偏置给每个 query-key 距离学一个共享标量，加到 attention logits 上。它的外推比 APE 好，
+        但 ALiBi 论文 §2.2 指出训练至少慢一倍。ALiBi §2.2 的例子是：同样做 <span data-src="ALiBi §2.2">1024</span> token 推理，
+        <span data-src="ALiBi Table 1">L=1024</span> 的 sinusoidal 是 <span data-src="ALiBi Table 1">28.5k</span> words/s，而 <span data-src="ALiBi Table 1">L=512</span> 的 T5 bias 是
+        <span data-src="ALiBi Table 1">14.4k</span> words/s（正文引 ALiBi Appendix Table 1）——训练更短也没有速度优势。
+        注：原文正文与 ALiBi Table 1 对 28.5k 的归属不一致（ALiBi Table 1 的 <span data-src="ALiBi Table 1">L=512</span> Sinusoidal 行也是
+        <span data-src="ALiBi Table 1">28.5k</span>，<span data-src="ALiBi Table 1">L=1024</span> 行为 <span data-src="ALiBi Table 1">26.0k</span>）；
+        本页表 3 按 ALiBi Table 1 的 512 行转录。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Full RoPE</span><h4>旋转全部二维子空间</h4></div>
+      <p>
+        RoPE 把 q/k 的每两维看成一个复数平面，按位置旋转；点积只依赖相对位移。
+        但 NoPE 论文 §4 在合成推理任务上报告：Rotary 的长度泛化表现更接近 APE，而不是其他相对方法。
+      </p>
+    </div>
+  </div>
+
+  <p class="eq-cap">表 1 · 三种已有位置方案的注入点与已知瓶颈（页面整理；APE 与 T5 的瓶颈见 ALiBi §2.1 与 ALiBi §2.2，Full RoPE 的瓶颈见 NoPE §4）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方案</th><th>位置进入哪里</th><th>额外参数</th><th>已知瓶颈</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>绝对位置嵌入 APE</td>
+          <td>加到词嵌入；按位置查表或固定正弦</td>
+          <td>可学习位置表，或 0 个参数</td>
+          <td>训练长度之外没有表项；正弦版实测也只能多外推几十个 token（ALiBi §2.1）</td>
+        </tr>
+        <tr>
+          <td>T5 relative bias</td>
+          <td>每层 attention logits 加一个按距离学习的标量</td>
+          <td>每个距离一个 bias</td>
+          <td>训练至少慢一倍（ALiBi §2.2）</td>
+        </tr>
+        <tr>
+          <td>Full RoPE</td>
+          <td>旋转 q/k 的全部 d/2 个二维子空间</td>
+          <td>0 个参数；只有 base 等超参</td>
+          <td>下游长度泛化被 NoPE 论文 §4 归到接近 APE 的一侧</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这三条路线的共同点是「位置要覆盖整个表示」：APE 给每个位置一整条向量，T5 bias 给每个距离一个标量，Full RoPE 旋转全部维度。
+    下一个自然问题是：能不能少花一点？只旋转一个子空间，会不会保住相对性又省下计算？
+    完全不旋转，模型能不能自己学出位置？如果不想旋转，能不能直接用距离惩罚代替？
+  </p>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>RoPE 把相对位移写进旋转角；Partial RoPE 只让一个子空间携带位置</h2></div>
+  <p class="sec-sub">记住三个式子：<code>R<sub>m</sub><sup>T</sup>R<sub>n</sub> = R<sub>n−m</sub></code>、<code>θ<sub>i</sub> = B<sup>−2i/d</sup></code>，以及 Partial RoPE 的点积 = 旋转子空间项 + 不旋转的常数项。</p>
+
+  <h3>Full RoPE：相对性来自旋转矩阵的乘法</h3>
+  <p>
+    设第 <code>m</code> 个位置的 query 为 <code>q<sub>m</sub> = R<sub>Θ,m</sub><sup>d</sup>W<sub>q</sub>x<sub>m</sub></code>，
+    第 <code>n</code> 个位置的 key 为 <code>k<sub>n</sub> = R<sub>Θ,n</sub><sup>d</sup>W<sub>k</sub>x<sub>n</sub></code>。
+    每个 <code>R</code> 是一个块对角矩阵，第 <code>i</code> 块是一个二维旋转，角度为 <code>mθ<sub>i</sub></code>。
+    因为旋转矩阵正交，<code>R<sub>m</sub><sup>T</sup>R<sub>n</sub> = R<sub>n−m</sub></code>，于是：
+  </p>
+
+  <div class="eq">
+    q<sub>m</sub><sup>T</sup>k<sub>n</sub>
+    = (W<sub>q</sub>x<sub>m</sub>)<sup>T</sup> <span class="hl-a">R<sub>Θ,m</sub><sup>d,T</sup></span>
+    <span class="hl-b">R<sub>Θ,n</sub><sup>d</sup></span> (W<sub>k</sub>x<sub>n</sub>)<br>
+    = (W<sub>q</sub>x<sub>m</sub>)<sup>T</sup>
+    <span class="hl-c">R<sub>Θ,n−m</sub><sup>d</sup></span>
+    (W<sub>k</sub>x<sub>n</sub>)
+  </div>
+  <div class="eq-cap">RoPE 论文 §3.2.2 式 (15)–(16)：绝对位置写进旋转角，点积里只剩相对位移 n−m；R 正交，所以旋转不改变向量范数</div>
+
+  <p>
+    频率由维度索引决定：<code>θ<sub>i</sub> = B<sup>−2i/d</sup></code>，<code>i = 0,1,…,d/2−1</code>。
+    RoPE 论文取 <code>B = <span data-src="RoPE §3.2.2">10000</span></code>（RoPE §3.2.2）。<code>i=0</code> 的频率恒为 <code>1</code> rad/token，波长是 <code>2π</code>；
+    <code>i</code> 越大，频率越低，波长越长。增加维度 <code>d</code> 会加入更多低频对；增大 base <code>B</code> 会把 <code>i&gt;0</code> 的频率整体压低。
+    <span class="infer">推断</span>（由 RoPE §3.2.2 的 θ<sub>i</sub> 公式直接读出；论文没有单独讨论 base 的缩放效果）。
+  </p>
+
+  <h3>Partial RoPE：只旋转前 d<sub>r</sub> 维，其余维贡献一个常数项</h3>
+  <p>
+    把 q/k 切成两段：前 <code>d<sub>r</sub></code> 维记为 <code>rot</code>，其余记为 <code>pass</code>。
+    只对 <code>rot</code> 施加 RoPE，<code>pass</code> 原样保留：
+  </p>
+
+  <div class="eq">
+    q<sub>m</sub> = [ R<sub>Θ,m</sub><sup>d<sub>r</sub></sup> q<sub>rot</sub> ; q<sub>pass</sub> ]<br>
+    k<sub>n</sub> = [ R<sub>Θ,n</sub><sup>d<sub>r</sub></sup> k<sub>rot</sub> ; k<sub>pass</sub> ]<br>
+    q<sub>m</sub><sup>T</sup>k<sub>n</sub>
+    = <span class="hl-c">q<sub>rot</sub><sup>T</sup>R<sub>Θ,n−m</sub><sup>d<sub>r</sub></sup>k<sub>rot</sub></span>
+    + <span class="hl-a">q<sub>pass</sub><sup>T</sup>k<sub>pass</sub></span>
+  </div>
+  <div class="eq-cap">第一项携带相对位置，第二项与 m、n 无关；GPT-NeoX §2.1.1 取 d<sub>r</sub> = <span data-src="GPT-NeoX §2.1.1">25%</span> 的维度，DeepSeek-V2 §2.1 把 RoPE 隔离到独立的 <span data-src="DeepSeek-V2 §3.1.2">64</span> 维 decoupled key 上</div>
+
+  <p>
+    这是一个连续的光谱：<code>d<sub>r</sub> = d</code> 是 Full RoPE；<code>d<sub>r</sub> = 0</code> 时 q/k 完全不旋转，退化成 NoPE 的 q/k 形式。
+    中间的选择让模型只在一个子空间里看相对位移，剩余维度只提供内容匹配。
+    <span class="infer">推断</span>：位置信号被稀释，但内容通路保留（依据：点积分块展开后，未旋转维度的内积与 m、n 无关）。
+    这个「常数项」是页面由点积分块展开得到的 <span class="infer">推断</span>（依据：上式第一行；论文没有把它写成单独的定理）。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">GPT-NeoX §2.1.1</span><h4>前 25% 维度旋转</h4></div>
+      <p>
+        GPT-NeoX 论文 §2.1.1 写明：Su et al. 对每个维度都做旋转，而 GPT-NeoX-20B 只对前 <span data-src="GPT-NeoX §2.1.1">25%</span> 的维度做旋转。
+        论文的说法是，初始实验显示这样在性能和计算效率之间取得了最好的平衡；正文没有附对照表。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">DeepSeek-V2 §2.1</span><h4>decoupled RoPE：位置不碰压缩内容</h4></div>
+      <p>
+        DeepSeek-V2 的 MLA 用低秩压缩存 KV。若把 RoPE 直接施加在压缩后的 key 上，位置敏感的旋转矩阵会夹在
+        <code>W<sup>Q</sup></code> 与 <code>W<sup>UK</sup></code> 之间，破坏推理时的矩阵吸收（DeepSeek-V2 §2.1）。
+        解法是另开一路 <code>q<sup>R</sup>/k<sup>R</sup></code> 专门承载 RoPE：每头的 decoupled 路径另有
+        <span data-src="DeepSeek-V2 §3.1.2">64</span> 维（与 <span data-src="DeepSeek-V2 §3.1.2">128</span> 维内容头维度并列；<code>k<sup>R</sup></code> 在头间共享），压缩内容路径保持不旋转。
+      </p>
+    </div>
+  </div>
+
+  <h3>交互：旋转维数与 base 如何改变 q·k 随距离的曲线</h3>
+  <p>
+    把 q/k 的每一对维度都取成单位向量 <code>(1,0)</code>，只保留旋转项的 <code>cos(Δθ<sub>i</sub>)</code>。
+    未旋转的维度每对贡献常数 1，所以平均点积 = <code>(d−d<sub>r</sub>)/d + (2/d)Σcos(Δθ<sub>i</sub>)</code>。
+    切换 base 与 <code>d<sub>r</sub></code>，看曲线在长距离处怎么变。
+  </p>
+
+  <div class="sim" id="rope-sim">
+    <div class="sim-top">
+      <button type="button" class="rule-btn active" data-base="10000">B = <span data-src="RoPE §3.2.2">10000</span><span class="r-sub">RoPE 论文默认 base</span></button>
+      <button type="button" class="rule-btn" data-base="500000">B = 500000<span class="r-sub">页面自定对照值</span></button>
+    </div>
+    <div class="sim-top">
+      <button type="button" class="rule-btn active" data-dr="32">d_r = 32<span class="r-sub">页面档位，对应 <span data-src="GPT-NeoX §2.1.1">25%</span></span></button>
+      <button type="button" class="rule-btn" data-dr="64">d_r = 64<span class="r-sub">半维</span></button>
+      <button type="button" class="rule-btn" data-dr="128">d_r = 128<span class="r-sub">全维 RoPE</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>相对距离 Δ <span class="v" id="rd-val">1</span></label>
+        <input id="rd" type="range" min="0" max="128" step="1" value="1">
+      </div>
+      <div class="ctrl">
+        <label>每头维度 d <span class="v" data-src="DeepSeek-V2 §3.1.2">128</span></label>
+        <div class="slot-val">固定为 DeepSeek-V2 的每头维度</div>
+      </div>
+    </div>
+
+    <div class="slots s5">
+      <div class="slot"><div class="slot-name">相对距离 Δ</div><div class="slot-val" id="v-delta">1</div></div>
+      <div class="slot"><div class="slot-name">旋转维数 d_r</div><div class="slot-val" id="v-dr">32</div></div>
+      <div class="slot"><div class="slot-name">旋转对数</div><div class="slot-val" id="v-pairs">16</div></div>
+      <div class="slot"><div class="slot-name">Σ cos</div><div class="slot-val" id="v-sum">14.1137</div></div>
+      <div class="slot"><div class="slot-name">平均点积</div><div class="slot-val" id="v-mean">0.9705</div></div>
+    </div>
+
+    <svg id="dot-chart" viewBox="0 0 760 240" role="img" aria-label="平均点积随相对距离变化的曲线" font-family="Inter,'Noto Sans SC',sans-serif">
+      <line x1="40" y1="20" x2="40" y2="200" stroke="var(--border-strong)" stroke-width="1"></line>
+      <line x1="40" y1="200" x2="720" y2="200" stroke="var(--border-strong)" stroke-width="1"></line>
+      <line x1="40" y1="20" x2="720" y2="20" stroke="var(--border)" stroke-dasharray="3 4"></line>
+      <line x1="40" y1="65" x2="720" y2="65" stroke="var(--border)" stroke-dasharray="3 4"></line>
+      <line x1="40" y1="110" x2="720" y2="110" stroke="var(--border)" stroke-dasharray="3 4"></line>
+      <line x1="40" y1="155" x2="720" y2="155" stroke="var(--border)" stroke-dasharray="3 4"></line>
+      <text x="30" y="24" text-anchor="end" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">1.0</text>
+      <text x="30" y="69" text-anchor="end" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">0.5</text>
+      <text x="30" y="114" text-anchor="end" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">0</text>
+      <text x="30" y="159" text-anchor="end" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">−0.5</text>
+      <text x="30" y="204" text-anchor="end" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">−1.0</text>
+      <text x="40" y="218" text-anchor="middle" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">0</text>
+      <text x="210" y="218" text-anchor="middle" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">32</text>
+      <text x="380" y="218" text-anchor="middle" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">64</text>
+      <text x="550" y="218" text-anchor="middle" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">96</text>
+      <text x="720" y="218" text-anchor="middle" fill="var(--text-soft)" font-size="11" font-family="'JetBrains Mono',monospace">128</text>
+      <text x="380" y="234" text-anchor="middle" fill="var(--text-soft)" font-size="11">相对距离 Δ（token）</text>
+      <path id="chart-floor" d="" fill="none" stroke="var(--c1)" stroke-width="1.5" stroke-dasharray="5 4"></path>
+      <path id="chart-path" d="" fill="none" stroke="var(--accent)" stroke-width="2.5"></path>
+    </svg>
+
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>平均点积</span>
+      <span><i style="background:var(--c1)"></i>未旋转维度贡献 (d−d_r)/d</span>
+    </div>
+
+    <div class="readout" id="sim-readout" data-src="RoPE §3.2.2">
+      <div class="r-head">当前读数</div>
+      <div id="sim-msg">Δ = 1，d_r = 32：Σ cos = 14.1137，平均点积 = 0.9705。</div>
+    </div>
+  </div>
+
+  <p class="eq-cap">
+    交互参数：d = <span data-src="DeepSeek-V2 §3.1.2">128</span>（DeepSeek-V2 的每头维度），base <span data-src="RoPE §3.2.2">10000</span> 来自 RoPE §3.2.2；
+    base 500000 与 d_r 档位是页面自定对照值。这是<strong>简化模拟，不是源码实现</strong>：只计算 q=k=(1,0) 时的 128 维平均点积。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：两组参数，JS 与手算同一套公式<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>模型定义：</strong>d = 128，q 与 k 在每一对维度上都取单位向量 (1,0)。第 i 对的旋转贡献是
+        <code>cos(Δ·θ<sub>i</sub>)</code>，<code>θ<sub>i</sub> = B<sup>−2i/128</sup></code>。
+        平均点积 = <code>(d−d<sub>r</sub>)/d + (2/d)Σcos</code>。
+      </p>
+      <p><strong>组 A：B = 10000，d_r = 32，Δ = 1</strong></p>
+      <ol>
+        <li>θ<sub>i</sub> = 10000<sup>−i/64</sup>，i = 0…15。</li>
+        <li>16 项 cos 值：0.540302, 0.647906, 0.731761, 0.796458, 0.846009, 0.883756, 0.912396, 0.934062, 0.950415, 0.962739, 0.972014, 0.978989, 0.984230, 0.988167, 0.991122, 0.993340；Σ = 14.113666。</li>
+        <li>未旋转贡献 = (128 − 32) / 128 = 0.75；旋转项 = 2 × 14.113666 / 128 = 0.220526。</li>
+        <li>平均点积 = 0.75 + 0.220526 = 0.970526，显示 0.9705。</li>
+      </ol>
+      <p><strong>组 B：B = 500000，d_r = 32，Δ = 16</strong></p>
+      <ol>
+        <li>θ<sub>i</sub> = 500000<sup>−i/64</sup>，i = 0…15。</li>
+        <li>16 项 cos 值：−0.957659, 0.892695, −0.369020, −0.714084, 0.722987, 0.855903, −0.036736, −0.785515, −0.999246, −0.817334, −0.469038, −0.106298, 0.203022, 0.441923, 0.616337, 0.739395；Σ = −0.782669。</li>
+        <li>未旋转贡献 = 0.75；旋转项 = 2 × (−0.782669) / 128 = −0.012229。</li>
+        <li>平均点积 = 0.75 − 0.012229 = 0.737771，显示 0.7378。</li>
+      </ol>
+      <p>
+        JS 只做 <code>Math.pow</code>、<code>Math.cos</code> 和四则运算，显示用 <code>toFixed(4)</code>；
+        上面两组参数在页面上切换后逐位一致。q=k=(1,0) 是页面简化的玩具设定，不是论文实验。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">覆盖分支与差异清单</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>RoPE 的二维旋转与相对位移恒等式；d=128 时的 d/2 个频率；
+        Partial RoPE 只旋转前 d_r 维、其余维贡献常数项；base 对 i&gt;0 频率的影响
+        （i=0 的频率恒为 1 rad/token，不随 base 改变）；d_r/d 的位置预算。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>真实 q/k 的随机方向与幅值；W_q/W_k 投影；attention softmax 与温度；
+        ALiBi 的偏置项；NoPE 的隐式位置学习；多头之间的斜率差异；训练与长度外推实验；
+        KV cache 与 DeepSeek-V2 的矩阵吸收。
+      </p>
+      <p>
+        因此它是<strong>简化模拟，不是源码实现</strong>；它只回答「旋转维数与 base 如何改变 q·k 随相对距离的曲线」，
+        不回答「哪种变体在某个下游任务上更好」。
+      </p>
+    </div>
+  </details>
+
+  <h3>NoPE：不旋转，靠因果结构隐式定位</h3>
+  <p>
+    NoPE 把位置项整个删掉：<code>q<sub>m</sub> = W<sub>q</sub>x<sub>m</sub></code>、<code>k<sub>n</sub> = W<sub>k</sub>x<sub>n</sub></code>，
+    <code>q<sub>m</sub><sup>T</sup>k<sub>n</sub> = (W<sub>q</sub>x<sub>m</sub>)<sup>T</sup>(W<sub>k</sub>x<sub>n</sub>)</code>。
+    它没有位置参数，也没有额外计算（NoPE §4）。
+  </p>
+  <p>
+    为什么这样还能工作？NoPE 论文 §5.1 给出两个构造：第一层可以在 hidden state 里恢复绝对位置（以序列开头的 <code>&lt;bos&gt;</code> 为锚点，NoPE Appendix C.1）；
+    后续层可以实现相对编码，把点积写成 <code>f<sub>cnt</sub>(q,k) + f<sub>rel</sub>(n−m)</code>（NoPE §5.1）。
+    但「能表示」不等于「会学到」：NoPE §5.2 用 attention 分布的 JSD 比较发现，训练后的 NoPE 最像 T5 的相对偏置，最不像 APE 和 Rotary。
+  </p>
+
+  <h3>ALiBi：不加位置嵌入，但在每层 logits 上加距离惩罚</h3>
+  <p>
+    ALiBi 的改动只有一处：在 query-key 点积之后、softmax 之前，给每个 head 加一个固定斜率的线性偏置：
+  </p>
+
+  <div class="eq">
+    softmax( q<sub>i</sub>K<sup>T</sup> + <span class="hl-c">m · [−(i−1), …, −2, −1, 0]</span> )
+  </div>
+  <div class="eq-cap">ALiBi 论文 §3：m 是每个 head 固定、不学习的斜率；bias 不乘 1/√d<sub>k</sub>（ALiBi §3 脚注 10）；网络里不加任何位置嵌入</div>
+
+  <p>
+    斜率按几何序列取。对 <code>n</code> 个头，第 <code>i</code> 个斜率是 <code>2<sup>−8i/n</sup></code>，
+    起点和公比都是 <code>2<sup>−8/n</sup></code>（ALiBi §3）。<span data-src="ALiBi §3">8</span> 个头时是 <code>1/2<sup>1</sup>, …, 1/2<sup>8</sup></code>；
+    <span data-src="ALiBi §3">16</span> 个头时从 <code>2<sup>−0.5</sup></code> 开始，按同样的公比插值到 <code>2<sup>−8</sup></code>。
+    ALiBi 论文说这组斜率在多个数据域和模型规模上都能用，因此不需要每次重新调（ALiBi §3）。
+  </p>
+
+  <p>
+    这和 NoPE 的差别是「加不加先验」，不是「加不加位置嵌入」：两者都不往词嵌入里加位置向量；
+    但 ALiBi 在每层 logits 上加一个固定的、按距离递减的标量，NoPE 什么也不加。
+    和 RoPE 的差别是「加在 logits 上」还是「旋转 q/k」：ALiBi 的 bias 是加性的，RoPE 的旋转是乘性的。
+  </p>
+
+  <p class="eq-cap">表 2 · 三种变体与基线的位置项对照（页面整理；公式与超参出处：RoPE §3.2.2、GPT-NeoX §2.1.1、NoPE §4 与 NoPE §5、ALiBi §3）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>变体</th><th>位置项</th><th>关键超参</th><th>位置作用的维度</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Full RoPE</td>
+          <td>q<sub>m</sub>=R<sub>m</sub>W<sub>q</sub>x<sub>m</sub>；k<sub>n</sub>=R<sub>n</sub>W<sub>k</sub>x<sub>n</sub></td>
+          <td>base B=10000；d/2 个频率</td>
+          <td>全部 d 维</td>
+        </tr>
+        <tr>
+          <td>Partial RoPE</td>
+          <td>前 d<sub>r</sub> 维旋转；其余维不旋转</td>
+          <td>d<sub>r</sub>；GPT-NeoX 取 25%</td>
+          <td>d<sub>r</sub> 维</td>
+        </tr>
+        <tr>
+          <td>NoPE</td>
+          <td>无</td>
+          <td>无</td>
+          <td>0 维；顺序靠 causal mask</td>
+        </tr>
+        <tr>
+          <td>ALiBi</td>
+          <td>q/k 不旋转；logits 加 m(j−i)</td>
+          <td>每头斜率 2<sup>−8i/n</sup></td>
+          <td>所有层的每个 q-k 对（标量偏置）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 04. 计算与开销 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>省的是旋转与 KV，代价是位置分辨率或一份额外的 bias mask</h2></div>
+  <p class="sec-sub">把每种变体的额外计算、显存和 KV cache 账分开算；ALiBi 不加位置嵌入，但多一份 n×L×L 的 bias mask。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">开销账本</span><h4>四笔账：旋转、KV、bias 矩阵、参数</h4></div>
+    <ul>
+      <li><strong>Full RoPE：</strong>每个 token 每层做 <code>d</code> 维的逐元素旋转；没有额外参数。RoPE 论文 §3.4.2 给出等价的逐元素实现，旋转本身是 <code>O(d)</code>，不改变 attention 的 <code>O(N²d)</code> 主项。</li>
+      <li><strong>Partial RoPE：</strong>旋转量按 <code>d<sub>r</sub></code> 计；<code>d<sub>r</sub> &lt; d</code> 时旋转的逐元素运算更少，但 KV cache 仍要存完整的 K，不会因为少转几维而缩小。DeepSeek-V2 的 decoupled key 反而额外存 <span data-src="DeepSeek-V2 §3.1.2">64</span> 维，换来压缩内容路径可吸收。</li>
+      <li><strong>NoPE：</strong>没有位置参数、没有额外项；NoPE 论文 §4 明确说它不增加 attention 的计算量。</li>
+      <li><strong>ALiBi：</strong>前向不增加运算，bias 直接加进 mask；但 mask 从 <code>L×L</code> 变成 <code>n×L×L</code>，ALiBi 论文 §3 报告最多多占 <span data-src="ALiBi §3">100MB</span>（图 2 的 1024/3072 设置）。斜率不学习；论文说把斜率改成可学习没有带来强外推，训练速度还相对固定斜率的 ALiBi 慢 <span data-src="ALiBi §3">3%</span>（ALiBi §3 脚注 11）。</li>
+    </ul>
+  </div>
+
+  <p>
+    DeepSeek-V2 的 KV 账最能说明 Partial RoPE 的工程意义。MLA 的压缩维度 <code>d<sub>c</sub></code> 是
+    <span data-src="DeepSeek-V2 §3.1.2">512</span>，decoupled RoPE key 的维度 <code>d<sub>h</sub><sup>R</sup></code> 是
+    <span data-src="DeepSeek-V2 §3.1.2">64</span>。每个 token 跨 <code>l</code> 层要存的总 KV 元素是
+    <code>(d<sub>c</sub> + d<sub>h</sub><sup>R</sup>)l = (512 + 64)l = 576l</code>；平均每层 <span data-src="DeepSeek-V2 §3.1.2">576</span> 个。
+    DeepSeek-V2 Table 1 把它折算成「约 <span data-src="DeepSeek-V2 Table 1">2.25</span> 个 GQA 组」，同时 DeepSeek-V2 Table 1 把能力标为 Stronger（强于 MHA）。
+    这里的 <span data-src="DeepSeek-V2 §3.1.2">576</span> 是页面按 DeepSeek-V2 §3.1.2 的两个维度相加得到的每层值，<code>576l</code> 才是跨层总数；
+    DeepSeek-V2 论文 §2.1.3 给出的是 <code>(d<sub>c</sub> + d<sub>h</sub><sup>R</sup>)l</code> 的公式。
+  </p>
+
+  <p>
+    注意 <span data-src="DeepSeek-V2 §3.1.2">576</span> 是每 token 每层的 KV cache，跨 <code>l</code> 层是 <code>576l</code>，不是「RoPE 单独占 <span data-src="DeepSeek-V2 §3.1.2">576</span>」。RoPE 只负责其中 <span data-src="DeepSeek-V2 §3.1.2">64</span> 维的 key；
+    如果没有 decoupled 这一路，位置旋转会污染压缩内容路径，推理时就不能把 <code>W<sup>UK</sup></code> 吸收进 <code>W<sup>Q</sup></code>（DeepSeek-V2 §2.1）。
+    所以这 <span data-src="DeepSeek-V2 §3.1.2">64</span> 维是「为了保住矩阵吸收而付出的位置通道」，不是纯粹的额外浪费。
+  </p>
+
+  <p>
+    ALiBi 的成本可以用 ALiBi 论文 Table 1 的同一组测量横向看：训练长度 <span data-src="ALiBi Table 1">512</span>、WikiText-103、单张 V100。
+    ALiBi 的训练速度与 sinusoidal 基本持平，推理更快；T5 bias 的训练和推理都慢很多；Rotary 居中但显存更高。
+  </p>
+
+  <p class="eq-cap">表 3 · WikiText-103、训练长度 512、单张 V100 的速度与显存（按 ALiBi 论文 Table 1 的 L=512 行转录；Train/Eval 单位为 words/s）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>位置方法</th><th>训练速度</th><th>推理速度</th><th>训练显存</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Sinusoidal</td><td class="num">28.5k</td><td class="num">82.1k</td><td class="num">15.3 GB</td></tr>
+        <tr><td>Rotary</td><td class="num">20.0k</td><td class="num">43.4k</td><td class="num">17.8 GB</td></tr>
+        <tr><td>T5 Bias</td><td class="num">14.4k</td><td class="num">21.8k</td><td class="num">16.9 GB</td></tr>
+        <tr><td>ALiBi</td><td class="num">28.3k</td><td class="num">85.8k</td><td class="num">15.3 GB</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表的口径是「训练长度 512」的对比，不是长上下文外推实验；它说明 ALiBi 的固定 bias 在训练和推理上几乎不付额外时间，
+    代价是那份按 head 复制的 mask。RoPE 的旋转在表里体现为 Rotary 的 <span data-src="ALiBi Table 1">20.0k</span> words/s 和 <span data-src="ALiBi Table 1">17.8</span> GB；
+    Partial RoPE 会把旋转量按 <code>d<sub>r</sub>/d</code> 缩小，但表里没有 partial 的单独一行，不能把 Rotary 的数字直接当成 Partial RoPE 的数字。
+  </p>
+</section>
+
+<!-- ================= 05. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三个注入点：q/k 旋转、什么都不加、logits 加偏置</h2></div>
+  <p class="sec-sub">同一层注意力的前向顺序不变，变的是 q/k 投影之后到 softmax 之前那一步。</p>
+
+  <figure>
+    <svg viewBox="0 0 840 420" role="img" aria-label="RoPE、Partial RoPE、NoPE 与 ALiBi 在注意力层中的三种位置注入点" font-family="Inter,'Noto Sans SC',sans-serif">
+      <defs>
+        <marker id="rv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <text x="420" y="28" text-anchor="middle" fill="var(--text)" font-size="15" font-weight="700">位置进入注意力的三个位置</text>
+
+      <g>
+        <rect x="20" y="54" width="250" height="300" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+        <text x="145" y="82" text-anchor="middle" fill="var(--text)" font-size="14" font-weight="700">RoPE / Partial RoPE</text>
+
+        <rect x="40" y="100" width="52" height="26" rx="4" fill="var(--accent)"></rect>
+        <rect x="94" y="100" width="156" height="26" rx="4" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="66" y="118" text-anchor="middle" fill="var(--bg)" font-size="11" font-weight="600">旋转</text>
+        <text x="172" y="118" text-anchor="middle" fill="var(--c1)" font-size="11">不旋转</text>
+
+        <text x="40" y="150" fill="var(--text)" font-size="11.5">只旋转前 d_r 维</text>
+        <text x="40" y="168" fill="var(--text)" font-size="11.5">其余维度仍参与 q·k</text>
+        <text x="40" y="186" fill="var(--text-muted)" font-size="11.5">但不含位置项</text>
+
+        <rect x="40" y="200" width="210" height="72" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="54" y="224" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">q_m = R_m W_q x_m</text>
+        <text x="54" y="244" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">q_mᵀk_n = f(n − m)</text>
+        <text x="54" y="264" fill="var(--text-muted)" font-size="11" font-family="'JetBrains Mono',monospace">only first d_r dims rotate</text>
+
+        <text x="40" y="304" fill="var(--text-muted)" font-size="11">全维 RoPE 是 d_r = d 的特例</text>
+        <text x="40" y="324" fill="var(--text-muted)" font-size="11">d_r = 0 时退化为 NoPE 的 q/k</text>
+      </g>
+
+      <g>
+        <rect x="295" y="54" width="250" height="300" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+        <text x="420" y="82" text-anchor="middle" fill="var(--text)" font-size="14" font-weight="700">NoPE</text>
+
+        <rect x="315" y="100" width="210" height="52" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-dasharray="4 3"></rect>
+        <text x="420" y="122" text-anchor="middle" fill="var(--text)" font-size="12" font-weight="600">没有位置模块</text>
+        <text x="420" y="140" text-anchor="middle" fill="var(--text-muted)" font-size="11">q/k 不做任何位置变换</text>
+
+        <rect x="370" y="178" width="90" height="90" rx="4" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+        <polygon points="370,178 370,268 460,268" fill="var(--c1-soft)" stroke="var(--c1)"></polygon>
+        <text x="398" y="258" fill="var(--c1)" font-size="11" font-family="'JetBrains Mono',monospace">j ≤ i</text>
+        <text x="420" y="290" text-anchor="middle" fill="var(--text-muted)" font-size="11">mask 让位置 i 只能看 ≤ i</text>
+
+        <text x="315" y="316" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">q_mᵀk_n =</text>
+        <text x="315" y="334" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">(W_q x_m)ᵀ(W_k x_n)</text>
+        <text x="315" y="348" fill="var(--text-muted)" font-size="11">没有显式位置项；顺序来自因果结构</text>
+      </g>
+
+      <g>
+        <rect x="570" y="54" width="250" height="300" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+        <text x="695" y="82" text-anchor="middle" fill="var(--text)" font-size="14" font-weight="700">ALiBi</text>
+
+        <text x="590" y="108" fill="var(--text)" font-size="11.5">q/k 不旋转；在 logits 上加</text>
+        <text x="590" y="126" fill="var(--text)" font-size="11.5">每头一个固定斜率 m 的线性偏置</text>
+
+        <rect x="590" y="140" width="210" height="78" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="602" y="162" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">logits_ij = q_iᵀk_j</text>
+        <text x="602" y="182" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">          + m(j − i)</text>
+        <text x="602" y="204" fill="var(--text)" font-size="11.5" font-family="'JetBrains Mono',monospace">m_i = 2^(−8i/n)</text>
+
+        <rect x="590" y="252" width="18" height="36" fill="var(--c2)"></rect>
+        <rect x="614" y="252" width="18" height="32" fill="var(--c2)"></rect>
+        <rect x="638" y="252" width="18" height="28" fill="var(--c2)"></rect>
+        <rect x="662" y="252" width="18" height="24" fill="var(--c2)"></rect>
+        <rect x="686" y="252" width="18" height="20" fill="var(--c2)"></rect>
+        <rect x="710" y="252" width="18" height="16" fill="var(--c2)"></rect>
+        <rect x="734" y="252" width="18" height="12" fill="var(--c2)"></rect>
+        <rect x="758" y="252" width="18" height="8" fill="var(--c2)"></rect>
+        <text x="590" y="304" fill="var(--text-muted)" font-size="11">斜率随头号递减</text>
+
+        <text x="590" y="326" fill="var(--text-muted)" font-size="11">不加位置嵌入；</text>
+        <text x="590" y="342" fill="var(--text-muted)" font-size="11">bias 不乘 1/√d_k</text>
+      </g>
+
+      <text x="420" y="394" text-anchor="middle" fill="var(--text-muted)" font-size="12">同一层里，位置只可能进入 q/k、logits，或者哪里都不进</text>
+      <line x1="270" y1="204" x2="295" y2="204" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rv-arrow)"></line>
+      <line x1="545" y1="204" x2="570" y2="204" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#rv-arrow)"></line>
+    </svg>
+    <figcaption>图 1 · 三种位置注入点的示意。左：RoPE/Partial RoPE 旋转 q/k 的子空间；中：NoPE 只保留 causal mask；右：ALiBi 在每层 logits 上加线性偏置。图中 d_r 与 <span data-src="DeepSeek-V2 §3.1.2">128</span>/<span data-src="DeepSeek-V2 §3.1.2">64</span> 的数字来自 GPT-NeoX §2.1.1 与 DeepSeek-V2 §3.1.2；MLA 的完整压缩路径与 KV cache 布局未画。</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>q/k 投影：</strong>先用 <code>W<sub>q</sub></code>、<code>W<sub>k</sub></code> 得到每个 token 的 query 和 key。此时两者都还没有位置信息。</li>
+    <li><strong>位置处理：</strong>Full RoPE 旋转全部 <code>d/2</code> 个二维子空间；Partial RoPE 只旋转前 <code>d<sub>r</sub>/2</code> 个；NoPE 跳过；ALiBi 不在 q/k 上做任何事，只准备每头的 bias 矩阵。</li>
+    <li><strong>logits：</strong>计算 <code>q<sub>i</sub><sup>T</sup>k<sub>j</sub>/√d</code>。ALiBi 在这里加上 <code>m(j−i)</code>，且这个 bias 不参与 <code>1/√d</code> 缩放（ALiBi §3 脚注 10）。</li>
+    <li><strong>mask + softmax：</strong>因果掩码把 <code>j &gt; i</code> 的位置置为不可见；NoPE 的顺序信息主要来自这一步。</li>
+    <li><strong>加权求和：</strong>用 softmax 权重聚合 value。三种变体都不改变 value 的计算，位置只影响 attention 权重。</li>
+  </ol>
+
+  <p>
+    这张图只画「位置项放在哪里」，不画多头注意力的并行、KV cache 的布局和 MLA 的矩阵吸收。
+    Partial RoPE 的未旋转维度仍会进入 <code>q·k</code>，只是不带位置；NoPE 的 q/k 与普通线性投影完全相同；
+    ALiBi 的 bias 在每一层都加，不是只在第一层加。三者的差别都在 softmax 之前那一步，之后的 attention 计算共享同一套结构。
+  </p>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>ALiBi 在语言建模上把 <span data-src="ALiBi Table 2">512</span> 训练外推到 <span data-src="ALiBi Table 2">3512</span>；NoPE 在十亿级代码模型上到 <span data-src="NoPE Appendix F.3">1800</span></h2></div>
+  <p class="sec-sub">两组证据的评测对象不同：一个是 WikiText-103 的 PPL，一个是代码模型的 PPL 随 context 变化；不要横比绝对数。</p>
+
+  <h3>ALiBi：PPL 随评估长度变长而下降，sinusoidal 则爆炸</h3>
+  <p>
+    ALiBi 论文 Table 2 给了训练长度 <span data-src="ALiBi Table 2">512</span> 的一组对照。训练 <span data-src="ALiBi Table 2">512</span>、评估 <span data-src="ALiBi Table 2">512</span> 时，ALiBi 的 PPL 是
+    <span data-src="ALiBi Table 2">19.73</span>；评估 <span data-src="ALiBi Table 2">3512</span> 时降到 <span data-src="ALiBi Table 2">18.40</span>。
+    同一组条件下，sinusoidal 从 <span data-src="ALiBi Table 2">20.05</span> 涨到 <span data-src="ALiBi Table 2">178.97</span>，
+    Rotary 从 <span data-src="ALiBi Table 2">20.07</span> 涨到 <span data-src="ALiBi Table 2">35.54</span>，
+    T5 bias 从 <span data-src="ALiBi Table 2">19.65</span> 涨到 <span data-src="ALiBi Table 2">22.91</span>。
+    <span data-src="ALiBi Table 2">3512</span> 是训练长度的 <span data-src="ALiBi Table 2">6.9×</span>（<span data-src="ALiBi Table 2">3512</span> / <span data-src="ALiBi Table 2">512</span>）；在 <span data-src="ALiBi Table 2">3512</span> 这个点上，
+    sinusoidal 与 ALiBi 的 PPL 之比约为 <span data-src="ALiBi Table 2">9.7×</span>（<span data-src="ALiBi Table 2">178.97</span> / <span data-src="ALiBi Table 2">18.40</span>）。
+  </p>
+
+  <p class="eq-cap">表 4 · WikiText-103 验证集 PPL（训练长度 512；节选，保留以下 6 个长度；转录自 ALiBi 论文 Table 2，WPS 列未转录；OOM 表示原文该格为 OOM）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>评估长度 L<sub>valid</sub></th><th>Sinusoidal</th><th>Rotary</th><th>T5 Bias</th><th>ALiBi</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">512</td><td class="num">20.05</td><td class="num">20.07</td><td class="num">19.65</td><td class="num">19.73</td></tr>
+        <tr><td class="num">1012</td><td class="num">43.54</td><td class="num">21.37</td><td class="num">18.79</td><td class="num">18.73</td></tr>
+        <tr><td class="num">2512</td><td class="num">132.41</td><td class="num">31.58</td><td class="num">20.41</td><td class="num">18.41</td></tr>
+        <tr><td class="num">3512</td><td class="num">178.97</td><td class="num">35.54</td><td class="num">22.91</td><td class="num">18.40</td></tr>
+        <tr><td class="num">10512</td><td class="num">341.53</td><td class="num">60.77</td><td class="num">52.95</td><td class="num">18.32</td></tr>
+        <tr><td class="num">15512</td><td class="num">406.01</td><td class="num">79.25</td><td class="num">OOM</td><td class="num">18.31</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表里最反直觉的一行是 ALiBi 的 <span data-src="ALiBi Table 2">18.31</span>：评估长度到 <span data-src="ALiBi Table 2">15512</span> 时，它的 PPL 仍低于训练长度 <span data-src="ALiBi Table 2">512</span> 时的 <span data-src="ALiBi Table 2">19.73</span>。
+    ALiBi §4.2 还报告，<span data-src="ALiBi §4.2">1.3B</span> 参数模型在 <span data-src="ALiBi §4.2">1024</span> 上训练、外推到 <span data-src="ALiBi §4.2">2048</span> 时，
+    PPL 比在 <span data-src="ALiBi §4.2">2048</span> 上训练的 sinusoidal 低 <span data-src="ALiBi §4.2">0.09</span>，显存比后者少 <span data-src="ALiBi §4.2">3.1</span> GB，
+    达到同一 PPL 比在 <span data-src="ALiBi §4.2">2048</span> 上训练的 sinusoidal 平均快 <span data-src="ALiBi §4.2">11%</span>（ALiBi §4.2）。
+  </p>
+
+  <h3>NoPE：合成任务上不输 T5 相对偏置，代码模型上到 <span data-src="NoPE Appendix F.3">1800</span></h3>
+  <p>
+    NoPE 论文的实验设置是 decoder-only、约 <span data-src="NoPE §3">107M</span> 参数、从零训练；训练长度在 <span data-src="NoPE §3">1</span> 到 <span data-src="NoPE §3">20</span> 之间均匀采样，
+    测试长度在 <span data-src="NoPE §3">1</span> 到 <span data-src="NoPE §3">40</span> 之间均匀采样，
+    覆盖 <span data-src="NoPE §3">10</span> 个合成任务、每个任务 <span data-src="NoPE §3">3</span> 个种子（NoPE §3）。在这个设置下，NoPE §4 的结论是：
+    NoPE 与最强的显式位置编码 T5 相对偏置相当，甚至更好；ALiBi 居中；APE 和 Rotary 表现较差。
+  </p>
+  <p>
+    更接近真实规模的证据在 NoPE Appendix F：<span data-src="NoPE Appendix F.1">1.3B</span> 参数、在代码数据上预训练、context <span data-src="NoPE Appendix F.3">1024</span>。
+    NoPE 与 ALiBi 都能有效外推到 <span data-src="NoPE Appendix F.3">1800</span> 个 token；
+    超过 <span data-src="NoPE Appendix F.3">1800</span> 之后，两者 PPL 都上升，但 ALiBi 相对更稳（NoPE Appendix F.3）。
+    <span data-src="NoPE Appendix F.3">1800</span> / <span data-src="NoPE Appendix F.3">1024</span> =
+    <span data-src="NoPE Appendix F.3">1.76×</span>，这是本页数字卡里的外推倍数。
+  </p>
+
+  <p>
+    两处证据不能拼成一张总排名。ALiBi 论文的主实验是 WikiText-103 语言建模，指标是 PPL；
+    NoPE 论文的主实验是合成推理任务和代码模型，指标是下游准确率与 PPL。
+    ALiBi 论文说 ALiBi 能外推；NoPE 论文说 ALiBi 在合成任务上居中、不如 T5 相对偏置。
+    这两句话分别成立，页面并列呈现，不把其中一个推广到另一个 setting。
+  </p>
+
+  <h3>Partial RoPE：证据是效率，不是一条独立的外推曲线</h3>
+  <p>
+    GPT-NeoX 的 <span data-src="GPT-NeoX §2.1.1">25%</span> 是工程选择，不是一篇受控的外推实验：GPT-NeoX §2.1.1 只说明初始实验认为它在性能和计算效率之间最平衡，
+    正文没有给对照数字。DeepSeek-V2 的 decoupled RoPE 则把证据放在 KV cache 上：
+    每 token 每层 <span data-src="DeepSeek-V2 §3.1.2">576</span> 个元素（<span data-src="DeepSeek-V2 §3.1.2">512</span> + <span data-src="DeepSeek-V2 §3.1.2">64</span>），跨 <code>l</code> 层共 <code>576l</code> 个；DeepSeek-V2 Table 1 折算成约 <span data-src="DeepSeek-V2 Table 1">2.25</span> 个 GQA 组。
+    这能说明位置通道可以只占一个小切片，但不能说明 Partial RoPE 在长度外推上优于 Full RoPE。
+  </p>
+  <p>
+    DeepSeek-V2 的 <span data-src="DeepSeek-V2 §3.1.4">128K</span> 上下文不能单独归因于 decoupled RoPE：DeepSeek-V2 论文 §3.1.4 说预训练后还用 YaRN 把默认 <span data-src="DeepSeek-V2 §3.1.4">4K</span> 扩展到 <span data-src="DeepSeek-V2 §3.1.4">128K</span>，
+    且 YaRN 只作用在承载 RoPE 的 decoupled key 上。<span class="infer">推断</span>：Partial RoPE 在这里的角色是「让位置与压缩内容解耦」，
+    不是「单靠少转几维就能解释 128K 的外推」。
+  </p>
+
+  <p class="eq-cap">表 5 · 各变体的证据口径（页面整理；数字出处见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>变体</th><th>证据来源</th><th>设定</th><th>结果</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Partial RoPE</td>
+          <td>GPT-NeoX §2.1.1</td>
+          <td>20B 模型；只旋转前 25% 维度</td>
+          <td>作者称性能与计算效率最平衡；正文未附对照表</td>
+        </tr>
+        <tr>
+          <td>Decoupled RoPE</td>
+          <td>DeepSeek-V2 §2.1、DeepSeek-V2 Table 1</td>
+          <td>d<sub>c</sub>=512；d<sub>h</sub><sup>R</sup>=64</td>
+          <td>KV cache 每层 576 元素/token；跨 <code>l</code> 层 576l 元素/token；约 2.25 个 GQA 组</td>
+        </tr>
+        <tr>
+          <td>NoPE</td>
+          <td>NoPE §4、NoPE Appendix F.3</td>
+          <td>合成任务；1.3B 代码模型</td>
+          <td>合成任务不输 T5 相对偏置；1.3B 有效外推到 1800</td>
+        </tr>
+        <tr>
+          <td>ALiBi</td>
+          <td>ALiBi Table 2</td>
+          <td>WikiText-103；训练 512</td>
+          <td>评估 3512 时 PPL 18.40；sinusoidal 为 178.97</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>没有一种变体同时保住位置分辨率、零成本和长度外推</h2></div>
+  <p class="sec-sub">把每种选择的失效条件写清楚：部分旋转丢位置，NoPE 在更长上下文变弱，ALiBi 有 recency 偏置。</p>
+
+  <ul>
+    <li>
+      <strong>Partial RoPE 只给一个子空间位置：</strong>未旋转的维度仍参与 <code>q·k</code>，但不含位置项；
+      如果任务需要每个维度都携带细粒度位置，这部分信息只能由旋转子空间和内容匹配间接提供。
+      GPT-NeoX 的 <span data-src="GPT-NeoX §2.1.1">25%</span> 是初始实验的选择，正文没有给消融表；
+      DeepSeek-V2 的 decoupled RoPE 与 MLA 的矩阵吸收绑定，不是一个可以无条件搬到其他模型的通用替换。
+    </li>
+    <li>
+      <strong>NoPE 的位置能力完全靠学习：</strong>NoPE 论文证明它<strong>能</strong>表示绝对和相对位置（NoPE §5.1），
+      但训练后实际学到的更接近 T5 相对偏置（NoPE §5.2）。在 <span data-src="NoPE Appendix F.1">1.3B</span> 代码模型上，NoPE 与 ALiBi 都能到
+      <span data-src="NoPE Appendix F.3">1800</span> 个 token；超过 <span data-src="NoPE Appendix F.3">1800</span> 后 ALiBi 相对更稳，NoPE 的 PPL 上升（NoPE Appendix F.3）。
+      NoPE 论文 §7 还提醒，语言建模数据本身有大量短程依赖，ALiBi 的 recency bias 可能让它在 PPL 上看起来更好；
+      这不等于 NoPE 在所有下游任务上都更差。
+    </li>
+    <li>
+      <strong>ALiBi 把 recency 先验写死：</strong>NoPE 论文 §6.1 的 attention 分布显示，ALiBi 强烈偏向短程；
+      ALiBi 论文 §4.2 说模型在约 <code>2L</code> 处最好，并能在实验中维持到 <span data-src="ALiBi §4.2">10000</span> 个 token，
+      但这不是对所有数据域的保证。斜率是固定的几何序列；把斜率改成可学习没有带来强外推，训练速度还相对慢
+      <span data-src="ALiBi §3">3%</span>（ALiBi §3 脚注 11）。
+    </li>
+    <li>
+      <strong>Full RoPE 也不是默认可外推：</strong>NoPE 论文 §4 在合成任务上把 Rotary 归到接近 APE 的一侧；
+      ALiBi 论文 §2 说 Rotary 比 sinusoidal 好，但仍没有达到令人满意的外推。
+      RoPE 的 long-term decay 是一个性质（RoPE §3.3、RoPE §3.4.3），不是长度外推的保证。
+    </li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>什么时候选哪个</h4></div>
+    <p>
+      需要在不加位置嵌入的前提下，用固定先验换稳定外推和低成本，ALiBi 是最直接的选择；
+      需要零位置计算、并愿意让模型自己学隐式位置，NoPE 在中小规模下游推理任务上有证据；
+      想保留 RoPE 的相对性、又要减少旋转维数或保住低秩 KV 的矩阵吸收，Partial/decoupled RoPE 是工程上的折中。
+      三者不是同一把尺子上的三个刻度：Partial RoPE 改变的是位置子空间，NoPE 去掉的是显式位置项，ALiBi 改变的是 logits 的距离先验。
+    </p>
+  </div>
+
+  <p>
+    最后把两处原文的相反结论并列在这里，方便读者按 setting 取用：
+    ALiBi 论文 §4 报告 ALiBi 在 WikiText-103 上外推到 <span data-src="ALiBi Table 2">3512</span> 仍保持低 PPL，而 sinusoidal 爆炸；
+    NoPE 论文 §4 报告在合成推理任务上 ALiBi 居中、T5 相对偏置更强、NoPE 最好。
+    两篇的评测对象、指标和训练数据都不同；页面不把这两组结论合并成一个总排名。
+  </p>
+</section>
+
+<footer>
+  <div>RoPE 变体 · Partial RoPE / NoPE / ALiBi</div>
+  <div class="src">
+    论文：<a href="https://arxiv.org/abs/2104.09864" target="_blank" rel="noopener">RoFormer / RoPE（arXiv 2104.09864）</a> ·
+    <a href="https://arxiv.org/abs/2108.12409" target="_blank" rel="noopener">ALiBi（arXiv 2108.12409）</a> ·
+    <a href="https://arxiv.org/abs/2305.19466" target="_blank" rel="noopener">NoPE 长度泛化研究（arXiv 2305.19466）</a><br>
+    来源：<a href="https://arxiv.org/abs/2204.06745" target="_blank" rel="noopener">GPT-NeoX-20B（arXiv 2204.06745）</a> ·
+    <a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener">DeepSeek-V2（arXiv 2405.04434）</a><br>
+    笔记：<a href="/partial-rope/">Partial RoPE</a> · <a href="/nopeno-positional-embedding/">NoPE（No Positional Embedding）</a> · <a href="/alibi/">ALiBi</a><br>
+    版本：页面引用的 arXiv 链接均不带版本号；RoPE、ALiBi、GPT-NeoX、DeepSeek-V2 以 2026-11 抓取的 abs/HTML 为准，
+    NoPE 论文按 v2（NeurIPS 2023 版）引用。
+  </div>
+  <div class="src" style="margin-top:12px">
+    编号核对：候选标题「Length Generalization in Transformers without Positional Encodings」未在 arXiv 检索到同题论文；
+    编号 2305.19466 对应的实际标题是「The Impact of Positional Encoding on Length Generalization in Transformers」。
+    本页 NoPE 的结论与数字全部取自后者；最接近候选标题的论文是 2404.12224「Length Generalization of Causal Transformers without Position Encoding」，
+    本页没有使用它的数字。
+  </div>
+  <div class="src" style="margin-top:12px">
+    笔记勘误：<code>ALiBi.md</code> 写 bias「在 softmax 的结果后添加」，原文是加在 softmax 之前的 attention logits 上；
+    <code>Partial RoPE.md</code> 写「MiniMax M1（首创）」，但 GPT-NeoX（2022）§2.1.1 已对前 25% 维度施加 RoPE；
+    <code>NoPE（No Positional Embedding）.md</code> 称大模型 + 长 context 效果不清楚，NoPE Appendix F.1 的 1.3B/1024 设置、NoPE Appendix F.3 的初步结果已在论文中报告。
+    以上只说明差异，未改原笔记。
+  </div>
+  <div class="src" style="margin-top:12px">
+    页面说明：交互是简化模拟，不是源码实现；所有实验数字取自上述论文的 Table/§，页面没有做新实验。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('rope-sim');
+  if (!sim) return;
+
+  var slider = document.getElementById('rd');
+  var rdVal = document.getElementById('rd-val');
+  var msg = document.getElementById('sim-msg');
+  var path = document.getElementById('chart-path');
+  var floorLine = document.getElementById('chart-floor');
+  var vDelta = document.getElementById('v-delta');
+  var vDr = document.getElementById('v-dr');
+  var vPairs = document.getElementById('v-pairs');
+  var vSum = document.getElementById('v-sum');
+  var vMean = document.getElementById('v-mean');
+  if (!slider || !rdVal || !msg || !path || !floorLine || !vDelta || !vDr || !vPairs || !vSum || !vMean) return;
+
+  var D = 128;
+  var MAXD = 128;
+  var state = { B: 10000, dr: 32 };
+
+  function sumCos(B, dr, delta) {
+    var pairs = dr / 2;
+    var s = 0;
+    for (var i = 0; i < pairs; i++) {
+      var theta = Math.pow(B, -2 * i / D);
+      s += Math.cos(delta * theta);
+    }
+    return s;
+  }
+
+  function meanDot(B, dr, delta) {
+    var s = sumCos(B, dr, delta);
+    return (2 * s + (D - dr)) / D;
+  }
+
+  function chartPath(B, dr) {
+    var pts = [];
+    for (var d = 0; d <= MAXD; d++) {
+      var val = meanDot(B, dr, d);
+      var x = 40 + d / MAXD * 680;
+      var y = 20 + (1 - val) * 90;
+      pts.push((d === 0 ? 'M' : 'L') + x.toFixed(2) + ',' + y.toFixed(2));
+    }
+    return pts.join(' ');
+  }
+
+  function floorY(dr) {
+    var c = (D - dr) / D;
+    return 20 + (1 - c) * 90;
+  }
+
+  function setActive(attr, value) {
+    var btns = sim.querySelectorAll('.rule-btn');
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      if (!b.getAttribute(attr)) continue;
+      if (b.getAttribute(attr) === String(value)) {
+        b.classList.add('active');
+      } else {
+        b.classList.remove('active');
+      }
+    }
+  }
+
+  function render() {
+    var delta = parseInt(slider.value, 10);
+    if (isNaN(delta)) delta = 0;
+    if (delta < 0) delta = 0;
+    if (delta > MAXD) delta = MAXD;
+    slider.value = String(delta);
+    rdVal.textContent = String(delta);
+
+    var dr = state.dr;
+    var B = state.B;
+    var pairs = dr / 2;
+    var s = sumCos(B, dr, delta);
+    var mean = meanDot(B, dr, delta);
+    var base = (D - dr) / D;
+    var rot = mean - base;
+
+    vDelta.textContent = String(delta);
+    vDr.textContent = String(dr);
+    vPairs.textContent = String(pairs);
+    vSum.textContent = s.toFixed(4);
+    vMean.textContent = mean.toFixed(4);
+
+    path.setAttribute('d', chartPath(B, dr));
+    floorLine.setAttribute('d', 'M40,' + floorY(dr).toFixed(2) + ' L720,' + floorY(dr).toFixed(2));
+
+    msg.textContent = 'Δ = ' + delta + '，d_r = ' + dr + '：Σ cos = ' + s.toFixed(4) +
+      '，平均点积 = ' + mean.toFixed(4) + '。未旋转维度贡献 = ' + base.toFixed(4) +
+      '，旋转项 = ' + rot.toFixed(4) + '。d_r 越大，旋转项占比越高；base 越大，i>0 的频率越低。';
+  }
+
+  var btns = sim.querySelectorAll('.rule-btn');
+  for (var i = 0; i < btns.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var b = btn.getAttribute('data-base');
+        var dr = btn.getAttribute('data-dr');
+        if (b !== null) {
+          state.B = parseFloat(b);
+          setActive('data-base', b);
+        }
+        if (dr !== null) {
+          state.dr = parseInt(dr, 10);
+          setActive('data-dr', dr);
+        }
+        render();
+      });
+    })(btns[i]);
+  }
+
+  slider.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

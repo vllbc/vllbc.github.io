@@ -1,0 +1,802 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 3.8 | Table 1 | 33.8-30.0 |
+| 2.1 | Table 1 | 55.9-53.8 |
+| 3.2 | Table 1 | 76.9-73.7 |
+| 1.2 | Table 1 | 24.0-22.8 |
+| 3.7 | Table 1 | 40.1-36.4 |
+| 4.1 | Table 1 | 66.1-62.0 |
+| 0.7 | Table 1 | 3.5-2.8 |
+| 3.0 | Table 1 | 10.8-7.8 |
+| 5.3 | Table 1 | 22.7-17.4 |
+| 6.1 | Table 4 | 26.8-20.7 |
+| 9.2 | Table 4 | 53.7-44.5 |
+| 6.0 | Table 4 | 31.4-25.4 |
+| 1.7 | Table 4 | 74.0-72.3 |
+| 3.3 | Table 4 | 53.3-50.0 |
+| -0.9 | Table 4 | 66.6-67.5 |
+| -0.4 | Table 4 | 22.3-22.7 |
+| 1.3 | Table 4 | 28.5-27.2 |
+| 0.7 | Table 4 | 70.7-70.0 |
+| 2.1 | Table 4 | 70.6-68.5 |
+| 3.439 | §3.2 | 1+0.9+0.9*0.9+0.9*0.9*0.9 |
+| 2.9904 | §3.2 | 3.439/(1+0.15) |
+| 1.85 | §3.2 | 1+0.85 |
+| 1.7619 | §3.2 | 1.85/(1+0.05) |
+| 0.148 | Appendix A | 3.5/3.05-1 |
+| 3.5023 | Appendix A | 1+0.912+0.912*0.912+0.912*0.912*0.912 |
+| 3.0508 | Appendix A | 3.5023/(1+0.148) |
+| 0.0417 | §5.4.3 | 1.875/1.8-1 |
+| 1.875 | §5.4.3 | 1+0.875 |
+| 1.7999 | §5.4.3 | 1.875/(1+0.0417) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="mixed">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTP · 一次预测未来 n 个 token，训练与自投机</title>
+<meta name="description" content="Multi-token prediction 精读：Gloeckle et al. 的并行 head、DeepSeek-V3 的顺序因果链与 D=1、训练信号密度、推理时丢弃或自投机解码的接受率与加速比，以及与 Medusa/EAGLE 的分层区别。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.tbl-cap{font-size:12.5px;color:var(--text-soft);margin:0 0 8px;line-height:1.7}
+.tbl-scroll table{min-width:760px}
+.sim-note,.preset-note{font-size:12px;color:var(--text-soft);line-height:1.7;margin:10px 0 0}
+details.handcalc{margin-top:14px}
+.flow text{font-family:Inter,"Noto Sans SC",sans-serif}
+.flow .svg-panel{fill:var(--bg-soft);stroke:var(--border);stroke-width:1}
+.flow .svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.1}
+.flow .svg-box-draft{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.1}
+.flow .svg-box-target{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.1}
+.flow .svg-box-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.1}
+.flow .svg-title{fill:var(--text);font-size:12.5px;font-weight:700}
+.flow .svg-label{fill:var(--text);font-size:11px;font-weight:600}
+.flow .svg-small{fill:var(--text-muted);font-size:10px}
+.flow .svg-mono{fill:var(--text);font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600}
+.flow .svg-arrow{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.flow .svg-arrow-head{fill:var(--text-soft)}
+.flow .svg-dash{stroke:var(--border-strong);stroke-width:1.1;fill:none;stroke-dasharray:4 4}
+@media (max-width:520px){
+  .sim{padding:18px}
+  .flow .svg-small{font-size:10.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MTP</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">训练与推理</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 预训练 · 多 token 预测 · 2024</span>
+  <h1>MTP：一次预测未来 n 个 token，训练更强，推理还能自投机</h1>
+  <p class="hero-sub">
+    自回归训练在每个位置只监督一个 token，信号稀，而且 teacher forcing 的局部目标与推理时的多步生成错位。
+    MTP 让每个位置同时预测未来 <strong>n</strong> 个 token：Gloeckle et al. 用共享 trunk 加独立 head，DeepSeek-V3 用顺序因果链且只多预测一个 token。
+    训练收益在代码任务上最明显；推理时这些 head 可以丢掉，也可以拿来做自投机解码。
+  </p>
+  <div class="meta">
+    <span>Gloeckle et al. · DeepSeek-V3 · Medusa · EAGLE</span>
+    <a href="https://arxiv.org/abs/2404.19737" target="_blank" rel="noopener">MTP v1 ↗</a>
+    <a href="https://arxiv.org/abs/2412.19437v2" target="_blank" rel="noopener">DeepSeek-V3 v2 ↗</a> · <a href="https://github.com/deepseek-ai/DeepSeek-V3" target="_blank" rel="noopener">code ↗</a>
+    <a href="https://arxiv.org/abs/2401.10774v2" target="_blank" rel="noopener">Medusa v2 ↗</a> · <a href="https://github.com/FasterDecoding/Medusa" target="_blank" rel="noopener">code ↗</a>
+    <a href="https://arxiv.org/abs/2401.15077v2" target="_blank" rel="noopener">EAGLE v2 ↗</a> · <a href="https://github.com/SafeAILab/EAGLE" target="_blank" rel="noopener">code ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    MTP 是<strong>训练目标</strong>，不是推理插件。每个训练位置不再只预测 <code>x(t+1)</code>，而是同时预测 <code>x(t+1) … x(t+n)</code>；
+    共享 trunk 上挂 <strong>n 个 head</strong>，每个 head 负责一个偏移。为了做等参数量比较，作者把 <strong>n−1 层</strong>从 trunk 移到预测 head，所以这不是“白送参数”。
+  </p>
+  <p>
+    两种排布。Gloeckle et al. 的 head 相互<strong>并行、独立</strong>，共享 unembedding；DeepSeek-V3 改成<strong>顺序因果链</strong>：第 k 个深度把上一个深度的 hidden state 与 <code>Emb(t(i+k))</code> 拼接，过一个 Transformer block，再共享 output head。DeepSeek-V3 只取 <strong data-src="§4.2">D=1</strong>，即多预测一个 token。
+  </p>
+  <p>
+    收益<strong>不均匀</strong>：代码任务的收益更明显，自然语言的选择题基本持平或回退；DeepSeek-V3 的 Large MoE 消融中，MMLU 从 <span data-src="Table 4">67.5</span> 降到 <span data-src="Table 4">66.6</span>（<span class="mono" data-src="Table 4">−0.9</span> 个百分点）。训练时间也不是零：Table S5 的 n=4 实测为 <span class="mono" data-src="Appendix C">1.07–1.22×</span>，而 §1 的表述是「no train time or memory overhead」。
+  </p>
+  <p>
+    推理有两条路：丢掉 MTP head，成本回到普通模型；或把 head 当 draft 做自投机。Gloeckle 的 7B / 4-token 模型在代码上报告 <span class="mono" data-src="§3.2">3.0×</span>，平均接受 <span class="mono" data-src="§3.2">2.5</span> / <span class="mono" data-src="§3.2">3</span> 个建议；DeepSeek-V3 报告第二 token 接受率 <span class="mono" data-src="§5.4.3">85–90%</span>、<span class="mono" data-src="§5.4.3">1.8×</span> TPS。Medusa/EAGLE 是推理侧的 draft 机制，和 MTP 不在同一层。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§3.2">3.0<small>×</small></div>
+      <div class="k">7B / 4-token / greedy 自投机 / 代码；平均接受 <span data-src="§3.2">2.5</span> / <span data-src="§3.2">3</span> 个建议</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 4">+9.2<small>pp</small></div>
+      <div class="k">DeepSeek-V3 大 MoE / HumanEval；<span data-src="Table 4">53.7</span> − <span data-src="Table 4">44.5</span></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.4.3">1.8<small>×</small></div>
+      <div class="k">DeepSeek-V3 MTP 投机解码 TPS；第二 token 接受率 <span data-src="§5.4.3">85–90%</span></div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>每个位置只学一个 token，训练信号稀，且与自回归生成错位</h2></div>
+  <p class="sec-sub">读完这节你应该知道：MTP 为什么是训练目标问题，而不是又一个推理加速插件。</p>
+
+  <p>
+    标准语言建模在每个位置只监督下一个 token：<code>L<sub>1</sub> = −Σ<sub>t</sub> log P<sub>θ</sub>(x<sub>t+1</sub> | x<sub>t:1</sub>)</code>（§2，Eq. 1）。
+    teacher forcing 把 ground truth 喂给模型，模型只需要在局部把下一个 token 的分布拟合好；一条长度为 T 的序列只产生 T 个监督信号，而且每个信号只指向紧邻的下一个位置。
+    论文的观察是，这种局部目标会让模型抓住局部模式，却不容易学到对后续文本更重要的“选择点”（§1、§5.1）。
+  </p>
+  <p>
+    推理时的情况不同：没有 ground truth，模型只能沿着自己生成的 token 往前走，早期错误会累积。训练时每步都有正确前缀，推理时没有；这个分布错位是论文在 §5.2 用信息论解释 MTP 的出发点。
+    在这个视角下，MTP 想改的是<strong>模型学到什么表示</strong>，而不是解码器怎么调度。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">训练侧</span><h4>改变监督信号</h4></div>
+      <p>把每个位置的标签从 1 个扩展成 n 个未来 token，让同一个 hidden state 同时服务多个偏移的 cross-entropy。信号密度上去了，表示也被推向更长程的信息。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">推理侧</span><h4>改变解码调度</h4></div>
+      <p>speculative decoding、Medusa、EAGLE 都在推理时用更便宜的 draft 换并行验证；目标模型的参数和训练目标不变。它们优化的是“每一步怎么走”，不是“模型学到什么”。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">MTP 的位置</span><h4>训练时多用 head，推理时可以不用</h4></div>
+    <p>
+      MTP 把额外 head 写进预训练目标；训练完成后，最基本的使用方式仍然是只用 next-token head（§2）。
+      因此它和 speculative decoding 不是互斥关系：MTP 提供了一种“自带 draft”的可能，但不启用自投机时，额外 head 可以被丢弃。
+      这也解释了为什么页面的前半段在讲训练目标，后半段才谈推理加速。
+    </p>
+  </div>
+
+  <p>
+    要让这个想法可用，至少有三个约束：训练时间不能线性增长、参数量要能和 baseline 对齐、推理时如果不能加速也不能变慢。后面的「训练与推理」一节会逐条对账。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人试过多 token 预测，但要么复制残差流，要么只做推理微调</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Qi et al.、Stern、Medusa、EAGLE 各自做到哪一步，MTP 的空白在哪里。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">先验 A</span><h4>Qi et al. 2020：多 token 预测，但残差流复制 n 份</h4></div>
+      <p>Qi et al. 认为多 token 预测能鼓励规划、改善表示，并减少 teacher forcing 对局部模式的过拟合。但他们的实现把 residual stream 复制 n 份；Gloeckle et al. 在 §6 的对比里指出，这种做法难以做等计算量比较，残差表示参与辅助 loss 的方式也不同。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">先验 B</span><h4>Stern et al. 2018：推理侧多 head，不是预训练损失</h4></div>
+      <p>blockwise parallel decoding 用多个 head 一次提出多个 token，再用目标模型验证；它关注的是解码加速，通常是在已有模型上做微调。Gloeckle et al. §6 把这类工作归为“为推理而做的多 token 预测”，没有研究把它作为预训练目标的效果。</p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">推理侧对照 A</span><h4>Medusa：冻结主干，加头做树验证</h4></div>
+      <p>Medusa 在 backbone 上加多个解码头，并行预测多个未来 token，用 tree attention 同时验证多条候选。Medusa-1 冻结主干、只训 head，在 Vicuna-7B 上报告 <span class="mono" data-src="Table 2">2.18×</span>；Medusa-2 联合微调，报告 <span class="mono" data-src="Table 2">2.83×</span>（Table 2）。它的 typical acceptance 不要求输出与目标分布逐点一致（§2.3.1；实验见 §3.3.2），所以不是无损采样的同义词。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">推理侧对照 B</span><h4>EAGLE：在特征层做 draft</h4></div>
+      <p>EAGLE 不在 token 层自回归，而是在目标模型倒数第二层特征上自回归，并把 token 序列前移一步来降低特征预测的不确定性；draft 树用 tree attention 验证（§1、§3）。它仍属于 speculative sampling 框架，改变的是“草稿怎么来”，不是预训练目标。LLaMA2-Chat 70B 上报告 <span class="mono" data-src="§1">2.7–3.5×</span> latency 加速（§1）。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">MTP 的空白</span><h4>把多 token 预测作为大规模预训练目标，并做等参数量比较</h4></div>
+    <p>
+      Gloeckle et al. 的贡献是把这个目标做成“无额外参数”的架构：共享 trunk 加 n 个 head，训练时按 head 顺序做前向/反向，把显存压回 <code>O(V+d)</code>（§2）。
+      DeepSeek-V3 则把它带进 <span data-src="§4.2">671B</span> 总参数、<span data-src="§4.2">37B</span> 激活参数的 MoE 预训练（§4.2），改成顺序因果链，并且只多预测一个 token（<span data-src="§4.2">D=1</span>，§4.2）。
+      这两篇的分工，正好对应页面后面要讲的两件事：训练信号怎么加，以及推理时这些 head 怎么处理。
+    </p>
+  </div>
+
+  <p>
+    和 Medusa/EAGLE 的关键区别是层次不同：MTP 改的是预训练目标，额外 head 是训练图的一部分；Medusa/EAGLE 改的是推理时的 draft 机制，主干模型可以冻结，也可以联合微调。
+    两者可以组合（Gloeckle §2 提到 Medusa-like tree attention；DeepSeek-V3 §2.2 提到复用 MTP 做 speculative decoding），但组合不等于同一件事。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>共享 trunk + n 个预测头；DeepSeek-V3 改成顺序因果链，只多预测一个 token</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两个实现的公式、参数怎么对齐，以及为什么 head 的前向/反向顺序会影响显存。</p>
+
+  <h3>Gloeckle et al.：并行独立 head，共享 unembedding</h3>
+  <p>
+    设共享 trunk 为 <code>f<sub>s</sub></code>，第 i 个预测 head 为 <code>f<sub>h(i)</sub></code>，共享 unembedding 为 <code>f<sub>u</sub></code>。模型在每个位置 <code>t</code> 同时预测未来 n 个 token：
+  </p>
+  <div class="eq">
+    <code>L<sub>n</sub> = −Σ<sub>t</sub> log P<sub>θ</sub>(x<sub>t+n:t+1</sub> | x<sub>t:1</sub>)</code><br>
+    <code>P<sub>θ</sub>(x<sub>t+i</sub> | x<sub>t:1</sub>) = softmax(f<sub>u</sub>(f<sub>h(i)</sub>(f<sub>s</sub>(x<sub>t:1</sub>))))</code>
+  </div>
+  <p class="eq-cap">Eq. (2) 与 §2 的分解；i=1 是 next-token head，i&gt;1 是额外 head。所有 head 读同一个 trunk 表示 <code>z<sub>t:1</sub></code>。</p>
+
+  <p>
+    额外 head 不是线性层：论文的主架构里，每个 head 是一个 transformer 层（Appendix B 另试了 linear head）。所有 head 共享同一个 unembedding 矩阵 <code>f<sub>u</sub></code>，因此词表投影的参数量不随 n 线性增长；如果每个 head 都复制一份 unembedding，矩阵形状会是 <code>(d, nV)</code>，在大词表下不可行（Appendix B）。
+  </p>
+  <p>
+    等参数量比较的做法是：加 <code>n−1</code> 个 head 层，就从 trunk 里减掉 <code>n−1</code> 层（§3）。所以 MTP 模型和 next-token baseline 的总参数量相同，差别在于深度怎么分配，而不是“多了一倍参数”。
+    这一点在读 Figure 3 的规模趋势时很重要：横轴是总参数量，不是 trunk 深度。
+  </p>
+
+  <h3>显存：naive 实现物化 n 份 logits，顺序前向/反向把它压回一份</h3>
+  <p>
+    词表大小 V 远大于 hidden dimension d，logits 是显存瓶颈。如果一次把所有 head 的 logits 和梯度都物化，峰值是 <code>O(nV+d)</code>；论文的做法是：
+    先做 trunk 的前向，然后<strong>逐个 head</strong>做前向和反向，把梯度累加到 trunk，再释放当前 head 的 logits，只长期保留 d 维的 trunk gradient <code>∂L<sub>n</sub>/∂f<sub>s</sub></code>。
+    峰值降到 <code>O(V+d)</code>，且作者称运行时不增加（§2、Figure 2；训练时间的实测见「训练与推理」一节的 Table S5）。
+  </p>
+
+  <h3>DeepSeek-V3：顺序因果链，D=1，共享 embedding 与 output head</h3>
+  <p>
+    DeepSeek-V3 的实现和 Gloeckle 的并行 head 不同：它用 D 个顺序模块预测 D 个额外 token，并保留每个预测深度的完整因果链（§2.2）。
+    第 k 个模块先把上一个深度的表示 <code>h<sup>k−1</sup><sub>i</sub></code> 与第 <code>i+k</code> 个 token 的 embedding 拼接，过一个线性投影 <code>M<sub>k</sub></code>：
+  </p>
+  <div class="eq">
+    <code>h′<sup>k</sup><sub>i</sub> = M<sub>k</sub>[RMSNorm(h<sup>k−1</sup><sub>i</sub>); RMSNorm(Emb(t<sub>i+k</sub>))]</code><br>
+    <code>h<sup>k</sup><sub>1:T−k</sub> = TRM<sub>k</sub>(h′<sup>k</sup><sub>1:T−k</sub>)</code><br>
+    <code>P<sup>k</sup><sub>i+k+1</sub> = OutHead(h<sup>k</sup><sub>i</sub>)</code>
+  </div>
+  <p class="eq-cap">Eq. (21)–(23)，§2.2；k=1 时 <code>h<sup>0</sup></code> 是主模型的表示，<code>Emb</code> 与 <code>OutHead</code> 都与主模型共享。</p>
+
+  <p>
+    每个深度的 loss 是该偏移上的 cross-entropy；总 loss 是各深度平均后乘权重 λ：
+  </p>
+  <div class="eq">
+    <code>L<sup>k</sup><sub>MTP</sub> = CrossEntropy(P<sup>k</sup><sub>2+k:T+1</sub>, t<sub>2+k:T+1</sub>)</code><br>
+    <code>L<sub>MTP</sub> = (λ/D) Σ<sub>k=1</sub><sup>D</sup> L<sup>k</sup><sub>MTP</sub></code>
+  </div>
+  <p class="eq-cap">Eq. (24)–(25)，§2.2；DeepSeek-V3 取 <span data-src="§4.2">D=1</span>（§4.2），即主模型之外只多预测一个 token。</p>
+
+  <p>
+    为什么是“顺序”而不是“并行”？看 <code>h′<sup>k</sup><sub>i</sub></code> 的第二个输入：<code>Emb(t<sub>i+k</sub>)</code>。k=1 时它吃的是真实的下一个 token 的 embedding，用来预测再下一个 token；k=2 时它吃 <code>h<sup>1</sup><sub>i</sub></code> 和 <code>Emb(t<sub>i+2</sub>)</code>，继续往前推。
+    这样每个深度都保留完整的因果链，深度之间是串行的。DeepSeek-V3 §2.2 明确说，这个因果链的思路和 EAGLE 相似，但 EAGLE 的目标是 speculative decoding，DeepSeek-V3 的目标是训练。
+  </p>
+
+  <h3>为什么可能有效：作者给的两种解释</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">信息论</span><h4>把相对互信息的权重加倍</h4></div>
+      <p>论文把 next-token 的 <code>H(X)</code> 与 2-token 的 <code>H(X)+H(Y)</code> 拆开：<code>H(X)+H(Y) = H(X|Y) + 2I(X;Y) + H(Y|X)</code>。丢掉 <code>H(Y|X)</code>（它会在下一个位置再次出现），2-token 预测把 <code>I(X;Y)</code> 的权重提高一倍（§5.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">选择点</span><h4>难预测的转折被隐式加权</h4></div>
+      <p>论文用一个简化的序列论证：n-token 预测通过“相关项”给 choice point 的权重是 <code>n(n+1)/2</code>，给 inconsequential point 的权重是 <code>n</code>（§5.1）。这不是显式的损失重加权，而是多偏移目标叠加后的隐式效果。</p>
+    </div>
+  </div>
+
+  <h3>Appendix B 的其他排布：causal / anticausal / linear 没有一致胜出</h3>
+  <p>
+    除了并行独立 head，论文还试了三种排布：<strong>causal</strong>，后面的 head 叠在前面的 head 上；<strong>anticausal</strong>，先预测最远的 token，再逐步细化到近处；<strong>linear head</strong>，用单个线性层代替 transformer 层。
+    Appendix B 称三种变体相对 parallel「showed no significant improvement」；页面只引用这个结论，不展开表内数字。作者的大规模实验采用 parallel。
+  </p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>训练开销最高约两成；推理可以零成本丢掉 MTP 头</h2></div>
+  <p class="sec-sub">读完这节你应该知道：显存怎么压、训练时间与「无开销」说法怎么并列、推理侧的自投机加速怎么算。</p>
+
+  <h3>参数与训练时间：等参数量不是零开销</h3>
+  <p>
+    等参数量比较把 <code>n−1</code> 层从 trunk 移到 head，总参数不变，但训练图多了一些逐 head 的前向/反向调度。论文 §1 称这个架构「no train time or memory overhead」；Appendix C 的 Table S5 则给出相对 next-token 训练的墙钟时间：
+    n=4 在 <span data-src="Appendix C">0.3B</span> 到 <span data-src="Appendix C">13B</span> 的模型上为 <span class="mono" data-src="Appendix C">1.07–1.22×</span>，n=2 为 <span class="mono" data-src="Appendix C">1.02–1.07×</span>。
+    Table S5 的 caption 把这归因于 FSDP 的层权重通信与计算 overlap 丢失，并说如果重新实现可以去掉这部分开销（Appendix C）。
+    两处口径并列：§1 的「no train time or memory overhead」是贡献表述，Table S5 是当前实现的实测；页面不替它们做进一步解释。
+  </p>
+  <p>
+    显存侧的收益更明确：naive 物化所有 head 的 logits 是 <code>O(nV+d)</code>，顺序前向/反向把它压到 <code>O(V+d)</code>（§2、Figure 2）。这是一个实现顺序问题，不是模型架构变化；如果训练框架一次性物化所有 head 的 logits，显存仍会按 n 增长。
+  </p>
+
+  <h3>推理：丢弃是零成本，复用才是加速</h3>
+  <p>
+    Gloeckle et al. 明确说，最基本的推理方式是只用 next-token head，其余 head 全部丢弃（§2）。
+    DeepSeek-V3 在 §4.5.1 也写得更直接：推理时直接丢弃 MTP 模块，所以带 MTP 和不带 MTP 的对比模型推理成本相同。
+    这意味着 MTP 的训练收益和推理加速是<strong>解耦</strong>的：不启用自投机，额外 head 不进入推理图；启用自投机，才把 head 当 draft。
+  </p>
+  <p>
+    自投机的基本账：用 k 个 head（含 next-token head）一次产生最多 k 个 token，目标模型再做一次验证 forward。设逐位接受率为 α，且各位置独立同分布，则每次 forward 的期望 token 数是
+    <code>E = 1 + α + … + α<sup>k−1</sup> = (1−α<sup>k</sup>)/(1−α)</code>。
+    设一次 draft pass 的成本是一次 target forward 的 c 倍，则 walltime 加速比是 <code>S = E/(1+c)</code>。k=1 时 E=1，S≤1；至少要有两个 head 才有加速空间。
+  </p>
+  <p class="sim-note">
+    这和标准 speculative decoding 的公式是同一个：k 个 MTP head 提供 k−1 个额外草稿，等价于标准投机的 γ=k−1，因此 <code>(1−α<sup>k</sup>)/(1−α) = (1−α<sup>γ+1</sup>)/(1−α)</code>。区别在草稿的来源：MTP 的 head 是预训练 jointly 学出来的，不是外挂的 draft model。
+  </p>
+
+  <div class="sim" id="mtp-sim">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button" data-k="4" data-alpha="0.912" data-c="0.148">Code 7B · 4 heads<span class="r-sub">Table S2</span></button>
+      <button class="rule-btn" type="button" data-k="2" data-alpha="0.875" data-c="0.0417">DeepSeek-V3 · 2 heads<span class="r-sub">§5.4.3</span></button>
+    </div>
+    <p class="preset-note">
+      预设的实测值逐字取自 Table S2（<span data-src="Appendix A">3.50</span> tokens/forward、<span data-src="Appendix A">3.05×</span>）与 §5.4.3（<span data-src="§5.4.3">85–90%</span>、<span data-src="§5.4.3">1.8×</span> TPS）。
+      α 与 c 不是论文直接给出的常数，而是由这两组数反推的等效值 <span class="infer">推断</span>：前者由 <code>1+α+α²+α³=3.50</code> 解出 <span data-src="Appendix A">α≈0.912</span>（由 Table S2 反推），后者由 <code>3.50/3.05−1</code> 得到 <span data-src="Appendix A">c≈0.148</span>（由 Table S2 反推）；DeepSeek-V3 预设用 <span data-src="§5.4.3">α=0.875</span>、<span data-src="§5.4.3">c≈0.0417</span>。
+      模拟器只算上面的几何模型，不是对论文实现的逐行还原。
+    </p>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="kRange">MTP head 数 k <span class="v" id="kVal">4</span></label>
+        <input type="range" id="kRange" min="1" max="8" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label for="alphaRange">逐位接受率 α <span class="v" id="alphaVal">0.912</span></label>
+        <input type="range" id="alphaRange" min="0.50" max="0.99" step="0.001" value="0.912">
+      </div>
+      <div class="ctrl">
+        <label for="cRange">draft 成本 c <span class="v" id="cVal">0.1480</span></label>
+        <input type="range" id="cRange" min="0" max="0.30" step="0.0001" value="0.148">
+      </div>
+    </div>
+    <div class="slots">
+      <div class="slot"><div class="slot-name">heads k</div><div class="slot-val" id="slotK">4</div></div>
+      <div class="slot"><div class="slot-name">accept α</div><div class="slot-val" id="slotAlpha">0.912</div></div>
+      <div class="slot"><div class="slot-name">cost c</div><div class="slot-val" id="slotC">0.1480</div></div>
+      <div class="slot"><div class="slot-name">E[token]</div><div class="slot-val" id="slotE">3.5023</div></div>
+    </div>
+    <div class="readout" data-src="Appendix A" id="expOut">
+      <div class="r-head">每步期望 token 数（由 Table S2 反推）</div>
+      <strong id="expTokens">3.5023</strong> tokens / 次 forward
+    </div>
+    <div class="readout" data-src="Appendix A" id="speedOut">
+      <div class="r-head">理论 walltime 加速比（由 Table S2 反推）</div>
+      <strong id="speedup">3.0508×</strong><br>
+      <span id="simNote">盈亏平衡 c = 2.5023；当前 c = 0.1480（S &gt; 1）</span>
+    </div>
+    <p class="sim-note">
+      这是简化模型：α 被视为各位置相同的常数，c 被视为常数，且假设一次 draft pass 覆盖所有 head、验证 forward 可以并行处理 k 个位置。
+      未覆盖 batch size、硬件并行效率、tree attention、验证开销、逐位置 α 差异和 greedy/随机采样的差异。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算两组：k、α、c 如何变成 E 与 S <span class="sum-sub">结果保留 4 位小数</span></summary>
+    <div class="details-body">
+      <p><strong>简化模型：</strong>假设 k 个 head 的逐位接受率都是 α 且相互独立，draft pass 成本 c 为常数，目标模型一次 forward 可以并行验证所有候选。这个模型只对应上面的几何公式，不是对论文实现的逐行还原。</p>
+
+      <p><strong>算例 A：</strong>k=4，α=0.90，c=0.15。</p>
+      <p>
+        <code>E = 1 + 0.90 + 0.90² + 0.90³ = 1 + 0.90 + 0.81 + 0.729 = 3.4390</code><br>
+        <code>S = 3.4390 / (1 + 0.15) = 3.4390 / 1.15 = 2.9904</code><br>
+        页面显示：<code>E = 3.4390</code>，<code>S = 2.9904</code>。
+      </p>
+
+      <p><strong>算例 B：</strong>k=2，α=0.85，c=0.05。</p>
+      <p>
+        <code>E = 1 + 0.85 = 1.8500</code><br>
+        <code>S = 1.8500 / (1 + 0.05) = 1.8500 / 1.05 = 1.7619</code><br>
+        页面显示：<code>E = 1.8500</code>，<code>S = 1.7619</code>。
+      </p>
+
+      <p><strong>JS 与手算同口径：</strong>E 用 <code>(1 − α<sup>k</sup>)/(1 − α)</code>，S 用 <code>E/(1+c)</code>，只在显示时用 <code>toFixed(4)</code> 四舍五入；中间值不取整。</p>
+
+      <p><strong>未覆盖：</strong>batch size、硬件、tree attention、验证开销、逐位置 α 不同、draft 与 target 的分布差异、greedy 与随机采样的差异；也未建模 DeepSeek-V3 的 rejection sampler 细节。α 是特定任务上的等效值，不是通用常数。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>训练时并行或顺序加头，推理时先丢后验或直接自投机</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两种 MTP 的数据流，以及 MTP 与 Medusa/EAGLE 在系统里的位置。</p>
+
+  <figure>
+    <svg class="flow" viewBox="0 0 640 560" role="img" aria-label="MTP 训练与推理流程">
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" class="svg-arrow-head"></path>
+        </marker>
+      </defs>
+
+      <rect x="10" y="8" width="620" height="168" rx="12" class="svg-panel"></rect>
+      <text x="24" y="30" class="svg-title">1 · 训练：Gloeckle 并行头</text>
+      <rect x="24" y="48" width="96" height="56" rx="8" class="svg-box"></rect>
+      <text x="72" y="72" text-anchor="middle" class="svg-mono">x₁ … x_t</text>
+      <text x="72" y="90" text-anchor="middle" class="svg-small">已观测上下文</text>
+      <line x1="120" y1="76" x2="146" y2="76" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="150" y="42" width="140" height="68" rx="8" class="svg-box-accent"></rect>
+      <text x="220" y="70" text-anchor="middle" class="svg-label">shared trunk f_s</text>
+      <text x="220" y="88" text-anchor="middle" class="svg-small">每个位置前向一次</text>
+      <path d="M290,76 L305,76 L305,36 L316,36" class="svg-arrow" marker-end="url(#arrowhead)"></path>
+      <path d="M290,76 L305,76 L305,80 L316,80" class="svg-arrow" marker-end="url(#arrowhead)"></path>
+      <path d="M290,76 L305,76 L305,124 L316,124" class="svg-arrow" marker-end="url(#arrowhead)"></path>
+      <rect x="320" y="18" width="180" height="36" rx="6" class="svg-box-draft"></rect>
+      <text x="410" y="41" text-anchor="middle" class="svg-label">head 1 → x(t+1)</text>
+      <rect x="320" y="62" width="180" height="36" rx="6" class="svg-box-draft"></rect>
+      <text x="410" y="85" text-anchor="middle" class="svg-label">head 2 → x(t+2)</text>
+      <rect x="320" y="106" width="180" height="36" rx="6" class="svg-box-draft"></rect>
+      <text x="410" y="129" text-anchor="middle" class="svg-label">head n → x(t+n)</text>
+      <path d="M500,36 L516,36 L516,60 L520,60" class="svg-arrow" marker-end="url(#arrowhead)"></path>
+      <path d="M500,80 L520,80" class="svg-arrow" marker-end="url(#arrowhead)"></path>
+      <path d="M500,124 L516,124 L516,100 L520,100" class="svg-arrow" marker-end="url(#arrowhead)"></path>
+      <rect x="520" y="42" width="100" height="68" rx="8" class="svg-box"></rect>
+      <text x="570" y="70" text-anchor="middle" class="svg-label">shared f_u</text>
+      <text x="570" y="88" text-anchor="middle" class="svg-small">unembedding</text>
+      <text x="320" y="162" text-anchor="middle" class="svg-small">所有 head 共享 unembedding；loss 是 n 个偏移的 cross-entropy 之和</text>
+
+      <rect x="10" y="188" width="620" height="190" rx="12" class="svg-panel"></rect>
+      <text x="24" y="210" class="svg-title">2 · 训练：DeepSeek-V3 顺序链（D=1）</text>
+      <rect x="24" y="235" width="110" height="48" rx="8" class="svg-box"></rect>
+      <text x="79" y="263" text-anchor="middle" class="svg-mono">h(k−1)_i</text>
+      <rect x="24" y="295" width="110" height="44" rx="8" class="svg-box"></rect>
+      <text x="79" y="322" text-anchor="middle" class="svg-mono">Emb(t(i+k))</text>
+      <line x1="134" y1="259" x2="156" y2="270" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <line x1="134" y1="317" x2="156" y2="292" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="160" y="250" width="120" height="54" rx="8" class="svg-box-accent"></rect>
+      <text x="220" y="281" text-anchor="middle" class="svg-label">concat → M_k</text>
+      <line x1="280" y1="277" x2="302" y2="277" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="306" y="250" width="100" height="54" rx="8" class="svg-box"></rect>
+      <text x="356" y="281" text-anchor="middle" class="svg-label">TRM_k</text>
+      <line x1="406" y1="277" x2="428" y2="277" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="432" y="250" width="80" height="54" rx="8" class="svg-box"></rect>
+      <text x="472" y="281" text-anchor="middle" class="svg-mono">h(k)_i</text>
+      <line x1="512" y1="277" x2="528" y2="277" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="532" y="250" width="90" height="54" rx="8" class="svg-box"></rect>
+      <text x="577" y="276" text-anchor="middle" class="svg-label">OutHead</text>
+      <text x="577" y="292" text-anchor="middle" class="svg-small">shared</text>
+      <path d="M472,304 L472,340 L80,340 L80,283" class="svg-dash" marker-end="url(#arrowhead)"></path>
+      <text x="320" y="360" text-anchor="middle" class="svg-small">每个 depth 保留完整因果链：h(k−1) + Emb(t(i+k)) → h(k)；沿虚线进入下一 depth</text>
+
+      <rect x="10" y="388" width="620" height="164" rx="12" class="svg-panel"></rect>
+      <text x="24" y="410" class="svg-title">3 · 推理：两条路</text>
+      <rect x="24" y="428" width="130" height="42" rx="8" class="svg-box"></rect>
+      <text x="89" y="453" text-anchor="middle" class="svg-label">只用 head 1</text>
+      <line x1="154" y1="449" x2="184" y2="449" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="190" y="428" width="120" height="42" rx="8" class="svg-box-target"></rect>
+      <text x="250" y="453" text-anchor="middle" class="svg-label">next token</text>
+      <text x="330" y="453" class="svg-small">丢弃 heads 2..n；推理成本不变</text>
+      <rect x="24" y="484" width="140" height="42" rx="8" class="svg-box-draft"></rect>
+      <text x="94" y="509" text-anchor="middle" class="svg-label">heads 1..k draft</text>
+      <line x1="164" y1="505" x2="186" y2="505" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="190" y="484" width="170" height="42" rx="8" class="svg-box-target"></rect>
+      <text x="275" y="509" text-anchor="middle" class="svg-label">verify 1 forward</text>
+      <line x1="360" y1="505" x2="386" y2="505" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="390" y="484" width="130" height="42" rx="8" class="svg-box-accent"></rect>
+      <text x="455" y="509" text-anchor="middle" class="svg-label">accept / reject</text>
+      <text x="320" y="542" text-anchor="middle" class="svg-small">E = (1 − α^k) / (1 − α) tokens / step；S = E / (1 + c)</text>
+    </svg>
+    <figcaption>图 1 · 按 Gloeckle §2 与 DeepSeek-V3 §2.2 重绘，不是论文原图；推理侧只画 MTP 自投机，不展开 Medusa/EAGLE 的树结构。</figcaption>
+  </figure>
+
+  <p>
+    图的上半部分是两种训练排布：左边并行 head 都读同一个 trunk 表示，右边顺序链把上一个深度的 hidden state 和偏移 token 的 embedding 拼起来。
+    下半部分是推理的两条路：只用 next-token head，或把 heads 当 draft 做自投机。两条路的共同点是额外 head 都不参与参数更新之外的事情；区别是第二条路多了一次验证 forward 和接受/拒绝逻辑。
+  </p>
+
+  <p class="tbl-cap">对照表 · 四条路线的位置（依据：Gloeckle §2；DeepSeek-V3 §2.2；Medusa §1、§2.3.1、§3；EAGLE §1、§3）。本表是页面整理，不是原文表号。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>路线</th><th>预测什么、怎么排</th><th>参数与共享</th><th>训练 / 推理</th><th>输出保证与备注</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>MTP · Gloeckle</td>
+          <td>同一位置并行预测未来 n 个 token；n 个独立 head</td>
+          <td>共享 trunk；共享 unembedding；每个 head 一个 transformer 层</td>
+          <td>预训练目标；推理可只用 next-token head，或用 heads 做 greedy 自投机</td>
+          <td>训练收益不依赖推理复用；参数对齐靠把 n−1 层从 trunk 移到 heads（§2、§3）</td>
+        </tr>
+        <tr>
+          <td>MTP · DeepSeek-V3</td>
+          <td>顺序预测 D 个额外 token，保留每个 depth 的完整因果链</td>
+          <td>共享 embedding 与 output head；每个 depth 一个 TRM_k 与 M_k</td>
+          <td>预训练目标；推理丢弃 MTP，或复用做投机解码</td>
+          <td>D=1；正常推理成本与不带 MTP 的模型相同（§2.2、§4.2、§4.5.1）</td>
+        </tr>
+        <tr>
+          <td>Medusa</td>
+          <td>在冻结主干上加多个解码头，并行预测多个未来 token；树注意力验证</td>
+          <td>Medusa-1 冻结主干；Medusa-2 联合微调；heads 参数高效</td>
+          <td>推理加速插件</td>
+          <td>typical acceptance 不要求与目标分布逐点一致；可用拒绝采样但加速比不同（§1；定义见 §2.3.1，实验见 §3.3.2）</td>
+        </tr>
+        <tr>
+          <td>EAGLE</td>
+          <td>在 second-to-top 特征层自回归，输入 token 序列前移一步；树 draft</td>
+          <td>draft head 读目标模型 hidden states</td>
+          <td>推理加速插件</td>
+          <td>仍在 speculative sampling 框架内，改变 draft 侧而非训练目标（§1、§3）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">分层</span><h4>MTP 与 Medusa/EAGLE 不是替代关系</h4></div>
+    <p>
+      把三者放在一张图里时，最容易混淆的是“都有多个预测头”。区别在训练图：MTP 的 head 参与预训练 loss，主干和 head 一起从数据里学；Medusa 的 head 是在已有主干上做参数高效微调；EAGLE 的 draft head 读目标模型 hidden states，目标模型通常冻结。
+      所以 MTP 的 <span data-src="§3.2">3.0×</span> 和 Medusa 的 <span data-src="Table 2">2.18×</span> 不是同一张表上的排名，模型、数据、硬件、batch size 都不同，不能直接横比。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>代码任务获益更明显，自然语言和选择题不一定；DeepSeek-V3 的 MTP 也不是全线涨</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Table 1/Table 4 的具体数字、n 的选择，以及哪些指标回退。</p>
+
+  <h3>Gloeckle et al.：7B 代码模型上的 n 消融</h3>
+  <p>
+    先看 <span data-src="Table 1">7B</span>、<span data-src="Table 1">200B</span> tokens（<span data-src="Table 1">0.8</span> epochs）、<span data-src="Table 1">32k</span> 词表的代码模型。Table 1 的 200B tokens 部分比较 n=1、2、4、6、8，指标是 MBPP、HumanEval、APPS/Intro 的 pass@1/10/100。每问题用 <span data-src="Table 1">200</span> 个样本，温度为按测试集选的 oracle 温度（Table 1）。
+  </p>
+  <p class="tbl-cap">Table 1（Gloeckle et al. v1，节选：200B tokens / 32k 词表）：7B 参数、200B tokens（0.8 epochs）、32k 词表；每问题 200 个样本，pass@k 用 Chen et al. 的估计器；温度为按测试集选的 oracle 温度。313B bytes（0.5 epochs，n=1/8/16/32）与 1T tokens（4 epochs，n=1/4）两部分未转录（本页未使用）。高亮 n=4 表示这一 200B tokens 块内 MBPP/HumanEval 六项最高，APPS/Intro 的 n=6 见正文。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>n</th><th>MBPP @1</th><th>MBPP @10</th><th>MBPP @100</th><th>HumanEval @1</th><th>HumanEval @10</th><th>HumanEval @100</th><th>APPS/Intro @1</th><th>APPS/Intro @10</th><th>APPS/Intro @100</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="num">30.0</td><td class="num">53.8</td><td class="num">73.7</td><td class="num">22.8</td><td class="num">36.4</td><td class="num">62.0</td><td class="num">2.8</td><td class="num">7.8</td><td class="num">17.4</td></tr>
+        <tr><td class="num">2</td><td class="num">30.3</td><td class="num">55.1</td><td class="num">76.2</td><td class="num">22.2</td><td class="num">38.5</td><td class="num">62.6</td><td class="num">2.1</td><td class="num">9.0</td><td class="num">21.7</td></tr>
+        <tr class="best"><td class="num">4</td><td class="num">33.8</td><td class="num">55.9</td><td class="num">76.9</td><td class="num">24.0</td><td class="num">40.1</td><td class="num">66.1</td><td class="num">1.6</td><td class="num">7.1</td><td class="num">19.9</td></tr>
+        <tr><td class="num">6</td><td class="num">31.9</td><td class="num">53.9</td><td class="num">73.1</td><td class="num">20.6</td><td class="num">38.4</td><td class="num">63.9</td><td class="num">3.5</td><td class="num">10.8</td><td class="num">22.7</td></tr>
+        <tr><td class="num">8</td><td class="num">30.7</td><td class="num">52.2</td><td class="num">73.4</td><td class="num">20.0</td><td class="num">36.6</td><td class="num">59.6</td><td class="num">3.5</td><td class="num">10.4</td><td class="num">22.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    n=4 在 MBPP 和 HumanEval 的六个指标里都高于 n=1：MBPP <span data-src="Table 1">+3.8</span> 个百分点（<span data-src="Table 1">33.8</span> − <span data-src="Table 1">30.0</span>）、<span data-src="Table 1">+2.1</span>（<span data-src="Table 1">55.9</span> − <span data-src="Table 1">53.8</span>）、<span data-src="Table 1">+3.2</span>（<span data-src="Table 1">76.9</span> − <span data-src="Table 1">73.7</span>）；HumanEval <span data-src="Table 1">+1.2</span>（<span data-src="Table 1">24.0</span> − <span data-src="Table 1">22.8</span>）、<span data-src="Table 1">+3.7</span>（<span data-src="Table 1">40.1</span> − <span data-src="Table 1">36.4</span>）、<span data-src="Table 1">+4.1</span>（<span data-src="Table 1">66.1</span> − <span data-src="Table 1">62.0</span>）。
+    §3.4 原文用「+3.8%」这类写法描述这组差；按 Table 1 的表值，它们是百分点差，页面按点差标注。
+  </p>
+  <p>
+    n 不是越大越好，也不是固定为 4。APPS/Intro 上 n=6 的 @10/@100 最高，@1 与 n=8 并列 <span data-src="Table 1">3.5</span>：相对 n=1 是 <span data-src="Table 1">+0.7</span>（<span data-src="Table 1">3.5</span> − <span data-src="Table 1">2.8</span>）、<span data-src="Table 1">+3.0</span>（<span data-src="Table 1">10.8</span> − <span data-src="Table 1">7.8</span>）、<span data-src="Table 1">+5.3</span>（<span data-src="Table 1">22.7</span> − <span data-src="Table 1">17.4</span>）个百分点。论文在 §3.4 说，最优窗口很可能取决于输入数据分布；byte-level 模型的窗口则更稳定。
+  </p>
+
+  <p>
+    规模趋势是另一条轴。论文训练了 <span data-src="§3.1">6</span> 个规模、从 <span data-src="§3.1">300M</span> 到 <span data-src="§3.1">13B</span> 参数，每个至少 <span data-src="§3.1">91B</span> tokens 的代码模型；Figure 3 的结论是：小模型上 MTP 不如 baseline，大模型上反超。Figure 3 的 caption 原话是「worse than the baseline for small model sizes, but outperform the baseline at scale」，所以这条收益不是所有规模都成立。
+  </p>
+
+  <h3>自然语言：2-token 持平，4-token 在选择题上回退</h3>
+  <p>
+    7B、200B tokens 自然语言模型上，2-token 在 <span data-src="Figure 5">6</span> 个标准 NLP benchmark 上与 next-token baseline 持平，4-token 略回退；Figure 5 的 caption 说更大的模型可能需要才能看到提升。摘要任务上，Figure 6 报告八个摘要基准的平均 ROUGE-L F1：n=2 和 n=4 在 <span data-src="Figure 6">200B</span> 与 <span data-src="Figure 6">500B</span> tokens 两个训练集大小上都高于 baseline，但数据越多，差距越小；个别数据集存在回退（Appendix H）。
+    GSM8K 更不稳定：<span data-src="§3.7">200B</span> tokens 时 n=2 高于 baseline，<span data-src="§3.7">500B</span> tokens 后模式反转，n=4 在整个区间都更差（Appendix I）。
+  </p>
+
+  <h3>DeepSeek-V3：大 MoE 上的 MTP 消融</h3>
+  <p>
+    DeepSeek-V3 在两个规模上做消融：Small MoE 是 <span data-src="Table 4">15.7B</span> 总参数 / <span data-src="Table 4">2.4B</span> 激活参数、<span data-src="Table 4">1.33T</span> tokens；Large MoE 是 <span data-src="Table 4">228.7B</span> / <span data-src="Table 4">20.9B</span>、<span data-src="Table 4">540B</span> tokens。两组的推理成本相同，因为推理时丢弃 MTP 模块（§4.5.1）。
+  </p>
+  <p class="tbl-cap">Table 4（DeepSeek-V3 v2，评测行全表转录）：Small MoE = 15.7B total / 2.4B activated，1.33T tokens；Large MoE = 228.7B total / 20.9B activated，540B tokens（3 个 metadata 行在此汇总，未进表）；推理时丢弃 MTP，所以 Baseline 与 w/ MTP 的推理成本相同（§4.5.1）。高亮 HumanEval/GSM8K 是页面标出的代码/数学代表行。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Benchmark (Metric)</th><th># Shots</th><th>Small Baseline</th><th>Small w/ MTP</th><th>Large Baseline</th><th>Large w/ MTP</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Pile-test (BPB)</td><td class="num">-</td><td class="num">0.729</td><td class="num">0.729</td><td class="num">0.658</td><td class="num">0.657</td></tr>
+        <tr><td>BBH (EM)</td><td class="num">3</td><td class="num">39.0</td><td class="num">41.4</td><td class="num">70.0</td><td class="num">70.7</td></tr>
+        <tr><td>MMLU (EM)</td><td class="num">5</td><td class="num">50.0</td><td class="num">53.3</td><td class="num">67.5</td><td class="num">66.6</td></tr>
+        <tr><td>DROP (F1)</td><td class="num">1</td><td class="num">39.2</td><td class="num">41.3</td><td class="num">68.5</td><td class="num">70.6</td></tr>
+        <tr><td>TriviaQA (EM)</td><td class="num">5</td><td class="num">56.9</td><td class="num">57.7</td><td class="num">67.0</td><td class="num">67.3</td></tr>
+        <tr><td>NaturalQuestions (EM)</td><td class="num">5</td><td class="num">22.7</td><td class="num">22.3</td><td class="num">27.2</td><td class="num">28.5</td></tr>
+        <tr class="best"><td>HumanEval (Pass@1)</td><td class="num">0</td><td class="num">20.7</td><td class="num">26.8</td><td class="num">44.5</td><td class="num">53.7</td></tr>
+        <tr><td>MBPP (Pass@1)</td><td class="num">3</td><td class="num">35.8</td><td class="num">36.8</td><td class="num">61.6</td><td class="num">62.2</td></tr>
+        <tr class="best"><td>GSM8K (EM)</td><td class="num">8</td><td class="num">25.4</td><td class="num">31.4</td><td class="num">72.3</td><td class="num">74.0</td></tr>
+        <tr><td>MATH (EM)</td><td class="num">4</td><td class="num">10.7</td><td class="num">12.6</td><td class="num">38.6</td><td class="num">39.8</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    最醒目的是代码：Small MoE 的 HumanEval 从 <span data-src="Table 4">20.7</span> 到 <span data-src="Table 4">26.8</span>（<span class="mono" data-src="Table 4">+6.1</span> 个百分点），Large MoE 从 <span data-src="Table 4">44.5</span> 到 <span data-src="Table 4">53.7</span>（<span class="mono" data-src="Table 4">+9.2</span> 个百分点）；GSM8K 在 Small MoE 从 <span data-src="Table 4">25.4</span> 到 <span data-src="Table 4">31.4</span>（<span class="mono" data-src="Table 4">+6.0</span>），Large MoE 从 <span data-src="Table 4">72.3</span> 到 <span data-src="Table 4">74.0</span>（<span class="mono" data-src="Table 4">+1.7</span>）。但不是全线涨：MMLU 小模型从 <span data-src="Table 4">50.0</span> 到 <span data-src="Table 4">53.3</span>（<span class="mono" data-src="Table 4">+3.3</span>），大模型却从 <span data-src="Table 4">67.5</span> 降到 <span data-src="Table 4">66.6</span>（<span class="mono" data-src="Table 4">−0.9</span>）；NaturalQuestions 小模型从 <span data-src="Table 4">22.7</span> 降到 <span data-src="Table 4">22.3</span>（<span class="mono" data-src="Table 4">−0.4</span>）；Pile-test 大模型只从 <span data-src="Table 4">0.658</span> 到 <span data-src="Table 4">0.657</span>（Table 4）。
+  </p>
+
+  <h3>自投机：head 越多，tokens/forward 越高，但收益递减</h3>
+  <p>
+    Gloeckle et al. 在 <span data-src="Appendix A">7B</span> 模型上测了 greedy self-speculative decoding。Table S2 报告 Wikipedia、Books、Code 三个 prompt 集，使用 <span data-src="Appendix A">1–4</span> 个 head 的相对加速比与每次 forward 的 token 数；Table S2 的 caption 说，用 k 个 head 时最大加速比就是 k。
+  </p>
+  <p class="tbl-cap">Table S2（Appendix A，全表转录）：7B 模型；Wikipedia/Books 用 500B tokens 预训练，Code 用 1T tokens；4200 条 512-token 序列，生成 512 tokens；greedy self-speculative decoding；在最大 batch size 42 下评估，作者称加速比在该设置下不随 batch size 变化（Figure S10）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th># Heads used</th><th>Wikipedia 加速比</th><th>Wikipedia tokens/forward</th><th>Books 加速比</th><th>Books tokens/forward</th><th>Code 加速比</th><th>Code tokens/forward</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">1.00</td></tr>
+        <tr><td class="num">2</td><td class="num">1.79</td><td class="num">1.88</td><td class="num">1.77</td><td class="num">1.87</td><td class="num">1.85</td><td class="num">1.94</td></tr>
+        <tr><td class="num">3</td><td class="num">2.35</td><td class="num">2.57</td><td class="num">2.32</td><td class="num">2.56</td><td class="num">2.54</td><td class="num">2.78</td></tr>
+        <tr class="best"><td class="num">4</td><td class="num">2.74</td><td class="num">3.12</td><td class="num">2.67</td><td class="num">3.09</td><td class="num">3.05</td><td class="num">3.50</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Code 上 4 个 head 是 <span data-src="Appendix A">3.05×</span>、<span data-src="Appendix A">3.50</span> tokens/forward；3 个 head 是 <span data-src="Appendix A">2.54×</span>、<span data-src="Appendix A">2.78</span>；2 个 head 是 <span data-src="Appendix A">1.85×</span>、<span data-src="Appendix A">1.94</span>。
+    从 2 到 3 再到 4 个 head，加速比的增量在变小，但 tokens/forward 仍在涨；这说明 head 数不是免费的，收益取决于接受率和 draft 成本。论文 §3.2 的正文总结是：代码 <span data-src="§3.2">3.0×</span>、平均接受 <span data-src="§3.2">2.5</span> / <span data-src="§3.2">3</span> 个建议，文本 <span data-src="§3.2">2.7×</span>；8-byte 模型达到 <span data-src="§3.2">6.4×</span>。
+  </p>
+  <p>
+    DeepSeek-V3 的推理侧报告更简单：第二 token 的接受率在 <span data-src="§5.4.3">85–90%</span> 之间（跨不同生成主题），解码速度达到 <span data-src="§5.4.3">1.8×</span> TPS（§5.4.3）。
+    它没有在 §5.4.3 展开接受/拒绝规则和 tree 结构，所以页面不把它等同于“无损随机采样”的实现；能确认的是论文把它放在 speculative decoding 框架下描述。
+  </p>
+
+  <h3>并列的推理侧数字：Medusa 与 EAGLE</h3>
+  <p>
+    Medusa 在 Vicuna-7B 上报告 Medusa-1 <span data-src="Table 2">2.18×</span>、Medusa-2 <span data-src="Table 2">2.83×</span>（Table 2）；EAGLE 在 LLaMA2-Chat 70B 上报告 <span data-src="§1">2.7–3.5×</span> latency 加速（§1），13B、temperature=0 时是 <span data-src="§4.1">3.01–3.76×</span>（§4.1）。
+    这些数字的模型、数据、硬件和 batch size 与 Gloeckle 的 Table S2 不同，不能直接排名；它们说明的是“推理侧 draft 机制”这条路线在不同实现上都能拿到倍数，而不是某个固定加速比。
+  </p>
+
+  <p><strong>反直觉点：</strong></p>
+  <ul>
+    <li><strong>n=4 不是通用最优。</strong>APPS/Intro 上 n=6 更高；论文明确说最优窗口可能依赖数据分布（§3.4）。</li>
+    <li><strong>代码收益大于自然语言选择题。</strong>2-token 在 <span data-src="Figure 5">6</span> 个 NLP benchmark 上持平，4-token 略回退（Figure 5）；摘要任务平均（八个基准）有提升，但数据越多差距越小，个别数据集会回退（Figure 6、Appendix H）。</li>
+    <li><strong>DeepSeek-V3 的 MTP 也不是全线涨。</strong>MMLU 大模型 <span class="mono" data-src="Table 4">−0.9</span>、NaturalQuestions 小模型 <span class="mono" data-src="Table 4">−0.4</span> 个百分点（Table 4）。</li>
+    <li><strong>“无训练开销”是贡献表述，不是所有实现的实测。</strong>§1 的表述是「no train time or memory overhead」，Table S5 的 n=4 实测是 <span class="mono" data-src="Appendix C">1.07–1.22×</span>（Appendix C）。</li>
+  </ul>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>MTP 不是通用增益：小模型、选择题和部分语言任务会回退</h2></div>
+  <p class="sec-sub">读完这节你应该知道：什么时候别用 MTP，以及哪些问题论文没有回答。</p>
+
+  <h3>规模：小模型上可能更差</h3>
+  <p>
+    Figure 3 的 caption 直接写了两段：MTP 在小模型上比 baseline 差，在大模型上才反超；论文在 §3.1 把这种「只在规模上有效」列为 MTP 过去被忽视的可能原因。
+    所以“MTP 一定提升下游”不成立；如果你的模型规模落在 Figure 3 的小端，收益可能为负，至少需要自己的消融。
+  </p>
+
+  <h3>任务：选择题、GSM8K 和部分语言任务会回退</h3>
+  <p>
+    自然语言的结果是混合的：2-token 在 <span data-src="Figure 5">6</span> 个选择题 benchmark 上与 baseline 持平，4-token 略回退（Figure 5）；摘要任务八个基准的平均 ROUGE-L F1 在 <span data-src="Figure 6">200B</span>/<span data-src="Figure 6">500B</span> tokens 上都高于 baseline，但差距随数据量缩小，个别数据集有回退（Figure 6、Appendix H）；GSM8K 在 <span data-src="§3.7">200B</span> 时 n=2 更好、<span data-src="§3.7">500B</span> 后反转，n=4 在整个区间都更差（Appendix I）。
+    DeepSeek-V3 的 Table 4 也不是全线涨：MMLU 大模型 <span class="mono" data-src="Table 4">−0.9</span> 个百分点、NaturalQuestions 小模型 <span class="mono" data-src="Table 4">−0.4</span> 个百分点（Table 4）。
+    <span class="infer">推断</span>（依据：Table 4 的点差与 Figure 5 的持平/回退）：MTP 更适合“生成式、代码、需要长程规划”的目标，不适合把选择题/似然指标当作主要目标。
+  </p>
+
+  <h3>训练开销：实现依赖，且 naive 显存会按 n 增长</h3>
+  <p>
+    §1 的「no train time or memory overhead」是贡献表述；Appendix C 的 Table S5 实测 n=4 为 <span class="mono" data-src="Appendix C">1.07–1.22×</span>，n=2 为 <span class="mono" data-src="Appendix C">1.02–1.07×</span>，作者把差异归因于 FSDP 通信/计算 overlap 丢失。
+    显存侧也一样：顺序前向/反向把峰值从 <code>O(nV+d)</code> 压到 <code>O(V+d)</code>，但如果训练框架一次性物化所有 head 的 logits，峰值仍会按 n 增长（§2）。
+    这两条都不是“模型架构自动解决”的问题，而是实现约束。
+  </p>
+
+  <h3>等参数量比较：不是免费参数</h3>
+  <p>
+    Gloeckle et al. 的等参数量做法是加 n−1 个 head 层、从 trunk 减 n−1 层（§3）。这改变了 trunk 的深度；如果直接给 baseline 加 head 而不减 trunk，得到的是更大的模型，不能把增益全部归因于 MTP 目标。
+    读 Figure 3 和 Table 1 时，要确认比较的是等参数量模型，而不是“MTP 模型更大所以更好”。
+  </p>
+
+  <h3>最优 n 与推理规则：论文没有给出通用答案</h3>
+  <p>
+    n 的选择依赖数据分布（§3.4），论文在 §7 把“自动选择 n”列为未来工作；DeepSeek-V3 只验证了 <span data-src="§4.2">D=1</span>（§4.2），更深的顺序 MTP 在 <span data-src="§4.2">671B</span> 规模上没有在这份报告里展开。
+    推理侧也有边界：Gloeckle §3.2 的实测是 greedy self-speculative decoding，§7 的结论用「exact inference」描述 <span data-src="§7">3</span> 倍加速；随机采样下的接受/拒绝规则，页面没有从原文获取到展开说明。
+    DeepSeek-V3 §5.4.3 只报告 <span data-src="§5.4.3">85–90%</span> 的接受率和 <span data-src="§5.4.3">1.8×</span> TPS，没有展开 rejection sampler 的细节。需要无损随机采样时，应回到 speculative decoding 的接受/拒绝规则自行核对，不能只看“1.8×”。
+  </p>
+
+  <h3>与 Medusa/EAGLE 的边界</h3>
+  <p>
+    Medusa 的 typical acceptance 不要求输出与目标分布逐点一致（Medusa §2.3.1；实验见 §3.3.2）；EAGLE 在 speculative sampling 框架内改变 draft 侧（§1、§3）。MTP 的训练收益不依赖这两者，推理复用也不等于它们：MTP 的 head 是预训练的一部分，Medusa/EAGLE 的 draft 是后加的。
+    如果目标是“训练一个更强的 base model”，优先看 MTP；如果目标是“在不改训练的情况下给已有模型加速”，优先看 Medusa/EAGLE。两者可以组合，但需要分别验证。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">适合</span><h4>代码/生成式任务、大模型、愿意改预训练目标</h4></div>
+      <p>有大规模预训练预算，能接受把 n−1 层从 trunk 移到 head 的等参数量重排，主要目标是代码、推理或长程生成，并且希望推理时保留“自投机”的可选项。<span class="infer">推断</span>（依据：Table 4 的点差排序）：HumanEval 和 GSM8K 的百分点增益在表内靠前，这与“生成式任务”方向一致。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">不适合</span><h4>小模型、选择题为主、要求零训练开销</h4></div>
+      <p><span class="infer">推断</span>（依据：Figure 3 的小模型趋势、Figure 5 的选择题持平/回退、Table S5 的训练开销）：如果模型规模在小端、主要指标是选择题或似然、训练框架不能承受逐 head 的前向/反向调度，MTP 的收益可能覆盖不了成本；此时优先考虑推理侧的 draft 机制或普通 next-token 训练。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div>Better &amp; Faster Large Language Models via Multi-token Prediction / DeepSeek-V3 Technical Report / Medusa / EAGLE</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2404.19737">Gloeckle et al., arXiv 2404.19737 v1 (ICML 2024)</a><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://arxiv.org/abs/2412.19437v2">DeepSeek-AI, DeepSeek-V3 Technical Report, arXiv 2412.19437 v2</a><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://arxiv.org/abs/2401.10774v2">Cai et al., Medusa, arXiv 2401.10774 v2</a><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://arxiv.org/abs/2401.15077v2">Li et al., EAGLE, arXiv 2401.15077 v2</a><br>
+    版本说明：MTP 仅 v1，链接不带版本号；DeepSeek-V3、Medusa、EAGLE 以 v2 为准。DeepSeek-V3 的 MTP 在 §2.2（§3.3 为 FP8 Training）。<br>
+    笔记：<a href="/mtpmulti-token-prediction/">MTP（Multi-Token Prediction）</a><br>
+    <strong>笔记勘误</strong>（笔记文件未改动）：<br>
+    · 笔记 L25 说 head 是线性层；页面 L232 依据原文 §2 与 Appendix B 说明每个 head 是一个 transformer 层（linear head 只是 Appendix B 的对照变体）。<br>
+    · 笔记 L31 说「训练速度↑」；页面 L297-300 与 Table S5 给出 n=4 实测 1.07–1.22× 墙钟时间（更慢），笔记可能指训练信号效率而非 wall-clock。<br>
+    · 笔记 L25 说论文推荐 k=4；页面 L556 说明 n 不是固定 4（APPS/Intro 的 n=6 更好，§3.4）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var kRange = document.getElementById('kRange');
+  var alphaRange = document.getElementById('alphaRange');
+  var cRange = document.getElementById('cRange');
+  var kVal = document.getElementById('kVal');
+  var alphaVal = document.getElementById('alphaVal');
+  var cVal = document.getElementById('cVal');
+  var slotK = document.getElementById('slotK');
+  var slotAlpha = document.getElementById('slotAlpha');
+  var slotC = document.getElementById('slotC');
+  var slotE = document.getElementById('slotE');
+  var expTokens = document.getElementById('expTokens');
+  var speedup = document.getElementById('speedup');
+  var simNote = document.getElementById('simNote');
+  if (!kRange || !alphaRange || !cRange || !kVal || !alphaVal || !cVal ||
+      !slotK || !slotAlpha || !slotC || !slotE || !expTokens || !speedup || !simNote) {
+    return;
+  }
+
+  var presets = document.querySelectorAll('.sim-top .rule-btn');
+
+  function fmt(x) {
+    return x.toFixed(4);
+  }
+
+  function expected(k, a) {
+    if (a === 1) {
+      return k;
+    }
+    return (1 - Math.pow(a, k)) / (1 - a);
+  }
+
+  function setActive(btn) {
+    var i;
+    for (i = 0; i < presets.length; i += 1) {
+      if (presets[i] === btn) {
+        presets[i].classList.add('active');
+      } else {
+        presets[i].classList.remove('active');
+      }
+    }
+  }
+
+  function update() {
+    var k = parseInt(kRange.value, 10);
+    var a = parseFloat(alphaRange.value);
+    var c = parseFloat(cRange.value);
+    var e = expected(k, a);
+    var s = e / (1 + c);
+    var be = e - 1;
+
+    kVal.textContent = String(k);
+    alphaVal.textContent = a.toFixed(3);
+    cVal.textContent = c.toFixed(4);
+    slotK.textContent = String(k);
+    slotAlpha.textContent = a.toFixed(3);
+    slotC.textContent = c.toFixed(4);
+    slotE.textContent = fmt(e);
+    expTokens.textContent = fmt(e);
+    speedup.textContent = fmt(s) + '×';
+    if (c < be) {
+      simNote.textContent = '盈亏平衡 c = ' + fmt(be) + '；当前 c = ' + c.toFixed(4) + '（S > 1）';
+    } else {
+      simNote.textContent = '盈亏平衡 c = ' + fmt(be) + '；当前 c = ' + c.toFixed(4) + '（S ≤ 1）';
+    }
+  }
+
+  kRange.addEventListener('input', function () { setActive(null); update(); });
+  alphaRange.addEventListener('input', function () { setActive(null); update(); });
+  cRange.addEventListener('input', function () { setActive(null); update(); });
+
+  var i;
+  for (i = 0; i < presets.length; i += 1) {
+    presets[i].addEventListener('click', function () {
+      kRange.value = this.getAttribute('data-k');
+      alphaRange.value = this.getAttribute('data-alpha');
+      cRange.value = this.getAttribute('data-c');
+      setActive(this);
+      update();
+    });
+  }
+
+  update();
+})();
+</script>
+</body>
+</html>

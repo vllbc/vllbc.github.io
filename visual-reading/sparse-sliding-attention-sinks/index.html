@@ -1,0 +1,776 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 2.6 | Longformer Table 7 | 75.0-72.4 |
+| 3.6 | Longformer Table 7 | (75.0-72.4)/72.4*100 |
+| 7.4 | Longformer Table 7 | 94.8-87.4 |
+| 8.5 | Longformer Table 7 | (94.8-87.4)/87.4*100 |
+| 99.9 | StreamingLLM Table 1 | (5158.07-5.40)/5158.07*100 |
+| 8.6 | FlashAttention Figure 2 | 75.2-66.6 |
+| 12.9 | FlashAttention Figure 2 | (75.2-66.6)/66.6*100 |
+| 35.9 | FlashAttention Figure 2 | 40.3-4.4 |
+| 89.1 | FlashAttention Figure 2 | (40.3-4.4)/40.3*100 |
+| 9.2 | FlashAttention Figure 2 | 40.3/4.4 |
+| 5.7 | FlashAttention Figure 2 | 41.7/7.3 |
+| 4100 | Mistral Table 1 + StreamingLLM §3.2 | 4096+4 |
+| 12.5 | Mistral Table 1 + StreamingLLM §3.2 | 4100/32768*100 |
+| 87.5 | Mistral Table 1 + StreamingLLM §3.2 | (32768-4100)/32768*100 |
+| 28668 | Mistral Table 1 + StreamingLLM §3.2 | 32768-4100 |
+| 100.0 | Mistral Table 1 + Longformer §3.1 | 32768/32768*100 |
+| 0.4 | Mistral Table 1 + StreamingLLM §3.2 | 4100/1048576*100 |
+| 99.6 | Mistral Table 1 + StreamingLLM §3.2 | (1048576-4100)/1048576*100 |
+| 131076 | Mistral Table 1 + Longformer §3.1 | 4096*32+4 |
+| 12.5 | Mistral Table 1 + Longformer §3.1 | 131076/1048576*100 |
+| 3.1 | 页面参数（W=1024）+ StreamingLLM §3.2 | 1024/32768*100 |
+| 96.9 | 页面参数（W=1024）+ StreamingLLM §3.2 | (32768-1024)/32768*100 |
+| 32768 | 页面参数（W=1024）+ Longformer §3.1 | 1024*32 |
+| 100.0 | 页面参数（W=1024）+ Longformer §3.1 | 32768/32768*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="multi-paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>稀疏、滑窗与 Attention Sinks · 省计算、稳分布、省搬运不是一回事</title>
+<meta name="description" content="Longformer 的局部窗口 + global token、StreamingLLM 的 4 个 attention sink + 滚动 KV cache、Mistral 7B 的 W=4096 SWA、FlashAttention 的 IO-aware 精确注意力：四种长上下文机制分别作用在计算模式、缓存策略和 HBM 搬运三个维度。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页专用：SVG 三带图、token 块、cache 覆盖率条 */
+code{overflow-wrap:anywhere}
+.svg-title{fill:var(--text);font-size:14px;font-weight:700}
+.svg-sub{fill:var(--text-muted);font-size:11.5px}
+.svg-label{fill:var(--text-muted);font-size:11px;font-weight:600}
+.svg-note{fill:var(--text-soft);font-size:10.5px}
+.svg-mono{fill:var(--text);font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600}
+.svg-box{fill:var(--bg);stroke:var(--border);stroke-width:1.2}
+.svg-block{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.1}
+.svg-arrow{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.tok{fill:var(--bg);stroke:var(--border);stroke-width:1.2}
+.tok-win{fill:var(--c1-soft);stroke:var(--c1)}
+.tok-glob{fill:var(--c2-soft);stroke:var(--c2)}
+.tok-sink{fill:var(--accent-soft);stroke:var(--accent)}
+.tok-recent{fill:var(--c1-soft);stroke:var(--c1)}
+.tok-evicted{fill:transparent;stroke:var(--border-strong);stroke-dasharray:3 2}
+.tok-query{stroke:var(--accent);stroke-width:2.4}
+.ws-bars{display:grid;gap:10px;margin:16px 0 4px}
+.ws-bar-row{display:grid;grid-template-columns:116px 1fr;gap:10px;align-items:center}
+.ws-bar-label{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);text-align:right}
+.ws-bars .bar{height:9px}
+.lg-glob{background:var(--c2-soft);border:1px solid var(--c2)}
+.lg-win{background:var(--c1-soft);border:1px solid var(--c1)}
+.lg-sink{background:var(--accent-soft);border:1px solid var(--accent)}
+.lg-evict{background:transparent;border:1px dashed var(--border-strong)}
+.src-note{font-size:12px;color:var(--text-soft);line-height:1.7}
+.infer{font-size:10.5px;font-family:"JetBrains Mono",monospace;color:var(--text-soft);border:1px solid var(--border);border-radius:4px;padding:0 4px;margin-left:3px}
+@media (max-width:520px){
+  .ws-bar-row{grid-template-columns:88px 1fr;gap:7px}
+  .ws-bar-label{font-size:9.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Sparse · SWA · Sinks</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">复杂度</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>长上下文 · 注意力机制 · 4 篇主线 + 2 篇对照</span>
+  <h1>滑窗省的是计算，sink 稳的是分布，FlashAttention 省的是搬运</h1>
+  <p class="hero-sub">
+    Longformer 用局部窗口加少量 global token 把每层注意力从 <code>O(n²)</code> 压到 <code>O(n·w)</code>；StreamingLLM 发现窗口丢掉开头几个 token 会让 Llama-2-13B 的 PPL 从 <strong data-src="StreamingLLM Table 1">5.40</strong> 冲到 <strong data-src="StreamingLLM Table 1">5158.07</strong>，于是保留 <strong data-src="StreamingLLM §3.2">4</strong> 个 sink 再滚动窗口；Mistral 7B 则把 <code data-src="Mistral Table 1">W=4096</code> 的 SWA 写进预训练，用 <span data-src="Mistral Table 1">32</span> 层叠出约 <strong data-src="Mistral §2">131K</strong> 的理论跨度。
+    FlashAttention 不改变注意力模式，只用分块和重算把 GPT-2 medium 的 HBM 读写从 <strong data-src="FlashAttention Figure 2">40.3 GB</strong> 压到 <strong data-src="FlashAttention Figure 2">4.4 GB</strong>——四件事分别作用在「算哪些对」「留哪些 KV」「把数据放在哪」三个维度上。
+  </p>
+  <div class="meta">
+    <span>Longformer · StreamingLLM · FlashAttention · Mistral 7B</span>
+    <a href="https://arxiv.org/abs/2004.05150" target="_blank" rel="noopener">Longformer 2004.05150 ↗</a>
+    <a href="https://arxiv.org/abs/2309.17453" target="_blank" rel="noopener">StreamingLLM 2309.17453 ↗</a>
+    <a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">FlashAttention 2205.14135 ↗</a>
+    <a href="https://arxiv.org/abs/2310.06825" target="_blank" rel="noopener">Mistral 7B 2310.06825 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    长上下文有三个独立的账本：注意力矩阵的<strong>计算量</strong>、推理时 <strong>KV cache 的大小</strong>、以及 <strong>HBM 与 SRAM 之间的数据搬运</strong>。
+    把三个账本混在一起，就会得出「FlashAttention 是稀疏注意力」或「滑窗等于长上下文」这类错误结论。
+  </p>
+  <p>
+    Longformer 改的是第一本账：每个 token 只算窗口内的 pair，再加少量 global token；计算 <code>O(n·w)</code>，<code>ℓ</code> 层感受野 <code>ℓ×w</code>。
+    StreamingLLM 改的是第二本账：不训练、不改模型，只保留 <span data-src="StreamingLLM §3.2">4</span> 个初始 token 的 KV 加最近窗口，Llama-2-13B 在 PG19 <span data-src="StreamingLLM Table 1">65K</span> 上的 PPL 从 <em data-src="StreamingLLM Table 1">5158.07</em> 回到 <em data-src="StreamingLLM Table 1">5.40</em>。
+  </p>
+  <p>
+    Mistral 7B 把 SWA 写进预训练：<code data-src="Mistral Table 1">W=4096</code>、<span data-src="Mistral Table 1">32</span> 层，理论跨度 <code data-src="Mistral §2">4096×32≈131K</code>（W 与层数见 Mistral Table 1）；rolling buffer 把 <span data-src="Mistral §2">32K</span> 序列的 cache 减少 <span data-src="Mistral §2">8×</span>。
+    FlashAttention 谁也不稀疏：它计算完整的 <code>N×N</code> 注意力，只是把中间矩阵留在 SRAM，靠 tiling 和重算减少 HBM 访问。
+  </p>
+  <p>
+    读这篇要分清「模式稀疏」「cache 策略」「IO 优化」三层；它们可以叠加，但任一层都不能单独解决另外两层的问题。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Mistral Table 1">4096<small>tokens</small></div>
+      <div class="k">Mistral 7B 的 SWA 窗口 W（Mistral Table 1）；<span data-src="Mistral Table 1">32</span> 层叠出约 <span data-src="Mistral §2">131K</span> 的理论跨度（Mistral §2）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="StreamingLLM §3.2">4<small>sink tokens</small></div>
+      <div class="k">StreamingLLM 的 sink 数；Llama-2-13B 在 PG19 <span data-src="StreamingLLM Table 1">65K</span> 上，0+1024 的 PPL <span data-src="StreamingLLM Table 1">5158.07</span> 回到 4+1020 的 <span data-src="StreamingLLM Table 1">5.40</span>（StreamingLLM Table 1）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="FlashAttention Figure 2">4.4<small>GB</small></div>
+      <div class="k">FlashAttention 在 GPT-2 medium 前向+反向的 HBM 读写；标准注意力为 <span data-src="FlashAttention Figure 2">40.3 GB</span>（FlashAttention Figure 2）</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>长上下文的第一道墙不是显存容量，而是 O(n²) 的计算与无界的 KV</h2></div>
+  <p class="sec-sub">读完这节你应该知道：长上下文到底贵在哪三个地方，以及为什么「把窗口改小」只解决其中一部分。</p>
+
+  <p>
+    标准自注意力先把 <code>Q</code> 和 <code>K</code> 乘成 <code>N×N</code> 的分数矩阵，再做 softmax、乘 <code>V</code>。Longformer 的 §3 直接指出，
+    这个操作的时间和显存都是 <code>O(n²)</code>：序列翻倍，矩阵面积翻四倍。到了几万 token，矩阵不再是一个可以随手物化的中间量，
+    而是一堵墙。论文的解法不是把矩阵算得更快，而是<strong>只算其中一部分</strong>——滑窗、膨胀滑窗、global token。
+  </p>
+
+  <p>
+    推理侧是另一本账。StreamingLLM 的 §1 说，解码阶段缓存所有历史 token 的 Key/Value 会带来过高的显存占用和递增的解码延迟；
+    序列越长，KV cache 线性膨胀。解码又是 memory-bound 的：FlashAttention 的 §2.1 给出 A100 的层级——
+    HBM 带宽 <span class="mono" data-src="FlashAttention §2.1">1.5–2.0 TB/s</span>，每个 SM 只有 <span class="mono" data-src="FlashAttention §2.1">192 KB</span> SRAM，
+    <span class="mono" data-src="FlashAttention §2.1">108</span> 个 SM，SRAM 带宽约 <span class="mono" data-src="FlashAttention §2.1">19 TB/s</span>。
+    SRAM 比 HBM 快一个数量级，但小三个数量级；数据放在哪里、搬多少次，直接决定 wall-clock。
+  </p>
+
+  <p>
+    NSA 的 §1 给了一个量级：解码 64K 上下文时，softmax 注意力约占总延迟的 <span class="mono" data-src="NSA §1">70–80%</span>。
+    这解释了为什么长上下文优化会同时出现三条路线——改计算图、改缓存、改数据搬运。
+  </p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">计算模式</span><h4>算哪些 query-key 对</h4></div>
+      <p>全注意力算 <code>N×N</code>；滑窗只算对角线带；global token 额外连一些行和列。改变的是<strong>注意力矩阵的非零结构</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">缓存策略</span><h4>推理时留哪些 KV</h4></div>
+      <p>全量、最近 <code>W</code> 个、或 <code>S</code> 个 sink 加最近 <code>W</code> 个。改变的是<strong>decode 时能回看多远</strong>，不改变训练时的注意力公式。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">IO 调度</span><h4>数据在哪一级内存算</h4></div>
+      <p>标准实现把 <code>N×N</code> 的 <code>S</code>、<code>P</code> 写回 HBM；FlashAttention 把它们留在 SRAM，只写 <code>O</code> 和统计量。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键判断</span><h4>窗口变小不等于上下文变长；sink 不恢复被丢掉的中间信息；FlashAttention 不减少 FLOPs</h4></div>
+    <p>三者只能各管一段。把它们当成同一件事，就会在「为什么滑窗模型仍然记不住很远的 token」或「为什么 FlashAttention 没有把长上下文变便宜」上卡住。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>把注意力变稀疏的路线很多，但窗口一滑就丢掉了开头的锚点</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Longformer 的局部+global 解决了什么，窗口 KV cache 又为什么会在超过 cache 后崩掉。</p>
+
+  <p>
+    Longformer 的 §2 把当时的长文档 Transformer 分成两类：从左到右分块处理的 ltr 路线，和定义稀疏注意力模式的路线。
+    前者不适合需要双向上下文的任务；后者里最接近的是 Sparse Transformer，它用 <span class="mono" data-src="Longformer §2">8×8</span> 块的膨胀滑窗，
+    但模式固定、且依赖 BlockSparse 的 C++ 实现。Longformer 的改动是：保留滑窗，额外加<strong>任务驱动的 global attention</strong>，
+    并用自定义 CUDA kernel 把带状矩阵乘法做快（Longformer §3.2）。
+  </p>
+
+  <p>
+    滑窗的算术很干净。给定窗口 <code>w</code>，每个 token 只看左右各 <code>1/2 w</code> 个 token；一层注意力的计算量是 <code>O(n×w)</code>，
+    随序列长度线性增长。多层堆叠会把感受野撑大：<code>ℓ</code> 层的顶层感受野是 <code>ℓ×w</code>；如果加膨胀率 <code>d</code>，
+    感受野变成 <code>ℓ×d×w</code>（Longformer §3.1）。Longformer 的预训练配置是 <code data-src="Longformer §5">w=512</code>、序列长 <span class="mono" data-src="Longformer §5">4,096</span>，
+    论文说这相当于 RoBERTa 在 <span class="mono" data-src="Longformer §5">512</span> 上的计算量，序列长度是 BERT 的 <span class="mono" data-src="Longformer §5">8</span> 倍（Longformer §5）。
+  </p>
+
+  <p>
+    推理侧的窗口缓存是另一种做法：只保留最近 <code>L</code> 个 token 的 KV，cache 满了就丢最旧的。它在 cache 填满后显存恒定、解码速度稳定，
+    但 StreamingLLM Figure 1(b) 和 Figure 3 显示，一旦序列长度超过 cache、开头的 KV 被挤掉，语言模型会崩。
+    Llama-2-13B 在 PG19 65K 上的窗口注意力（0+1024）PPL 是 <span class="mono" data-src="StreamingLLM Table 1">5158.07</span>；
+    保留 <span data-src="StreamingLLM §3.2">4</span> 个初始 token 后（4+1020）回到 <span class="mono" data-src="StreamingLLM Table 1">5.40</span>（StreamingLLM Table 1）。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Longformer：改计算图</span><h4>局部窗口 + 少量 global token</h4></div>
+      <p>每个 token 只算窗口内的 pair；global token 与所有 token 双向相连。复杂度 <code>O(n·w)</code>，global 数量与 <code>n</code> 无关时仍是线性。</p>
+      <p><strong>卡点：</strong>global token 是任务相关的先验；窗口和膨胀率是手工设计的，不是从数据里学出来的（Longformer §3.1）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Window cache：改缓存</span><h4>只留最近 L 个 KV</h4></div>
+      <p>cache 填满后显存恒定，解码速度稳定；实现简单，适合流式生成。</p>
+      <p><strong>卡点：</strong>开头 token 被挤掉后，softmax 的分母少了一大块，注意力分布整体偏移；PPL 从 5.40 量级跳到 5158.07 量级（StreamingLLM Table 1）。</p>
+    </div>
+  </div>
+
+  <p>
+    所以「窗口」在训练时和推理时不是同一件事。训练时的滑窗是一个<strong>注意力模式</strong>，模型仍然看得到整个序列，只是每层只连局部；
+    推理时的窗口 cache 是一个<strong>淘汰策略</strong>，被淘汰的 KV 再也回不来。Longformer 解决前者，StreamingLLM 解决后者。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三种机制回答三个不同问题：算哪些对、留哪些 KV、把数据放在哪</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Longformer 的窗口+global 怎么定义，StreamingLLM 的 4+sink 怎么滚动，Mistral 的 SWA 怎么叠出 131K，FlashAttention 的在线 softmax 怎么在不物化 N×N 的情况下算精确注意力。</p>
+
+  <h3>Longformer：窗口内的 pair 加上少量双向 global token</h3>
+  <p>
+    双向注意力下，第 <code>i</code> 个 token 的可见集合是窗口内的邻居加上 global 集合 <code>G</code>：
+  </p>
+  <div class="eq">
+    V(i) = { j : |i − j| ≤ w/2 } ∪ G
+    <br>
+    cost = O(n · w + n · |G|)
+  </div>
+  <div class="eq-cap">Longformer §3.1：每个 token 看左右各 1/2 w 个位置；global token 对称地看所有 token，所有 token 也看它。|G| 与 n 无关时，总复杂度仍是 O(n)。</div>
+
+  <p>
+    global attention 不是简单地把某些位置标成 global 就完事：论文用了两组投影 <code>Q<sub>s</sub>, K<sub>s</sub>, V<sub>s</sub></code> 和
+    <code>Q<sub>g</sub>, K<sub>g</sub>, V<sub>g</sub></code>，分别算滑窗注意力和 global 注意力，并把 global 投影初始化为滑窗投影的值（Longformer §3.1）。
+    这样做是为了让两类注意力有不同的表达空间，同时不破坏预训练权重的初始化。global 位置是任务相关的：分类用 <code>[CLS]</code>，QA 用所有 question token。
+  </p>
+
+  <h3>StreamingLLM：<span data-src="StreamingLLM §3.2">4</span> 个 sink 加滚动窗口，位置 ID 在 cache 内重编号</h3>
+  <p>
+    StreamingLLM 不改注意力公式，只改缓存里放什么。设当前解码到第 <code>t</code> 个 token，cache 由两段组成：
+  </p>
+  <div class="eq">
+    C<sub>t</sub> = {0, 1, …, S−1} ∪ {t−W+1, …, t}
+    <br>
+    pos(j) = j 在 C<sub>t</sub> 中的序号，0 … |C<sub>t</sub>|−1
+  </div>
+  <div class="eq-cap">StreamingLLM §3.2 / Figure 4：前 S 个 token 是 attention sink，后 W 个是最近窗口。位置编码按 cache 内的相对位置重新编号，而不是原始文本位置。</div>
+
+  <p>
+    sink 的作用不是「保留开头的语义」，而是「保留 softmax 的一个大分母项」。论文用 Llama-2-7B 的注意力图（StreamingLLM Figure 2）说明：除了最底下 <span data-src="StreamingLLM Figure 2">2</span> 层，
+    模型在几乎所有层和头上都强烈关注初始 token；把前 <span data-src="StreamingLLM §3.2">4</span> 个 token 换成换行符 <code>"\n"</code>，模型仍然关注它们，
+    重新引入后 PPL 也能恢复（StreamingLLM Table 1：4+1020 是 <span class="mono" data-src="StreamingLLM Table 1">5.40</span>，4"\n"+1020 是 <span class="mono" data-src="StreamingLLM Table 1">5.60</span>）。
+    这说明起作用的是<strong>绝对起始位置</strong>，不是 token 的语义内容。
+  </p>
+
+  <p>
+    位置重编号是容易被忽略的一步。论文举了一个例子：当前 cache 是 <code>[0, 1, 2, 3, 6, 7, 8]</code>，正在解码第 <span data-src="StreamingLLM §3.2">9</span> 个 token，
+    位置应赋成 <code>[0, 1, 2, 3, 4, 5, 6, 7]</code>，而不是原始文本里的 <code>[0, 1, 2, 3, 6, 7, 8, 9]</code>（StreamingLLM §3.2）。
+    RoPE 要缓存旋转前的 Key，再在每步对 rolling cache 里的 Key 施加位置变换；ALiBi 则用连续的线性偏置，而不是跳跃的偏置。
+    不做这一步，sink 保住了 KV，位置却对不上，模型仍然会退化。
+  </p>
+
+  <p>
+    论文在 <span data-src="StreamingLLM Table 2">400K</span> token 的拼接 PG19 上给了不同模型的 PPL：MPT-7B 从 0+2048 的 <span class="mono" data-src="StreamingLLM Table 2">460.29</span>
+    降到 4+2044 的 <span class="mono" data-src="StreamingLLM Table 2">14.99</span>；Llama-2-7B 从 0+4096 的 <span class="mono" data-src="StreamingLLM Table 2">3359.95</span>
+    降到 4+4092 的 <span class="mono" data-src="StreamingLLM Table 2">9.59</span>（StreamingLLM Table 2）。<span data-src="StreamingLLM §3.2">4</span> 个 sink 通常就够，继续加到 <span data-src="StreamingLLM Table 2">8</span> 个只有边际收益。
+  </p>
+
+  <h3>Mistral 7B：<span data-src="Mistral Table 1">W=4096</span> 的 SWA 叠 <span data-src="Mistral Table 1">32</span> 层，rolling buffer 按 i mod W 覆盖</h3>
+  <p>
+    Mistral 7B 把滑窗写进了预训练。Mistral 的 Table 1 配置是 <code data-src="Mistral Table 1">n_layers=32</code>、<code data-src="Mistral Table 1">window_size=4096</code>、<code data-src="Mistral Table 1">context_len=8192</code>；
+    第 <code>k</code> 层的 <code>h<sub>i</sub></code> 只看上一层 <code>[i−W, i]</code> 的隐藏状态。递归下去，顶层输入可以回看 <code>W×k</code> 个 token；
+    在 <code data-src="Mistral Table 1">W=4096</code>、<span data-src="Mistral Table 1">32</span> 层时，论文给出的理论注意力跨度约为 <span class="mono" data-src="Mistral §2">131K</span>（Mistral §2）。
+  </p>
+  <p>
+    推理时用 rolling buffer：第 <code>i</code> 个位置的 Key/Value 存在 cache 的 <code>i mod W</code> 槽位。位置超过 <code>W</code> 后旧值被覆盖，
+    cache 大小固定为 <code>W</code>。论文报告，在 <span data-src="Mistral §2">32K</span> 序列上这把 cache 显存减少 <span class="mono" data-src="Mistral §2">8×</span>，且不影响模型质量；
+    在 <span data-src="Mistral §2">16K</span> 序列、<code data-src="Mistral Table 1">W=4096</code> 下，配合 FlashAttention 和 xFormers 的改动，相对 vanilla attention baseline 有 <span class="mono" data-src="Mistral §2">2×</span> 加速（Mistral §2）。
+  </p>
+
+  <h3>FlashAttention：不是稀疏，是把 N×N 留在 SRAM</h3>
+  <p>
+    FlashAttention 的摘要和 FlashAttention §3.1 反复强调 <strong>exact attention</strong>：它算的是完整的 softmax 注意力，不丢任何 pair。
+    它改的是执行顺序。标准实现把 <code>S = QK<sup>T</sup></code> 和 <code>P = softmax(S)</code> 写回 HBM，再读出来乘 <code>V</code>；
+    FlashAttention 把 <code>Q/K/V</code> 切成块，逐块搬进 SRAM，用在线 softmax 累积结果，最后只把 <code>O</code> 和归一化统计量写回。
+  </p>
+  <div class="eq">
+    m<sub>new</sub> = max(m, m̃)
+    <br>
+    ℓ<sub>new</sub> = e<sup>m−m<sub>new</sub></sup> · ℓ + e<sup>m̃−m<sub>new</sub></sup> · ℓ̃
+    <br>
+    O<sub>new</sub> = diag(ℓ<sub>new</sub>)<sup>−1</sup> · ( diag(ℓ) · e<sup>m−m<sub>new</sub></sup> · O + e<sup>m̃−m<sub>new</sub></sup> · P̃ · V )
+  </div>
+  <div class="eq-cap">FlashAttention Algorithm 1：m 是 running max，ℓ 是 running sum；每读一个 K/V 块就更新一次。反向传播不存 S、P，用 O 和 (m, ℓ) 重算，省掉 O(N²) 的中间显存。</div>
+
+  <p>
+    复杂度分析在 FlashAttention §3.2：标准注意力需要 <code>Θ(Nd + N²)</code> 次 HBM 访问，FlashAttention 需要 <code>Θ(N²d²M<sup>−1</sup>)</code>，
+    其中 <code>M</code> 是 SRAM 大小。FLOPs 仍是 <code>O(N²d)</code>，额外显存是 <code>O(N)</code>；减少的是 HBM 访问，不是计算量。
+    论文在 FlashAttention Figure 2 的 GPT-2 medium 上把这一点量化得很直接：FLOPs 从 <span class="mono" data-src="FlashAttention Figure 2">66.6</span> 升到
+    <span class="mono" data-src="FlashAttention Figure 2">75.2</span> GFLOPs，HBM 读写却从 <span class="mono" data-src="FlashAttention Figure 2">40.3</span> GB 降到
+    <span class="mono" data-src="FlashAttention Figure 2">4.4</span> GB，时间从 <span class="mono" data-src="FlashAttention Figure 2">41.7</span> ms 降到
+    <span class="mono" data-src="FlashAttention Figure 2">7.3</span> ms。
+  </p>
+
+  <h3>交互：窗口 + sink 的 KV cache 与覆盖率</h3>
+  <p>
+    下面的计算器把三种参数放在一起：滑窗 <code>W</code>、sink 数 <code>S</code>、序列长度 <code>L</code>、层数 <code>layers</code>。
+    它算两个量：<strong>cache 大小</strong>（decode 时实际保留多少 token 的 KV）和<strong>有效感受野</strong>（顶层理论上能回看到多远）。
+    公式是页面按 StreamingLLM §3.2 的 cache 结构、Longformer §3.1 / Mistral §2 的层间递推做的组合模型，不声称原文给出「sink + 窗口」的感受野公式。
+  </p>
+  <div class="eq">
+    cache = min(L, W + S)
+    <br>
+    ERF = min(L, W × layers + S)
+  </div>
+  <div class="eq-cap">cache 是 decode 时保留的 KV 数；ERF 是顶层理论感受野。ERF 是上限，不代表模型真的检索到或利用到窗口外的 token。</div>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label for="ws-w">滑窗 W <span class="v" id="ws-w-val">4096</span></label>
+        <input type="range" id="ws-w" min="0" max="5" step="1" value="3">
+        <div class="src-note">512 · 1024 · 2048 · 4096 · 8192 · 16384</div>
+      </div>
+      <div class="ctrl">
+        <label for="ws-s">sink 数 S <span class="v" id="ws-s-val">4</span></label>
+        <input type="range" id="ws-s" min="0" max="4" step="1" value="3">
+        <div class="src-note">0 · 1 · 2 · 4 · 8</div>
+      </div>
+      <div class="ctrl">
+        <label for="ws-l">序列长度 L <span class="v" id="ws-l-val">32768</span></label>
+        <input type="range" id="ws-l" min="0" max="4" step="1" value="2">
+        <div class="src-note">2K · 8K · 32K · 128K · 1M</div>
+      </div>
+      <div class="ctrl">
+        <label for="ws-layers">层数 <span class="v" id="ws-layers-val">32</span></label>
+        <input type="range" id="ws-layers" min="0" max="2" step="1" value="2">
+        <div class="src-note">8 · 16 · 32</div>
+      </div>
+    </div>
+
+    <div class="ws-bars" aria-hidden="true">
+      <div class="ws-bar-row">
+        <span class="ws-bar-label">KV cache 占全量</span>
+        <div class="bar"><i class="b1" id="ws-bar-cache" style="width:12.5%"></i><i class="b2" id="ws-bar-evict" style="width:87.5%"></i></div>
+      </div>
+      <div class="ws-bar-row">
+        <span class="ws-bar-label">感受野覆盖</span>
+        <div class="bar"><i class="b1" id="ws-bar-erf" style="width:100%"></i><i class="b2" id="ws-bar-erf-rest" style="width:0%"></i></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="b1"></i>cache 内 / 覆盖</span>
+      <span><i class="b2"></i>cache 外 / 未覆盖</span>
+    </div>
+
+    <div class="readout" data-src="StreamingLLM §3.2">
+      <div class="r-head">当前配置</div>
+      <p>KV cache <strong id="ws-cache">4100</strong> tokens · 占全量 <strong id="ws-cache-ratio">12.5%</strong> · 省下 <strong id="ws-saved">87.5%</strong>
+        <span class="src-note">（默认 <span data-src="Mistral Table 1">W=4096</span> + <span data-src="StreamingLLM §3.2">S=4</span>，按 cache=min(L,W+S) 的页面公式计算）</span></p>
+      <p>每 token 可见 <strong id="ws-visible">4100</strong> keys · 有效感受野 <strong id="ws-erf" data-src="Longformer §3.1">32768</strong> tokens（覆盖 <strong id="ws-erf-ratio">100.0%</strong>）
+        <span class="src-note">（ERF=min(L,W×layers+S)：默认 W=4096、layers=32 时上限为 131076，再与 L 取 min；这是页面按 <span data-src="Longformer §3.1">Longformer §3.1</span> 的 ℓ×w 感受野递推做的组合模型，不是原文读数）</span></p>
+      <p class="src-note" id="ws-note">中间 28668 个 token 的 KV 不在 cache 里；每 token 只能看到 sink 与最近窗口。</p>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组参数的 cache 与感受野 <span class="sum-sub">W=4096/S=4/L=1M 与 W=1024/S=0/L=32K</span></summary>
+    <div class="details-body">
+      <p><strong>口径：</strong>cache = min(L, W+S)；cache 占比 = cache / L × 100%；省下 = (L − cache) / L × 100%；每 token 可见 = cache；有效感受野 = min(L, W × layers + S)。这是页面按 StreamingLLM §3.2 的 cache 结构、Longformer §3.1 / Mistral §2 的层间递推做的组合模型，不声称原文给出「sink + 窗口」的感受野公式。</p>
+      <p><strong>组 1：W=4096，S=4，L=1,048,576，layers=32。</strong>cache = min(1048576, 4100) = 4100；占比 4100 / 1048576 = 0.390625% → <strong>0.4%</strong>；省下 (1048576 − 4100) / 1048576 = 99.609375% → <strong>99.6%</strong>。有效感受野 = min(1048576, 4096×32 + 4) = min(1048576, 131076) = 131076 → 131076 / 1048576 = 12.5004% → <strong>12.5%</strong>。JS 在同样参数下输出 4100 / 0.4% / 99.6% / 131076 / 12.5%。</p>
+      <p><strong>组 2：W=1024，S=0，L=32,768，layers=32。</strong>cache = min(32768, 1024) = 1024；占比 1024 / 32768 = 3.125% → <strong>3.1%</strong>；省下 (32768 − 1024) / 32768 = 96.875% → <strong>96.9%</strong>。有效感受野 = min(32768, 1024×32) = 32768 → 100.0%。JS 输出 1024 / 3.1% / 96.9% / 32768 / 100.0%。</p>
+      <p>组 1 说明：即使 cache 只占全量的 0.4%，32 层滑窗的理论感受野仍能覆盖 12.5% 的 1M 序列；组 2 说明：在 32K 序列上，W=1024 的 32 层刚好覆盖全序列，但 cache 只有 1024 token。这里的「覆盖」是理论上限，不等于模型真的检索到或利用到那些 token。</p>
+    </div>
+  </details>
+
+  <p class="src-note">
+    交互常量：<code data-src="Mistral Table 1">W=4096</code>、<code data-src="Mistral Table 1">layers=32</code> 取自 Mistral Table 1；<code data-src="StreamingLLM §3.2">S=4</code> 取自 StreamingLLM §3.2；序列长度是页面给的可调参数。
+    读数随滑块变化，不是论文报告值。
+  </p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>滑窗把每层压到 O(n·W)，层数把感受野补回来，FlashAttention 把 HBM 访问压低</h2></div>
+  <p class="sec-sub">读完这节你应该知道：四种方案的计算/缓存/IO 复杂度各是什么，以及为什么 Mistral 的 131K 只是理论上限。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 1：四种注意力方案的复杂度对照（公式来自 Longformer §3.1、StreamingLLM §3.2、Mistral §2、FlashAttention §3.2；页面整理）</caption>
+      <thead>
+        <tr><th>方案</th><th>每个 query 看多少 key</th><th>计算 / 中间显存</th><th>KV cache</th><th>备注</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Full attention</td><td>N</td><td>O(N²) 计算；O(N²) 中间矩阵</td><td>N</td><td>精确，但长序列不可行</td></tr>
+        <tr><td>Longformer 滑窗 + global</td><td>w + |G|</td><td>O(N·w + N·|G|)</td><td>N（训练）；推理可另配窗口</td><td>global 是任务相关先验；ℓ 层感受野 ℓ·w</td></tr>
+        <tr><td>StreamingLLM</td><td>S + W（稳态）</td><td>O(N·(S+W)) = O(N)</td><td>S + W</td><td>只保 sink + 最近窗口；中间 KV 丢弃</td></tr>
+        <tr><td>Mistral SWA</td><td>W</td><td>O(N·W)</td><td>W（rolling）</td><td>预训练时写入；槽位 i mod W</td></tr>
+        <tr><td>FlashAttention</td><td>N（精确）</td><td>O(N²·d) FLOPs；O(N) 额外显存</td><td>N</td><td>HBM Θ(N²d²/M)；不是稀疏</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表里最容易被误读的是最后一行。FlashAttention 的「每个 query 看多少 key」仍是 <code>N</code>，它没有把矩阵变稀疏；
+    它把标准实现里 <code>O(N²)</code> 的中间矩阵从 HBM 拿掉，换成 SRAM 里的分块计算。所以它的 FLOPs 甚至可能更多：
+    FlashAttention Figure 2 的 GPT-2 medium 上，FLOPs 从 <span class="mono" data-src="FlashAttention Figure 2">66.6</span> 升到 <span class="mono" data-src="FlashAttention Figure 2">75.2</span> GFLOPs，
+    绝对多 <span class="mono" data-src="FlashAttention Figure 2">8.6</span> GFLOPs，相对多 <span class="mono" data-src="FlashAttention Figure 2">12.9%</span>（8.6 / 66.6）；
+    但 HBM 从 <span class="mono" data-src="FlashAttention Figure 2">40.3</span> GB 降到 <span class="mono" data-src="FlashAttention Figure 2">4.4</span> GB，
+    绝对少 <span class="mono" data-src="FlashAttention Figure 2">35.9</span> GB，相对少 <span class="mono" data-src="FlashAttention Figure 2">89.1%</span>（35.9 / 40.3），
+    比值 <span class="mono" data-src="FlashAttention Figure 2">9.2×</span>（40.3 / 4.4；论文摘要写 up to 9×，这里按 FlashAttention Figure 2 的表值算到 9.2×）；时间从 <span class="mono" data-src="FlashAttention Figure 2">41.7</span> ms 降到
+    <span class="mono" data-src="FlashAttention Figure 2">7.3</span> ms，比值 <span class="mono" data-src="FlashAttention Figure 2">5.7×</span>（41.7 / 7.3）。
+  </p>
+
+  <p>
+    Mistral 的 <span data-src="Mistral §2">131K</span> 也要加限定词。论文写的是 <em>theoretical attention span</em>：它假设每层都把信息往前传满 <code>W</code>，
+    且模型真的学会利用这条链路。它不等于「模型能有效使用 <span data-src="Mistral §2">131K</span> 上下文」，也不等于「cache 里存了 <span data-src="Mistral §2">131K</span> 个 token」——
+    rolling buffer 的 cache 始终只有 <code data-src="Mistral Table 1">W=4096</code>。这两件事在页面上经常被混成一句「Mistral 支持 <span data-src="Mistral §2">131K</span>」。
+    <span class="infer">推断</span>（由 Mistral §2 的 W×k 递推与 rolling buffer 的 i mod W 覆盖规则对照得出）
+  </p>
+
+  <p>
+    反过来，StreamingLLM 的 cache 是 <code>S+W</code>，在稳态下与序列长度无关：<span data-src="StreamingLLM §3.2">4</span> 个 sink 加最近窗口，序列到 <span data-src="StreamingLLM §4.1">4M</span> token 时 cache 仍是常数。
+    这也是它能把 Llama-2 系列跑到 <span data-src="StreamingLLM §4.1">4M</span> token 的原因（StreamingLLM Abstract / §4.1）。但常数 cache 的代价是中间 KV 全部丢弃，
+    见第 07 节。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">口径</span><h4>FLOPs、HBM 字节、cache token 数是三个不同的单位</h4></div>
+    <p>FLOPs 衡量算术量；HBM 字节衡量数据搬运；cache token 数衡量 decode 时保留的历史。一个方案可以「FLOPs 更多、HBM 更少、cache 不变」（FlashAttention），也可以「FLOPs 更少、cache 更小、但中间信息丢失」（窗口 cache）。横比之前先确认单位。</p>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>模式写进权重，切块交给 kernel，缓存决定推理能回看多远</h2></div>
+  <p class="sec-sub">读完这节你应该知道：训练时的注意力模式、推理时的 cache 策略、kernel 的 IO 调度如何串在一次 decode 里。</p>
+
+  <figure>
+    <svg viewBox="0 0 760 520" role="img" aria-labelledby="svg-title svg-desc">
+      <title id="svg-title">三种长上下文注意力机制的对照</title>
+      <desc id="svg-desc">上带：Longformer 的局部窗口与 global token；中带：StreamingLLM 的 4 个 sink、被覆盖的中间 KV 与最近窗口；下带：FlashAttention 在 HBM 与 SRAM 之间分块搬运 Q/K/V、写回 O。</desc>
+      <defs>
+        <marker id="svg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <text x="12" y="24" class="svg-title">① Longformer：局部窗口 + global token</text>
+      <text x="12" y="44" class="svg-sub">每个 token 只看 ±w/2；global token 与所有 token 双向相连</text>
+
+      <g>
+        <rect x="180" y="64" width="38" height="28" rx="4" class="tok tok-glob"></rect>
+        <rect x="224" y="64" width="38" height="28" rx="4" class="tok"></rect>
+        <rect x="268" y="64" width="38" height="28" rx="4" class="tok"></rect>
+        <rect x="312" y="64" width="38" height="28" rx="4" class="tok tok-win"></rect>
+        <rect x="356" y="64" width="38" height="28" rx="4" class="tok tok-win"></rect>
+        <rect x="400" y="64" width="38" height="28" rx="4" class="tok tok-win"></rect>
+        <rect x="444" y="64" width="38" height="28" rx="4" class="tok tok-win tok-query"></rect>
+        <rect x="488" y="64" width="38" height="28" rx="4" class="tok tok-win"></rect>
+        <rect x="532" y="64" width="38" height="28" rx="4" class="tok tok-win"></rect>
+        <rect x="576" y="64" width="38" height="28" rx="4" class="tok tok-win"></rect>
+        <rect x="620" y="64" width="38" height="28" rx="4" class="tok"></rect>
+        <rect x="664" y="64" width="38" height="28" rx="4" class="tok"></rect>
+      </g>
+      <text x="199" y="83" class="svg-mono" text-anchor="middle">G</text>
+      <text x="463" y="83" class="svg-mono" text-anchor="middle">q</text>
+      <path class="svg-arrow" d="M312 100 V108 H614 V100"></path>
+      <text x="463" y="124" class="svg-note" text-anchor="middle">w = 窗口</text>
+      <text x="12" y="148" class="svg-note">O(n·w)；ℓ 层感受野 ℓ×w（Longformer §3.1）</text>
+
+      <text x="12" y="186" class="svg-title">② StreamingLLM：4 个 sink + 滚动窗口</text>
+      <text x="12" y="206" class="svg-sub">sink 永远保留；中间 KV 被覆盖；位置 ID 在 cache 内重编号</text>
+
+      <g>
+        <rect x="180" y="226" width="38" height="28" rx="4" class="tok tok-sink"></rect>
+        <rect x="224" y="226" width="38" height="28" rx="4" class="tok tok-sink"></rect>
+        <rect x="268" y="226" width="38" height="28" rx="4" class="tok tok-sink"></rect>
+        <rect x="312" y="226" width="38" height="28" rx="4" class="tok tok-sink"></rect>
+        <rect x="356" y="226" width="38" height="28" rx="4" class="tok tok-evicted"></rect>
+        <rect x="400" y="226" width="38" height="28" rx="4" class="tok tok-evicted"></rect>
+        <rect x="444" y="226" width="38" height="28" rx="4" class="tok tok-evicted"></rect>
+        <rect x="488" y="226" width="38" height="28" rx="4" class="tok tok-evicted"></rect>
+        <rect x="532" y="226" width="38" height="28" rx="4" class="tok tok-recent"></rect>
+        <rect x="576" y="226" width="38" height="28" rx="4" class="tok tok-recent"></rect>
+        <rect x="620" y="226" width="38" height="28" rx="4" class="tok tok-recent"></rect>
+        <rect x="664" y="226" width="38" height="28" rx="4" class="tok tok-recent tok-query"></rect>
+      </g>
+      <text x="683" y="245" class="svg-mono" text-anchor="middle">q</text>
+      <path class="svg-arrow" d="M180 258 V266 H350 V258"></path>
+      <path class="svg-arrow" d="M356 258 V266 H526 V258"></path>
+      <path class="svg-arrow" d="M532 258 V266 H708 V258"></path>
+      <text x="265" y="282" class="svg-note" text-anchor="middle">S = 4</text>
+      <text x="441" y="282" class="svg-note" text-anchor="middle">evicted</text>
+      <text x="620" y="282" class="svg-note" text-anchor="middle">W</text>
+      <text x="12" y="308" class="svg-note">cache = S + W；中间 KV 不参与注意力（StreamingLLM §3.2 / Figure 4）</text>
+
+      <text x="12" y="346" class="svg-title">③ FlashAttention：分块 + 在线 softmax，不物化 N×N</text>
+      <text x="12" y="366" class="svg-sub">Q/K/V 分块从 HBM 搬到 SRAM；O 和 (m, ℓ) 写回；反向重算</text>
+
+      <rect x="170" y="386" width="230" height="86" rx="8" class="svg-box"></rect>
+      <text x="285" y="406" class="svg-label" text-anchor="middle">HBM</text>
+      <rect x="185" y="416" width="36" height="24" rx="4" class="svg-block"></rect>
+      <rect x="230" y="416" width="36" height="24" rx="4" class="svg-block"></rect>
+      <rect x="275" y="416" width="36" height="24" rx="4" class="svg-block"></rect>
+      <rect x="320" y="416" width="36" height="24" rx="4" class="svg-block"></rect>
+      <text x="203" y="432" class="svg-mono" text-anchor="middle">Q</text>
+      <text x="248" y="432" class="svg-mono" text-anchor="middle">K</text>
+      <text x="293" y="432" class="svg-mono" text-anchor="middle">V</text>
+      <text x="338" y="432" class="svg-mono" text-anchor="middle">O</text>
+
+      <rect x="460" y="386" width="180" height="86" rx="8" class="svg-box"></rect>
+      <text x="550" y="406" class="svg-label" text-anchor="middle">SRAM</text>
+      <rect x="475" y="416" width="60" height="24" rx="4" class="svg-block"></rect>
+      <rect x="545" y="416" width="60" height="24" rx="4" class="svg-block"></rect>
+      <text x="505" y="432" class="svg-mono" text-anchor="middle">S_ij</text>
+      <text x="575" y="432" class="svg-mono" text-anchor="middle">m, ℓ</text>
+      <text x="550" y="458" class="svg-note" text-anchor="middle">P̃·V 在 SRAM 内累加</text>
+
+      <path class="svg-arrow" d="M400 412 H458" marker-end="url(#svg-arrow)"></path>
+      <path class="svg-arrow" d="M460 452 H402" marker-end="url(#svg-arrow)"></path>
+      <text x="429" y="404" class="svg-note" text-anchor="middle">load</text>
+      <text x="429" y="468" class="svg-note" text-anchor="middle">store O</text>
+      <text x="12" y="500" class="svg-note">FLOPs 75.2 vs 66.6 GFLOPs；HBM 4.4 vs 40.3 GB（FlashAttention Figure 2）</text>
+    </svg>
+    <figcaption>三种机制的作用点不同：Longformer 改的是训练时的注意力模式；StreamingLLM 改的是推理时的 cache 内容；FlashAttention 改的是同一份精确注意力的执行位置。图中 token 数为示意，不代表具体实验配置。</figcaption>
+    <div class="legend">
+      <span><i class="lg-glob"></i>global token</span>
+      <span><i class="lg-win"></i>滑窗 / recent</span>
+      <span><i class="lg-sink"></i>sink</span>
+      <span><i class="lg-evict"></i>被覆盖 / evicted</span>
+    </div>
+  </figure>
+
+  <ol>
+    <li><strong>选模式。</strong>训练/预训练时决定注意力图：Longformer 的窗口+global；Mistral 的 causal SWA；Gemma 2 的 local/global 交替——每两层里一层用 <span class="mono" data-src="Gemma 2 §2">4096</span> 的 local window，另一层用 <span class="mono" data-src="Gemma 2 §2">8192</span> 的 global span（Gemma 2 §2）。模式在训练时写进权重，推理时不能仅靠改配置切换<span class="infer">推断</span>（依据：Longformer、Mistral、Gemma 2 的注意力模式都在预训练阶段确定，原文未给出推理时切换机制）。</li>
+    <li><strong>切块。</strong>前向时按模式生成 mask 或索引。窗口模式只算对角线带；global 行/列单独算；FlashAttention 把任意 mask 切成块，在 SRAM 里做在线 softmax，块大小受 SRAM 容量约束（Algorithm 1 的 B<sub>c</sub>、B<sub>r</sub>）。</li>
+    <li><strong>定缓存。</strong>推理时决定保留哪些 KV：全量、rolling <code>W</code>、<code>S+W</code>。StreamingLLM 还要在 cache 内重编号位置；Mistral 用 <code>i mod W</code> 覆盖旧槽位（StreamingLLM §3.2 / Mistral §2）。</li>
+    <li><strong>算反向。</strong>训练时 FlashAttention 不存 <code>S</code>、<code>P</code>，用 <code>O</code> 和 <code>(m, ℓ)</code> 重算；Longformer 的稀疏 kernel 只算非零带；两者的共同点是避免把 <code>N×N</code> 中间量写回 HBM（FlashAttention §3.1 / Longformer §3.2）。</li>
+    <li><strong>看度量。</strong>比较方案时同时看 wall-clock、HBM 字节、cache token 数。只报 FLOPs 会漏掉 memory-bound 的大头；只报 cache 会漏掉计算模式的影响。</li>
+  </ol>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">可以叠加，但别混为一谈</span><h4>三种机制的组合关系</h4></div>
+    <p><strong>Longformer + FlashAttention：</strong>稀疏 mask 可以交给块稀疏 FlashAttention 执行；FlashAttention §3.3 的 block-sparse 版本就是把稀疏模式映射到块上，再按稀疏率减少 IO。</p>
+    <p><strong>StreamingLLM + Mistral SWA：</strong>两者都保留最近窗口，但 Mistral 的 SWA 是训练时的注意力模式，rolling cache 是它在推理端的自然实现；StreamingLLM 是推理时对已训练模型加 sink，不改变模型权重。</p>
+    <p><strong>FlashAttention + 全量 KV：</strong>它不减少 cache，只减少中间矩阵的 HBM 读写；要和窗口/sink 叠加，得另外改 cache 策略。</p>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>窗口+sink 把 PPL 从 <span data-src="StreamingLLM Table 1">5158.07</span> 拉回 <span data-src="StreamingLLM Table 1">5.40</span>；FlashAttention 用更多 FLOPs 换 <span data-src="FlashAttention Figure 2">9.2×</span> 更少 HBM</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每个机制在原文里的代表数字、测量条件，以及哪些数字不能直接横比。</p>
+
+  <p>
+    先给一张总表，所有值都来自原文；不同论文的任务、模型、序列长度不同，只能在同一行内比较，不能跨行横比。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 2：四篇论文的代表结果（Longformer Table 7；StreamingLLM Table 1 与 Table 2；Mistral §2；FlashAttention Figure 2。只转录与本页论点相关的行，条件见行内，均为原文报告值）</caption>
+      <thead>
+        <tr><th>论文 / 模型</th><th>设置</th><th>指标</th><th>结果</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Longformer-base vs RoBERTa-base</td><td>WikiHop dev</td><td>accuracy</td><td class="num">75.0 vs 72.4</td></tr>
+        <tr><td>Longformer-base vs RoBERTa-base</td><td>Hyperpartisan dev</td><td>F1</td><td class="num">94.8 vs 87.4</td></tr>
+        <tr><td>StreamingLLM · Llama-2-13B</td><td>PG19 首本书 65K；0+1024 → 4+1020</td><td>PPL</td><td class="num">5158.07 → 5.40</td></tr>
+        <tr><td>StreamingLLM · MPT-7B</td><td>400K 拼接 PG19；0+2048 → 4+2044</td><td>PPL</td><td class="num">460.29 → 14.99</td></tr>
+        <tr><td>Mistral 7B</td><td>32K 序列；W=4096</td><td>KV cache</td><td class="num">8× reduction</td></tr>
+        <tr><td>FlashAttention · GPT-2 medium</td><td>N=1024，d=64，16 heads，batch 64，A100；前向+反向</td><td>HBM R/W</td><td class="num">40.3 → 4.4 GB</td></tr>
+        <tr><td>FlashAttention · GPT-2 medium</td><td>同上</td><td>runtime</td><td class="num">41.7 → 7.3 ms</td></tr>
+        <tr><td>FlashAttention · GPT-2 medium</td><td>同上</td><td>FLOPs</td><td class="num">66.6 → 75.2 GFLOPs</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Longformer 的 Table 7 是同一 backbone 的继续预训练+微调对比，不是和全注意力长上下文模型的横比。WikiHop 上
+    <span class="mono" data-src="Longformer Table 7">75.0</span> vs <span class="mono" data-src="Longformer Table 7">72.4</span>，
+    绝对 +<span class="mono" data-src="Longformer Table 7">2.6</span> 个百分点，相对 +<span class="mono" data-src="Longformer Table 7">3.6%</span>（2.6 / 72.4）；
+    Hyperpartisan 上 <span class="mono" data-src="Longformer Table 7">94.8</span> vs <span class="mono" data-src="Longformer Table 7">87.4</span>，
+    绝对 +<span class="mono" data-src="Longformer Table 7">7.4</span> 个百分点，相对 +<span class="mono" data-src="Longformer Table 7">8.5%</span>（7.4 / 87.4）。
+    指标口径按 Longformer Table 7 的表注：WikiHop 用 accuracy，Hyperpartisan 用 F1。
+  </p>
+
+  <p>
+    StreamingLLM 的 Table 1 条件是 Llama-2-13B、PG19 第一本书 <span data-src="StreamingLLM Table 1">65K</span> token；0+1024 表示 0 个 sink 加 1024 个最近 token，
+    4+1020 表示 4 个 sink 加 1020 个最近 token。PPL 从 <span class="mono" data-src="StreamingLLM Table 1">5158.07</span> 降到
+    <span class="mono" data-src="StreamingLLM Table 1">5.40</span>，相对降幅 <span class="mono" data-src="StreamingLLM Table 1">99.9%</span>
+    （(5158.07 − 5.40) / 5158.07）。把 <span data-src="StreamingLLM §3.2">4</span> 个原始 token 换成 <span data-src="StreamingLLM §3.2">4</span> 个换行符，PPL 是 <span class="mono" data-src="StreamingLLM Table 1">5.60</span>，
+    与原始 token 的 5.40 接近；这说明起作用的是起始位置，不是语义。
+  </p>
+
+  <p>
+    Mistral 7B 在 <span data-src="Mistral §2">32K</span> 序列上把 cache 减少 <span class="mono" data-src="Mistral §2">8×</span>，论文的措辞是「without impacting the model quality」；
+    在 <span data-src="Mistral §2">16K</span> 序列、<code data-src="Mistral Table 1">W=4096</code> 下，配合 FlashAttention 和 xFormers 的改动，相对 vanilla attention baseline 有
+    <span class="mono" data-src="Mistral §2">2×</span> 加速。这两个数字都是模型实现层面的报告，不是与全注意力模型的质量对比。
+  </p>
+
+  <p>
+    FlashAttention 的 Figure 2 条件最完整：GPT-2 medium、序列长 1024、head dim 64、16 heads、batch 64、A100、前向+反向。
+    FLOPs 从 <span class="mono" data-src="FlashAttention Figure 2">66.6</span> 升到 <span class="mono" data-src="FlashAttention Figure 2">75.2</span> GFLOPs，
+    但 HBM 从 <span class="mono" data-src="FlashAttention Figure 2">40.3</span> 降到 <span class="mono" data-src="FlashAttention Figure 2">4.4</span> GB，
+    时间从 <span class="mono" data-src="FlashAttention Figure 2">41.7</span> 降到 <span class="mono" data-src="FlashAttention Figure 2">7.3</span> ms。
+    论文把原因归为 HBM 访问减少，而不是 FLOPs 减少。这个例子最能说明「省搬运」和「省计算」不是一回事。
+  </p>
+
+  <p>
+    还有两个容易混的加速数字。FlashAttention 的 Figure 1 报告 GPT-2 上注意力计算最高 <span class="mono" data-src="FlashAttention Figure 1">7.6×</span>；
+    FlashAttention Figure 2 的 GPT-2 medium 前向+反向是 <span class="mono" data-src="FlashAttention Figure 2">5.7×</span>（41.7 / 7.3）。
+    前者是注意力 kernel 相对 PyTorch 实现的加速，后者是 GPT-2 medium 前向+反向的 attention 时间；引用时必须带测量对象。
+  </p>
+
+  <p>
+    StreamingLLM 的 <span class="mono" data-src="StreamingLLM §4.5">22.2×</span> 是相对 sliding window with re-computation 的每 token 解码加速
+    （StreamingLLM Abstract / §4.5），不是相对 full attention 的加速。它的质量基线是「窗口 + 重算」，不是「全量 KV」。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">反直觉 1</span><h4>FlashAttention 的 FLOPs 更多，但更快</h4></div>
+      <p><span class="mono" data-src="FlashAttention Figure 2">75.2</span> vs <span class="mono" data-src="FlashAttention Figure 2">66.6</span> GFLOPs，时间却是 <span class="mono" data-src="FlashAttention Figure 2">7.3</span> vs <span class="mono" data-src="FlashAttention Figure 2">41.7</span> ms。多出来的 FLOPs 来自反向重算；省下来的时间来自少读少写 HBM。在 memory-bound 的 attention 里，FLOPs 不是好指标。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">反直觉 2</span><h4>更大的 cache 不一定更低 PPL</h4></div>
+      <p>在 400K 拼接 PG19 上，Llama-2-7B 从 4+2044 扩到 4+4092，PPL 从 <span class="mono" data-src="StreamingLLM Table 6">9.08</span> 升到 <span class="mono" data-src="StreamingLLM Table 6">9.59</span>（StreamingLLM Table 6）。论文的解释是模型不一定能充分利用更长的上下文；这也是「cache 大小」和「有效上下文」不能划等号的证据。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>窗口不是记忆，sink 不是检索，FlashAttention 也没让注意力变便宜</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每种方法的失效边界，以及什么时候不该用。</p>
+
+  <ul>
+    <li><strong>Longformer 的 global token 是任务先验。</strong>分类用 <code>[CLS]</code>、QA 用 question token，都是人选的；窗口和膨胀率也是手工设计的。它降低了训练计算，但模型仍然要处理整个序列；global 数量与 <code>n</code> 无关且任务相关（Longformer §3.1）；本页不把它当检索机制。</li>
+    <li><strong>StreamingLLM 不扩展上下文长度。</strong>论文的原话是「efficiently generates coherent text from tokens within the KV cache without extending the LLMs' context length」（StreamingLLM §1）。它保住的是最近窗口内的连贯生成，不是对中间被淘汰 KV 的回忆。cache 变大也不一定更好：在 400K 拼接 PG19 上，Llama-2-7B 从 4+2044 扩到 4+4092，PPL 从 <span class="mono" data-src="StreamingLLM Table 6">9.08</span> 升到 <span class="mono" data-src="StreamingLLM Table 6">9.59</span>（StreamingLLM Table 6）。</li>
+    <li><strong>Mistral 的 <span data-src="Mistral §2">131K</span> 是理论上限。</strong>rolling buffer 只保留 <code>W</code> 个槽位；超过 <code>W</code> 的旧 KV 被覆盖，精确回看没有保证。Gemma 2 的 Table 10 还显示，把 local window 从 <span class="mono" data-src="Gemma 2 Table 10">4096</span> 降到 <span class="mono" data-src="Gemma 2 Table 10">1024</span>，验证 PPL 只从 <span class="mono" data-src="Gemma 2 Table 10">1.63</span> 到 <span class="mono" data-src="Gemma 2 Table 10">1.64</span>；这是 Gemma 2 特定模型和验证集上的现象，不是「窗口可以随便砍」的通用结论。</li>
+    <li><strong>FlashAttention 仍是 O(N²)。</strong>它把 HBM 访问从 <code>Θ(Nd+N²)</code> 降到 <code>Θ(N²d²M<sup>−1</sup>)</code>，但没有改变二次依赖；序列继续变长，计算和 IO 仍会涨。FlashAttention §4.3 说近似注意力方法在 <span data-src="FlashAttention §4.3">512–1024</span> 之间开始和 FlashAttention 交叉；FlashAttention §5 也指出每种新模式都要写新的 CUDA kernel。它是精确注意力的加速器，不是长上下文的免费通行证。</li>
+    <li><strong>NSA 把稀疏变成可训练组件，但不是推理开关。</strong>NSA §1 把压缩、选择、滑窗三路并行，并强调端到端训练和硬件对齐的 kernel；NSA §2.2 指出非可训练的选择算子会阻断梯度，NSA §2.1 指出散乱的内存访问会拖慢推理。要得到它的加速，需要按 NSA §2.2 的训练感知设计做端到端预训练或微调（预训练/微调设置见 NSA §4.1），不是把已有模型的 window 改小就能复现。</li>
+    <li><strong>Gemma 2 的交替 local/global 不是纯滑窗。</strong>它每隔一层保留一个 global span 为 <span class="mono" data-src="Gemma 2 §2">8192</span> 的全局层（Gemma 2 §2）；全局层仍然能看整个 8192 上下文。把它当成「纯 SWA 模型」会高估滑窗的贡献。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">使用判断</span><h4>什么时候用哪一种</h4></div>
+    <p><strong>值得用滑窗：</strong>长文档分类/QA，局部证据足够；训练预算有限；能接受 global token 的任务先验。</p>
+    <p><strong>值得用 sink + rolling：</strong>流式对话/长生成，只关心最近上下文；显存和延迟敏感；不需要回查中间细节。</p>
+    <p><strong>值得用 FlashAttention：</strong>需要精确全注意力；GPU 上 attention 是 memory-bound；训练和推理都想减少 HBM 流量。</p>
+    <p><strong>不要期待：</strong>用窗口或 sink 做长距离检索；用 FlashAttention 降低渐近复杂度；用 <span data-src="StreamingLLM §3.2">4</span> 个 sink 恢复被丢弃的中间信息。</p>
+  </div>
+
+  <p>
+    最后回到三个账本：Longformer 和 Mistral 改的是「算哪些对」，StreamingLLM 改的是「留哪些 KV」，FlashAttention 改的是「把数据放在哪」。
+    它们可以组合，但每组合一次，都要重新量一次 wall-clock、HBM 字节和有效上下文；只报其中一个数，都会把另外两个账本的代价藏起来。
+  </p>
+</section>
+
+<footer>
+  <div>Longformer · StreamingLLM · FlashAttention · Mistral 7B（附 Gemma 2 / NSA 对照）</div>
+  <div class="src">
+    原文：
+    <a href="https://arxiv.org/abs/2004.05150" target="_blank" rel="noopener">Longformer: The Long-Document Transformer</a> ·
+    <a href="https://arxiv.org/abs/2309.17453" target="_blank" rel="noopener">Efficient Streaming Language Models with Attention Sinks</a> ·
+    <a href="https://arxiv.org/abs/2205.14135" target="_blank" rel="noopener">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</a> ·
+    <a href="https://arxiv.org/abs/2310.06825" target="_blank" rel="noopener">Mistral 7B</a><br>
+    对照：
+    <a href="https://arxiv.org/abs/2408.00118" target="_blank" rel="noopener">Gemma 2</a> ·
+    <a href="https://arxiv.org/abs/2502.11089" target="_blank" rel="noopener">Native Sparse Attention</a><br>
+    版本：Longformer v2 · StreamingLLM v4 · FlashAttention v2 · Mistral 7B v1 · Gemma 2 v3 · NSA v2。所有 arXiv 链接不带版本号，图号/表号以这里列出的版本为准。<br>
+    笔记：<a href="/attention-sinks/">Attention Sinks</a> · <a href="/flash-attention/">flash attention</a> · <a href="/mistral-系列/">Mistral 系列</a>（该笔记讲 Mistral 3.1 Small，不含 Mistral 7B SWA 原文细节）
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var W_VALUES = [512, 1024, 2048, 4096, 8192, 16384];
+  var S_VALUES = [0, 1, 2, 4, 8];
+  var L_VALUES = [2048, 8192, 32768, 131072, 1048576];
+  var LAYER_VALUES = [8, 16, 32];
+
+  var wEl = document.getElementById('ws-w');
+  var sEl = document.getElementById('ws-s');
+  var lEl = document.getElementById('ws-l');
+  var nEl = document.getElementById('ws-layers');
+  if (!wEl || !sEl || !lEl || !nEl) return;
+
+  var out = {
+    w: document.getElementById('ws-w-val'),
+    s: document.getElementById('ws-s-val'),
+    l: document.getElementById('ws-l-val'),
+    n: document.getElementById('ws-layers-val'),
+    cache: document.getElementById('ws-cache'),
+    cacheRatio: document.getElementById('ws-cache-ratio'),
+    saved: document.getElementById('ws-saved'),
+    visible: document.getElementById('ws-visible'),
+    erf: document.getElementById('ws-erf'),
+    erfRatio: document.getElementById('ws-erf-ratio'),
+    note: document.getElementById('ws-note'),
+    barCache: document.getElementById('ws-bar-cache'),
+    barEvict: document.getElementById('ws-bar-evict'),
+    barErf: document.getElementById('ws-bar-erf'),
+    barErfRest: document.getElementById('ws-bar-erf-rest')
+  };
+
+  function pct(x) {
+    return x.toFixed(1) + '%';
+  }
+
+  function setText(el, text) {
+    if (el) el.textContent = text;
+  }
+
+  function render() {
+    var W = W_VALUES[Number(wEl.value)];
+    var S = S_VALUES[Number(sEl.value)];
+    var L = L_VALUES[Number(lEl.value)];
+    var NL = LAYER_VALUES[Number(nEl.value)];
+
+    var cache = Math.min(L, W + S);
+    var cacheRatio = cache / L * 100;
+    var saved = (L - cache) / L * 100;
+    var visible = cache;
+    var erf = Math.min(L, W * NL + S);
+    var erfRatio = erf / L * 100;
+
+    setText(out.w, String(W));
+    setText(out.s, String(S));
+    setText(out.l, String(L));
+    setText(out.n, String(NL));
+    setText(out.cache, String(cache));
+    setText(out.cacheRatio, pct(cacheRatio));
+    setText(out.saved, pct(saved));
+    setText(out.visible, String(visible));
+    setText(out.erf, String(erf));
+    setText(out.erfRatio, pct(erfRatio));
+
+    if (out.note) {
+      if (L > W + S) {
+        var visibleTo = S > 0 ? '只能看到 ' + String(S) + ' 个 sink 与最近窗口' : '只能看到最近窗口';
+        out.note.textContent = '中间 ' + String(L - W - S) + ' 个 token 的 KV 不在 cache 里；每 token ' + visibleTo + '。';
+      } else {
+        out.note.textContent = '序列还没超过 cache 容量，当前所有 KV 都在 cache 里。';
+      }
+    }
+
+    if (out.barCache) out.barCache.style.width = cacheRatio + '%';
+    if (out.barEvict) out.barEvict.style.width = (100 - cacheRatio) + '%';
+    if (out.barErf) out.barErf.style.width = erfRatio + '%';
+    if (out.barErfRest) out.barErfRest.style.width = (100 - erfRatio) + '%';
+  }
+
+  wEl.addEventListener('input', render);
+  sEl.addEventListener('input', render);
+  lEl.addEventListener('input', render);
+  nEl.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

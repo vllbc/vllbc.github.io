@@ -1,0 +1,648 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 2176 | §1 页面计算 | 2048+128 |
+| 262144 | §1 页面计算 | 2*131072 |
+| 259968 | §1 页面计算 | 262144-2176 |
+| 99.2 | §1 页面计算 | 259968/262144*100 |
+| 5 | §3 示例 | 3+2 |
+| 2944 | §4 表 4-1 | 2048+512+256+128 |
+| 8192 | §4 表 4-1 | 4*2048 |
+| 5248 | §4 表 4-1 | 8192-2944 |
+| 64.1 | §4 表 4-1 | 5248/8192*100 |
+| 64.0625 | §4 手算 A | 5248/8192*100 |
+| 2 | §4 表 4-1（packs=⌈T/L⌉ 下界） | 4096/2048 |
+| 4096 | §4 表 4-1 | 2*2048 |
+| 1152 | §4 表 4-1 | 4096-2944 |
+| 28.1 | §4 表 4-1 | 1152/4096*100 |
+| 50.0 | §4 表 4-1 | 4096/8192*100 |
+| 8388608 | §4 表 4-1 | 4*2048*2048/2 |
+| 2269184 | §4 表 4-1 | (2048*2048+512*512+256*256+128*128)/2 |
+| 6119424 | §4 表 4-1 | 8388608-2269184 |
+| 27.1 | §4 表 4-1 | 2269184/8388608*100 |
+| 72.9 | §4 表 4-1 | (8388608-2269184)/8388608*100 |
+| 2.0 | §4 表 4-1 | 8192/4096 |
+| 2656 | §4 手算 B | 1024+768+512+256+96 |
+| 10240 | §4 手算 B | 5*2048 |
+| 7584 | §4 手算 B | 10240-2656 |
+| 74.1 | §4 手算 B | 7584/10240*100 |
+| 74.0625 | §4 手算 B | 7584/10240*100 |
+| 1440 | §4 手算 B | 4096-2656 |
+| 6144 | §4 手算 B | 10240-4096 |
+| 60.0 | §4 手算 B | 6144/10240*100 |
+| 5500 | §4 预设 C | 1800+1700+1500+300+200 |
+| 4740 | §4 预设 C | 10240-5500 |
+| 46.3 | §4 预设 C | 4740/10240*100 |
+| 3 | §4 预设 C（packs=⌈T/L⌉ 下界） | 6144/2048 |
+| 644 | §4 预设 C | 6144-5500 |
+| 40.0 | §4 预设 C | 4096/10240*100 |
+| 1 | §4 交互 long（packs=⌈T/L⌉ 下界） | 131072/131072 |
+| 131072 | §4 交互 long pack 总 | 1*131072 |
+| 128896 | §4 交互 long pack 内 padding | 131072-2176 |
+| 131072 | §4 交互 long 节省 | 262144-131072 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2" data-source-commit="70f7a26">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>长上下文训练与 remove_padding · packing 去掉的是样本内 padding，不是边界</title>
+<meta name="description" content="定长 padding 在长上下文下浪费大量槽位；packing 用 cu_seqlens 把多条样本拼成 THD 序列，变长 attention 只在边界内计算。含 Megatron-Core 源码路径、token 账本与有条件的吞吐数字。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.calc{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--text-soft);background:var(--bg-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+footer .src{overflow-wrap:anywhere}
+.ctrl input[type=text]{width:100%;border:1px solid var(--border);border-radius:8px;background:var(--bg-surface);color:var(--text);font-family:"JetBrains Mono",monospace;font-size:13px;padding:8px 10px}
+.ctrl input[type=text]:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.sim .slots{margin-top:10px}
+.sim .slot-val{font-size:12.5px}
+.pack-error{display:none;margin:8px 0 0;font-size:12.5px;color:var(--accent-deep)}
+.hc-group{margin:14px 0}
+.hc-group + .hc-group{border-top:1px solid var(--border);padding-top:14px}
+.hc-group h4{margin:0 0 6px;font-size:14px;color:var(--text)}
+.hc-line{margin:4px 0;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.9;color:var(--text-muted)}
+.hc-line b{color:var(--text);font-weight:600}
+.src-note{font-size:12px;color:var(--text-soft);line-height:1.7}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+.svg-a{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.svg-b{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.svg-pad{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.1;stroke-dasharray:3 2}
+.svg-frame{fill:none;stroke:var(--accent);stroke-width:1.6}
+.svg-line{stroke:var(--accent);stroke-width:2;stroke-dasharray:4 3}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:11.5px;fill:var(--text-muted)}
+.svg-lbl{font-family:"Inter","Noto Sans SC",sans-serif;font-size:13.5px;font-weight:600;fill:var(--text)}
+@media (max-width:500px){.sim{padding:16px}.slots{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">remove_padding</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#ledger">账本</a>
+      <a href="#pipeline">数据流</a>
+      <a href="#effect">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Infra · 长上下文训练 · 2021–2026</span>
+  <h1>remove_padding：packing 去掉的是样本内 padding，不是边界</h1>
+  <p class="hero-sub">
+    定长训练把每条样本都铺到 <code>max_len</code>；短样本的 pad token 仍占着序列维度，长上下文把这份浪费放大到接近 100%。packing 把多条样本拼进一条 1D token 缓冲，用 <code>cu_seqlens</code> 记录边界，让变长 attention 只在本样本内计算。
+    代价是把 position ids、loss mask、EOD 和后端支持都变成必须对齐的工程约束。
+  </p>
+  <div class="meta">
+    <span>Krell, Kosec, Perez, Fitzgibbon · Megatron-Core @70f7a26</span>
+    <a href="https://arxiv.org/abs/2107.02027" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM/commit/70f7a26" target="_blank" rel="noopener">Megatron-Core ↗</a>
+    <a href="/remove_padding/">博客笔记</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    定长 padding 把每个样本都铺到 <code>max_len</code>。pad token 不是免费占位：在 SBHD 张量里，注意力的形状按 <code>L</code> 算，mask 只是把不该看的位置置 −∞，并没有把 token 从张量里删掉。短样本越多、<code>L</code> 越大，浪费越接近 100%。
+  </p>
+  <p>
+    packing 把多条样本写进一条 1D token 缓冲，用 <code>cu_seqlens</code> 记录每条样本的起点和终点；变长 FlashAttention 只在这个区间内做 causal attention。THD 格式下 q 的形状是 <code>(total_tokens, heads, head_dim)</code>，没有 batch 维。
+  </p>
+  <p>
+    Megatron-Core 有两条路径：<code>SFTDataset</code> 在一个 <code>sequence_length</code> 缓冲里预打包多个 conversation；<code>VarlenDataset</code> 返回单条变长样本，由调度器跨 DP×CP 装箱，最后把 <code>cu_seqlens</code> / <code>cu_seqlens_padded</code> 装进 <code>PackedSeqParams</code>。
+  </p>
+  <p>
+    收益取决于长度分布。Krell et al. 在 BERT phase-2 / IPU-M2000 上用 NNLSHP depth 3 报告 <span data-src="Krell Table 1"><strong>1.913×</strong></span>（kernel cycles 估算）；<span data-src="HF packing-with-FA2">HuggingFace 在 <strong>8×A100-80GB</strong> 上报告 FLAN <strong>2×</strong>、OrcaMath <strong>1.4×</strong></span>。接近满长的数据没有多少 padding 可去，收益会缩小。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Krell §1">89<small>%</small></div>
+      <div class="k">GLUE-CoLA，长度 128<br>padding 占比上限（2107.02027 §1）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Krell §1">50<small>%</small></div>
+      <div class="k">Wikipedia 长度 512<br>8.33B token 中 4.17B 是 padding</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Krell Table 1">1.913<small>×</small></div>
+      <div class="k">BERT phase-2 / IPU-M2000 16 芯片<br>NNLSHP depth 3，kernel cycles 估算</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>定长 padding 让短样本为整个 max_len 付费</h2></div>
+  <p class="sec-sub">先看清 pad token 在定长张量里占了多少槽位，再谈 packing 能省什么。</p>
+  <p>
+    训练 batch 需要矩形张量。设 batch 有 <code>N</code> 条样本，第 <code>i</code> 条长度 <code>l<sub>i</sub></code>，定长方案把每条样本补到 <code>L = max_len</code>。Megatron 的 <code>GPTDataset</code> 在样本不足 <code>sequence_length</code> 时补 pad token（<code>megatron/core/datasets/gpt_dataset.py:502-507</code>）；SC21 的 GPT 实验统一使用 <span data-src="SC21 §5.1"><code>s = 2048</code></span>（arXiv:2104.04473 §5.1）。
+  </p>
+  <div class="eq">
+    <code>waste = (N·L − Σ l<sub>i</sub>) / (N·L) = 1 − mean(l) / L</code>
+  </div>
+  <div class="eq-cap">定长槽位里没有被真实 token 使用的比例；未计 EOD、对齐 padding 和 drop_last。</div>
+  <p>
+    长上下文把 <code>L</code> 放大，浪费率趋近 <code>1 − mean(l)/L</code>。取两条样本长度 2,048 和 128，<code>L = 131,072</code>：定长槽位 262,144，真实 token 2,176，padding 259,968，浪费率 99.2% <span class="calc">页面计算</span>。Krell et al. 只把长度 128 的 GLUE-CoLA 称为「less common, but not extreme」；<span data-src="Krell §1">89% 是该数据集在长度 128 下的 padding 占比上限</span>（arXiv:2107.02027 §1）。短指令在 128K 训练数据中的占比取决于具体分布 <span class="infer">推断</span>。
+  </p>
+  <p>
+    pad token 不是免费的占位。FlashAttention 的 key padding mask 把 padding 位置的 score 置 −∞，但没有把 token 从张量里删掉（arXiv:2205.14135 Appendix B.3）；在定长张量里，kernel 看到的序列长度仍是 <code>L</code>。代价因此有两层：token 槽位（显存与带宽）和 attention 的 <code>L×L</code> 形状（计算）。短样本越多、<code>L</code> 越大，第二层越贵。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>定长补齐稳定但浪费；按长度分桶省 pad，却牺牲吞吐与图形稳定性（IPU/静态图后端）</h2></div>
+  <p class="sec-sub">两条常见路线各有硬约束，packing 不是凭空出现。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">A</span><h4>定长 padding / SBHD</h4><span class="sub">shape 稳定</span></div>
+      <p>
+        实现最简单：每条样本补到 <code>L</code>，attention mask 遮住 pad。张量形状固定，kernel 选择和 CUDA graph 都稳定 <span class="infer">推断</span>。代价是 pad token 仍进入前向；当 <code>L</code> 从 2K 拉到 128K，短样本的槽位浪费接近 100%。
+      </p>
+      <p class="src-note">来源：<code>gpt_dataset.py:502-507</code>；SC21 §5 的 <code>s=2048</code>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">B</span><h4>按长度分桶 / SORT（IPU/静态图后端）</h4><span class="sub">批内少 pad</span></div>
+      <p>
+        把长度相近的样本放同一批，批次内补到桶的最大长度，减少批内 padding。但在 IPU/静态图后端上，排序破坏随机 shuffle，短桶算力利用率低，改变序列长度还会触发计算图重编译；Krell et al. 的 <span data-src="Krell Table 1">Table 1 里 SORT 的 packing efficiency 是 99.9%，但 overhead ≫100，realized speed-up ≪1</span>（IPU-M2000，BERT phase-2）。
+      </p>
+      <p class="src-note">来源：arXiv:2107.02027 §C 与 Table 1。</p>
+    </div>
+  </div>
+  <p>
+    两条路都保留了「一条样本一个序列槽位」的布局。packing 改的是布局：多条样本共享一条序列，边界从 padding mask 变成 <code>cu_seqlens</code>。这让 token 槽位按真实长度计，但也把「跨样本不能互相注意」从 mask 的默认行为变成了必须显式实现的约束。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>packing 把多条样本压成一条 THD 序列，cu_seqlens 负责边界</h2></div>
+  <p class="sec-sub">记住三件事：拼、切、遮——拼 token，切边界，遮住不该看的 position 与 loss。</p>
+
+  <h3>拼：一条 1D token 缓冲，边界写进 cu_seqlens</h3>
+  <p>
+    给定样本长度 <code>l<sub>1</sub>…l<sub>N</sub></code>，packing 把 token 依次拼接；<code>cu_seqlens</code> 是前缀和：
+  </p>
+  <div class="eq">
+    <code>cu_seqlens = [0, l<sub>1</sub>, l<sub>1</sub>+l<sub>2</sub>, …, Σ l<sub>i</sub>]</code>
+  </div>
+  <div class="eq-cap">第 i 条样本占用 <code>[cu_seqlens[i], cu_seqlens[i+1])</code>；长度 3 和 2 的两条样本得到 <code>[0, 3, 5]</code>。</div>
+  <p>
+    FlashAttention 的 varlen 接口把 q 描述为 <code>(total_q, nheads, headdim)</code>，<code>cu_seqlens_q</code> 是 <code>(batch_size + 1,)</code> 的 <code>int32</code>，用来索引 q；具体签名以所用 flash-attn 版本的 docstring 为准，本页不逐行回源。Megatron 的 <code>PackedSeqParams</code> 把同一组边界拆成 q/kv 和 padded 版本（<code>megatron/core/packed_seq_params.py:19-25</code>）。
+  </p>
+
+  <h3>切：THD 变长 attention 只在边界内算</h3>
+  <p>
+    Megatron 在 <code>qkv_format='thd'</code> 时把 q/k/v 的 batch 维 squeeze 掉（<code>megatron/core/transformer/attention.py:1590-1594</code>），优先使用 <code>cu_seqlens_q_padded</code> / <code>cu_seqlens_kv_padded</code>，否则退回 <code>cu_seqlens_q/kv</code>（<code>attention.py:1605-1614</code>）。
+  </p>
+  <p>
+    TE 的 <code>TEDotProductAttention</code> 把 <code>PackedSeqParams</code> 的字段转成 flash-attn 参数（<code>megatron/core/extensions/transformer_engine.py:2617-2622</code>）；thd 格式下 causal mask 被映射为 <code>padding_causal</code>（<code>transformer_engine.py:2641-2648</code>），packing 路径的 <code>attention_mask</code> 是 <code>None</code>（<code>megatron/core/datasets/data_schedule.py:915</code>）。这层的语义是：token 只看同一 <code>cu_seqlens</code> 区间内的前驱；跨样本的 score 不参与 softmax。
+  </p>
+
+  <h3>遮：position ids 与 loss mask 按样本重置</h3>
+  <p>
+    位置：<code>SFTDataset</code> 每写一个 conversation 就重新 <code>extend(range(len(tokens_list)))</code>（<code>megatron/training/datasets/sft_dataset.py:149-150</code>）；<code>VarlenDataset</code> 每条样本 <code>arange(padded_seq_len)</code>（<code>varlen_dataset.py:453</code>）；<code>GPTDataset</code> 的 <code>inter_document_masking</code> 也按 document 重置（<code>gpt_dataset.py:386-391</code>）。THD RoPE 用 <code>searchsorted</code> 从 <code>cu_seqlens</code> 还原每条样本的局部位置（<code>megatron/core/models/common/embeddings/rope_utils.py:266-284</code>）。
+  </p>
+  <p>
+    loss：<code>SFTDataset</code> 把 pad 和 <code>IGNORE_INDEX</code> 位置置 0（<code>sft_dataset.py:192-195</code>）；<code>VarlenDataset</code> 把右 padding 和 <code>IGNORE_INDEX</code> 置 0（<code>varlen_dataset.py:454-456</code>）。packing 后每个 microbatch 的有效 token 数不同，Megatron 要求 <code>--calculate-per-token-loss</code>（<code>megatron/training/arguments.py:1575-1583</code>）。
+  </p>
+  <p>
+    EOD：<code>VarlenDataset</code> 保证样本以 EOD 结尾（<code>varlen_dataset.py:407-410</code>）；<code>GPTDataset</code> 可选 <code>eod_mask_loss</code> 把 EOD 的 loss 置 0（<code>gpt_dataset.py:882-883</code>）。EOD 是样本结束符；在 THD 路径里，attention 的边界仍由 <code>cu_seqlens</code> 显式给出，EOD 本身不告诉 kernel 在哪里切。
+  </p>
+
+  <div class="sim" id="pack-sim">
+    <div class="sim-top" id="pack-presets">
+      <button class="rule-btn active" type="button" data-preset="a">混合长度<span class="r-sub">2048 / 512 / 256 / 128</span></button>
+      <button class="rule-btn" type="button" data-preset="b">长尾短样本<span class="r-sub">1024 / 768 / 512 / 256 / 96</span></button>
+      <button class="rule-btn" type="button" data-preset="c">接近满长<span class="r-sub">1800 / 1700 / 1500 / 300 / 200</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label for="pack-seqs">序列长度（逗号分隔）</label>
+        <input id="pack-seqs" type="text" inputmode="numeric" value="2048, 512, 256, 128" spellcheck="false">
+      </div>
+      <div class="ctrl">
+        <label for="pack-maxlen">max_len <span class="v" id="pack-maxlen-label">2,048</span></label>
+        <input id="pack-maxlen" type="range" min="512" max="131072" step="512" value="2048">
+      </div>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">定长总 token</div><div class="slot-val" id="out-fixed">8,192</div></div>
+      <div class="slot"><div class="slot-name">padding token</div><div class="slot-val" id="out-pad">5,248</div></div>
+      <div class="slot"><div class="slot-name">浪费率</div><div class="slot-val" id="out-waste">64.1%</div></div>
+      <div class="slot"><div class="slot-name">理想下界箱数</div><div class="slot-val" id="out-packs">2</div></div>
+      <div class="slot"><div class="slot-name">pack 总 token</div><div class="slot-val" id="out-ptotal">4,096</div></div>
+      <div class="slot"><div class="slot-name">pack 内 padding</div><div class="slot-val" id="out-ppad">1,152</div></div>
+      <div class="slot"><div class="slot-name">理论节省上限</div><div class="slot-val" id="out-saved">4,096</div></div>
+      <div class="slot"><div class="slot-name">理论上限比例</div><div class="slot-val" id="out-save">50.0%</div></div>
+    </div>
+
+    <p class="pack-error" id="pack-error"></p>
+
+    <div class="actions">
+      <button class="act ghost" type="button" id="pack-reset">恢复默认</button>
+    </div>
+
+    <div class="readout" data-src="Megatron-Core data_schedule.py:173">
+      <div class="r-head">口径与简化</div>
+      <p>
+        箱数按 <code>⌈T/L⌉</code> 计算，这是下界，不保证可装入；当有样本 &gt; L/2 时实际箱数可能更多。Megatron 的 <code>dp_balanced</code> 按原顺序 first-fit（<code>data_schedule.py:173-231</code>），实际箱数可能高于下界。未计 EOD、每条样本的对齐 padding、<code>drop_last</code>；单条样本超过 <code>max_len</code> 时页面只提示，不做截断。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="ledger">
+  <div class="sec-head"><span class="sec-num">04</span><h2>token 账本：示例里 64.1% 的定长槽位是 padding，理想下界装箱后仍有 28.1% 的尾垫</h2></div>
+  <p class="sec-sub">用一组 4 条样本，把 token、尾垫和注意力 score 的账算平。</p>
+  <p>
+    用示例 A（4 条样本，<code>L = 2048</code>）把账算平。表 4-1 的所有数都是页面按公式算的示意，不是实测；口径是 token 槽位，不换算 GB。
+  </p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项目</th><th class="num">定长 padding</th><th class="num">packing（理想下界）</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>真实 token T</td><td class="num">2,944</td><td class="num">2,944</td><td>相同</td></tr>
+        <tr><td>序列槽位</td><td class="num">8,192</td><td class="num">4,096</td><td>定长 / pack = 2.00</td></tr>
+        <tr><td>padding token</td><td class="num">5,248</td><td class="num">1,152</td><td>定长是样本间 pad；pack 是尾垫</td></tr>
+        <tr><td>槽位浪费率</td><td class="num">64.1%</td><td class="num">28.1%</td><td>占各自槽位</td></tr>
+        <tr><td>理想下界箱数</td><td class="num">—</td><td class="num">2</td><td>⌈T/L⌉ 下界，不保证可装入</td></tr>
+        <tr><td>严格下三角 score 元素（不含对角线）</td><td class="num">8,388,608</td><td class="num">2,269,184</td><td>27.1% of 定长</td></tr>
+        <tr><td>理论节省上限</td><td class="num">—</td><td class="num">4,096</td><td>50.0% of 定长槽位</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    读法：padding 从 5,248 降到 1,152；按 <code>⌈T/L⌉</code> 下界，理论节省上限为 4,096 token，占定长槽位 50.0%。packing 不是零 padding：下界的 2 箱尾垫仍有 1,152（28.1%）；当有样本 &gt; L/2 时实际箱数可能更多。attention score 元素（严格下三角，不含对角线）从 8,388,608 降到 2,269,184（27.1%），少 72.9%；这是 causal 计数，不代表 HBM 实测，kernel 的块粒度可能让实际节省更小。token/KV 槽位按同模型同层数同比 2.00:1；attention score 另按 27.1% 计。均未换算 GB。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：两组输入，逐位核对<span class="sum-sub">与上方交互同口径；结果四舍五入到 1 位小数</span></summary>
+    <div class="details-body">
+      <p>口径：<code>T = Σ l<sub>i</sub></code>；<code>fixed = N·L</code>；<code>padding = fixed − T</code>；<code>packs = ⌈T/L⌉</code>（下界，不保证可装入；当有样本 &gt; L/2 时实际箱数可能更多）；<code>packed = packs·L</code>；<code>saved = fixed − packed</code>。所有百分比按 <code>值 / 分母 × 100</code> 计算。</p>
+      <div class="hc-group">
+        <h4>组 A：l = [2048, 512, 256, 128]，L = 2048</h4>
+        <p class="hc-line">N = 4；T = 2048 + 512 + 256 + 128 = <b>2,944</b></p>
+        <p class="hc-line">fixed = 4 × 2048 = <b>8,192</b></p>
+        <p class="hc-line">padding = 8,192 − 2,944 = <b>5,248</b></p>
+        <p class="hc-line">waste = 5,248 / 8,192 × 100 = 64.0625% → <b>64.1%</b></p>
+        <p class="hc-line">packs = ⌈2,944 / 2,048⌉ = <b>2</b></p>
+        <p class="hc-line">packed = 2 × 2,048 = <b>4,096</b></p>
+        <p class="hc-line">pack 内 padding = 4,096 − 2,944 = <b>1,152</b></p>
+        <p class="hc-line">saved = 8,192 − 4,096 = <b>4,096</b></p>
+        <p class="hc-line">理论上限比例 = 4,096 / 8,192 × 100 = <b>50.0%</b></p>
+      </div>
+      <div class="hc-group">
+        <h4>组 B：l = [1024, 768, 512, 256, 96]，L = 2048</h4>
+        <p class="hc-line">N = 5；T = 1024 + 768 + 512 + 256 + 96 = <b>2,656</b></p>
+        <p class="hc-line">fixed = 5 × 2048 = <b>10,240</b></p>
+        <p class="hc-line">padding = 10,240 − 2,656 = <b>7,584</b></p>
+        <p class="hc-line">waste = 7,584 / 10,240 × 100 = 74.0625% → <b>74.1%</b></p>
+        <p class="hc-line">packs = ⌈2,656 / 2,048⌉ = <b>2</b></p>
+        <p class="hc-line">packed = 2 × 2,048 = <b>4,096</b></p>
+        <p class="hc-line">pack 内 padding = 4,096 − 2,656 = <b>1,440</b></p>
+        <p class="hc-line">saved = 10,240 − 4,096 = <b>6,144</b></p>
+        <p class="hc-line">理论上限比例 = 6,144 / 10,240 × 100 = <b>60.0%</b></p>
+      </div>
+      <p class="src-note">
+        简化：按 <code>⌈T/L⌉</code> 计算下界，不保证可装入；当有样本 &gt; L/2 时实际箱数可能更多。未计 EOD、每条样本的对齐 padding、<code>drop_last</code>；Megatron 的 <code>dp_balanced</code> 按原顺序 first-fit（<code>data_schedule.py:173-231</code>），实际可能比下界多一箱。交互对超过 <code>max_len</code> 的单条样本只提示，不做截断。
+      </p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>数据流：样本先变长，再由调度器装箱，attention 只读边界</h2></div>
+  <p class="sec-sub">从 dataset 的 original_seq_len 到 TE 的 padding_causal，路径只有五步。</p>
+
+  <figure>
+    <svg viewBox="0 0 700 340" role="img" aria-labelledby="pack-fig-title pack-fig-desc">
+      <title id="pack-fig-title">定长 padding 与 packing 的槽位对比</title>
+      <desc id="pack-fig-desc">上两行是长度 3 和 2 的两条样本，各自补到 5 个槽位；下一行把它们拼成一条 5 token 的序列，边界 3 把两条样本分开，cu_seqlens 为 0、3、5。</desc>
+
+      <text class="svg-lbl" x="20" y="26">定长 padding：每条样本各占 5 个槽位（示意）</text>
+
+      <text class="svg-lbl" x="20" y="73">样本 A（3 token）</text>
+      <rect class="svg-a" x="170" y="52" width="60" height="36" rx="5"></rect>
+      <rect class="svg-a" x="230" y="52" width="60" height="36" rx="5"></rect>
+      <rect class="svg-a" x="290" y="52" width="60" height="36" rx="5"></rect>
+      <rect class="svg-pad" x="350" y="52" width="60" height="36" rx="5"></rect>
+      <rect class="svg-pad" x="410" y="52" width="60" height="36" rx="5"></rect>
+      <text class="svg-t" x="200" y="75" text-anchor="middle">A1</text>
+      <text class="svg-t" x="260" y="75" text-anchor="middle">A2</text>
+      <text class="svg-t" x="320" y="75" text-anchor="middle">A3</text>
+      <text class="svg-s" x="380" y="75" text-anchor="middle">pad</text>
+      <text class="svg-s" x="440" y="75" text-anchor="middle">pad</text>
+      <text class="svg-s" x="488" y="75">padding ×2</text>
+
+      <text class="svg-lbl" x="20" y="133">样本 B（2 token）</text>
+      <rect class="svg-b" x="170" y="112" width="60" height="36" rx="5"></rect>
+      <rect class="svg-b" x="230" y="112" width="60" height="36" rx="5"></rect>
+      <rect class="svg-pad" x="290" y="112" width="60" height="36" rx="5"></rect>
+      <rect class="svg-pad" x="350" y="112" width="60" height="36" rx="5"></rect>
+      <rect class="svg-pad" x="410" y="112" width="60" height="36" rx="5"></rect>
+      <text class="svg-t" x="200" y="135" text-anchor="middle">B1</text>
+      <text class="svg-t" x="260" y="135" text-anchor="middle">B2</text>
+      <text class="svg-s" x="320" y="135" text-anchor="middle">pad</text>
+      <text class="svg-s" x="380" y="135" text-anchor="middle">pad</text>
+      <text class="svg-s" x="440" y="135" text-anchor="middle">pad</text>
+      <text class="svg-s" x="488" y="135">padding ×3</text>
+
+      <line x1="20" y1="170" x2="680" y2="170" stroke="var(--border)" stroke-width="1"></line>
+
+      <text class="svg-lbl" x="20" y="204">packing：一条 THD 序列，cu_seqlens 划界</text>
+      <rect class="svg-frame" x="164" y="214" width="312" height="48" rx="7"></rect>
+      <rect class="svg-a" x="170" y="220" width="60" height="36" rx="5"></rect>
+      <rect class="svg-a" x="230" y="220" width="60" height="36" rx="5"></rect>
+      <rect class="svg-a" x="290" y="220" width="60" height="36" rx="5"></rect>
+      <rect class="svg-b" x="350" y="220" width="60" height="36" rx="5"></rect>
+      <rect class="svg-b" x="410" y="220" width="60" height="36" rx="5"></rect>
+      <text class="svg-t" x="200" y="243" text-anchor="middle">A1</text>
+      <text class="svg-t" x="260" y="243" text-anchor="middle">A2</text>
+      <text class="svg-t" x="320" y="243" text-anchor="middle">A3</text>
+      <text class="svg-t" x="380" y="243" text-anchor="middle">B1</text>
+      <text class="svg-t" x="440" y="243" text-anchor="middle">B2</text>
+      <line class="svg-line" x1="350" y1="212" x2="350" y2="268"></line>
+      <text class="svg-s" x="354" y="208">边界 3</text>
+      <text class="svg-s" x="488" y="243">只有同一边界内互相 attention</text>
+
+      <text class="svg-s" x="170" y="288">cu_seqlens = [0, 3, 5]</text>
+      <text class="svg-s" x="170" y="310">A: [0, 3)</text>
+      <text class="svg-s" x="350" y="310">B: [3, 5)</text>
+    </svg>
+    <figcaption>定长 padding 每条样本各占 <code>max_len</code> 个槽位；packing 把两条样本写进同一条 1D 序列，<code>cu_seqlens</code> 的边界 3 把 A 和 B 分开。示意 <code>max_len = 5</code>，未计 EOD、对齐 padding。</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>dataset：</strong><code>VarlenDataset</code> 返回单条样本，<code>tokens</code>/<code>labels</code>/<code>loss_mask</code>/<code>position_ids</code> 的长度等于该样本真实长度（补齐到 <code>pad_granularity</code>），并带 <code>original_seq_len</code> / <code>padded_seq_len</code>（<code>varlen_dataset.py:435-467</code>）。</li>
+    <li><strong>scheduler：</strong><code>DpBalancedScheduler</code> 按原顺序把样本塞进容量为 <code>max_seqlen_per_dp_cp_rank × cp_size</code> 的箱（<code>data_schedule.py:173-231</code>）；<code>DefaultDynamicCPScheduler</code> 先按长度降序，再选运行时 CP 组（<code>data_schedule.py:460-474</code>）。</li>
+    <li><strong>pack：</strong><code>_pack_sequences</code> 拼接 <code>tokens</code>/<code>labels</code>/<code>loss_mask</code>/<code>position_ids</code>，算 <code>cu_seqlens</code> 与 <code>cu_seqlens_padded</code>（<code>data_schedule_utils.py:286-322</code>）。</li>
+    <li><strong>metadata：</strong>构造 <code>PackedSeqParams(qkv_format='thd', cu_seqlens_q/kv, cu_seqlens_*_padded, max_seqlen_q/kv, total_tokens, pad_between_seqs)</code>（<code>data_schedule.py:900-913</code>）。</li>
+    <li><strong>attention：</strong>THD 路径 squeeze batch 维、按 <code>cu_seqlens</code> 选边界、RoPE 按边界重置位置，TE 用 <code>padding_causal</code> 调 flash-attn（<code>attention.py:1590-1614</code>; <code>transformer_engine.py:2641-2657</code>）。</li>
+  </ol>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">SFT</span><h4>固定 buffer 内预打包</h4></div>
+      <p>
+        <code>SFTDataset</code> 在一个 <code>sequence_length</code> 缓冲里放多个 conversation，<code>cu_seqlens</code> 按 conversation 切；不足缓冲长度的部分补 pad。它减少的是「一条样本内部」的 padding，不跨 DP rank 装箱。
+      </p>
+      <p class="src-note">来源：<code>sft_dataset.py:116-225</code>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">THD</span><h4>跨 DP×CP 装箱</h4></div>
+      <p>
+        <code>VarlenDataset</code> 每次只返回一条变长样本；调度器把多条样本装进 <code>max_seqlen_per_dp_cp_rank × cp_size</code> 的容量，再跨 rank 重排。它减少的是「整个 global batch 内」的 padding。
+      </p>
+      <p class="src-note">来源：<code>varlen_dataset.py:311-325</code>；<code>data_schedule.py:173-231</code>。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="effect">
+  <div class="sec-head"><span class="sec-num">06</span><h2>收益取决于长度分布：BERT phase-2 上 1.913×，A100 上 1.4–2×</h2></div>
+  <p class="sec-sub">只引用有硬件、模型、长度分布条件的数字。</p>
+
+  <p>
+    <strong>表 6-1（Krell Table 1 节选）</strong>给出 packing 算法在 BERT phase-2 上的 kernel-cycle 估算。实验条件是 Wikipedia、<span data-src="Krell §4">序列长度 512、IPU-M2000 16 个加速芯片</span>；realized speed-up 由 kernel cycles 估算，不是端到端 wall-clock。
+  </p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th class="num">EFF (%)</th><th class="num">packing factor</th><th class="num">OH (%)</th><th class="num">realized speed-up</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>NONE（baseline）</td><td class="num">50.0</td><td class="num">1.00</td><td class="num">0.000</td><td class="num">1.000</td></tr>
+        <tr><td>GREEDY</td><td class="num">≈78</td><td class="num">≈1.6</td><td class="num">≈4.48</td><td class="num">≈1.5</td></tr>
+        <tr><td>SPFHP depth 3</td><td class="num">89.4</td><td class="num">1.79</td><td class="num">4.287</td><td class="num">1.716</td></tr>
+        <tr class="best"><td>NNLSHP depth 3</td><td class="num">99.7</td><td class="num">2.00</td><td class="num">4.287</td><td class="num">1.913</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src-note">
+    Table 1 的 baseline NONE 在 Wikipedia 长度 512 上只有 50.0% 的 slot 装真实 token，所以 packing factor 的理论上限是 2.001（Table 1 取整为 2.00）；NNLSHP depth 3 的 1.913 已接近这个上限。OH 是掩码与 loss adjustment 等开销，4.287% 不是零成本。
+  </p>
+
+  <p data-src="HF packing-with-FA2">
+    端到端实测看另一组条件：HuggingFace 的 packing-with-FA2 在 <strong>8×A100-80GB</strong> 上，用 Llama2-7B、Mistral-7B、granite-8B-code 跑 20K 样本一个 epoch；FLAN 吞吐 <strong>2×</strong>，OrcaMath <strong>1.4×</strong>；峰值显存相对 baseline 下降 <strong>20%</strong> 和 <strong>6%</strong>。原文把差异归因于 FLAN 的样本更短、长度方差更大，OrcaMath 更长、更均匀，能去掉的 padding 更少。
+  </p>
+  <p>
+    FlashAttention 论文报告注意力显存效率最多高 <span data-src="FlashAttention §4.3"><strong>20×</strong></span>（A100 40GB，序列到 64K，含 padding mask；arXiv:2205.14135 §4.3 / Figure 3）。这是注意力算子相对 exact attention 的显存，不是 packing 的 A/B；它说明变长 kernel 能避免物化 <code>L×L</code> 矩阵，但不会替你决定 packing 的收益。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">条件</span><h4>不要把 1.4–2× 外推到所有训练</h4></div>
+    <p>
+      收益来自被去掉的 padding 比例：如果所有样本都接近 <code>max_len</code>，packing factor 接近 1，收益接近 0。它还取决于序列长度分布、装箱算法开销、对齐 padding 和后端 kernel。Megatron-Core 源码与 README 中，本页未获取到 packing 的端到端吞吐数字；上面的 1.913× 是 IPU 上的 kernel-cycle 估算，1.4–2× 是 A100 上的外部工程实测，二者不能混用。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：跨样本注意力、position ids、EOD、pack 上限与后端支持</h2></div>
+  <p class="sec-sub">这些条件下 packing 会失效或变贵。</p>
+
+  <h3>跨样本污染：没有边界，packing 会把邻居 token 当上下文</h3>
+  <p>
+    把多条样本拼成一条 1D 序列后，如果 attention 仍按普通 causal mask 跑，第 <code>i</code> 条样本的 token 会看到第 <code>i−1</code> 条样本的尾部。Krell et al. 用 block-diagonal mask 阻断跨样本注意力（arXiv:2107.02027 §3.2.2）；分隔符 token 不够：论文引用 RoBERTa 的结果，下游 F1 平均下降 <span data-src="Krell §1">0.35%</span>（原文未标明相对或绝对口径，§1）。Megatron 的 THD 路径把 <code>attention_mask</code> 设为 <code>None</code>，靠 <code>cu_seqlens</code> + <code>padding_causal</code> 做隔离（<code>data_schedule.py:915</code>; <code>transformer_engine.py:2641-2648</code>）。
+  </p>
+  <p>
+    如果后端不支持 varlen，非 TE 的 <code>DotProductAttention</code> 直接 assert <code>packed_seq_params is None</code>（<code>megatron/core/transformer/dot_product_attention.py:161-164</code>）。这不是配置问题，而是实现没有 packed 分支。
+  </p>
+
+  <h3>position ids：每条样本从 0 重新开始</h3>
+  <p>
+    <code>SFTDataset</code> 每写一个 conversation 就 <code>pack_positions.extend(range(len(tokens_list)))</code>（<code>sft_dataset.py:149-150</code>）；<code>VarlenDataset</code> 每条样本 <code>arange(padded_seq_len)</code>（<code>varlen_dataset.py:453</code>）；<code>GPTDataset</code> 的 <code>inter_document_masking</code> 按 document 重置（<code>gpt_dataset.py:386-391</code>）。THD RoPE 用 <code>cu_seqlens</code> 的 <code>searchsorted</code> 还原局部位置（<code>rope_utils.py:266-284</code>）。位置不重置，样本 B 的第一个 token 会从样本 A 的末尾继续数，RoPE 的相对距离全错。
+  </p>
+
+  <h3>EOD 与 loss mask：边界要对齐，loss 要按 token 归一</h3>
+  <p>
+    EOD 是样本结束符。<code>VarlenDataset</code> 保证样本以 EOD 结尾（<code>varlen_dataset.py:407-410</code>）；<code>GPTDataset</code> 可选 <code>eod_mask_loss</code> 把 EOD 的 loss 置 0（<code>gpt_dataset.py:882-883</code>），它的 <code>reset_position_ids</code> / <code>reset_attention_mask</code> 也会用 EOD 找 document 边界（<code>gpt_dataset.py:891-908</code>）。但 THD packing 路径把边界放在 <code>cu_seqlens</code> 里：如果 EOD 在 pack 内但 <code>cu_seqlens</code> 没切开，attention 仍会跨样本；反过来，<code>cu_seqlens</code> 切开了但 loss mask 没盖住 padding，尾垫会进 loss。
+  </p>
+  <p>
+    packing 后每个 microbatch 的有效 token 数不同，默认的 per-microbatch loss 平均会让 token 权重随装箱结果变化；Megatron 要求 <code>--calculate-per-token-loss</code>（<code>arguments.py:1575-1583</code>）。
+  </p>
+
+  <h3>pack 上限：单条样本不能超过容量</h3>
+  <p>
+    <code>max_seqlen_per_dp_cp_rank</code> 是每个 DP×CP rank 的容量；调度器把 <code>original_seq_len</code> / <code>padded_seq_len</code> 塞进这个上限（<code>data_schedule.py:183-190</code>）。单条 padded 样本超过 static CP 容量会直接 <code>ValueError</code>（<code>data_schedule.py:186-187</code>）。当 <code>context_parallel_size &gt; 1</code> 时，<code>--seq-length</code> 还要满足 <code>seq_length % (2 * context_parallel_size) == 0</code>（<code>arguments.py:1179-1181</code>），因为 CP 切片要求。
+  </p>
+  <p>
+    <code>max_num_seqs</code> 限制每箱样本数（<code>data_schedule.py:188-190</code>）；CUDA graph 路径还会把 packed 序列数固定到 <code>cuda_graph_thd_max_packed_sequences</code>（<code>data_schedule.py:868-878</code>）。
+  </p>
+
+  <h3>实现后端：不是所有 attention 都支持 THD</h3>
+  <p>
+    TE 的版本也有限制：<code>cu_seqlens_q_padded</code> 需要 TE ≥ 1.10，<code>pad_between_seqs</code> 需要 ≥ 2.2（<code>transformer_engine.py:2486-2503</code>）。非 TE 的 <code>DotProductAttention</code> 不支持 packed（<code>dot_product_attention.py:161-164</code>）。升级内核之前，packing 只能停在数据层，进不了 attention。
+  </p>
+
+  <h3>什么时候别用</h3>
+  <ul>
+    <li><strong>所有样本接近 max_len：</strong>没有多少 padding 可去，装箱开销和边界维护可能超过收益。</li>
+    <li><strong>需要严格随机顺序或固定计算图：</strong>装箱会改变 microbatch 组成，first-fit / 动态 CP 还会改变每箱 token 数。</li>
+    <li><strong>任务依赖跨样本上下文：</strong>packing 的前提是样本独立；如果任务本身需要跨样本注意力，不能用。</li>
+    <li><strong>后端或内核不支持 varlen：</strong>先升级 TE/FlashAttention，或换实现；否则只能做数据层的假 packing。</li>
+  </ul>
+  <p>
+    packing 去掉的是样本内 padding，不是边界、EOD、对齐 padding。把这四件事混为一谈，就会把「吞吐提升」误当成无条件结论。
+  </p>
+</section>
+
+<footer>
+  <div>Efficient Sequence Packing without Cross-contamination: Accelerating Large Language Models without Impacting Performance（Krell, Kosec, Perez, Fitzgibbon）· Megatron-Core @70f7a26</div>
+  <div class="src">
+    Krell arXiv 2107.02027：<a href="https://arxiv.org/abs/2107.02027">https://arxiv.org/abs/2107.02027</a><br>
+    Megatron-LM SC21 arXiv 2104.04473：<a href="https://arxiv.org/abs/2104.04473">https://arxiv.org/abs/2104.04473</a><br>
+    FlashAttention arXiv 2205.14135：<a href="https://arxiv.org/abs/2205.14135">https://arxiv.org/abs/2205.14135</a><br>
+    HuggingFace: packing-with-FA2（HF）— <a href="https://huggingface.co/blog/packing-with-FA2">https://huggingface.co/blog/packing-with-FA2</a><br>
+    Megatron-Core：<a href="https://github.com/NVIDIA/Megatron-LM/commit/70f7a26">commit 70f7a26</a><br>
+    版本：本页数字以 2107.02027v2、2104.04473v5、2205.14135v2 为准；Megatron-LM 源码以 commit 70f7a26 为准。<br>
+    笔记：<a href="/remove_padding/">remove_padding</a><br>
+    说明：笔记提到用 EOS 拼接；本页补充，EOD 是样本结束符，Megatron 的 THD 路径用 <code>cu_seqlens</code> 显式划界，二者不能互相替代。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var seqEl = document.getElementById('pack-seqs');
+  var maxEl = document.getElementById('pack-maxlen');
+  var maxLabel = document.getElementById('pack-maxlen-label');
+  var outFixed = document.getElementById('out-fixed');
+  var outPad = document.getElementById('out-pad');
+  var outWaste = document.getElementById('out-waste');
+  var outPacks = document.getElementById('out-packs');
+  var outPTotal = document.getElementById('out-ptotal');
+  var outPPad = document.getElementById('out-ppad');
+  var outSaved = document.getElementById('out-saved');
+  var outSave = document.getElementById('out-save');
+  var packError = document.getElementById('pack-error');
+  var resetBtn = document.getElementById('pack-reset');
+  if (!seqEl || !maxEl || !maxLabel || !outFixed || !outPad || !outWaste || !outPacks || !outPTotal || !outPPad || !outSaved || !outSave || !packError) return;
+
+  function fmtInt(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function fmt1(n) {
+    return n.toFixed(1);
+  }
+
+  function parseLengths(text) {
+    var parts = text.split(/[,，\s]+/);
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      var v = Number(parts[i]);
+      if (!isFinite(v) || Math.floor(v) !== v || v <= 0) return null;
+      out.push(v);
+    }
+    return out.length ? out : null;
+  }
+
+  function setAll(value) {
+    outFixed.textContent = value;
+    outPad.textContent = value;
+    outWaste.textContent = value;
+    outPacks.textContent = value;
+    outPTotal.textContent = value;
+    outPPad.textContent = value;
+    outSaved.textContent = value;
+    outSave.textContent = value;
+  }
+
+  function showError(msg) {
+    packError.textContent = msg;
+    packError.style.display = msg ? 'block' : 'none';
+  }
+
+  function update() {
+    var lengths = parseLengths(seqEl.value);
+    var maxLen = Number(maxEl.value);
+    maxLabel.textContent = fmtInt(maxLen);
+    if (!lengths) {
+      setAll('—');
+      showError('请至少输入一条正整数长度。');
+      return;
+    }
+    for (var i = 0; i < lengths.length; i++) {
+      if (lengths[i] > maxLen) {
+        setAll('—');
+        showError('第 ' + (i + 1) + ' 条长度 ' + fmtInt(lengths[i]) + ' > max_len ' + fmtInt(maxLen) + '；请先截断或调大 max_len。');
+        return;
+      }
+    }
+    showError('');
+    var n = lengths.length;
+    var total = 0;
+    for (var j = 0; j < lengths.length; j++) total += lengths[j];
+    var fixed = n * maxLen;
+    var pad = fixed - total;
+    var waste = pad / fixed * 100;
+    var packs = Math.ceil(total / maxLen);
+    var packedTotal = packs * maxLen;
+    var packPad = packedTotal - total;
+    var saved = fixed - packedTotal;
+    var savePct = saved / fixed * 100;
+    outFixed.textContent = fmtInt(fixed);
+    outPad.textContent = fmtInt(pad);
+    outWaste.textContent = fmt1(waste) + '%';
+    outPacks.textContent = String(packs);
+    outPTotal.textContent = fmtInt(packedTotal);
+    outPPad.textContent = fmtInt(packPad);
+    outSaved.textContent = fmtInt(saved);
+    outSave.textContent = fmt1(savePct) + '%';
+  }
+
+  var presets = {
+    a: { seqs: '2048, 512, 256, 128', max: 2048 },
+    b: { seqs: '1024, 768, 512, 256, 96', max: 2048 },
+    c: { seqs: '1800, 1700, 1500, 300, 200', max: 2048 }
+  };
+
+  var buttons = document.querySelectorAll('[data-preset]');
+  for (var k = 0; k < buttons.length; k++) {
+    buttons[k].addEventListener('click', function () {
+      var key = this.getAttribute('data-preset');
+      var p = presets[key];
+      if (!p) return;
+      seqEl.value = p.seqs;
+      maxEl.value = String(p.max);
+      for (var m = 0; m < buttons.length; m++) buttons[m].classList.remove('active');
+      this.classList.add('active');
+      update();
+    });
+  }
+
+  seqEl.addEventListener('input', update);
+  maxEl.addEventListener('input', update);
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      seqEl.value = presets.a.seqs;
+      maxEl.value = String(presets.a.max);
+      for (var m = 0; m < buttons.length; m++) buttons[m].classList.remove('active');
+      if (buttons[0]) buttons[0].classList.add('active');
+      update();
+    });
+  }
+
+  update();
+})();
+</script>
+</body>
+</html>

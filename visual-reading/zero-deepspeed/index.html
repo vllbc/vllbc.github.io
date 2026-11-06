@@ -1,0 +1,935 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 15 | §3.1 | 2*7.5 |
+| 90 | §3.1 | 12*7.5 |
+| 120 | §3.1 | 16*7.5 |
+| 1.41 | §5.1 | 12*7.5/64 |
+| 31.4 | §5.1 | 4*7.5+12*7.5/64 |
+| 0.23 | §5.2 | 2*7.5/64 |
+| 16.6 | §5.2 | 2*7.5+14*7.5/64 |
+| 1.88 | §5.3 | 16*7.5/64 |
+| 30 | §7.1 | 2*7.5*2 |
+| 45 | §7.2.2 | 3*7.5*2 |
+| 256 | §3.1 | 2*128 |
+| 1536 | §3.1 | 12*128 |
+| 2048 | §3.1 | 16*128 |
+| 24 | §5.1 | 12*128/64 |
+| 536 | §5.1 | 4*128+12*128/64 |
+| 4 | §5.2 | 2*128/64 |
+| 284 | §5.2 | 2*128+14*128/64 |
+| 32 | §5.3 | 16*128/64 |
+| 512 | §7.1 | 2*128*2 |
+| 768 | §7.2.2 | 3*128*2 |
+| 1.5 | §7.2.2 | 3/2 |
+| 50% | §7.2.2 | (3/2-1)*100 |
+| 6 | §3.1 | 12/2 |
+| 4 | §5.4 | 16/4 |
+| 8 | §5.4 | 16/2 |
+| 90 | 本页外推（§5.1–§5.3） | (2*4+4)*7.5 |
+| 60.5 | 本页外推（§5.1–§5.3） | 2*4*7.5+4*7.5/64 |
+| 30.9 | 本页外推（§5.1–§5.3） | 4*7.5+(4+4)*7.5/64 |
+| 1.41 | 本页外推（§5.1–§5.3） | (2*4+4)*7.5/64 |
+| 64 | 本页外推（§5.1–§5.3） | 90/((2*4+4)*7.5/64) |
+| 12 | 本页外推（§5.1–§5.3） | (2*4+0)*1.5 |
+| 6.75 | 本页外推（§5.1–§5.3） | 4*1.5+4*1.5/8 |
+| 1.5 | 本页外推（§5.1–§5.3） | (2*4+0)*1.5/8 |
+| 8 | 本页外推（§5.1–§5.3） | 12/((2*4+0)*1.5/8) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeRO：分片优化器状态、梯度与参数，1T 模型上 1024 张卡</title>
+<meta name="description" content="ZeRO 三阶段依次分片优化器状态、梯度、参数，把每卡模型状态从 16Ψ 压到 16Ψ/N；Stage 3 每步通信量为 baseline DP 的 1.5 倍。对照 arXiv 1910.02054v3 与 DeepSpeed f47dc3e 源码。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页局部微调；公共组件与配色全部来自 base.css */
+.sim-note{font-size:12.5px;color:var(--text-soft);line-height:1.8;margin:10px 0 0}
+.infer{font-size:11px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;margin-left:4px;font-family:"JetBrains Mono",monospace}
+.presets{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.presets .act{padding:4px 10px;font-size:11.5px}
+.sel{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-family:"JetBrains Mono",monospace;font-size:12.5px}
+.sel:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+.slot-sub{font-size:10.5px;color:var(--text-soft);margin-top:5px;line-height:1.4;font-family:"JetBrains Mono",monospace}
+.table-cap{font-size:12.5px;color:var(--text-soft);margin:22px 0 8px;line-height:1.7}
+.table-note{font-size:12px;color:var(--text-soft);margin:-8px 0 18px;line-height:1.7}
+p code,li code,td code,.src-line code,.details-body code{overflow-wrap:anywhere}
+.src-line{font-size:12px;color:var(--text-soft);line-height:1.8}
+.src-line code{font-size:11.5px}
+.hand-table{font-size:12.5px}
+.hand-table th,.hand-table td{padding:6px 8px}
+details h4{margin:14px 0 6px;font-size:14px;color:var(--text)}
+@media (max-width:520px){
+  .slots.s3{grid-template-columns:repeat(3,1fr)}
+  .slot-val{font-size:11.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">ZeRO / DeepSpeed</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#comm">通信</a>
+      <a href="#flow">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>系统 · SC 2020 · arXiv 1910.02054v3</span>
+  <h1>ZeRO：不复制模型状态，靠三处分片把 1T 模型摊到 1024 张卡</h1>
+  <p class="hero-sub">
+    数据并行最浪费的地方不是算力，而是每张卡都存一份完整的优化器状态、梯度和参数。
+    ZeRO 把这三类状态<strong>依次切开</strong>：Stage 1 分优化器状态，Stage 2 再分梯度，Stage 3 连参数也分。
+    Stage 3 的显存按 N<sub>d</sub> 下降，代价从 Stage 3 开始显现：论文算出每步通信量是 baseline DP 的 <strong>1.5 倍</strong>。
+  </p>
+  <div class="meta">
+    <span>Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He · Microsoft</span>
+    <a href="https://arxiv.org/abs/1910.02054v3" target="_blank" rel="noopener">arXiv 1910.02054v3 ↗</a>
+    <a href="https://github.com/deepspeedai/DeepSpeed/tree/f47dc3e3d48e748d699720ea65eca1f45c136255" target="_blank" rel="noopener">DeepSpeed @ f47dc3e ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>混合精度 Adam 下，每个参数要背 16 字节。</strong>
+    2Ψ 是 fp16 参数，2Ψ 是 fp16 梯度，剩下 12Ψ 是优化器状态：4Ψ fp32 主权重、4Ψ momentum、4Ψ variance（§3.1）。
+    1.5B 的 GPT-2 因此要 24 GB 才能放下模型状态，而 fp16 权重本身只有 3 GB。
+  </p>
+  <p>
+    <strong>ZeRO 不换优化器，也不改模型，只改“谁存哪一份”。</strong>
+    Stage 1 把 12Ψ 的优化器状态切成 N<sub>d</sub> 份，每卡只留 1/N<sub>d</sub>；
+    Stage 2 再把梯度切成 1/N<sub>d</sub>；Stage 3 把参数也切成 1/N<sub>d</sub>，用到哪层再临时 all-gather 回来。
+    模型状态从 16Ψ 一路降到 16Ψ/N<sub>d</sub>。
+  </p>
+  <p>
+    <strong>省显存不是免费的。</strong>
+    论文的通信账里，Stage 1/2 与 baseline DP 同为 2Ψ；Stage 3 需要前向、反向各一次参数 all-gather，再加一次梯度 reduce-scatter，
+    总计 3Ψ，是 baseline 的 1.5 倍（§1、§7.2.1、§7.2.2）。DeepSpeed 当前实现还在这条主线之外加了 CPU/NVMe offload、prefetch 与 bucket 化通信。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§5.4">最多 4× · 8× · N<sub>d</sub>×</div>
+      <div class="k">论文口径（混合精度 Adam）：N_d 足够大时，Stage 1/2/3 每卡模型状态相对 baseline DP 的压缩上限</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§7.2.2">1.5×</div>
+      <div class="k">Stage 3 每步通信量 / baseline DP：参数 gather 2Ψ + 梯度 reduce-scatter Ψ = 3Ψ</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">15.6 GB</div>
+      <div class="k">1T 模型、N_d=1024 时每卡模型状态（Stage 3，混合精度 Adam）</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>显存不是被权重吃掉的，而是被每个参数的三份账本吃掉的</h2></div>
+  <p class="sec-sub">先建立一笔账：混合精度 Adam 下，一个参数在每张卡上要占 16 字节，其中权重只占 2 字节。</p>
+
+  <p>
+    论文把训练显存分成两类：<strong>model states</strong>（优化器状态、梯度、参数）和
+    <strong>residual states</strong>（activations、临时 buffer、碎片）。大模型训练里，前者是主项。
+    Adam 在混合精度训练中除了 fp16 参数和梯度，还要保留 fp32 主权重、一阶矩 momentum 和二阶矩 variance（§3.1）：
+  </p>
+
+  <div class="eq" data-src="§3.1">
+    16Ψ = 2Ψ <span class="hl-a">fp16 参数</span> + 2Ψ <span class="hl-a">fp16 梯度</span> + 12Ψ <span class="hl-c">优化器状态</span>
+  </div>
+  <div class="eq-cap">K=12：4Ψ fp32 主权重 + 4Ψ momentum + 4Ψ variance；Ψ 为参数个数，单位为字节（§3.1，混合精度 Adam）</div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">2Ψ</span><h4>参数</h4></div>
+      <p>前向和反向都要用的 fp16 权重。一张卡上没有它，这一步就算不了。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">2Ψ</span><h4>梯度</h4></div>
+      <p>反向传播逐层产生；baseline DP 要对所有参数做一次全量 all-reduce。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">12Ψ</span><h4>优化器状态</h4></div>
+      <p>fp32 主权重、momentum、variance 各 4Ψ。Adam 的“记忆”比权重本身贵 6 倍。</p>
+    </div>
+  </div>
+
+  <p>
+    <span data-src="§3.1">1.5B 参数的 GPT-2，按 16Ψ 计算至少需要 24 GB 模型状态；而只存 fp16 权重只要 3 GB。</span>
+    论文指出，这样的模型在 32 GB 的 V100 上仍然训练不了，因为 residual states 还要占地方。
+    <span data-src="§3.2">1.5B GPT-2 在 seq 1024、batch 32 下，activations 约 60 GB；activation checkpointing 能把它压到约 8 GB，代价是 33% 的重算；此外还有约 6 GB 的 fp32 梯度融合 buffer。</span>
+    碎片也会让显存在“30% 以上仍空闲”时分配失败（§3.2）。
+  </p>
+
+  <p>
+    问题的核心于是变成：<strong>能不能让每张卡只存模型状态的一部分，同时保留 DP 的计算粒度和通信效率？</strong>
+    baseline DP 的做法是每张卡都存完整 16Ψ，再用 all-reduce 同步梯度；模型越大，这份冗余越贵。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>模型并行省显存，但把计算切碎、把通信变贵</h2></div>
+  <p class="sec-sub">理解 ZeRO 的取舍，先看它没有选的两条路：模型并行和流水线并行。</p>
+
+  <p>
+    <strong>模型并行（MP）</strong>把每一层的参数和计算竖着切到多张卡。显存是省的，但计算粒度变细，层间还要频繁通信。
+    <span data-src="§1">论文实测 40B 参数模型跨两个 DGX-2 节点跑 Megatron-LM，每张 V100 只有约 5 TFLOPs，不到硬件峰值的 5%。</span>
+    跨节点带宽是硬约束：<span data-src="§10.2">节点内 NVSwitch 每链路约 300 GB/s，跨节点 InfiniBand EDR 只有 12.5 GB/s。</span>
+  </p>
+
+  <p>
+    <strong>流水线并行（PP）</strong>按层横着切，用 micro-batch 填 pipeline bubble。
+    它能省显存，但论文指出 PP 在 tied-weights、batch-normalization 等功能上难实现，
+    而且需要与流水线段数成比例的 batch size 来遮住 bubble，可能影响收敛（§2.1）。
+  </p>
+
+  <p>
+    <strong>CPU offload</strong>把状态搬到 CPU。论文引用的前作里，GPU-CPU-GPU 传输最多能吃掉 50% 的训练时间（§2.2.2）。
+    ZeRO 的判断是：DP 本身有更高的计算粒度、更低的通信量，问题只是“每张卡都存了完整状态”；
+    与其换并行方式，不如<strong>把 DP 的状态分片</strong>，同时保留 DP 的调度。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">ZeRO 的赌注</span><h4>不是“少算”，而是“少存”</h4></div>
+    <p>
+      ZeRO-DP 不改变优化器、不改变模型结构，也不改变每步的数学结果；它只改变三件事的存放位置：
+      优化器状态、梯度、参数。分片之后，每个 rank 仍然按 DP 的方式算自己那份数据，
+      只在需要时通过 all-gather / reduce-scatter 把缺的部分补齐。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三次切分：先优化器状态，再梯度，最后参数</h2></div>
+  <p class="sec-sub">三个阶段是累积的。每多切一类状态，每卡显存再降一档，但参数的“临时拼回”也更频繁。</p>
+
+  <p>
+    记模型有 Ψ 个参数、DP 度为 N<sub>d</sub>、优化器状态乘数为 K（混合精度 Adam 为 12）。baseline DP 的每卡模型状态是 16Ψ。
+    三个阶段的公式直接来自 §5.1–§5.3：
+  </p>
+
+  <div class="eq" data-src="§5.1">
+    Stage 1（P<sub>os</sub>）：4Ψ + <span class="hl-c">12Ψ / N<sub>d</sub></span>
+  </div>
+  <div class="eq" data-src="§5.2">
+    Stage 2（P<sub>os+g</sub>）：2Ψ + <span class="hl-c">14Ψ / N<sub>d</sub></span>
+  </div>
+  <div class="eq" data-src="§5.3">
+    Stage 3（P<sub>os+g+p</sub>）：<span class="hl-c">16Ψ / N<sub>d</sub></span>
+  </div>
+  <div class="eq-cap">每卡模型状态字节数；4Ψ = 2Ψ 参数 + 2Ψ 梯度，K=12 时 12Ψ 为优化器状态；不含 residual states</div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Stage 1</span><h4>只分优化器状态</h4></div>
+      <p>每个 rank 只存 1/N_d 的 optimizer state，也只更新 1/N_d 的参数；step 末尾把更新后的参数 all-gather 回全量。梯度仍是全量。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Stage 2</span><h4>再分梯度</h4></div>
+      <p>梯度在反向时按 owner 做 reduce-scatter，每个 rank 只保留自己负责的那 1/N_d；参数仍全量，step 后 all-gather 更新。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Stage 3</span><h4>参数也分</h4></div>
+      <p>每个 rank 只常驻 1/N_d 参数。做某一层前向/反向之前，把该层参数 all-gather 成临时全量，算完立刻释放。</p>
+    </div>
+  </div>
+
+  <p>
+    把 16Ψ 拆开看，三个阶段的“地板”很清楚：Stage 1 至少留下 4Ψ（参数+梯度），Stage 2 至少留下 2Ψ（参数），
+    只有 Stage 3 能把模型状态降到 16Ψ/N<sub>d</sub>。这也是为什么论文说 Stage 3 让 DP 能训练“任意大小”的模型——
+    前提是有足够多的卡来分摊（§5.3–§5.4）。
+  </p>
+
+  <div class="sim" id="zero-sim">
+    <div class="sim-top" id="zero-stage-btns">
+      <button class="rule-btn active" type="button" data-stage="0">Stage 0<span class="r-sub">baseline DP</span></button>
+      <button class="rule-btn" type="button" data-stage="1">Stage 1<span class="r-sub">P_os</span></button>
+      <button class="rule-btn" type="button" data-stage="2">Stage 2<span class="r-sub">P_os+g</span></button>
+      <button class="rule-btn" type="button" data-stage="3">Stage 3<span class="r-sub">P_os+g+p</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label for="zero-p">参数量 Ψ <span class="v" id="zero-p-label">7.5B</span></label>
+        <input type="range" id="zero-p" min="8" max="12" step="any" value="9.875061263391697" aria-label="参数量，对数刻度">
+        <div class="presets">
+          <button class="act ghost zero-preset" type="button" data-p="1.5">1.5B</button>
+          <button class="act ghost zero-preset" type="button" data-p="7.5">7.5B</button>
+          <button class="act ghost zero-preset" type="button" data-p="128">128B</button>
+          <button class="act ghost zero-preset" type="button" data-p="1000">1T</button>
+        </div>
+      </div>
+      <div class="ctrl">
+        <label for="zero-n">世界规模 N<sub>d</sub> <span class="v" id="zero-n-label">64</span></label>
+        <input type="range" id="zero-n" min="3" max="10" step="1" value="6" aria-label="数据并行度，2 的幂">
+        <div class="presets">
+          <span class="sim-note">8 → 1024，按 2 的幂取</span>
+        </div>
+      </div>
+      <div class="ctrl">
+        <label for="zero-prec">精度</label>
+        <select class="sel" id="zero-prec">
+          <option value="mixed" selected>fp16 / bf16 混合精度（2 字节）</option>
+          <option value="fp32">fp32（4 字节）</option>
+        </select>
+      </div>
+      <div class="ctrl">
+        <label for="zero-opt">优化器状态</label>
+        <select class="sel" id="zero-opt">
+          <option value="adam" selected>Adam：m + v（8 字节）</option>
+          <option value="sgd_m">SGD + momentum（4 字节）</option>
+          <option value="sgd">SGD，无状态（0 字节）</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="slots s3" id="zero-slots">
+      <div class="slot" id="zero-slot-param">
+        <div class="slot-name">参数</div>
+        <div class="slot-val" id="zero-v-param">15 GB</div>
+        <div class="slot-sub" id="zero-s-param">2Ψ 常驻</div>
+        <div class="bar"><i class="b2" id="zero-b-param" style="width:12%"></i></div>
+      </div>
+      <div class="slot" id="zero-slot-grad">
+        <div class="slot-name">梯度</div>
+        <div class="slot-val" id="zero-v-grad">15 GB</div>
+        <div class="slot-sub" id="zero-s-grad">2Ψ 常驻</div>
+        <div class="bar"><i class="b3" id="zero-b-grad" style="width:12%"></i></div>
+      </div>
+      <div class="slot" id="zero-slot-opt">
+        <div class="slot-name">优化器状态</div>
+        <div class="slot-val" id="zero-v-opt">90 GB</div>
+        <div class="slot-sub" id="zero-s-opt">12Ψ 常驻</div>
+        <div class="bar"><i class="b1" id="zero-b-opt" style="width:75%"></i></div>
+      </div>
+    </div>
+
+    <div class="readout" id="zero-mem-readout" data-src="§5.1–§5.3">
+      <div class="r-head">每卡模型状态显存</div>
+      <div><strong id="zero-total">120 GB</strong> <span id="zero-ratio">/ 卡 · baseline</span></div>
+      <div id="zero-breakdown" class="sim-note">参数 15 GB · 梯度 15 GB · 优化器状态 90 GB</div>
+    </div>
+
+    <div class="readout" id="zero-comm-readout" data-src="§1、§7.2.1、§7.2.2">
+      <div class="r-head">每步通信量（论文口径）</div>
+      <div><strong id="zero-comm">30 GB</strong> <span id="zero-comm-ratio">/ step · baseline 2Ψ</span></div>
+      <div id="zero-comm-note" class="sim-note">baseline DP：梯度 all-reduce 2Ψ。</div>
+    </div>
+
+    <p class="sim-note">
+      <span class="infer">推断</span>
+      精度切到 fp32、优化器切到 SGD 时，页面按同一字节记账替换 b 与 K；论文 Table 1 只给出混合精度 Adam（K=12）的组合，
+      这些扩展组合不在表内。默认组合（fp16/bf16 混合 + Adam）直接取自 §5.1–§5.3 的公式。
+      压缩比按所选精度/优化器的 Stage 0 记账：baseline = (2b + K)Ψ，b 为参数字节（混合精度 2、fp32 4），
+      K 为优化器状态乘数（Adam 8、SGD+m 4、SGD 0；混合精度另加 4 字节 fp32 主权重）。
+      本模拟只算 model states，未覆盖 activations、临时 buffer、碎片，也未模拟通信 overlap 与网络拓扑。
+    </p>
+  </div>
+
+  <details>
+    <summary>手算对账：两组参数如何得到读数 <span class="sum-sub">与上方交互同口径</span></summary>
+    <div class="details-body">
+      <p>
+        显示规则：≥100 GB 取整；10–100 GB 最多保留 1 位小数；&lt;10 GB 最多保留 2 位小数；
+        整数不补零（例如 31.0 显示为 31，1.50 显示为 1.5）。GB 按 10<sup>9</sup> 字节，不按 GiB。
+        分项先算后舍入，总计按未舍入值算，所以分项显示值相加可能与总计差 0.01–0.04。
+      </p>
+
+      <h4>A. Ψ = 7.5B，N_d = 64，fp16/bf16 混合，Adam（b=2，K=12；公式 §5.1–§5.3）</h4>
+      <p>Stage 1：<code>4×7.5 + 12×7.5/64 = 30 + 1.40625 = 31.40625 → 31.4 GB</code></p>
+      <p>Stage 2：<code>2×7.5 + 14×7.5/64 = 15 + 1.640625 = 16.640625 → 16.6 GB</code></p>
+      <p>Stage 3：<code>16×7.5/64 = 1.875 → 1.88 GB</code></p>
+      <p>通信：baseline / Stage 1 / Stage 2 为 <code>2×7.5×2 = 30 GB</code>；Stage 3 为 <code>3×7.5×2 = 45 GB</code>。</p>
+      <div class="tbl-scroll">
+        <table class="hand-table">
+          <thead><tr><th>Stage</th><th>参数</th><th>梯度</th><th>优化器状态</th><th>总计</th><th>通信（论文）</th><th>Stage 1（含 step 末 gather）</th></tr></thead>
+          <tbody>
+            <tr><td>0</td><td class="num">15</td><td class="num">15</td><td class="num">90</td><td class="num">120</td><td class="num">30</td><td class="num">—</td></tr>
+            <tr><td>1</td><td class="num">15</td><td class="num">15</td><td class="num">1.41</td><td class="num">31.4</td><td class="num">30</td><td class="num">45</td></tr>
+            <tr><td>2</td><td class="num">15</td><td class="num">0.23</td><td class="num">1.41</td><td class="num">16.6</td><td class="num">30</td><td class="num">—</td></tr>
+            <tr><td>3</td><td class="num">0.23</td><td class="num">0.23</td><td class="num">1.41</td><td class="num">1.88</td><td class="num">45</td><td class="num">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="table-note">单位 GB。Stage 1 的 45 GB 按论文 §5.1 / DeepSpeed 实现里 step 末的一次参数 all-gather 计入（+Ψ）；论文 §1、§7 的总账对 Stage 1 记 30 GB（见 04 节）。</p>
+
+      <h4>B. Ψ = 128B，N_d = 64，fp16/bf16 混合，Adam（b=2，K=12；公式 §5.1–§5.3）</h4>
+      <p>Stage 1：<code>4×128 + 12×128/64 = 512 + 24 = 536 GB</code></p>
+      <p>Stage 2：<code>2×128 + 14×128/64 = 256 + 28 = 284 GB</code></p>
+      <p>Stage 3：<code>16×128/64 = 32 GB</code></p>
+      <p>通信：baseline / Stage 1 / Stage 2 为 <code>2×128×2 = 512 GB</code>；Stage 3 为 <code>3×128×2 = 768 GB</code>。</p>
+      <div class="tbl-scroll">
+        <table class="hand-table">
+          <thead><tr><th>Stage</th><th>参数</th><th>梯度</th><th>优化器状态</th><th>总计</th><th>通信（论文）</th><th>Stage 1（含 step 末 gather）</th></tr></thead>
+          <tbody>
+            <tr><td>0</td><td class="num">256</td><td class="num">256</td><td class="num">1536</td><td class="num">2048</td><td class="num">512</td><td class="num">—</td></tr>
+            <tr><td>1</td><td class="num">256</td><td class="num">256</td><td class="num">24</td><td class="num">536</td><td class="num">512</td><td class="num">768</td></tr>
+            <tr><td>2</td><td class="num">256</td><td class="num">4</td><td class="num">24</td><td class="num">284</td><td class="num">512</td><td class="num">—</td></tr>
+            <tr><td>3</td><td class="num">4</td><td class="num">4</td><td class="num">24</td><td class="num">32</td><td class="num">768</td><td class="num">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="table-note">A、B 两组的 Stage 1/2/3 总计分别对应 Table 1 的 7.5B 行与 128B 行（31.4 / 16.6 / 1.88，536 / 284 / 32），可逐项对照。</p>
+
+      <h4>C. 扩展组合（论文 Table 1 未覆盖；按同一记账外推）</h4>
+      <p>
+        记账口径：b 为参数字节（混合精度 2、fp32 4），K 为优化器状态乘数
+        （Adam 8、SGD+m 4、SGD 0；混合精度另加 4 字节 fp32 主权重），Stage 0 = (2b + K)Ψ。
+      </p>
+      <p>C1. Ψ = 7.5B，N_d = 64，fp32，SGD + momentum（b=4，K=4）：
+      Stage 0 <code>(2×4+4)×7.5 = 90 GB</code>；
+      Stage 1 <code>2×4×7.5 + 4×7.5/64 = 60.46875 → 60.5 GB</code>；
+      Stage 2 <code>4×7.5 + (4+4)×7.5/64 = 30.9375 → 30.9 GB</code>；
+      Stage 3 <code>(2×4+4)×7.5/64 = 1.40625 → 1.41 GB</code>；
+      压缩比 <code>90 / 1.40625 = 64×</code>。</p>
+      <p>C2. Ψ = 1.5B，N_d = 8，fp32，SGD（b=4，K=0）：
+      Stage 0 <code>(2×4+0)×1.5 = 12 GB</code>；
+      Stage 1 <code>2×4×1.5 + 0 = 12 GB</code>；
+      Stage 2 <code>4×1.5 + 4×1.5/8 = 6.75 GB</code>；
+      Stage 3 <code>(2×4+0)×1.5/8 = 1.5 GB</code>；
+      压缩比 <code>12 / 1.5 = 8×</code>。</p>
+      <p class="table-note">C 组不在论文 Table 1 内，是本页按 (2b + K)Ψ 的 Stage 0 记账外推；与交互模拟使用同一公式，显示值可直接对照。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="comm">
+  <div class="sec-head"><span class="sec-num">04</span><h2>论文总账：Stage 1/2 的通信量与 DP 持平，Stage 3 多 50%</h2></div>
+  <p class="sec-sub">分片省了显存，问题是每一步要多搬多少字节。论文把通信量拆成 all-gather 与 reduce-scatter 两笔账。</p>
+
+  <p>
+    baseline DP 的梯度同步是一次 all-reduce。按 §7.1 的拆法，all-reduce = reduce-scatter Ψ + all-gather Ψ，
+    所以每步每卡的数据移动量是 <strong>2Ψ</strong>。Stage 2 把梯度 all-reduce 换成 reduce-scatter（Ψ），
+    参数更新后再 all-gather 一次（Ψ），合计仍是 <strong>2Ψ</strong>，与 baseline 相同（§7.2.1）。
+  </p>
+
+  <div class="eq" data-src="§7.2.1">
+    baseline DP：reduce-scatter Ψ + all-gather Ψ = <span class="hl-a">2Ψ</span>
+  </div>
+  <div class="eq" data-src="§7.2.2">
+    Stage 3：前向 all-gather Ψ + 反向 all-gather Ψ + 梯度 reduce-scatter Ψ = <span class="hl-c">3Ψ</span> = 1.5 × 2Ψ
+  </div>
+  <div class="eq-cap">每步每卡的数据移动量；Ψ 为参数个数，通信元素大小取梯度/权重的元素字节数</div>
+
+  <p>
+    Stage 3 多出来的那一笔，是参数的第二次 all-gather：前向按层把参数拼回来，反向按逆序再拼一次。
+    这两次 gather 不必同时存在——某一层算完就可以释放，所以显存不会回到 16Ψ，但通信账上是实打实的 3Ψ。
+    论文强调这不是“把整个模型同时广播”，而是把 gather 摊到整个前向/反向过程中（§7.2.2）。
+  </p>
+
+  <p>
+    论文 §1 对 P<sub>os</sub> 的表述是 “4x memory reduction, same communication volume as DP”，
+    §7 的分项通信账也只把 P<sub>os+g</sub> 记入 2Ψ、把 P<sub>os+g+p</sub> 记入 3Ψ。
+    但论文 §5.1 在描述 P<sub>os</sub> 时，自己写了 optimizer step 末尾的一次参数 all-gather；
+    DeepSpeed 的实现（<code>all_gather_dp_groups</code>）与 §5.1 的流程一致。
+    若按字节把这次 gather 计入，Stage 1 是 3Ψ；§1 与 §7 的总账仍记 2Ψ。三处来源并列如下，本页不替原文裁决。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">论文 §1 + §7</span><h4>Stage 1/2 总账不增加通信</h4></div>
+      <p>§1 与 §7 的总账：P<sub>os</sub>、P<sub>os+g</sub> 都不增加通信量；只有 P<sub>p</sub> 额外做参数 gather，总计 1.5×。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">论文 §5.1 / DeepSpeed</span><h4>Stage 1 在 step 末再 gather 一次参数</h4></div>
+      <p>§5.1 与 <code>stage_1_and_2.py:3180</code> 都在 optimizer step 末尾调用参数 all-gather。Stage 2 用 reduce-scatter Ψ + 参数 all-gather Ψ 凑成 2Ψ；Stage 1 的梯度 all-reduce 已经占满 2Ψ，这次 gather 是额外的 Ψ。</p>
+    </div>
+  </div>
+
+  <p>
+    实现层面，DeepSpeed 把这些 collective 做成 bucket 化、可 overlap 的调用：
+    Stage 2 的梯度按 partition 归并后 reduce-scatter；Stage 3 的梯度用
+    <code>reduce_scatter_coalesced</code>（<code>deepspeed/runtime/zero/stage3.py:1948</code>），
+    参数 gather 则走 <code>deepspeed/runtime/zero/partition_parameters.py:1723</code> 的 <code>_all_gather</code>，
+    由 coordinator 在每层 forward 前触发（<code>deepspeed/runtime/zero/partitioned_param_coordinator.py:310</code>）。
+  </p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Stage 3 把参数变成按层流动的临时副本</h2></div>
+  <p class="sec-sub">前向用到哪层，就把哪层的参数 all-gather 回来；算完立刻释放。反向按逆序再来一遍。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 400" role="img" aria-labelledby="zero-svg-title">
+      <title id="zero-svg-title">ZeRO 三个阶段的分片对象对比：Stage 1 只分优化器状态，Stage 2 再分梯度，Stage 3 连参数也分</title>
+      <g font-family="Inter, 'Noto Sans SC', sans-serif">
+        <!-- panel 1 -->
+        <rect x="8" y="8" width="224" height="330" rx="10" fill="none" stroke="var(--border)"/>
+        <text x="120" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="var(--text)">Stage 1 · P_os</text>
+        <text x="120" y="50" text-anchor="middle" font-size="12.5" fill="var(--text-soft)">只切优化器状态</text>
+        <text x="20" y="78" font-size="14" font-weight="600" fill="var(--text)">优化器状态 12Ψ</text>
+        <g>
+          <rect x="20" y="84" width="47" height="30" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="71" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="122" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="173" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <text x="43.5" y="104" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">1/N</text>
+        </g>
+        <text x="20" y="140" font-size="14" font-weight="600" fill="var(--text)">梯度 2Ψ</text>
+        <rect x="20" y="146" width="200" height="30" rx="5" fill="var(--c1-soft)" stroke="var(--c1)"/>
+        <text x="120" y="166" text-anchor="middle" font-size="12" fill="var(--c1)">每卡 1 份</text>
+        <text x="20" y="202" font-size="14" font-weight="600" fill="var(--text)">参数 2Ψ</text>
+        <rect x="20" y="208" width="200" height="30" rx="5" fill="var(--c1-soft)" stroke="var(--c1)"/>
+        <text x="120" y="228" text-anchor="middle" font-size="12" fill="var(--c1)">每卡 1 份</text>
+        <text x="120" y="266" text-anchor="middle" font-size="14" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">每卡 4Ψ + 12Ψ/N</text>
+        <text x="20" y="294" font-size="11.5" fill="var(--text-soft)">§5.1 / 实现：step 末 gather Ψ</text>
+        <text x="20" y="310" font-size="11.5" fill="var(--text-soft)">§1 / §7 总账：2Ψ</text>
+
+        <!-- panel 2 -->
+        <rect x="248" y="8" width="224" height="330" rx="10" fill="none" stroke="var(--border)"/>
+        <text x="360" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="var(--text)">Stage 2 · P_os+g</text>
+        <text x="360" y="50" text-anchor="middle" font-size="12.5" fill="var(--text-soft)">再切梯度</text>
+        <text x="260" y="78" font-size="14" font-weight="600" fill="var(--text)">优化器状态 12Ψ</text>
+        <g>
+          <rect x="260" y="84" width="47" height="30" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="311" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="362" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="413" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <text x="283.5" y="104" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">1/N</text>
+        </g>
+        <text x="260" y="140" font-size="14" font-weight="600" fill="var(--text)">梯度 2Ψ</text>
+        <g>
+          <rect x="260" y="146" width="47" height="30" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="311" y="146" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="362" y="146" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="413" y="146" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <text x="283.5" y="166" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">1/N</text>
+        </g>
+        <text x="260" y="202" font-size="14" font-weight="600" fill="var(--text)">参数 2Ψ</text>
+        <rect x="260" y="208" width="200" height="30" rx="5" fill="var(--c1-soft)" stroke="var(--c1)"/>
+        <text x="360" y="228" text-anchor="middle" font-size="12" fill="var(--c1)">每卡 1 份</text>
+        <text x="360" y="266" text-anchor="middle" font-size="14" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">每卡 2Ψ + 14Ψ/N</text>
+        <text x="260" y="294" font-size="11.5" fill="var(--text-soft)">梯度 reduce-scatter Ψ</text>
+        <text x="260" y="310" font-size="11.5" fill="var(--text-soft)">参数 all-gather Ψ → 2Ψ</text>
+
+        <!-- panel 3 -->
+        <rect x="488" y="8" width="224" height="330" rx="10" fill="none" stroke="var(--border)"/>
+        <text x="600" y="32" text-anchor="middle" font-size="18" font-weight="700" fill="var(--text)">Stage 3 · P_os+g+p</text>
+        <text x="600" y="50" text-anchor="middle" font-size="12.5" fill="var(--text-soft)">参数也切</text>
+        <text x="500" y="78" font-size="14" font-weight="600" fill="var(--text)">优化器状态 12Ψ</text>
+        <g>
+          <rect x="500" y="84" width="47" height="30" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="551" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="602" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="653" y="84" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <text x="523.5" y="104" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">1/N</text>
+        </g>
+        <text x="500" y="140" font-size="14" font-weight="600" fill="var(--text)">梯度 2Ψ</text>
+        <g>
+          <rect x="500" y="146" width="47" height="30" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="551" y="146" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="602" y="146" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="653" y="146" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <text x="523.5" y="166" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">1/N</text>
+        </g>
+        <text x="500" y="202" font-size="14" font-weight="600" fill="var(--text)">参数 2Ψ</text>
+        <g>
+          <rect x="500" y="208" width="47" height="30" rx="5" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <rect x="551" y="208" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="602" y="208" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <rect x="653" y="208" width="47" height="30" rx="5" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+          <text x="523.5" y="228" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">1/N</text>
+        </g>
+        <text x="600" y="266" text-anchor="middle" font-size="14" font-family="'JetBrains Mono', monospace" fill="var(--accent-deep)">每卡 16Ψ/N</text>
+        <text x="500" y="294" font-size="11.5" fill="var(--text-soft)">前向 gather Ψ + 反向 gather Ψ</text>
+        <text x="500" y="310" font-size="11.5" fill="var(--text-soft)">梯度 reduce-scatter Ψ → 3Ψ</text>
+
+        <!-- legend -->
+        <rect x="8" y="362" width="14" height="14" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="28" y="374" font-size="12" fill="var(--text-muted)">本卡持有的 1/N 分片</text>
+        <rect x="196" y="362" width="14" height="14" rx="3" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-dasharray="4 3"/>
+        <text x="216" y="374" font-size="12" fill="var(--text-muted)">其他卡的分片（不常驻）</text>
+        <rect x="404" y="362" width="14" height="14" rx="3" fill="var(--c1-soft)" stroke="var(--c1)"/>
+        <text x="424" y="374" font-size="12" fill="var(--text-muted)">每卡全量复制</text>
+      </g>
+    </svg>
+    <figcaption>
+      三个阶段的分片对象对比。图中画 4 个分片表示 1/N；本页交互的 N_d 取 8–1024（Table 1 另含 N_d=1/4）。
+      公式来自 §5.1–§5.3；Stage 1 的 2Ψ 是论文 §1/§7 的总账；论文 §5.1 与 DeepSpeed 实现在 step 末都描述了一次参数 all-gather（见 04 节）。
+    </figcaption>
+  </figure>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">前向</span><h4>按层 gather</h4></div>
+      <p>
+        <code>fetch_sub_module</code> 在子模块 forward 前触发参数 all-gather
+        （<code>partitioned_param_coordinator.py:310</code>），并把后续几层放进 prefetch 队列（同文件 452–484 行）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反向</span><h4>逆序再 gather，梯度归 owner</h4></div>
+      <p>
+        参数按反向顺序再次 all-gather；梯度按 partition 归并后 reduce-scatter
+        （<code>stage3.py:1948</code>），每个 rank 只保留自己负责的梯度分片。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">更新</span><h4>只动本地 1/N</h4></div>
+      <p>
+        optimizer step 只更新本地 fp32 参数分片与优化器状态（<code>stage3.py:2913</code>）；
+        下一步 forward 需要别的层时再 gather。常驻参数上限由 <code>stage3_max_live_parameters</code> 控制（默认 10<sup>9</sup> 个元素，<code>deepspeed/runtime/zero/config.py:245</code>）。
+      </p>
+    </div>
+  </div>
+
+  <p class="src-line">
+    源码锚点（DeepSpeed f47dc3e）：<code>deepspeed/runtime/zero/stage3.py:152</code>（Stage 3 类）、
+    <code>:1282</code>（<code>_partitioned_params_swap_out</code>，把用完的参数换出）、
+    <code>:1948</code>（<code>reduce_scatter_coalesced</code>）；
+    <code>deepspeed/runtime/zero/partition_parameters.py:1723</code>（<code>_all_gather</code>）、
+    <code>:1765</code>（<code>_partition</code>）、<code>:1778</code>（<code>_partition_param</code> 释放数据）。
+  </p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>显存随 N_d 下降，但 Stage 1/2 有地板</h2></div>
+  <p class="sec-sub">Table 1 是每卡模型状态的解析结果，Table 2 把“理论最大模型”与“实测能跑的模型”放在一起。</p>
+
+  <div class="table-cap">Table 1 · 不同 ZeRO 阶段与 DP 度下每卡模型状态显存（GB，十进制；混合精度 Adam，K=12；不含 residual states）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">N_d</th>
+          <th colspan="3">7.5B</th>
+          <th colspan="3">128B</th>
+          <th colspan="3">1T</th>
+        </tr>
+        <tr>
+          <th>P_os</th><th>P_os+g</th><th>P_os+g+p</th>
+          <th>P_os</th><th>P_os+g</th><th>P_os+g+p</th>
+          <th>P_os</th><th>P_os+g</th><th>P_os+g+p</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td class="num">120</td><td class="num">120</td><td class="num">120</td><td class="num">2048</td><td class="num">2048</td><td class="num">2048</td><td class="num">16000</td><td class="num">16000</td><td class="num">16000</td></tr>
+        <tr><td>4</td><td class="num">52.5</td><td class="num">41.3</td><td class="num">30</td><td class="num">896</td><td class="num">704</td><td class="num">512</td><td class="num">7000</td><td class="num">5500</td><td class="num">4000</td></tr>
+        <tr><td>16</td><td class="num">35.6</td><td class="num">21.6</td><td class="num">7.5</td><td class="num">608</td><td class="num">368</td><td class="num">128</td><td class="num">4750</td><td class="num">2875</td><td class="num">1000</td></tr>
+        <tr><td>64</td><td class="num">31.4</td><td class="num">16.6</td><td class="num">1.88</td><td class="num">536</td><td class="num">284</td><td class="num">32</td><td class="num">4187</td><td class="num">2218</td><td class="num">250</td></tr>
+        <tr><td>256</td><td class="num">30.4</td><td class="num">15.4</td><td class="num">0.47</td><td class="num">518</td><td class="num">263</td><td class="num">8</td><td class="num">4046</td><td class="num">2054</td><td class="num">62.5</td></tr>
+        <tr><td>1024</td><td class="num">30.1</td><td class="num">15.1</td><td class="num">0.12</td><td class="num">513</td><td class="num">257</td><td class="num">2</td><td class="num">4011</td><td class="num">2013</td><td class="num">15.6</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">Table 1 已完整转录。原文用加粗标出能装入 32 GB V100 的组合，本页未复刻加粗，可按数值读出。</p>
+
+  <p>
+    <span data-src="Table 1">N_d=64 时，7.5B 模型的 Stage 1 是 31.4 GB，刚好在 32 GB 以内；Stage 2 降到 16.6 GB，Stage 3 只要 1.88 GB。
+    同样 64 张卡，128B 模型只有 Stage 3 的 32 GB 能装下；Stage 1/2 分别是 536 GB 与 284 GB。</span>
+    1T 模型更极端：<span data-src="Table 1">N_d=1024 时 Stage 3 每卡 15.6 GB，Stage 1/2 仍有 4011 GB 与 2013 GB。</span>
+    这不是线性缩放失效，而是 Stage 1 的 4Ψ 与 Stage 2 的 2Ψ 地板在模型变大时先撞墙。
+  </p>
+
+  <div class="table-cap">Table 2 · 理论最大模型规模（左）与实测模型规模（右）；实测只覆盖 ZeRO-OS（P_os）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">MP</th><th rowspan="2">GPUs</th>
+          <th colspan="4">Max Theoretical Model Size</th>
+          <th colspan="2">Measured Model Size</th>
+        </tr>
+        <tr><th>Baseline</th><th>P_os</th><th>P_os+g</th><th>P_os+g+p</th><th>Baseline</th><th>ZeRO-DP (P_os)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>64</td><td>2B</td><td>7.6B</td><td>14.4B</td><td>128B</td><td>1.3B</td><td>6.2B</td></tr>
+        <tr><td>2</td><td>128</td><td>4B</td><td>15.2B</td><td>28.8B</td><td>256B</td><td>2.5B</td><td>12.5B</td></tr>
+        <tr><td>4</td><td>256</td><td>8B</td><td>30.4B</td><td>57.6B</td><td>0.5T</td><td>5B</td><td>25B</td></tr>
+        <tr><td>8</td><td>512</td><td>16B</td><td>60.8B</td><td>115.2B</td><td>1T</td><td>10B</td><td>50B</td></tr>
+        <tr><td>16</td><td>1024</td><td>32B</td><td>121.6B</td><td>230.4B</td><td>2T</td><td>20B</td><td>100B</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">Table 2 已完整转录。条件是按 MP 度 × DP 度的组合；P_os 的实测值与理论最大值吻合，说明内存分析可作为现实上界。</p>
+
+  <p>
+    论文的实现叫 ZeRO-100B，只覆盖 <strong>P<sub>os+g</sub> + ZeRO-R</strong>，不是完整 Stage 3（§10）。
+    <span data-src="§10.2">它能在 400 张 V100 上跑 170B 参数，8B–100B 区间平均 15 PFLOPs，超过峰值 30%，
+    相对基线最多 10× 加速；</span><span data-src="§10.4">不加 MP 时，128 张卡能跑 13B 参数，平均每卡超过 40 TFLOPs，而 baseline DP 最大只能跑 1.4B、每卡不到 20 TFLOPs。</span>
+    Table 1 的 1T 行是解析结果，不是 1T 实测；Table 2 的实测列也只到 P_os 的 100B。把这两类数字分开看，才不会把“能装下”误读成“已经训练过”。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它省的是模型状态，省不了激活、碎片和物理通信时间</h2></div>
+  <p class="sec-sub">把 ZeRO 放回完整训练系统里看：它解决了显存的主项，但剩下的项和实现代价仍然决定能不能跑、跑得多快。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">不解决</span><h4>residual states 仍在</h4></div>
+      <p>
+        Stage 1–3 只切优化器状态、梯度、参数。activations、临时 buffer、碎片仍要占显存；
+        论文用 ZeRO-R 的 P<sub>a</sub>、C<sub>B</sub>、M<sub>D</sub> 处理这些项（§6），但它们不在本页的 16Ψ 账里。
+        显存计算器给出的数字只是 model states 的下界。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">不保证</span><h4>1.5× 通信不等于 1.5× 墙钟</h4></div>
+      <p>
+        3Ψ 是字节账。实际时间取决于 bucket 大小、prefetch 是否盖住 gather、跨节点带宽和 batch size。
+        论文说 Stage 3 的 gather 可以摊到整个前向/反向（§7.2.2），但没承诺在所有网络上都能完全 overlap。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    <strong>Stage 1/2 有显存地板。</strong>无论 N_d 多大，Stage 1 至少留 4Ψ、Stage 2 至少留 2Ψ；只有 Stage 3 是 16Ψ/N_d。
+    <span data-src="Table 1">1T 模型在 1024 张卡上，Stage 1/2 的每卡仍要 4011 GB / 2013 GB，只有 Stage 3 的 15.6 GB 落在单卡范围。</span>
+    所以“ZeRO 能训练任意大小模型”这句话，准确说是“Stage 3 在卡足够多时能”。
+  </p>
+
+  <p>
+    <strong>offload 是另一条轴，不是论文 ZeRO-DP 的默认路径。</strong>
+    论文 §2.2.2 明确说 ZeRO 不把模型状态存到 CPU；只有 ZeRO-R 在少数情况下把 activation checkpoint 放到 CPU（§6.1）。
+    DeepSpeed 当前实现把 offload 做成配置项：<code>offload_optimizer</code> 支持 Stage 1/2/3，
+    <code>offload_param</code> 只支持 Stage 3（<code>deepspeed/runtime/zero/config.py:164–177</code>），
+    设备可以是 CPU 或 NVMe（<code>deepspeed/runtime/engine.py:1581–1588</code>；NVMe swap 见 <code>deepspeed/runtime/zero/stage3.py:828</code>）。
+    这能进一步降显存，但把瓶颈移到 PCIe / NVMe 带宽，和论文的 1.5× 通信账是两笔不同的成本。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">对照</span><h4>FSDP：同一族思路的另一个实现</h4></div>
+    <p>
+      PyTorch FSDP 文档写明它 “is inspired by Xu et al. as well as the ZeRO Stage 3 from DeepSpeed”。
+      两者都把参数、梯度、优化器状态分片到 data-parallel rank，并在使用前 all-gather 参数；
+      差别在实现单位：FSDP 默认把 module 的参数收进内部 FlatParameter 管理，
+      DeepSpeed ZeRO-3 以参数/分区为单位，并配 prefetch 与 <code>stage3_max_live_parameters</code> 限制常驻量。
+      这是同一设计目标下的两套工程实现，不是同一份代码。
+    </p>
+    <p class="src-line">引用：PyTorch docs, <em>FullyShardedDataParallel</em>（“A wrapper for sharding module parameters across data parallel workers. This is inspired by ... the ZeRO Stage 3 from DeepSpeed.”）</p>
+  </div>
+
+  <div class="table-cap">表 · 论文与 DeepSpeed 当前实现的差异（来源见每行；非原文表格）</div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>维度</th><th>论文（arXiv 1910.02054v3）</th><th>DeepSpeed f47dc3e</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Stage 1 通信</td>
+          <td>§1、§7 总账记 2Ψ（“same communication volume as DP”）；§5.1 描述 step 末参数 all-gather</td>
+          <td>对应 §5.1：step 末 <code>all_gather_dp_groups</code>（<code>stage_1_and_2.py:3180</code>），按字节另计 Ψ</td>
+        </tr>
+        <tr>
+          <td>Stage 3 参数驻留</td>
+          <td>按层 broadcast / discard，gather 摊到前向与反向（§7.2.2）</td>
+          <td>hook + coordinator fetch/prefetch（<code>deepspeed/runtime/zero/partitioned_param_coordinator.py:310,452</code>）；<code>stage3_max_live_parameters</code> 默认 10<sup>9</sup> 元素（<code>deepspeed/runtime/zero/config.py:245</code>）</td>
+        </tr>
+        <tr>
+          <td>模型状态 offload</td>
+          <td>ZeRO-DP 不把 model states 放 CPU；只有 P<sub>a+cpu</sub> 放 activation checkpoint（§2.2.2、§6.1）</td>
+          <td><code>offload_optimizer</code> 支持 Stage 1/2/3；<code>offload_param</code> 仅 Stage 3；CPU 或 NVMe（<code>deepspeed/runtime/zero/config.py:164–177</code>）</td>
+        </tr>
+        <tr>
+          <td>评测范围</td>
+          <td>ZeRO-100B = P<sub>os+g</sub> + ZeRO-R，最高 170B（§10）；1T 为解析</td>
+          <td>实现 Stage 0–3，含 offload、NVMe、prefetch 等工程路径</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>什么时候别用 Stage 3：</strong></p>
+  <ul>
+    <li>模型用 Stage 2 就能放进单卡（例如 7.5B、N_d=64 时 Stage 2 只要 16.6 GB），不必为 Stage 3 多付一次参数 gather。</li>
+    <li>互联很慢、batch 很小，参数 gather 无法被计算盖住；这时 1.5× 的字节账可能放大成更差的实际吞吐。</li>
+    <li>只需要省优化器状态、且梯度 all-reduce 已经很便宜：Stage 1 的实现改动较小，但要注意论文 §5.1 / DeepSpeed 实现里 step 末的参数 gather。</li>
+  </ul>
+</section>
+
+<footer>
+  <div>ZeRO: Memory Optimizations Toward Training Trillion Parameter Models · SC 2020</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/1910.02054v3">https://arxiv.org/abs/1910.02054v3</a>（v1 withdrawn；本页以 v3 为准）<br>
+    代码：<a href="https://github.com/deepspeedai/DeepSpeed/tree/f47dc3e3d48e748d699720ea65eca1f45c136255">DeepSpeed @ f47dc3e</a><br>
+    笔记：<a href="/zero/">zero</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var pEl = document.getElementById('zero-p');
+  var nEl = document.getElementById('zero-n');
+  var precEl = document.getElementById('zero-prec');
+  var optEl = document.getElementById('zero-opt');
+  var pLabel = document.getElementById('zero-p-label');
+  var nLabel = document.getElementById('zero-n-label');
+  var totalEl = document.getElementById('zero-total');
+  var ratioEl = document.getElementById('zero-ratio');
+  var breakdownEl = document.getElementById('zero-breakdown');
+  var commEl = document.getElementById('zero-comm');
+  var commRatioEl = document.getElementById('zero-comm-ratio');
+  var commNoteEl = document.getElementById('zero-comm-note');
+  var vParam = document.getElementById('zero-v-param');
+  var vGrad = document.getElementById('zero-v-grad');
+  var vOpt = document.getElementById('zero-v-opt');
+  var sParam = document.getElementById('zero-s-param');
+  var sGrad = document.getElementById('zero-s-grad');
+  var sOpt = document.getElementById('zero-s-opt');
+  var bParam = document.getElementById('zero-b-param');
+  var bGrad = document.getElementById('zero-b-grad');
+  var bOpt = document.getElementById('zero-b-opt');
+  var slotParam = document.getElementById('zero-slot-param');
+  var slotGrad = document.getElementById('zero-slot-grad');
+  var slotOpt = document.getElementById('zero-slot-opt');
+  var stageBtns = document.querySelectorAll('#zero-stage-btns .rule-btn');
+  var presets = document.querySelectorAll('.zero-preset');
+
+  if (!pEl || !nEl || !precEl || !optEl || !pLabel || !nLabel || !totalEl ||
+      !ratioEl || !breakdownEl || !commEl || !commRatioEl || !commNoteEl ||
+      !vParam || !vGrad || !vOpt || !sParam || !sGrad || !sOpt ||
+      !bParam || !bGrad || !bOpt || !slotParam || !slotGrad || !slotOpt ||
+      !stageBtns.length) {
+    return;
+  }
+
+  var stage = 0;
+
+  function fmtGB(g) {
+    if (g >= 100) return String(Math.round(g));
+    if (g >= 10) return (Math.round(g * 10) / 10).toFixed(1).replace(/\.0$/, '');
+    return (Math.round(g * 100) / 100).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function fmtParams(p) {
+    if (p >= 1e12 - 1e6) return (p / 1e12).toFixed(2).replace(/\.?0+$/, '') + 'T';
+    if (p >= 1e9) return (p / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+    return (p / 1e6).toFixed(0) + 'M';
+  }
+
+  function params() {
+    return Math.pow(10, parseFloat(pEl.value));
+  }
+
+  function world() {
+    return Math.pow(2, parseFloat(nEl.value));
+  }
+
+  function setBar(el, frac) {
+    el.style.width = Math.max(frac * 100, frac > 0 ? 2 : 0) + '%';
+  }
+
+  function update() {
+    var P = params();
+    var N = world();
+    var mixed = precEl.value === 'mixed';
+    var b = mixed ? 2 : 4;
+    var master = mixed ? 4 : 0;
+    var optState = optEl.value === 'adam' ? 8 : (optEl.value === 'sgd_m' ? 4 : 0);
+    var K = master + optState;
+
+    var paramBytes = stage >= 3 ? b * P / N : b * P;
+    var gradBytes = stage >= 2 ? b * P / N : b * P;
+    var optBytes = stage >= 1 ? K * P / N : K * P;
+    var totalBytes = paramBytes + gradBytes + optBytes;
+
+    var paramGB = paramBytes / 1e9;
+    var gradGB = gradBytes / 1e9;
+    var optGB = optBytes / 1e9;
+    var totalGB = totalBytes / 1e9;
+
+    pLabel.textContent = fmtParams(P);
+    nLabel.textContent = String(N);
+
+    totalEl.textContent = fmtGB(totalGB) + ' GB';
+    if (stage === 0) {
+      ratioEl.textContent = '/ 卡 · baseline';
+    } else {
+      var baseBytes = (2 * b + K) * P;
+      var ratio = baseBytes / totalBytes;
+      var ratioText = ratio >= 10 ? ratio.toFixed(0) : ratio.toFixed(1).replace(/\.0$/, '');
+      ratioEl.textContent = '/ 卡 · 相对 Stage 0 压缩 ' + ratioText + '×';
+    }
+    breakdownEl.textContent = '参数 ' + fmtGB(paramGB) + ' GB · 梯度 ' + fmtGB(gradGB) +
+      ' GB · 优化器状态 ' + fmtGB(optGB) + ' GB';
+
+    vParam.textContent = fmtGB(paramGB) + ' GB';
+    vGrad.textContent = fmtGB(gradGB) + ' GB';
+    vOpt.textContent = fmtGB(optGB) + ' GB';
+    sParam.textContent = stage >= 3 ? b + 'Ψ/N 分片' : b + 'Ψ 常驻';
+    sGrad.textContent = stage >= 2 ? b + 'Ψ/N 分片' : b + 'Ψ 常驻';
+    sOpt.textContent = stage >= 1 ? K + 'Ψ/N 分片' : K + 'Ψ 常驻';
+
+    setBar(bParam, totalBytes > 0 ? paramBytes / totalBytes : 0);
+    setBar(bGrad, totalBytes > 0 ? gradBytes / totalBytes : 0);
+    setBar(bOpt, totalBytes > 0 ? optBytes / totalBytes : 0);
+
+    slotParam.classList.toggle('hit', stage >= 3);
+    slotGrad.classList.toggle('hit', stage >= 2);
+    slotOpt.classList.toggle('hit', stage >= 1);
+
+    var coeff = stage >= 3 ? 3 : 2;
+    var commGB = coeff * P * b / 1e9;
+    commEl.textContent = fmtGB(commGB) + ' GB';
+
+    if (stage === 0) {
+      commRatioEl.textContent = '/ step · baseline 2Ψ';
+      commNoteEl.textContent = 'baseline DP：梯度 all-reduce 2Ψ。';
+    } else if (stage === 1) {
+      commRatioEl.textContent = '/ step · 论文口径 2Ψ';
+      var dsComm = 3 * P * b / 1e9;
+      commNoteEl.textContent = '论文 §1/§7 总账记 2Ψ；论文 §5.1 与 DeepSpeed 实现都在 step 末 all-gather 更新后的参数（+Ψ），' +
+        '按字节计 3Ψ = ' + fmtGB(dsComm) + ' GB（stage_1_and_2.py:3180）。';
+    } else if (stage === 2) {
+      commRatioEl.textContent = '/ step · 2Ψ · 与 baseline 持平';
+      commNoteEl.textContent = '梯度 reduce-scatter Ψ + 参数 all-gather Ψ = 2Ψ，与 baseline DP 相同。';
+    } else {
+      commRatioEl.textContent = '/ step · 3Ψ · 1.5× baseline';
+      commNoteEl.textContent = '前向参数 gather Ψ + 反向参数 gather Ψ + 梯度 reduce-scatter Ψ = 3Ψ，' +
+        '是 baseline 的 1.5 倍。';
+    }
+  }
+
+  function activateStage(s) {
+    stage = s;
+    for (var i = 0; i < stageBtns.length; i++) {
+      var btn = stageBtns[i];
+      if (parseInt(btn.getAttribute('data-stage'), 10) === s) {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+    }
+    update();
+  }
+
+  for (var i = 0; i < stageBtns.length; i++) {
+    stageBtns[i].addEventListener('click', function () {
+      activateStage(parseInt(this.getAttribute('data-stage'), 10));
+    });
+  }
+
+  for (var j = 0; j < presets.length; j++) {
+    presets[j].addEventListener('click', function () {
+      var billions = parseFloat(this.getAttribute('data-p'));
+      pEl.value = Math.log10(billions * 1e9);
+      update();
+    });
+  }
+
+  pEl.addEventListener('input', update);
+  nEl.addEventListener('input', update);
+  precEl.addEventListener('change', update);
+  optEl.addEventListener('change', update);
+
+  update();
+})();
+</script>
+</body>
+</html>

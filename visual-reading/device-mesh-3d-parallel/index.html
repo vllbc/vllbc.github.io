@@ -1,0 +1,714 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 32 | Table 1 | 32/(1*1) |
+| 32 | Table 1 | 64/(2*1) |
+| 32 | Table 1 | 128/(4*1) |
+| 32 | Table 1 | 256/(8*1) |
+| 32 | Table 1 | 512/(8*2) |
+| 32 | Table 1 | 1024/(8*4) |
+| 24 | Table 1 | 1536/(8*8) |
+| 15 | Table 1 | 1920/(8*16) |
+| 9 | Table 1 | 2520/(8*35) |
+| 6 | Table 1 | 3072/(8*64) |
+| 4016 | 源码 megatron/core/parallel_state.py:1210-1408 | 3072/6+3072/8+3072/64+3072/1 |
+| 4528 | 源码 megatron/core/parallel_state.py:648,1217-1220 | 3072/6+3072/8+3072/64+3072/1+3072/6 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v5">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Mesh 与 3D/4D 并行 · 一张网格管住四组 rank</title>
+<meta name="description" content="DP/TP/PP/CP 如何拼成多维设备网格：DeviceMesh 的坐标、子网格与 process group 生成，Megatron 的 RankGenerator 对照，以及 SC21 的 1T 配置与扩展边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的微调：只加布局与源码路径折行，不复制 base.css */
+.note{font-size:13px;color:var(--text-soft);line-height:1.7}
+.table-cap{font-size:12.5px;color:var(--text-soft);margin:18px 0 6px;font-family:"JetBrains Mono",monospace;line-height:1.6}
+.table-note{font-size:12px;color:var(--text-soft);margin:6px 0 0;line-height:1.6}
+.ctrl.wide{grid-column:1/-1}
+.mesh-line{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin:5px 0;font-size:13.5px}
+.mesh-dim{display:inline-block;min-width:42px;font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 6px;text-align:center}
+.mesh-line code{background:var(--bg-surface);border:1px solid var(--border);padding:1px 5px;border-radius:4px;font-size:12.5px}
+.small{font-size:12.5px;color:var(--text-soft)}
+.wrap code{overflow-wrap:anywhere;word-break:break-word}
+@media (max-width:600px){
+  .mesh-line{font-size:12.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Device Mesh</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">旧方案</a>
+      <a href="#method">网格</a>
+      <a href="#groups">分组</a>
+      <a href="#flow">数据流</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>System · PyTorch + Megatron · SC21</span>
+  <h1>Device Mesh：把 3D/4D 并行的 rank 算术收进一张网格</h1>
+  <p class="hero-sub">
+    DP、TP、PP 是三个正交的切分方向，4D 再加 CP。每加一维，rank 的坐标多一维、通信 group 多一套。
+    <strong>DeviceMesh</strong> 把设备拓扑写成 n 维 rank 数组，用 <code>mesh_dim_names</code> 给每维命名，并为每一维生成 process group；
+    Megatron-Core 则用 <code>RankGenerator</code> 的 order 字符串和 <code>get_ranks()</code> 生成同样的正交 group。
+    代价是 mesh 形状、rank 顺序和 group 创建都必须全局一致。
+  </p>
+  <div class="meta">
+    <span>Narayanan et al. · SC21 · PyTorch 2ee7a63 · Megatron-Core 70f7a26</span>
+    <a href="https://arxiv.org/abs/2104.04473" target="_blank" rel="noopener">SC21 原文 ↗</a>
+    <a href="https://github.com/pytorch/pytorch/blob/2ee7a63cc8feb9171418ac602c0434dbb88348a1/torch/distributed/device_mesh.py" target="_blank" rel="noopener">DeviceMesh 源码 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM/blob/70f7a269ddf45b6f5b237aff6668fd1ddd79ef2d/megatron/core/parallel_state.py" target="_blank" rel="noopener">Megatron 源码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    3D 并行不是三个开关，而是三张正交的通信图：<strong>DP 管 batch 与梯度，TP 管层内张量，PP 管层间激活</strong>。4D 再加 CP 管序列；每加一维，rank 的坐标就多一维，group 家族也多一套。
+  </p>
+  <p>
+    PyTorch 的 <strong>DeviceMesh</strong> 把设备拓扑写成 n 维 rank 数组，并用 <code>mesh_dim_names</code> 给每维命名；固定其余维、只变一维，就是一个 group。<code>mesh["tp"]</code> 拿子网格，<code>get_group("tp")</code> 拿当前 rank 的通信句柄。
+  </p>
+  <p>
+    Megatron-Core 的 <code>parallel_state.py</code> 建组路径没有用 DeviceMesh；它用 <code>RankGenerator</code> 的 order 字符串和 <code>get_ranks("tp")/("pp")/("dp")</code> 生成同样的正交 group，再用 <code>create_group</code> 逐个建；其 FSDP/DTensor 适配层则使用 <code>DeviceMesh.from_group</code>（<code>megatron/core/distributed/torch_fully_sharded_data_parallel.py:81</code>）。两者在这条 dense 建组路径上数学同源，但一个是对象，一个是显式 rank 列表。
+  </p>
+  <p>
+    SC21 的 1T 配置落在 3072 张 A100 上：TP=8、PP=64、DP=6，每 GPU 163 TFLOP/s、52% 峰值；但 TP 跨节点、PP 气泡、CP 的 KV 交换都会把扩展效率拉回去。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">3072<small> 卡</small></div>
+      <div class="k">1T 模型的 3D 网格：TP=8、PP=64，DP=3072/(8×64)=6</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 1">52<small>%</small></div>
+      <div class="k">1T 模型每 GPU 163 TFLOP/s，聚合 502 PFLOP/s，达到峰值 52%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.2">70<small>%</small></div>
+      <div class="k">GPU 翻倍、batch 不变时，PTD 相对 ZeRO-3 的吞吐提升；175B 与 530B 均为 70%</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>并行维度一多，先失控的是 rank 算术</h2></div>
+  <p class="sec-sub">先建立共同认知：每个 rank 同时属于多个 group，错一个坐标就会把不该通信的卡配到一起。</p>
+  <p>
+    SC21 把大模型训练拆成三个方向：<strong>data parallelism（DP）</strong>复制模型、切分 batch；<strong>pipeline model parallelism（PP）</strong>把层切成阶段；<strong>tensor model parallelism（TP）</strong>把层内矩阵切到多张卡。论文把它们组合成 PTD-P，并要求 <code>p · t · d = n</code>（§3.1）。这三项已经需要三套 group；长上下文训练再加 <strong>context parallelism（CP）</strong>，把序列切成块，就变成四维。
+  </p>
+  <p>
+    四维不是四个独立开关。一个 rank 在 DP 组里要和同模型副本交换梯度，在 TP 组里要对层内激活做 all-reduce，在 PP 组里要把激活发给上下游，在 CP 组里要和序列块邻居交换 KV。四套 group 的成员集合不同，但都从同一个 global rank 解出来；只要 rank 顺序或维度顺序有一处不一致，通信就会安静地配错对象。
+  </p>
+  <p>
+    换个说法：<code>k</code> 个维度就有 <code>k</code> 套 group 家族；每套又有 <code>n / size</code> 个子组。rank 列表的数量随维度线性增长，也随 <code>world_size</code> 线性增长，而每张卡都要在每个家族里被分对一次。
+  </p>
+  <div class="eq">
+    n = <span class="hl-a">DP</span> × <span class="hl-b">TP</span> × <span class="hl-c">PP</span> × <span class="hl-b">CP</span>
+  </div>
+  <p class="eq-cap">前三项来自 SC21 §3.1 的 <code>p · t · d = n</code>；CP 是后加维度，Megatron-Core 把它乘进 <code>model_size</code>（<code>megatron/core/parallel_state.py:883-895</code>）。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">DP</span><h4>batch 与梯度</h4></div>
+      <p>每个 DP rank 拿不同的 microbatch，模型副本相同；一个 batch 结束做一次梯度 all-reduce。DP 的问题是 batch 不能无限切：SC21 §1 指出每卡 batch 太小会降低利用率，且可用设备数受 batch size 限制。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">TP</span><h4>层内张量</h4></div>
+      <p>一层里的 GEMM 按列/行切开，每张卡只算一部分；行并行出口要把部分和 all-reduce 回来。TP 的通信在层内，频率高，跨节点会变贵（SC21 §3.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">PP</span><h4>层与 microbatch</h4></div>
+      <p>层被切成阶段，microbatch 在阶段间流水；相邻阶段只传边界激活。代价是 pipeline bubble：GPipe 用 <code>M</code> 个 microbatch 填 <code>K</code> 个阶段，气泡约为 <code>O((K-1)/(M+K-1))</code>（GPipe §2.3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">CP</span><h4>序列</h4></div>
+      <p>序列被切成 <code>N_h</code> 块，每张卡持有一块；attention 的 KV 块要沿 ring 传给下一张卡。Ring Attention §3 描述的重叠是「本地算 attention 的同时收发 KV」，Algorithm 1 给出对应伪代码；块太小则通信暴露（Ring Attention §3）。</p>
+    </div>
+  </div>
+  <p>
+    所以问题不是「能不能建 group」——<code>new_group</code> 当然能建。问题是：当维度从 2 变成 4，谁来保证每个 rank 在每个维度上都被分到正确的组？谁来给消费者一个「只看 DP」或「只看 TP」的子网格？这就是 02 要说的旧方案痛点，也是 03 的 mesh 抽象要接住的东西。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>裸 new_group 只给句柄，不给拓扑</h2></div>
+  <p class="sec-sub">已有方案能建出 group，但每个消费者都要自己重算 rank；维度一多，重复和错配就来了。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">A</span><h4>PyTorch <code>new_group</code></h4></div>
+      <p>签名只接受 <code>ranks</code>、backend、timeout 等参数，返回一个 process group 句柄或 <code>NON_GROUP_MEMBER</code>（<code>torch/distributed/distributed_c10d.py:7269-7340</code>）。它要求主组里的所有进程都进入调用，并按相同顺序建组（同文件 <code>7282-7285</code>）。句柄不带维度名、不带坐标，也不带子网格概念。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">B</span><h4>Megatron <code>RankGenerator</code></h4></div>
+      <p>把 TP/EP/DP/PP/CP 的尺寸和 order 字符串交给生成器，<code>get_ranks("tp")</code> 返回该维所有子组的 rank 列表，再逐个 <code>create_group</code>（<code>megatron/core/parallel_state.py:494-577</code>）。它解决了 rank 算术，但 order 是全局约定；EP 与 CP 不能同时在同一个生成器里大于 1（同文件 <code>508-509</code>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">C</span><h4>FSDP / HSDP</h4></div>
+      <p><code>fully_shard</code> 的 <code>mesh</code> 若是 2D，参数按第 0 维复制、第 1 维分片，即 <code>(Replicate(), Shard(0))</code> 的 HSDP 语义（<code>torch/distributed/fsdp/_fully_shard/_fully_shard.py:184-190</code>）。它要的是一个 DP 网格，而不是四个维度混在一起的 rank 列表。</p>
+    </div>
+  </div>
+  <p>
+    三者的共同缺口不是建组能力，而是<strong>表示</strong>：一个 group 属于哪一维、当前 rank 的坐标是什么、怎样只取某一维的子网格。没有这层表示，每个消费者都要维护一份 rank 算术；新增 CP 或 EP 时，所有消费者都得跟着改。DeviceMesh 的做法是把这份算术收进一个对象；Megatron 的做法是把它收进一个 order 字符串和生成器。两者都不是免费午餐，但都把「维度」变成了显式参数。
+  </p>
+  <p class="note">
+    本页把 DeviceMesh 当作 PyTorch 侧的抽象来读；Megatron-Core 70f7a26 的 <code>parallel_state.py</code> 建组路径没有调用 DeviceMesh，它用 RankGenerator + create_group 达到同样的正交分组；其 FSDP/DTensor 适配层则使用 <code>DeviceMesh.from_group</code>（<code>megatron/core/distributed/torch_fully_sharded_data_parallel.py:81</code>）。后面的对比会一直区分这两条建组路径。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>DeviceMesh：n 维 rank 数组 + 维名 + 每维一组 process group</h2></div>
+  <p class="sec-sub">读完这节你应该能从一个 global rank 反推出坐标，并说出它在每个维度上和谁同组。</p>
+  <p>
+    <code>DeviceMesh</code> 的 docstring 说得很直接：mesh 是一个 n 维数组，数组里的每个值是默认 process group 的 global rank；每个维度上的通信可以分开进行（<code>torch/distributed/device_mesh.py:188-196</code>）。它遵循 SPMD：所有 rank 必须拿到同一张 mesh，不一致的 mesh 会静默 hang（同文件 <code>203-207</code>）。
+  </p>
+  <div class="eq">
+    mesh = [[0,1,2,3],<br>[4,5,6,7]]
+  </div>
+  <p class="eq-cap">PyTorch 文档里的 2×4 例子（<code>torch/distributed/device_mesh.py:228-242</code>）：第 0 维跨主机，第 1 维机内。沿第 0 维 reduce 会配对 <code>(0,4), (1,5), ...</code>；沿第 1 维 reduce 会配对 <code>(0,1,2,3)</code> 与 <code>(4,5,6,7)</code>。</p>
+
+  <h3>从 shape 到对象：init_device_mesh</h3>
+  <p>
+    <code>init_device_mesh(device_type, mesh_shape, mesh_dim_names=...)</code> 用 <code>mesh_shape</code> 的乘积生成长度为该乘积的 rank map：<code>torch.arange(layout.numel())</code>（<code>torch/distributed/device_mesh.py:1720-1725</code>）。这就是行主序的单位映射：rank 0 在坐标 <code>(0,0,...,0)</code>，最后一个 rank 在最后一格。维名不得重复，且长度与 shape 一致（同文件 <code>1691-1702</code>）。
+  </p>
+  <p>
+    一旦有了对象，常用接口是：<code>size(dim)</code> 取某一维大小（<code>1289-1292</code>）；<code>get_local_rank(dim)</code> 取当前 rank 在该维 group 内的序号（<code>1308-1326</code>）；<code>get_coordinate()</code> 取相对所有维的坐标（<code>1371-1376</code>）；<code>mesh["tp"]</code> 切出 1D 子网格（<code>770-789</code>）；<code>get_group("tp")</code> 取当前 rank 在该维的 process group（<code>846-899</code>）。当 <code>ndim &gt; 1</code> 时，<code>get_group()</code> 必须给维度，否则报错（<code>861-867</code>）。
+  </p>
+
+  <h3>group 是怎么生成的：固定其余维，只变一维</h3>
+  <p>
+    <code>_init_process_groups</code> 对每个维度调用一次 <code>_init_one_process_group</code>（<code>665-694</code>）。后者把该维的子布局重映射成 rank 张量 <code>pg_ranks_by_dim</code>，再对每个子组调用 <code>new_group</code>；每个 rank 都会为所有子组进入调用，但只保存包含自己的那个 group（<code>547-663</code>）。这就是为什么创建 group 是集合操作，不能只让组内 rank 参与。
+  </p>
+
+  <h3>3D/4D 布局：坐标是 rank 的分解</h3>
+  <p>以行主序的 <code>DP-TP-PP-CP</code> 为例，shape 为 <code>(dp, tp, pp, cp)</code> 时：</p>
+  <div class="eq">
+    rank = ((<span class="hl-a">dp</span> × TP + <span class="hl-b">tp</span>) × PP + <span class="hl-c">pp</span>) × CP + <span class="hl-b">cp</span>
+  </div>
+  <p class="eq-cap">
+    这是页面交互采用的<strong>简化布局</strong>；步长依次是 <code>TP·PP·CP</code>、<code>PP·CP</code>、<code>CP</code>、1。Megatron 的真实 rank 顺序由 <code>order</code> 字符串决定，函数签名默认是 <code>tp-cp-ep-dp-pp</code>（<code>megatron/core/parallel_state.py:645</code>），docstring 里的示例公式又是 <code>tp-dp-pp</code> 顺序（同文件 <code>293-309</code>）。换顺序就换步长，不能把这里的公式直接套到 Megatron 上。
+  </p>
+  <p>
+    3D 是 <code>CP=1</code> 的特例：<code>rank = dp·(TP·PP) + tp·PP + pp</code>。SC21 的 1T 配置是 <code>TP=8</code>、<code>PP=64</code>，所以 DP 每跨一格，rank 跳 <code>8×64</code>；这不是 Megatron 的默认顺序，只是把 3072 个 rank 摊成一张三维表的其中一种方式（Table 1）。
+  </p>
+  <p>
+    Megatron 的配置默认值也在同一层：<code>TransformerConfig</code> 继承 <code>ModelParallelConfig</code>（<code>transformer_config.py:61</code>），<code>tensor_model_parallel_size</code>、<code>pipeline_model_parallel_size</code>、<code>context_parallel_size</code> 默认都是 1（<code>model_parallel_config.py:59, 112, 129</code>）。没有 <code>data_parallel_size</code> 字段；DP 由 <code>world_size / (TP×PP×CP×gtp_remat)</code> 推出，默认 <code>gtp_remat=1</code>（<code>megatron/core/parallel_state.py:883-895</code>）。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <button class="rule-btn active" data-preset="3d" type="button">3D 示例<span class="r-sub">DP2 × TP4 × PP2 × CP1</span></button>
+      <button class="rule-btn" data-preset="4d" type="button">4D 示例<span class="r-sub">DP2 × TP2 × PP2 × CP2</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl"><label for="sim-dp">DP <span class="v" id="sim-dp-v">2</span></label><input id="sim-dp" type="range" min="1" max="8" step="1" value="2"></div>
+      <div class="ctrl"><label for="sim-tp">TP <span class="v" id="sim-tp-v">4</span></label><input id="sim-tp" type="range" min="1" max="8" step="1" value="4"></div>
+      <div class="ctrl"><label for="sim-pp">PP <span class="v" id="sim-pp-v">2</span></label><input id="sim-pp" type="range" min="1" max="8" step="1" value="2"></div>
+      <div class="ctrl"><label for="sim-cp">CP <span class="v" id="sim-cp-v">1</span></label><input id="sim-cp" type="range" min="1" max="8" step="1" value="1"></div>
+    </div>
+    <div class="slots s5">
+      <div class="slot"><div class="slot-name">world</div><div class="slot-val" id="sim-world">16</div></div>
+      <div class="slot"><div class="slot-name">DP 组数</div><div class="slot-val" id="sim-gdp">8</div></div>
+      <div class="slot"><div class="slot-name">TP 组数</div><div class="slot-val" id="sim-gtp">4</div></div>
+      <div class="slot"><div class="slot-name">PP 组数</div><div class="slot-val" id="sim-gpp">8</div></div>
+      <div class="slot"><div class="slot-name">CP 组数</div><div class="slot-val" id="sim-gcp">16</div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl wide"><label for="sim-rank">示例 rank <span class="v" id="sim-rank-v">13</span></label><input id="sim-rank" type="range" min="0" max="15" step="1" value="13"></div>
+    </div>
+    <div class="readout" data-src="简化布局，参照 torch/distributed/device_mesh.py:665-694">
+      <div class="r-head">rank 13 的坐标与同组 rank</div>
+      <div id="sim-out">
+        <div class="mesh-line"><span class="mesh-dim">坐标</span><code>(dp=1, tp=2, pp=1, cp=0)</code></div>
+        <div class="mesh-line"><span class="mesh-dim">DP</span>组大小 2 · 组数 8 · 你的组 <code>[5, 13]</code></div>
+        <div class="mesh-line"><span class="mesh-dim">TP</span>组大小 4 · 组数 4 · 你的组 <code>[9, 11, 13, 15]</code></div>
+        <div class="mesh-line"><span class="mesh-dim">PP</span>组大小 2 · 组数 8 · 你的组 <code>[12, 13]</code></div>
+        <div class="mesh-line"><span class="mesh-dim">CP</span>组大小 1 · 组数 16 · 你的组 <code>[13]</code></div>
+      </div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组参数，逐位对账 <span class="sum-sub">行主序 DP-TP-PP-CP；与上面的交互同公式</span></summary>
+    <div class="details-body">
+      <p><strong>A：DP=2、TP=4、PP=2、CP=1，示例 rank=13。</strong></p>
+      <p>world = 2×4×2×1 = 16。行主序步长：DP 8、TP 2、PP 1、CP 1。</p>
+      <p>坐标：dp = 13//8 = 1；tp = (13//2) % 4 = 2；pp = (13//1) % 2 = 1；cp = (13//1) % 1 = 0 → <code>(1,2,1,0)</code>。</p>
+      <p>DP 组：固定 tp=2、pp=1、cp=0，变 dp：<code>0×8+2×2+1=5</code>、<code>1×8+2×2+1=13</code> → <code>[5, 13]</code>。组数 16/2=8。</p>
+      <p>TP 组：固定 dp=1、pp=1、cp=0，变 tp：<code>8+0×2+1=9</code>、<code>8+1×2+1=11</code>、<code>8+2×2+1=13</code>、<code>8+3×2+1=15</code> → <code>[9, 11, 13, 15]</code>。组数 16/4=4。</p>
+      <p>PP 组：固定 dp=1、tp=2、cp=0，变 pp：<code>8+4+0=12</code>、<code>8+4+1=13</code> → <code>[12, 13]</code>。组数 16/2=8。</p>
+      <p>CP 组：固定 dp=1、tp=2、pp=1，变 cp：只有 <code>[13]</code>。组数 16/1=16（每个都是 singleton）。</p>
+      <p><strong>B：DP=2、TP=2、PP=2、CP=2，示例 rank=13。</strong></p>
+      <p>world = 2×2×2×2 = 16。步长：DP 8、TP 4、PP 2、CP 1。</p>
+      <p>坐标：dp = 13//8 = 1；tp = (13//4) % 2 = 1；pp = (13//2) % 2 = 0；cp = 13 % 2 = 1 → <code>(1,1,0,1)</code>。</p>
+      <p>DP 组：固定 tp=1、pp=0、cp=1，变 dp：<code>0×8+4+0+1=5</code>、<code>1×8+4+0+1=13</code> → <code>[5, 13]</code>。组数 16/2=8。</p>
+      <p>TP 组：固定 dp=1、pp=0、cp=1，变 tp：<code>8+0×4+0+1=9</code>、<code>8+1×4+0+1=13</code> → <code>[9, 13]</code>。组数 16/2=8。</p>
+      <p>PP 组：固定 dp=1、tp=1、cp=1，变 pp：<code>8+4+0+1=13</code>、<code>8+4+2+1=15</code> → <code>[13, 15]</code>。组数 16/2=8。</p>
+      <p>CP 组：固定 dp=1、tp=1、pp=0，变 cp：<code>8+4+0+0=12</code>、<code>8+4+0+1=13</code> → <code>[12, 13]</code>。组数 16/2=8。</p>
+      <p>注：交互里的 <code>//</code> 表示整数除法；页面用行主序 DP-TP-PP-CP 简化布局，不是 Megatron 的真实 rank 顺序（默认 <code>tp-cp-ep-dp-pp</code>，<code>megatron/core/parallel_state.py:645</code>）。</p>
+    </div>
+  </details>
+
+  <h3>4D 之后，为什么还要 mesh 这层抽象</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">表示</span><h4>一个 rank，四套成员关系</h4></div>
+      <p>3D 时还能用三个嵌套循环拼 group；4D 再多一层 CP，rank 的坐标和每个消费者的投影都变复杂。mesh 把「第几维」变成名字，消费者用 <code>mesh["dp"]</code> 或 <code>get_group("tp")</code> 取自己那一维，而不是各自重算 rank。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">组合</span><h4>子网格是可传递的接口</h4></div>
+      <p>FSDP 要 DP 子网格，TP/PP/CP 各要自己那一维；同一张 4D mesh 可以切出多个 1D/2D 子网格（<code>torch/distributed/device_mesh.py:770-789</code>）。这比把四个 rank 列表分别传给四个框架更容易保持顺序一致。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">PyTorch</span><h4>DeviceMesh 的答案</h4></div>
+      <p>对象化：shape、dim names、rank map、每维 group 都在一个 <code>DeviceMesh</code> 里；<code>get_coordinate()</code> 和 <code>get_group()</code> 是统一入口（<code>torch/distributed/device_mesh.py:188-242, 846-899</code>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Megatron</span><h4>RankGenerator 的答案</h4></div>
+      <p>生成器化：order 字符串 + mask 决定每维 rank 集合；<code>get_ranks("tp")</code> 返回列表，<code>create_group</code> 建组（<code>megatron/core/parallel_state.py:494-577, 236-270</code>）。这条 dense 建组路径没有 DeviceMesh 对象，但同样把维度显式化；Megatron-Core 的 FSDP/DTensor 适配层另行使用 <code>DeviceMesh.from_group</code>。</p>
+    </div>
+  </div>
+  <p>
+    所以「4D 需要 mesh 抽象」的准确说法是：4D 需要一个<strong>显式的维度表示</strong>。它可以是 PyTorch 的 <code>DeviceMesh</code> 对象，也可以是 Megatron 的 <code>RankGenerator</code> + order 字符串；关键是消费者不再各自维护一套隐式 rank 算术。抽象不减少通信，只减少「把 group 配错」和「加一维时改所有调用点」的成本。
+  </p>
+</section>
+
+<section class="block" id="groups">
+  <div class="sec-head"><span class="sec-num">04</span><h2>四组 group：谁固定、谁变化、通信什么</h2></div>
+  <p class="sec-sub">同一张网格上，DP/TP/PP/CP 只是固定另外三维、变化自己这一维。</p>
+  <p>
+    把 rank 写成坐标 <code>(dp, tp, pp, cp)</code> 后，某一维的 group 就是「其余坐标不变，只让这一维取遍 <code>0..size-1</code>」得到的 rank 集合。组大小等于该维大小，组数等于 <code>world_size / size</code>。下面这张表是页面整理的四个维度；右侧锚点给出 Megatron-Core 里对应的建组循环。
+  </p>
+  <p class="table-cap">§04 · 四维 group 家族（页面整理；源码锚点见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>维度</th><th>组大小</th><th>组数</th><th>固定</th><th>变化</th><th>组内通信</th><th>源码</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DP</td><td class="num">dp</td><td class="num">n/dp</td><td>tp, pp, cp</td><td>dp</td><td>梯度 all-reduce，每 batch 一次</td><td>SC21 §3.2；<code>parallel_state.py:1210-1226</code></td></tr>
+        <tr><td>TP</td><td class="num">tp</td><td class="num">n/tp</td><td>dp, pp, cp</td><td>tp</td><td>层内激活 all-reduce，前向 2 次、反向 2 次</td><td><code>parallel_state.py:1321-1330</code></td></tr>
+        <tr><td>PP</td><td class="num">pp</td><td class="num">n/pp</td><td>dp, tp, cp</td><td>pp</td><td>边界激活/梯度 p2p，每 microbatch 一次</td><td><code>parallel_state.py:1397-1408</code></td></tr>
+        <tr><td>CP</td><td class="num">cp</td><td class="num">n/cp</td><td>dp, tp, pp</td><td>cp</td><td>KV block ring / 序列交换；权重梯度并入 DP 组</td><td><code>parallel_state.py:1270-1283</code></td></tr>
+        <tr><td>EP（独立 expert grid）</td><td class="num">ep</td><td class="num">n/ep</td><td>tp, dp, pp</td><td>ep</td><td>token all-to-all dispatch / combine</td><td><code>parallel_state.py:950-976</code>（expert grid；all-to-all 见 MoE 层）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">表中 <code>parallel_state.py</code> 均指 <code>megatron/core/parallel_state.py</code>。EP 不在上面那张 dense 4D 网格里：Megatron 用单独的 expert RankGenerator（<code>megatron/core/parallel_state.py:950-976</code>），并且同一个 RankGenerator 不允许 EP 与 CP 同时大于 1（同文件 <code>508-509</code>）。所以 MoE 的“5D”不是一张均匀 mesh，而是 dense grid 与 expert grid 两套分组<span class="infer">推断</span>。</p>
+  <p>
+    CP 那一行有一个容易忽略的细节：CP rank 持有不同的序列块，但权重是复制的；因此权重梯度也要在 CP 之间求和。Megatron 的做法是把 CP 并进 DP 的权重梯度 all-reduce 组，而不是单独再做一次（<code>megatron/core/parallel_state.py:717-722</code>）。TP 的组内通信则是层内激活的 all-reduce：一个 Transformer 层前向 2 次、反向 2 次（TP 论文 §3）；SC21 §3.2 把每层每卡的 TP 通信量记为 <code>8bsh((t−1)/t)</code>。
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 700 540" role="img" aria-label="2D 与 3D mesh 的 group 高亮">
+      <text x="24" y="30" font-family="Inter, Noto Sans SC, sans-serif" font-size="16" font-weight="600" fill="var(--text)">2D mesh：DP × TP（8 ranks）</text>
+      <text x="24" y="50" font-family="Inter, Noto Sans SC, sans-serif" font-size="12" fill="var(--text-muted)">固定一维、变化另一维，就是一个 group</text>
+
+      <rect x="80" y="82" width="64" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="2"/>
+      <rect x="150" y="82" width="64" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="2"/>
+      <rect x="220" y="82" width="64" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="2"/>
+      <rect x="290" y="82" width="64" height="44" rx="8" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="2"/>
+      <rect x="80" y="132" width="64" height="44" rx="8" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="2"/>
+      <rect x="150" y="132" width="64" height="44" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="220" y="132" width="64" height="44" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="290" y="132" width="64" height="44" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="76" y="78" width="72" height="102" rx="10" fill="none" stroke="var(--c1)" stroke-width="2.5" stroke-dasharray="6 4"/>
+      <rect x="76" y="78" width="72" height="52" rx="10" fill="none" stroke="var(--accent)" stroke-width="2"/>
+
+      <text x="112" y="104" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">0</text>
+      <text x="182" y="104" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">1</text>
+      <text x="252" y="104" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">2</text>
+      <text x="322" y="104" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">3</text>
+      <text x="112" y="154" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">4</text>
+      <text x="182" y="154" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">5</text>
+      <text x="252" y="154" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">6</text>
+      <text x="322" y="154" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="15" font-weight="600" fill="var(--text)">7</text>
+
+      <text x="380" y="96" font-family="Inter, Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="var(--c2)">TP 组 [0,1,2,3]</text>
+      <text x="380" y="114" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">固定 dp/pp，变 tp</text>
+      <text x="380" y="148" font-family="Inter, Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="var(--c1)">DP 组 [0,4]</text>
+      <text x="380" y="166" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">固定 tp/pp，变 dp</text>
+      <text x="380" y="200" font-family="Inter, Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="var(--accent-deep)">rank 0 同属两组</text>
+      <text x="80" y="204" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-soft)">列 = TP，行 = DP</text>
+
+      <line x1="24" y1="232" x2="676" y2="232" stroke="var(--border)" stroke-width="1"/>
+
+      <text x="24" y="266" font-family="Inter, Noto Sans SC, sans-serif" font-size="16" font-weight="600" fill="var(--text)">3D mesh：DP × TP × PP（8 ranks）</text>
+      <text x="24" y="286" font-family="Inter, Noto Sans SC, sans-serif" font-size="12" fill="var(--text-muted)">同一 rank 同时属于 DP、TP、PP 三组；这里高亮 PP 组</text>
+
+      <line x1="160" y1="350" x2="230" y2="316" stroke="var(--border-strong)" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <line x1="290" y1="350" x2="360" y2="316" stroke="var(--border-strong)" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <line x1="290" y1="440" x2="360" y2="406" stroke="var(--border-strong)" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <line x1="160" y1="440" x2="230" y2="406" stroke="var(--border-strong)" stroke-width="1.5" stroke-dasharray="5 4"/>
+
+      <rect x="230" y="316" width="62" height="42" rx="7" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="3"/>
+      <rect x="298" y="316" width="62" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="230" y="364" width="62" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="298" y="364" width="62" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+
+      <rect x="160" y="350" width="62" height="42" rx="7" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="3"/>
+      <rect x="228" y="350" width="62" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="160" y="398" width="62" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="228" y="398" width="62" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"/>
+      <rect x="156" y="346" width="70" height="50" rx="10" fill="none" stroke="var(--accent)" stroke-width="2"/>
+
+      <line x1="191" y1="371" x2="261" y2="337" stroke="var(--c3)" stroke-width="3" stroke-dasharray="4 3"/>
+
+      <text x="261" y="337" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">1</text>
+      <text x="329" y="337" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">3</text>
+      <text x="261" y="385" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">5</text>
+      <text x="329" y="385" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">7</text>
+      <text x="191" y="371" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">0</text>
+      <text x="259" y="371" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">2</text>
+      <text x="191" y="419" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">4</text>
+      <text x="259" y="419" text-anchor="middle" dominant-baseline="central" font-family="JetBrains Mono, monospace" font-size="14" font-weight="600" fill="var(--text)">6</text>
+
+      <text x="390" y="336" font-family="Inter, Noto Sans SC, sans-serif" font-size="13" font-weight="600" fill="var(--c3)">PP 组 [0,1]</text>
+      <text x="390" y="354" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">固定 dp=0、tp=0，变 pp</text>
+      <text x="390" y="382" font-family="Inter, Noto Sans SC, sans-serif" font-size="12" font-weight="600" fill="var(--accent-deep)">rank 0 同属</text>
+      <text x="390" y="400" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--text-muted)">DP [0,4] · TP [0,2] · PP [0,1]</text>
+      <text x="160" y="465" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-soft)">前层 pp=0，后层 pp=1；数字是 global rank</text>
+
+      <rect x="160" y="486" width="12" height="12" rx="3" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.5"/>
+      <text x="178" y="496" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">DP 组</text>
+      <rect x="250" y="486" width="12" height="12" rx="3" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.5"/>
+      <text x="268" y="496" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">TP 组</text>
+      <rect x="340" y="486" width="12" height="12" rx="3" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="1.5"/>
+      <text x="358" y="496" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">PP 组</text>
+      <rect x="430" y="486" width="12" height="12" rx="3" fill="none" stroke="var(--accent)" stroke-width="2"/>
+      <text x="448" y="496" font-family="Inter, Noto Sans SC, sans-serif" font-size="11" fill="var(--text-muted)">当前 rank</text>
+    </svg>
+    <figcaption>
+      2D 与 3D mesh 的 group 高亮。上：2×4 网格来自 PyTorch 文档示例（<code>torch/distributed/device_mesh.py:228-242</code>），TP 组是同一行 <code>[0,1,2,3]</code>，DP 组是同一列 <code>[0,4]</code>。下：2×2×2 的 3D 网格，PP 组是同一 <code>(dp,tp)</code> 下沿深度变化的两格 <code>[0,1]</code>。颜色只表示维度，不表示性能。
+    </figcaption>
+  </figure>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>训练步：DP 分数据，PP 分阶段，TP 分层内，CP 分序列</h2></div>
+  <p class="sec-sub">顺序不是流水账；每一步的通信落在不同的 group 家族上。</p>
+  <p>
+    一个训练步可以按「数据 → 层间 → 层内 → 序列」读。注意这只是一种展开顺序：实际执行中 PP 的 microbatch、TP 的 all-reduce 和 CP 的 KV 交换会重叠，不会严格串行。
+  </p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">1</span><h4>DP 取数据</h4></div>
+      <p>每个 DP rank 取不同的 microbatch；同一 DP 组的模型副本相同，梯度在 batch 末汇合（SC21 §2.1）。DP 组内不传激活，只传梯度。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">2</span><h4>PP 切层</h4></div>
+      <p>层被切成阶段，microbatch 在阶段间流水；相邻阶段只传边界激活。GPipe 把 mini-batch 切成 <code>M</code> 个 micro-batch，在 <code>K</code> 个加速器上流水（GPipe §2.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">3</span><h4>TP 切层内</h4></div>
+      <p>每个阶段的每一层再按 TP 切 GEMM；行并行出口 all-reduce 部分和。一个 Transformer 层前向 2 次、反向 2 次 all-reduce（TP 论文 §3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">4</span><h4>CP 切序列</h4></div>
+      <p>序列被切成 <code>N_h</code> 块，每张卡持有一块；KV 块沿 ring 传给下一张卡，同时本地继续算 attention。Ring Attention §3 描述了这条重叠流水线，Algorithm 1 给出对应伪代码（Ring Attention §3）。</p>
+    </div>
+  </div>
+  <p>
+    反向时顺序反过来：TP 的 all-reduce 在反向再做两次（TP §3）；PP 反向发梯度；DP 在 batch 末 all-reduce 梯度；CP 的权重梯度并入 DP 组（<code>megatron/core/parallel_state.py:717-722</code>）。
+  </p>
+  <p class="table-cap">§05 · 训练步通信账（页面整理；parallel_state.py 指 megatron/core/parallel_state.py）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>维度</th><th>切什么</th><th>集合操作</th><th>频率</th><th>锚点</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DP</td><td>batch</td><td>梯度 all-reduce</td><td>每 batch</td><td>SC21 §2.1, §3.2；<code>parallel_state.py:1210-1226</code></td></tr>
+        <tr><td>TP</td><td>层内张量</td><td>激活 all-reduce</td><td>每层前向 2 + 反向 2</td><td>TP §3；SC21 §3.2</td></tr>
+        <tr><td>PP</td><td>层</td><td>边界激活 p2p</td><td>每 microbatch</td><td>GPipe §2.2；SC21 §2.2</td></tr>
+        <tr><td>CP</td><td>序列</td><td>KV ring send/recv</td><td>每层、每块</td><td>Ring Attention Algorithm 1</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="eq">
+    bubble ≈ (p − 1) / m
+  </div>
+  <p class="eq-cap">PP 的气泡：<code>p</code> 是阶段数，<code>m</code> 是每 pipeline 的 microbatch 数（SC21 §2.2.1；GPipe §2.3 写作 <code>O((K−1)/(M+K−1))</code>）。气泡是 PP 的固定成本，和 mesh 形状无关。</p>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>SC21 的 1T 配置：TP=8、PP=64、DP=6，3072 卡跑出 52% 峰值</h2></div>
+  <p class="sec-sub">先看配置如何落在网格上，再看吞吐；这是弱扩展实验，不是同模型强扩展。</p>
+  <p>
+    以下数字都来自 SC21 论文在 Selene 上的实测，不是 PyTorch 或 Megatron-Core 的基准。每个节点 8 张 80GB A100，节点内 NVLink/NVSwitch，节点间 8 条 200Gbps HDR InfiniBand，三层的 leaf/spine/core fat-tree；单卡 16 位峰值 312 TFLOP/s（§5）。Table 1 是弱扩展：模型从 1.7B 长到 1008B，GPU 数从 32 长到 3072。
+  </p>
+  <p class="table-cap">Table 1（SC21 v5）· Selene 上的弱扩展端到端吞吐；DP 列为页面派生 = GPU/(TP×PP)</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>参数 (B)</th><th>层数</th><th>hidden</th><th>heads</th><th>TP</th><th>PP</th><th>DP</th><th>GPU</th><th>batch</th><th>TFLOP/s/GPU</th><th>峰值 %</th><th>聚合 (PFLOP/s)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">1.7</td><td class="num">24</td><td class="num">2304</td><td class="num">24</td><td class="num">1</td><td class="num">1</td><td class="num">32</td><td class="num">32</td><td class="num">512</td><td class="num">137</td><td class="num">44</td><td class="num">4.4</td></tr>
+        <tr><td class="num">3.6</td><td class="num">30</td><td class="num">3072</td><td class="num">32</td><td class="num">2</td><td class="num">1</td><td class="num">32</td><td class="num">64</td><td class="num">512</td><td class="num">138</td><td class="num">44</td><td class="num">8.8</td></tr>
+        <tr><td class="num">7.5</td><td class="num">36</td><td class="num">4096</td><td class="num">32</td><td class="num">4</td><td class="num">1</td><td class="num">32</td><td class="num">128</td><td class="num">512</td><td class="num">142</td><td class="num">46</td><td class="num">18.2</td></tr>
+        <tr><td class="num">18.4</td><td class="num">40</td><td class="num">6144</td><td class="num">48</td><td class="num">8</td><td class="num">1</td><td class="num">32</td><td class="num">256</td><td class="num">1024</td><td class="num">135</td><td class="num">43</td><td class="num">34.6</td></tr>
+        <tr><td class="num">39.1</td><td class="num">48</td><td class="num">8192</td><td class="num">64</td><td class="num">8</td><td class="num">2</td><td class="num">32</td><td class="num">512</td><td class="num">1536</td><td class="num">138</td><td class="num">44</td><td class="num">70.8</td></tr>
+        <tr><td class="num">76.1</td><td class="num">60</td><td class="num">10240</td><td class="num">80</td><td class="num">8</td><td class="num">4</td><td class="num">32</td><td class="num">1024</td><td class="num">1792</td><td class="num">140</td><td class="num">45</td><td class="num">143.8</td></tr>
+        <tr><td class="num">145.6</td><td class="num">80</td><td class="num">12288</td><td class="num">96</td><td class="num">8</td><td class="num">8</td><td class="num">24</td><td class="num">1536</td><td class="num">2304</td><td class="num">148</td><td class="num">47</td><td class="num">227.1</td></tr>
+        <tr><td class="num">310.1</td><td class="num">96</td><td class="num">16384</td><td class="num">128</td><td class="num">8</td><td class="num">16</td><td class="num">15</td><td class="num">1920</td><td class="num">2160</td><td class="num">155</td><td class="num">50</td><td class="num">297.4</td></tr>
+        <tr><td class="num">529.6</td><td class="num">105</td><td class="num">20480</td><td class="num">128</td><td class="num">8</td><td class="num">35</td><td class="num">9</td><td class="num">2520</td><td class="num">2520</td><td class="num">163</td><td class="num">52</td><td class="num">410.2</td></tr>
+        <tr><td class="num">1008.0</td><td class="num">128</td><td class="num">25600</td><td class="num">160</td><td class="num">8</td><td class="num">64</td><td class="num">6</td><td class="num">3072</td><td class="num">3072</td><td class="num">163</td><td class="num">52</td><td class="num">502.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">Table 1 全表转录；DP 列是页面派生，不是原表列。弱扩展下每一行的模型和 GPU 数都不同，不能把相邻行当成强扩展曲线。</p>
+  <p>
+    先看配置怎么变：TP 在所有行都不超过 8；PP 从 1 长到 64；DP 从 32 缩到 6。论文的 Takeaway #1 解释了这个选择：TP 用到单机 GPU 数 <code>g</code>，再用 PP 跨机扩展（§3.2）。1008.0B 行（论文称 1T）的 <code>TP=8、PP=64、DP=6</code> 正好落在 3072 张 A100 上，每 GPU 163 TFLOP/s，达到峰值 52%，聚合 502 PFLOP/s（Table 1）。
+  </p>
+  <p>
+    论文把 1T 行更高的利用率归因于更大的矩阵乘：模型越大，GEMM 越大，通信时间相对计算时间没有明显上升（§5.1）。这不是说 mesh 本身提高了效率；mesh 只是把 3072 个 rank 分成了正确的通信组。
+  </p>
+
+  <p class="table-cap">Table 2（SC21 v5）· PTD 与 ZeRO-3（不带模型并行）的配对比较；按模型、batch、GPU 数配对读</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型 (B)</th><th>方案</th><th>模型并行大小</th><th>batch</th><th>GPU</th><th>microbatch</th><th>TFLOP/s/GPU</th><th>300B token 天数</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">174.6</td><td>ZeRO-3</td><td class="num">1</td><td class="num">1536</td><td class="num">384</td><td class="num">4</td><td class="num">144</td><td class="num">90</td></tr>
+        <tr><td class="num">174.6</td><td>ZeRO-3</td><td class="num">1</td><td class="num">1536</td><td class="num">768</td><td class="num">2</td><td class="num">88</td><td class="num">74</td></tr>
+        <tr><td class="num">174.6</td><td>ZeRO-3</td><td class="num">1</td><td class="num">1536</td><td class="num">1536</td><td class="num">1</td><td class="num">44</td><td class="num">74</td></tr>
+        <tr><td class="num">529.6</td><td>ZeRO-3</td><td class="num">1</td><td class="num">2560*</td><td class="num">640</td><td class="num">4</td><td class="num">138</td><td class="num">169</td></tr>
+        <tr><td class="num">529.6</td><td>ZeRO-3</td><td class="num">1</td><td class="num">2240</td><td class="num">1120</td><td class="num">2</td><td class="num">98</td><td class="num">137</td></tr>
+        <tr><td class="num">529.6</td><td>ZeRO-3</td><td class="num">1</td><td class="num">2240</td><td class="num">2240</td><td class="num">1</td><td class="num">48</td><td class="num">140</td></tr>
+        <tr><td class="num">174.6</td><td>PTD</td><td class="num">96</td><td class="num">1536</td><td class="num">384</td><td class="num">1</td><td class="num">153</td><td class="num">84</td></tr>
+        <tr><td class="num">174.6</td><td>PTD</td><td class="num">96</td><td class="num">1536</td><td class="num">768</td><td class="num">1</td><td class="num">149</td><td class="num">43</td></tr>
+        <tr><td class="num">174.6</td><td>PTD</td><td class="num">96</td><td class="num">1536</td><td class="num">1536</td><td class="num">1</td><td class="num">141</td><td class="num">23</td></tr>
+        <tr><td class="num">529.6</td><td>PTD</td><td class="num">280</td><td class="num">1120</td><td class="num">560</td><td class="num">1</td><td class="num">171</td><td class="num">156</td></tr>
+        <tr><td class="num">529.6</td><td>PTD</td><td class="num">280</td><td class="num">2240</td><td class="num">1120</td><td class="num">1</td><td class="num">167</td><td class="num">80</td></tr>
+        <tr><td class="num">529.6</td><td>PTD</td><td class="num">280</td><td class="num">2240</td><td class="num">2240</td><td class="num">1</td><td class="num">159</td><td class="num">42</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">* 530B 的 ZeRO-3 在 560 GPU、microbatch 4 下放不下，论文改用 640 GPU、batch 2560 给出估算（Table 2 注）。</p>
+  <p>
+    配对看最清楚：174.6B、1536 GPU、batch 1536、microbatch 1 时，PTD 141 vs ZeRO-3 44 TFLOP/s/GPU，300B token 的训练时间 23 vs 74 天；529.6B、2240 GPU、batch 2240、microbatch 1 时，159 vs 48，42 vs 140 天（Table 2）。这些是端到端数字，包含通信、数据加载和优化器；不是单纯的 GEMM 吞吐。
+  </p>
+  <p>
+    论文还报告：GPU 翻倍、batch 不变时，PTD 相对 ZeRO-3 的吞吐提升 70%，175B 与 530B 两个模型都是这个幅度（§5.2）。70% 是相对提升，条件是 batch 不变、只加倍 GPU 数；不是绝对百分点。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：mesh 是逻辑坐标，不是物理拓扑</h2></div>
+  <p class="sec-sub">形状、rank 顺序、group 创建、异构链路和框架衔接，五处会限制扩展效率。</p>
+
+  <h3>1. 形状：乘积必须对得上 world_size</h3>
+  <p>
+    <code>init_device_mesh</code> 用 <code>mesh_shape</code> 的乘积生成长度为该乘积的 rank map（<code>torch/distributed/device_mesh.py:1720-1725</code>）；代码里只检查 rank map 覆盖 layout 的大小（同文件 <code>305-309</code>），没有显式的 world_size 相等检查。页面把 <code>world_size = DP×TP×PP×CP</code> 当作使用前提。Megatron 则显式检查 <code>world_size % model_size == 0</code>，其中 <code>model_size = TP×PP×CP×gtp_remat</code>（默认 <code>gtp_remat=1</code>），DP 由除法得到（<code>megatron/core/parallel_state.py:883-895</code>）。
+  </p>
+  <p>
+    DeviceMesh 还要求 layout 正交、不重叠（<code>torch/distributed/device_mesh.py:297-300</code>），维名不重复且长度与 shape 一致（同文件 <code>1691-1702</code>）。这些约束不是形式主义：mesh 是矩形数组，每个 rank 必须恰好落在一格；如果 shape 或维名对不上，初始化会报错；如果 rank 顺序对不上，组可能建在错误的卡上。
+  </p>
+
+  <h3>2. 集合约束：group 创建不是本地操作</h3>
+  <p>
+    <code>new_group</code> 要求主组所有进程进入，并按相同顺序建组（<code>torch/distributed/distributed_c10d.py:7282-7285</code>）。DeviceMesh 对每一维遍历所有子组，每个 rank 都为所有子组调用 <code>new_group</code>（<code>torch/distributed/device_mesh.py:639-649, 665-694</code>）。因此 group 创建是集合操作：rank 顺序不一致会 hang；组数随 <code>world_size</code> 线性增长。
+  </p>
+  <p>
+    按当前 Megatron-Core 的四个主循环推算 1T 配置（TP=8、PP=64、DP=6、CP=1）：DP 512 组、TP 384 组、PP 48 组、CP 3072 个 singleton 组，四个循环合计 4016 个 NCCL group；默认 <code>create_gloo_process_groups=True</code> 时，DP 循环还会为每个 DP 组再建一个 Gloo group（<code>megatron/core/parallel_state.py:648, 1217-1220</code>），<code>create_group</code> 调用约 4528 次（<code>megatron/core/parallel_state.py:1210-1408</code>；不含 GTP weight-shard、embedding、model-parallel、DP-with-CP 等额外循环）。这是<span class="infer">推算</span>，不是 SC21 的实测；SC21 论文没有 CP 轴。它说明一件事：把 CP 设为 1 仍保留一维，就会为每个 rank 建一个 singleton group；不需要这一维时，最好别把它放进 shape。DeviceMesh 同样会对 size-1 维循环生成 singleton group（<code>665-694</code>）。
+  </p>
+
+  <h3>3. 拓扑：逻辑相邻不等于物理相邻</h3>
+  <p>
+    DeviceMesh 的 rank map 是逻辑数组；默认 <code>preserve_rank_order=False</code>，子组 rank 会按升序排序（<code>torch/distributed/device_mesh.py:213-220</code>），<code>new_group</code> 的 <code>sort_ranks</code> 默认也是 True（<code>torch/distributed/distributed_c10d.py:7332-7336</code>）。如果 rank 编号与物理拓扑不一致，排序后同组 rank 可能不再相邻；需要保序时要显式打开 <code>preserve_rank_order</code>。
+  </p>
+  <p>
+    Megatron 的 order 字符串就是干这个的：注释说最左边的 token 步长最小、rank 最相邻（<code>megatron/core/parallel_state.py:609-617</code>）；docstring 也提醒调用方让相邻 rank 落在同一台 DGX（<code>817-820</code>）。SC21 §5.9 在 1T/3072 GPU 上测得 PP 阶段间 p2p 的有效二分带宽 892 GB/s，而 DP 副本间 all-reduce 为 12.9 TB/s；同一张逻辑 mesh 上，不同维度的物理链路并不等价。SC21 §3.2 还说，TP 度数超过单机 GPU 数时，all-reduce 要走跨节点链路，开销可能不实用；Takeaway #1 建议 TP 用到单机 GPU 数 <code>g</code>，再用 PP 跨机。
+  </p>
+
+  <h3>4. 框架衔接：FSDP 要的是 DP 子网格</h3>
+  <p>
+    <code>fully_shard</code> 的 <code>mesh</code> 是 data parallel mesh；1D 时全分片，2D 时第 0 维复制、第 1 维分片，即 HSDP 的 <code>(Replicate(), Shard(0))</code>（<code>torch/distributed/fsdp/_fully_shard/_fully_shard.py:184-190</code>）。<code>_validate_mesh</code> 默认只接受 1D/2D mesh，2D 还要求有 <code>mesh_dim_names</code>（<code>torch/distributed/fsdp/_fully_shard/_fsdp_init.py:50-76</code>）；要传更大的 SPMD mesh，得用 <code>dp_mesh_dims</code> 指定 shard/replicate 维（<code>torch/distributed/fsdp/_fully_shard/_fully_shard.py:245-249</code>）。
+  </p>
+  <p>
+    因此，不带 <code>dp_mesh_dims</code> 时，4D mesh 不能直接塞给 FSDP；要么先切出 <code>mesh["dp"]</code> 子网格，要么用 <code>dp_mesh_dims</code> 指定 DP 维（它内部会切子网格，<code>torch/distributed/fsdp/_fully_shard/_fsdp_init.py:108-140</code>）。本页讨论的 Megatron dense 建组路径不走 FSDP：它用 RankGenerator + create_group 建自己的 DP/TP/PP/CP 组（<code>megatron/core/parallel_state.py:494-577, 1210-1464</code>），DDP/optimizer 直接消费这些组；Megatron-Core 另有一套 FSDP 适配层（<code>megatron/core/distributed/fsdp/</code>），会在 DP 组之上构造 <code>DeviceMesh</code>。两套实现不能混着读：DeviceMesh 是 PyTorch 的组合式并行接口，RankGenerator 是 Megatron 的建组器。
+  </p>
+
+  <h3>5. 什么时候别用 4D mesh</h3>
+  <p>
+    如果模型能放进单机、batch 足够大，DP 或 DP+TP 往往已经够用；再加 PP/CP 只会多一套 group 和一类通信，除非它们确实解决了显存或序列长度约束。如果物理拓扑不规则，先把 rank 顺序和子网格映射对清楚，再谈 4D；mesh 只表达逻辑分组，不表达链路带宽。
+  </p>
+  <p>
+    <strong>一句话边界：</strong>mesh 能把「谁和谁通信」表达清楚，但不能把慢链路变快，也不能消除 all-reduce、p2p、KV 交换的字节数。扩展效率最终由通信量、链路带宽、pipeline 气泡、CP 的块大小和 group 启动成本共同决定；维数不是越多越好。
+  </p>
+</section>
+
+<footer>
+  <div>Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM（SC21）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2104.04473">https://arxiv.org/abs/2104.04473</a>（数字以 v5 为准）<br>
+    PyTorch：commit 2ee7a63 · <code>torch/distributed/device_mesh.py</code>、<code>distributed_c10d.py</code>、<code>fsdp/_fully_shard/_fully_shard.py</code><br>
+    Megatron-Core：commit 70f7a26 · <code>megatron/core/parallel_state.py</code>、<code>model_parallel_config.py</code>、<code>transformer_config.py</code><br>
+    方法引用：TP arXiv 1909.08053 · GPipe arXiv 1811.06965 · Ring Attention arXiv 2310.01889（只用于机制说明，不引其数字，不锁定版本）<br>
+    笔记：<a href="/device_mesh/">/device_mesh/</a><br>
+    说明：交互采用行主序 DP-TP-PP-CP 简化布局，不是 Megatron 的真实 rank 顺序（默认 <code>tp-cp-ep-dp-pp</code>）；本页比较的 Megatron 建组路径由 RankGenerator + create_group 生成（<code>parallel_state.py</code> 未使用 DeviceMesh），Megatron-Core 的 FSDP/DTensor 适配层则使用 <code>DeviceMesh.from_group</code>。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var dp = document.getElementById('sim-dp');
+  var tp = document.getElementById('sim-tp');
+  var pp = document.getElementById('sim-pp');
+  var cp = document.getElementById('sim-cp');
+  var rank = document.getElementById('sim-rank');
+  var out = document.getElementById('sim-out');
+  if (!dp || !tp || !pp || !cp || !rank || !out) return;
+
+  var dpv = document.getElementById('sim-dp-v');
+  var tpv = document.getElementById('sim-tp-v');
+  var ppv = document.getElementById('sim-pp-v');
+  var cpv = document.getElementById('sim-cp-v');
+  var rankv = document.getElementById('sim-rank-v');
+  var worldEl = document.getElementById('sim-world');
+  var gdp = document.getElementById('sim-gdp');
+  var gtp = document.getElementById('sim-gtp');
+  var gpp = document.getElementById('sim-gpp');
+  var gcp = document.getElementById('sim-gcp');
+  if (!dpv || !tpv || !ppv || !cpv || !rankv || !worldEl || !gdp || !gtp || !gpp || !gcp) return;
+
+  var names = ['DP', 'TP', 'PP', 'CP'];
+  var presets = document.querySelectorAll('[data-preset]');
+
+  function decompose(r, sizes) {
+    var strides = [];
+    var s = 1;
+    var i;
+    for (i = sizes.length - 1; i >= 0; i--) {
+      strides[i] = s;
+      s = s * sizes[i];
+    }
+    var coords = [];
+    for (i = 0; i < sizes.length; i++) {
+      coords.push(Math.floor(r / strides[i]) % sizes[i]);
+    }
+    return { strides: strides, coords: coords };
+  }
+
+  function rankOf(coords, strides) {
+    var r = 0;
+    var i;
+    for (i = 0; i < coords.length; i++) {
+      r = r + coords[i] * strides[i];
+    }
+    return r;
+  }
+
+  function groupFor(dim, sizes, coords, strides) {
+    var group = [];
+    var k;
+    for (k = 0; k < sizes[dim]; k++) {
+      var c = coords.slice();
+      c[dim] = k;
+      group.push(rankOf(c, strides));
+    }
+    return group;
+  }
+
+  function render() {
+    var sizes = [
+      parseInt(dp.value, 10) || 1,
+      parseInt(tp.value, 10) || 1,
+      parseInt(pp.value, 10) || 1,
+      parseInt(cp.value, 10) || 1
+    ];
+    var world = sizes[0] * sizes[1] * sizes[2] * sizes[3];
+    rank.max = String(world - 1);
+    var r = parseInt(rank.value, 10);
+    if (isNaN(r) || r < 0) r = 0;
+    if (r > world - 1) r = world - 1;
+    rank.value = String(r);
+
+    dpv.textContent = String(sizes[0]);
+    tpv.textContent = String(sizes[1]);
+    ppv.textContent = String(sizes[2]);
+    cpv.textContent = String(sizes[3]);
+    rankv.textContent = String(r);
+    worldEl.textContent = String(world);
+    gdp.textContent = String(world / sizes[0]);
+    gtp.textContent = String(world / sizes[1]);
+    gpp.textContent = String(world / sizes[2]);
+    gcp.textContent = String(world / sizes[3]);
+
+    var d = decompose(r, sizes);
+    var lines = [];
+    lines.push('<div class="mesh-line"><span class="mesh-dim">坐标</span><code>(dp=' + d.coords[0] + ', tp=' + d.coords[1] + ', pp=' + d.coords[2] + ', cp=' + d.coords[3] + ')</code></div>');
+    var i;
+    for (i = 0; i < 4; i++) {
+      var group = groupFor(i, sizes, d.coords, d.strides);
+      lines.push('<div class="mesh-line"><span class="mesh-dim">' + names[i] + '</span>组大小 ' + sizes[i] + ' · 组数 ' + (world / sizes[i]) + ' · 你的组 <code>[' + group.join(', ') + ']</code></div>');
+    }
+    if (sizes[3] === 1) {
+      lines.push('<div class="mesh-line"><span class="mesh-dim">注</span>CP=1 仍占一维，会生成 ' + world + ' 个 singleton group；不需要时把 CP 从 shape 里去掉。</div>');
+    }
+    out.innerHTML = lines.join('');
+  }
+
+  function clearPresets() {
+    var i;
+    for (i = 0; i < presets.length; i++) {
+      presets[i].classList.remove('active');
+    }
+  }
+
+  var i;
+  for (i = 0; i < presets.length; i++) {
+    presets[i].addEventListener('click', function () {
+      var p = this.getAttribute('data-preset');
+      if (p === '4d') {
+        dp.value = '2';
+        tp.value = '2';
+        pp.value = '2';
+        cp.value = '2';
+        rank.value = '13';
+      } else {
+        dp.value = '2';
+        tp.value = '4';
+        pp.value = '2';
+        cp.value = '1';
+        rank.value = '13';
+      }
+      clearPresets();
+      this.classList.add('active');
+      render();
+    });
+  }
+
+  var inputs = [dp, tp, pp, cp, rank];
+  for (i = 0; i < inputs.length; i++) {
+    inputs[i].addEventListener('input', function () {
+      clearPresets();
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

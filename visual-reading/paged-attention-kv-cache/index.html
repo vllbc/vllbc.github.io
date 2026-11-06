@@ -1,0 +1,843 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 79.6 | Figure 2 | 100-20.4 |
+| 4 | Figure 8 | 2*2 |
+| 2 | Figure 8 | 4-2 |
+| 50.0 | Figure 8 | 2/4*100 |
+| 3 | Figure 8 | 2+1 |
+| 1 | Figure 8 | 4-3 |
+| 25.0 | Figure 8 | 1/4*100 |
+| 6 | Figure 8 | 3*2 |
+| 5 | Figure 8 | 3*2-1 |
+| 16.7 | Figure 8 | 1/6*100 |
+| 0.0 | Figure 8 | 3-3 |
+| 27 | Figure 16 | 5+22 |
+| 432 | Figure 16 | 27*16 |
+| 11 | Figure 16 | 432-80-341 |
+| 2.5 | Figure 16 | 11/432*100 |
+| 14 | Figure 16 | 3+11 |
+| 448 | Figure 16 | 14*32 |
+| 27 | Figure 16 | 448-80-341 |
+| 6.0 | Figure 16 | 27/448*100 |
+| 8 | Figure 16 | 2+6 |
+| 512 | Figure 16 | 8*64 |
+| 91 | Figure 16 | 512-80-341 |
+| 17.8 | Figure 16 | 91/512*100 |
+| 4 | Figure 16 | 1+3 |
+| 512 | Figure 16 | 4*128 |
+| 5 | Figure 16 | 80/16 |
+| 22 | Figure 16 | 21+1 |
+| 21 | Figure 16 | 22-1 |
+| 352 | Figure 16 | 22*16 |
+| 2 | Figure 16 | 128/64 |
+| 6 | Figure 16 | 384/64 |
+| 128 | Figure 16 | 2*64 |
+| 384 | Figure 16 | 6*64 |
+| 48 | Figure 16 | 128-80 |
+| 43 | Figure 16 | 384-341 |
+| 80 | Figure 16 | 5*16 |
+| 0 | Figure 16 | 80-80 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PagedAttention · 把 KV Cache 切成页，按 token 按需分配</title>
+<meta name="description" content="PagedAttention 与分页 KV Cache 精读：逻辑块、物理块、block table、按需分配、共享前缀、内部碎片，以及 vLLM V1（commit e740bad）与 2023 年论文实现的差异。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页专用：block table 模拟器、碎片条、SVG 文本 */
+code{overflow-wrap:anywhere}
+.bt-table{display:grid;grid-template-columns:64px 1fr 1fr;gap:8px;align-items:stretch;margin:14px 0 12px}
+.bt-head{font-family:"JetBrains Mono",monospace;font-size:11px;letter-spacing:.04em;color:var(--text-soft);text-transform:uppercase;padding:0 2px}
+.bt-label{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;color:var(--text-muted);display:flex;align-items:center;justify-content:center;background:var(--bg-soft);border-radius:8px;min-height:52px}
+.bt-chip{border:1.5px solid var(--border);border-radius:8px;background:var(--bg);padding:7px 8px;min-height:52px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;transition:background .25s ease,border-color .25s ease}
+.bt-chip .id{font-family:"JetBrains Mono",monospace;font-size:14px;font-weight:700;line-height:1.1}
+.bt-chip .note{font-family:"JetBrains Mono",monospace;font-size:9.5px;color:var(--text-soft);line-height:1.25;text-align:center;white-space:nowrap}
+.bt-chip.a{border-color:var(--c1);background:var(--c1-soft)}
+.bt-chip.a .id{color:var(--c1)}
+.bt-chip.b{border-color:var(--c2);background:var(--c2-soft)}
+.bt-chip.b .id{color:var(--c2)}
+.bt-chip.shared{border-color:var(--accent);background:var(--accent-soft)}
+.bt-chip.shared .id{color:var(--accent-deep)}
+.bt-chip.free{border-style:dashed;background:transparent;opacity:.65}
+.bt-chip.free .id{color:var(--text-soft)}
+.bt-pool{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0 10px}
+.bt-pool .slot{padding:8px 4px;min-height:58px}
+.bt-pool .slot .id{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;display:block;line-height:1.2}
+.bt-pool .slot .note{font-family:"JetBrains Mono",monospace;font-size:9px;color:var(--text-soft);display:block;line-height:1.25;margin-top:2px;white-space:nowrap}
+.bt-pool .slot.used-a{border-color:var(--c1);background:var(--c1-soft)}
+.bt-pool .slot.used-a .id{color:var(--c1)}
+.bt-pool .slot.used-b{border-color:var(--c2);background:var(--c2-soft)}
+.bt-pool .slot.used-b .id{color:var(--c2)}
+.bt-pool .slot.shared{border-color:var(--accent);background:var(--accent-soft)}
+.bt-pool .slot.shared .id{color:var(--accent-deep)}
+.bt-pool .slot.free{border-style:dashed;opacity:.6}
+.bt-pool .slot.free .id{color:var(--text-soft)}
+.bt-desc{min-height:4.8em;margin-bottom:8px!important}
+.bt-stats{font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--text-muted);line-height:1.8}
+.bt-stats strong{color:var(--accent-deep)}
+.act:disabled{opacity:.45;cursor:default}
+.frag-bar{display:flex;height:20px;border-radius:100px;overflow:hidden;background:var(--bg-soft);margin:16px 0 4px;border:1px solid var(--border)}
+.frag-bar i{display:block;height:100%;transition:width .3s ease}
+.frag-bar .used{background:var(--accent)}
+.frag-bar .waste{background:var(--c1-soft)}
+.frag-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--text-soft);margin-bottom:12px}
+.frag-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.bs-mode{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);margin-top:5px;min-height:1.2em}
+.svg-title{fill:var(--text);font-size:14px;font-weight:700}
+.svg-label{fill:var(--text-muted);font-size:12.5px;font-weight:600}
+.svg-body{fill:var(--text);font-size:14px}
+.svg-note{fill:var(--text-soft);font-size:11.5px}
+.svg-mono{fill:var(--text);font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:600}
+.svg-block rect{fill:var(--bg);stroke:var(--border);stroke-width:1.2}
+.svg-block.shared rect{fill:var(--accent-soft);stroke:var(--accent)}
+.svg-block.a rect{fill:var(--c1-soft);stroke:var(--c1)}
+.svg-block.b rect{fill:var(--c2-soft);stroke:var(--c2)}
+.svg-block.free rect{fill:transparent;stroke:var(--border);stroke-dasharray:4 3}
+.svg-arrow{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.infer{font-size:10.5px;font-family:"JetBrains Mono",monospace;color:var(--text-soft);border:1px solid var(--border);border-radius:4px;padding:0 4px;margin-left:3px}
+@media (max-width:520px){
+  .bt-table{grid-template-columns:48px 1fr 1fr;gap:6px}
+  .bt-chip .note{font-size:8.5px}
+  .bt-pool{grid-template-columns:repeat(4,1fr);gap:6px}
+  .bt-pool .slot{padding:6px 2px;min-height:54px}
+  .bt-pool .slot .note{font-size:8px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">PagedAttention</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#engineering">V1 实现</a>
+      <a href="#architecture">映射</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 推理 · SOSP 2023 · vLLM</span>
+  <h1>PagedAttention：把 KV Cache 切成页，让显存随 token 按需增长</h1>
+  <p class="hero-sub">
+    输出长度事先未知，旧系统按最大长度预留<strong>一整段连续显存</strong>；论文实测只有 20.4%–38.2% 的 KV 内存真正存了 token 状态。
+    PagedAttention 把每个序列的 KV Cache 切成固定大小的块，逻辑块经 block table 映射到任意物理块，从而按需分配、跨序列共享。
+    代价是 attention kernel 多一层间接寻址（延迟高 20–26%），以及每个序列最后一块的内部碎片。
+  </p>
+  <div class="meta">
+    <span>Kwon et al. · UC Berkeley</span>
+    <a href="https://arxiv.org/abs/2309.06180v1" target="_blank" rel="noopener">原文 arXiv 2309.06180v1 ↗</a>
+    <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">代码 vLLM ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    旧系统的浪费不止一种：按最大长度<strong>预留</strong>未来槽位、实际长度小于预留长度造成的<strong>内部碎片</strong>、以及 buddy allocator 产生的<strong>外部碎片</strong>。论文 Fig. 2 的 profiling 里，有效 KV 内存最低只有 <em>20.4%</em>。
+  </p>
+  <p>
+    PagedAttention 的关键不是把 KV Cache 搬走，而是<strong>取消「必须连续」这个约束</strong>：逻辑块按 token 顺序生长，block table 把每个逻辑块映射到任意物理块；attention kernel 按块分别读取，因此物理块可以不连续。
+  </p>
+  <p>
+    共享是 block table 的自然结果：多个逻辑块可以指向同一个物理块，用 <strong>ref count</strong> 记录引用；写入共享尾块时做 block 级 <strong>copy-on-write</strong>。parallel sampling、beam search、shared prefix 都建立在这一个机制上。
+  </p>
+  <p>
+    读这篇要分清两个时代：论文的默认块大小是 <strong>16</strong>，抢占可选 swap 或 recompute；当前 V1（commit e740bad）的 <strong>CacheConfig 默认是 64</strong>，block table 在 worker 侧，抢占路径是释放块后重算。算法思想没变，工程实现已经分叉。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="源码 vllm/config/cache.py:185">64<small>tokens</small></div>
+      <div class="k">V1 当前 CacheConfig 默认块大小；论文默认 16（§7.2），后端会约束可用块大小</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 2">79.6<small>%</small></div>
+      <div class="k">旧系统最差情况下被浪费的 KV 显存：100 − 20.4；实测范围为 20.4%–38.2% 有效</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§6.3">55.2<small>%</small></div>
+      <div class="k">Alpaca trace、OPT-13B、beam search 的 KV 内存节省上限</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>瓶颈不是算力，而是给未知长度的输出预留连续显存</h2></div>
+  <p class="sec-sub">读完这节你应该知道：KV Cache 为什么随请求线性膨胀，以及三种浪费各自发生在哪。</p>
+
+  <p>
+    以 OPT-13B 为例，单个 token 的 KV Cache 约 <strong>800 KB</strong>：22（key/value 两组）× 5120（hidden size）× 40（层）× 2（FP16 字节）。序列长到 2048 个 token，一个请求就要 <strong>1.6 GB</strong>（§3）。A100 的显存是几十 GB 量级；即使全部拿来放 KV，也只能同时容纳几十个请求。serving 的吞吐因此是 <strong>memory-bound</strong>，不是 compute-bound。
+  </p>
+
+  <p>更麻烦的是输出长度不可预知。旧系统只能按请求的<em>最大可能长度</em>预分配一段连续显存，于是出现三种浪费（Fig. 3）：</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">reserved</span><h4>预留槽位</h4></div>
+      <p>给未来生成的 token 留的位置。它最终会被用到，但在请求的整个生命周期里一直占着，别的请求用不了。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">internal</span><h4>内部碎片</h4></div>
+      <p>请求实际长度小于预分配的最大长度，尾部槽位永远空着。只有请求结束后才能确认，是纯浪费。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">external</span><h4>外部碎片</h4></div>
+      <p>不同请求的 chunk 大小不一，buddy allocator 留下的空洞无法被后续请求利用。这些空洞永远不会用来存生成的 token。</p>
+    </div>
+  </div>
+
+  <p>
+    论文的 profiling 把这三类浪费加在一起：在 §6.2 的实验里，旧系统只有 <strong>20.4%–38.2%</strong> 的 KV 内存真正存了 token 状态（§3.1 / Fig. 2）。最差情况下浪费 <strong>79.6%</strong>（100 − 20.4）。压缩（compaction）可以消除外部碎片，但 KV Cache 太大，在性能敏感的 serving 系统里搬运不现实；而且它仍然解决不了跨序列共享（§3.1）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键判断</span><h4>问题不是「KV Cache 太大」，而是「为了未知长度，必须先占住一整段」</h4></div>
+    <p>只要分配单位从「整个请求的最大长度」变成「固定大小的块」，系统就不需要在请求开始时知道它会生成多少 token；块可以随生成逐个追加，也可以在请求之间共享。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人不是没想到分页，而是被「必须连续」卡住</h2></div>
+  <p class="sec-sub">读完这节你应该知道：连续分配与分页的分界线，以及 OS 的虚拟内存为什么可以搬过来。</p>
+
+  <p>
+    当时的 serving 系统（Orca、FasterTransformer）把每个请求的 KV Cache 存成一个<strong>连续的 tensor</strong>，因为大多数深度学习算子要求 tensor 在内存里连续。输出长度又不可知，所以只能按最大序列长度静态预留。于是分配器看到的是一个个大小不一的连续 chunk，而不是可以任意拼接的页。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">连续 chunk</span><h4>简单，但把长度写死</h4></div>
+      <p>kernel 可以直接按基址 + 偏移寻址，实现简单；代价是请求开始时就得决定 chunk 多大。</p>
+      <p><strong>卡点：</strong>预留、内部碎片、外部碎片三者叠加；不同序列的 KV 存在各自连续空间里，<strong>无法共享</strong>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">分页</span><h4>把「连续」从物理层挪到逻辑层</h4></div>
+      <p>固定大小的块可以散落在物理显存任意位置；逻辑块按 token 顺序编号，block table 负责翻译。</p>
+      <p><strong>代价：</strong>每次 attention 读 KV 都要先查 block table；kernel 要处理非连续块和可变序列长度。</p>
+    </div>
+  </div>
+
+  <p>
+    这正是 OS 虚拟内存的做法：进程看到连续的逻辑页，物理页可以任意映射；页表负责翻译，物理页按需分配。论文把三个对象一一对应起来——<strong>块 = 页，token = 字节，请求 = 进程</strong>（§4.2）。区别在于，OS 的页表由硬件 MMU 走，vLLM 的 block table 由 attention kernel 自己查。
+  </p>
+
+  <p>
+    所以 PagedAttention 不是「把 KV Cache 变成连续」，而是反过来：<strong>让 attention 能直接读非连续块</strong>。只有 kernel 支持了，分页内存管理才有意义；否则 block table 只是摆设。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把逻辑块映射到物理块，浪费就从「最多 2048 槽」变成「最后一块的空槽」</h2></div>
+  <p class="sec-sub">读完这节你应该知道：PagedAttention 的块级注意力怎么算、block table 存什么，以及共享与 COW 如何工作。</p>
+
+  <p>
+    论文把每个序列的 KV Cache 切成固定大小的 <strong>KV block</strong>，每块装 <code>B</code> 个 token 的 key/value 向量。第 <code>j</code> 个 key block 记为 <code>K<sub>j</sub></code>，value block 记为 <code>V<sub>j</sub></code>。注意力不再一次读完整条序列，而是按块累加：
+  </p>
+
+  <div class="eq">
+    A<sub>i,j</sub> = exp(q<sub>i</sub><sup>⊤</sup>K<sub>j</sub> / √d) / Σ<sub>t=1..⌈i/B⌉</sub> exp(q<sub>i</sub><sup>⊤</sup>K<sub>t</sub>1 / √d)
+    <br>
+    o<sub>i</sub> = Σ<sub>j=1..⌈i/B⌉</sub> V<sub>j</sub>A<sub>i,j</sub><sup>⊤</sup>
+  </div>
+  <div class="eq-cap">Eq. 4：A<sub>i,j</sub> 是第 i 个 query 在第 j 个 KV block 上的注意力行向量；1 是全 1 向量，用来对块内 token 求和。kernel 按块读取 K<sub>j</sub>、V<sub>j</sub>，不要求它们在物理内存里相邻。</div>
+
+  <p>
+    每个请求维护一张 <strong>block table</strong>：第 <code>i</code> 个逻辑块指向哪个物理块，以及这个逻辑块已经填了多少个位置（§4.2）。逻辑块从 0 开始，随着新 token 从左到右填充；最后一个逻辑块可能只填了一部分，剩余槽位留给后续生成。物理块由 GPU 上的 block engine 统一划分成固定大小，因此可以按需分配，不需要为整个请求预留最大长度。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">Figure 6 的例子</span><h4>7 个 token 的 prompt，只占 2 个逻辑块</h4></div>
+    <p>prompt 有 7 个 token，块大小 <code>B=4</code>：逻辑块 0 装满 4 个，逻辑块 1 装 3 个、留 1 个空槽。vLLM 把它映射到物理块 7 和 1；第一次 decode 直接用逻辑块 1 的空槽；第二次 decode 时逻辑块 1 满了，才分配新的物理块 3。整个过程没有按 2048 预留。</p>
+  </div>
+
+  <p>
+    共享也来自这张表。多个逻辑块可以映射到同一个物理块，物理块上记一个 <strong>ref count</strong>。写入共享块时不能原地改，否则会污染其他序列；vLLM 做 block 级 <strong>copy-on-write</strong>：复制出一个新物理块，把 ref count 减一，再往新块里写。Fig. 8 的 parallel sampling 就是两个 sample 共享 prompt 的逻辑块 0、1，物理块 7、1 的 ref count 都是 2；A1 写尾块时复制出物理块 3，A2 再写时 ref 已经降到 1，直接原地写。
+  </p>
+
+  <p>
+    下面的模拟器把 Figure 8 的两个 sample 换写成两个请求 A/B——两者共享同一段 7-token 前缀，用同一套 block table 语义走一遍分配、共享、COW 和释放；块号仍沿用 7/1/3。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" role="group" aria-label="block table 分配步骤">
+      <button class="rule-btn active" data-bt-step="0">① 共享前缀<span class="r-sub">A/B → 7,1 · ref 2</span></button>
+      <button class="rule-btn" data-bt-step="1">② A 写入<span class="r-sub">COW → 3</span></button>
+      <button class="rule-btn" data-bt-step="2">③ B 写入<span class="r-sub">ref 1，原地写</span></button>
+      <button class="rule-btn" data-bt-step="3">④ 各自新增块<span class="r-sub">A→4 · B→5</span></button>
+      <button class="rule-btn" data-bt-step="4">⑤ A 完成<span class="r-sub">释放 3,4</span></button>
+      <button class="rule-btn" data-bt-step="5">⑥ B 完成<span class="r-sub">全部释放</span></button>
+    </div>
+
+    <div class="bt-table" aria-live="polite">
+      <div class="bt-head">逻辑块</div><div class="bt-head">请求 A</div><div class="bt-head">请求 B</div>
+      <div class="bt-label">L0</div>
+      <div class="bt-chip a" id="a0"><span class="id">P7</span><span class="note">4/4</span></div>
+      <div class="bt-chip b" id="b0"><span class="id">P7</span><span class="note">4/4</span></div>
+      <div class="bt-label">L1</div>
+      <div class="bt-chip a" id="a1"><span class="id">P1</span><span class="note">3/4 · COW</span></div>
+      <div class="bt-chip b" id="b1"><span class="id">P1</span><span class="note">3/4 · COW</span></div>
+      <div class="bt-label">L2</div>
+      <div class="bt-chip free" id="a2"><span class="id">—</span><span class="note">未分配</span></div>
+      <div class="bt-chip free" id="b2"><span class="id">—</span><span class="note">未分配</span></div>
+    </div>
+
+    <div class="bt-pool" aria-label="物理块池">
+      <div class="slot shared" id="p0"><span class="id">P0</span><span class="note">free</span></div>
+      <div class="slot used-a" id="p1"><span class="id">P1</span><span class="note">A+B · 3/4</span></div>
+      <div class="slot free" id="p2"><span class="id">P2</span><span class="note">free</span></div>
+      <div class="slot used-a" id="p3"><span class="id">P3</span><span class="note">free</span></div>
+      <div class="slot free" id="p4"><span class="id">P4</span><span class="note">free</span></div>
+      <div class="slot free" id="p5"><span class="id">P5</span><span class="note">free</span></div>
+      <div class="slot free" id="p6"><span class="id">P6</span><span class="note">free</span></div>
+      <div class="slot shared" id="p7"><span class="id">P7</span><span class="note">A+B · 4/4</span></div>
+    </div>
+
+    <div class="readout" data-src="Figure 8">
+      <div class="r-head">当前状态</div>
+      <p class="bt-desc" id="bt-desc">prompt 7 个 token 切成 2 个逻辑块。A/B 的逻辑块 0、1 都映射到物理块 7、1，ref=2；尾块只填了 3/4，标记为 COW。</p>
+      <p class="bt-stats">占用物理块 <strong id="bt-used">2</strong> · 共享块 <strong id="bt-shared">2</strong> · 相对无共享节省 <strong id="bt-saved">50.0%</strong></p>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="bt-next">下一步</button>
+      <button class="act ghost" id="bt-reset">重置</button>
+    </div>
+  </div>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    模拟器取 <code>B=4</code>、prompt 7 token、8 个物理块；把 Figure 8 的两个 sample 改写成请求 A/B，物理块 7/1/3 沿用 Figure 8 的编号。第 ④ 步的 4/5 是页面为展示「各自新增块」补的，不在 Figure 8 里。
+  </p>
+
+  <details>
+    <summary>手算：两组参数如何得到 25.0% 和 16.7% <span class="sum-sub">B=4，prompt=7</span></summary>
+    <div class="details-body">
+      <p><strong>口径：</strong>块节省 =（逻辑映射数 − 唯一物理块数）/ 逻辑映射数 × 100%，不是按字节算。逻辑映射数 = A、B 当前持有的逻辑块总数；唯一物理块数 = 两个请求实际占用的不同物理块数。</p>
+      <p><strong>组 1：A、B 各生成 1 个 token。</strong>共享期有 2×2 = 4 个逻辑映射，唯一物理块 2 个（7、1），节省 4−2 = 2 块，2/4 = <strong>50.0%</strong>。A 触发 COW 后：A 持有 7、3，B 持有 7、1；唯一物理块 3 个（7、3、1），逻辑映射仍是 4 个，节省 4−3 = 1 块，1/4 = <strong>25.0%</strong>。</p>
+      <p><strong>组 2：A、B 各生成 2 个 token。</strong>尾块写满后各自新增一块：A 持有 7、3、4，B 持有 7、1、5；逻辑映射 3×2 = 6 个，唯一物理块 5 个（7、3、4、1、5），节省 6−5 = 1 块，1/6 = <strong>16.7%</strong>。与 JS 在第 ④ 步的读数一致。</p>
+      <p>COW 只复制一个块（Figure 8 中复制物理块 1 的内容到物理块 3），不是复制整条 prompt；这也是论文强调「block 级 copy-on-write」的原因（§4.4）。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="engineering">
+  <div class="sec-head"><span class="sec-num">04</span><h2>工程上，block table 是一次间接寻址；V1 把它搬到了 worker</h2></div>
+  <p class="sec-sub">读完这节你应该知道：attention kernel 为分页付出什么代价、block size 如何权衡，以及论文与 V1 在哪些实现上分叉。</p>
+
+  <p>
+    分页不是免费的。PagedAttention kernel 要读 block table、按块跳转、处理变长序列，比连续内存的 attention 多出分支和间接寻址。论文的 microbenchmark 显示，attention kernel 的延迟比高度优化的 FasterTransformer 高 <strong>20–26%</strong>（§7.1 / Fig. 18a）。这个开销只落在 attention 算子，不落在 Linear 等算子上；端到端仍然被显存节省带来的更大 batch 抵消。
+  </p>
+
+  <p>
+    block size 是一个双向权衡（§7.2 / Fig. 18b）：太小，GPU 读 KV 的并行度不够；太大，内部碎片增加，能共享的边界也变粗。论文的结论是 <strong>16</strong> 在大多数负载上足够大、又足够小；ShareGPT trace 上 16–128 都能工作，Alpaca 上 16/32 表现好，更大的块会显著退化，因为序列比块还短。论文因此把 vLLM 的默认块大小设为 <strong>16</strong>。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">版本说明</span><h4>官方 PagedAttention 设计文档已标注 historical</h4></div>
+    <p><code>docs.vllm.ai/en/latest/design/paged_attention.html</code> 开头明确写着 «This is a historical document based on the original paper for vLLM. It no longer describes the code used in vLLM today.» 所以下面涉及当前行为的部分，一律以 commit <code>e740bad</code> 的源码为准，不拿 2023 年的文档当现状。</p>
+  </div>
+
+  <p>V1 的实现可以概括成一条链：</p>
+  <ul>
+    <li><strong>调度器要槽位。</strong><code>KVCacheManager.allocate_slots</code> 计算这次要新增多少 token、需要多少块，再从 <code>BlockPool</code> 取块（<code>vllm/v1/core/kv_cache_manager.py:401</code>；<code>vllm/v1/core/block_pool.py:681</code>）。</li>
+    <li><strong>块池管引用。</strong>每个 <code>KVCacheBlock</code> 带 <code>ref_cnt</code> 和 <code>block_hash</code>（<code>vllm/v1/core/kv_cache_utils.py:166</code>）。前缀命中时 <code>touch</code> 增加引用（<code>block_pool.py:774</code>）；请求结束或抢占时 <code>free_blocks</code> 减引用（<code>block_pool.py:798</code>）。</li>
+    <li><strong>前缀缓存按块哈希。</strong><code>cache_full_blocks</code> 把满块的哈希写进缓存（<code>block_pool.py:203</code>）；后续请求用同样的 token 前缀就能命中同一物理块。</li>
+    <li><strong>block table 在 worker 侧。</strong>调度器每步下发 <code>new_block_ids</code>（<code>vllm/v1/core/sched/output.py:146-156</code>）；worker 的 <code>BlockTable</code> 把物理块号追加成一行 dense tensor（<code>vllm/v1/worker/block_table.py:49</code>），再用 <code>compute_slot_mapping</code> 根据 token position 算出每个 token 的 (block, offset)（<code>block_table.py:153</code>；<code>vllm/v1/worker/gpu_model_runner.py:2250</code>）。</li>
+    <li><strong>抢占是重算。</strong><code>_preempt_request</code> 释放请求的块，把 <code>num_computed_tokens</code> 置 0，然后把请求放回 waiting queue（<code>vllm/v1/core/sched/scheduler.py:1876,1899</code>）。</li>
+  </ul>
+
+  <p>
+    V1 的 <code>CacheConfig.DEFAULT_BLOCK_SIZE</code> 是 <strong>64</strong>（<code>vllm/config/cache.py:185</code>），不是论文的 16。后端还会约束可用块大小：FlashAttention 后端声明接受 <code>MultipleOf(16)</code> 的块大小（<code>vllm/v1/attention/backends/flash_attn.py:357,367</code>）。因此读论文的 16-token 实验时，不要把它和今天 V1 的默认值混在一起。
+  </p>
+
+  <p>把论文语义与 V1 当前实现并列，差异集中在五处：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 1：论文（SOSP '23）与 V1 commit e740bad 的实现对照（页面整理，非论文表格）</caption>
+      <thead>
+        <tr><th>维度</th><th>论文 / 原始 vLLM</th><th>V1（commit e740bad）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>默认块大小</td><td>16 token（§7.2）</td><td>64 token（<code>vllm/config/cache.py:185</code>）</td></tr>
+        <tr><td>逻辑 → 物理映射</td><td>每请求一张 block table，条目含物理块号 + 已填位置数（§4.2）</td><td>调度器每步下发 <code>new_block_ids</code>；worker 的 <code>BlockTable</code> 只存物理块号，槽位由 position 算（<code>sched/output.py:146-156</code>；<code>worker/block_table.py:49,153</code>）</td></tr>
+        <tr><td>共享</td><td>ref count + block 级 COW；shared prefix 可预留物理块（§4.4 / Fig. 8, 10）</td><td>block hash 前缀缓存 + <code>ref_cnt</code>；本 commit 还有部分块 COW 路径（<code>block_pool.py:203</code>；<code>single_type_kv_cache_manager.py:460</code>）</td></tr>
+        <tr><td>抢占</td><td>swap 到 CPU，或重算（§4.5）</td><td>释放块 + <code>num_computed_tokens=0</code> + 重算（<code>sched/scheduler.py:1876-1899</code>）</td></tr>
+        <tr><td>block table 位置</td><td>KV manager 维护映射，workers 共享（§4.6）</td><td>调度器不持久化 dense table；worker 侧张量（<code>worker/block_table.py:49</code>）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    有一处容易误读：V1 目录里存在独立的 <code>vllm/v1/kv_offload/</code> 子系统，也有 <code>swap_blocks</code> 相关的 Triton kernel；但这不是论文 §4.5 的抢占式 swapping——论文的 swapping 是「抢占序列 → 把它的块换到 CPU → 需要时换回」，而 V1 调度器的 <code>_preempt_request</code> 走的是释放块后重算。两条路径不能互相代替。
+  </p>
+
+  <h3>块越大，最后一块的碎片上限越高</h3>
+  <p>
+    分页消除了「按最大长度预留」造成的巨额内部碎片，但没有消除<strong>每个序列最后一块</strong>的空槽：序列长度为 <code>L</code> 时，块内碎片是 <code>ceil(L/B)×B − L</code> 个槽位，最多 <code>B−1</code> 个。块越大，单序列尾部的浪费上限越大，能共享的粒度也越粗（§7.2）。下面用 Figure 16 的两个前缀长度 80 和 341 做示例计算——注意论文没有报告这两个百分比，这是页面按 <code>ceil</code> 规则算的演示。
+  </p>
+
+  <div class="sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label for="bs">块大小 B <span class="v" id="bs-val">64</span></label>
+        <input type="range" id="bs" min="0" max="3" step="1" value="2">
+        <div class="bs-mode" id="bs-mode">V1 默认</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-soft);margin-top:2px">16 · 32 · 64 · 128</div>
+      </div>
+      <div class="ctrl">
+        <label>示例序列长度</label>
+        <div class="mono" style="font-size:13px;color:var(--text-muted)">80 / 341 tokens<br><span style="font-size:11px;color:var(--text-soft)">Figure 16 的两个前缀长度</span></div>
+      </div>
+    </div>
+    <div class="frag-bar" aria-hidden="true">
+      <i class="used" id="bs-used-bar" style="width:82.2%"></i>
+      <i class="waste" id="bs-waste-bar" style="width:17.8%"></i>
+    </div>
+    <div class="frag-legend"><span><i style="background:var(--accent)"></i>有效 token 槽位</span><span><i style="background:var(--c1-soft)"></i>最后一块空槽</span></div>
+    <div class="readout" data-src="§7.2">
+      <div class="r-head">内部碎片（序列结束时）</div>
+      <p>分配 <strong id="bs-blocks">8</strong> 块 · <strong id="bs-slots">512</strong> 槽 · 空 <strong id="bs-waste">91</strong> 槽 · 碎片率 <strong id="bs-pct">17.8%</strong></p>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算：B=16 与 B=64 的碎片率 <span class="sum-sub">长度 80 / 341</span></summary>
+    <div class="details-body">
+      <p><strong>口径：</strong>每个序列按 <code>ceil(L/B)</code> 分配块，分配槽位 = 块数 × B，空槽 = 分配槽位 − 80 − 341；总碎片率 = 空槽 / 分配槽位 × 100%。这是页面示例，不是论文测得的碎片率。</p>
+      <p><strong>组 1：B=16。</strong>80 token → 5 块、80 槽、0 空槽；341 token → 21 个满块 + 1 个尾块 = 22 块、352 槽、11 空槽。合计 27 块、432 槽、11 空槽，11/432 = <strong>2.5%</strong>。</p>
+      <p><strong>组 2：B=64。</strong>80 token → 1 个满块 + 1 个尾块 = 2 块、128 槽、48 空槽；341 token → 5 个满块 + 1 个尾块 = 6 块、384 槽、43 空槽。合计 8 块、512 槽、91 空槽，91/512 = <strong>17.8%</strong>。</p>
+      <p>JS 的滑块在这两组参数下分别输出 2.5% 和 17.8%，与上面的手算逐位一致。B=32 和 B=128 的读数见 LEDGER。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="architecture">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条请求的生命周期：分配、映射、读取、释放</h2></div>
+  <p class="sec-sub">读完这节你应该知道：逻辑块、block table、物理块在一次请求里如何串起来，以及 worker 实际读的是什么。</p>
+
+  <figure>
+    <svg viewBox="0 0 580 400" role="img" aria-labelledby="svg-title svg-desc">
+      <title id="svg-title">逻辑块经 block table 映射到物理块</title>
+      <desc id="svg-desc">请求 A 的逻辑块 0、1、2 分别映射到物理块 7、3、4；请求 B 的逻辑块 0、1、2 映射到物理块 7、1、5。物理块 7 被两个请求共享，ref 为 2。</desc>
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <text x="8" y="20" class="svg-title">逻辑块 → block table → 物理块（B=4，7-token prompt + 2 个生成 token）</text>
+
+      <text x="8" y="46" class="svg-label">请求 A 的逻辑块</text>
+      <text x="210" y="46" class="svg-label">block table</text>
+      <text x="404" y="46" class="svg-label">GPU 物理块池</text>
+
+      <g class="svg-block a">
+        <rect x="8" y="64" width="176" height="74" rx="8"></rect>
+        <text x="20" y="88" class="svg-mono">逻辑块 0</text>
+        <text x="20" y="110" class="svg-note">token 0–3 · 4/4</text>
+      </g>
+      <g class="svg-block a">
+        <rect x="8" y="154" width="176" height="74" rx="8"></rect>
+        <text x="20" y="178" class="svg-mono">逻辑块 1</text>
+        <text x="20" y="200" class="svg-note">token 4–7 · 4/4 · COW → 新块</text>
+      </g>
+      <g class="svg-block a">
+        <rect x="8" y="244" width="176" height="74" rx="8"></rect>
+        <text x="20" y="268" class="svg-mono">逻辑块 2</text>
+        <text x="20" y="290" class="svg-note">token 8 · 1/4</text>
+      </g>
+
+      <rect x="210" y="64" width="160" height="254" rx="8" fill="var(--bg)" stroke="var(--border)" stroke-width="1.2"></rect>
+      <line x1="210" y1="98" x2="370" y2="98" stroke="var(--border)" stroke-width="1"></line>
+      <line x1="210" y1="168" x2="370" y2="168" stroke="var(--border)" stroke-width="1"></line>
+      <line x1="210" y1="238" x2="370" y2="238" stroke="var(--border)" stroke-width="1"></line>
+      <text x="222" y="87" class="svg-label">逻辑 → 物理</text>
+      <text x="358" y="87" class="svg-label" text-anchor="end">已填</text>
+      <text x="222" y="126" class="svg-mono">0 → 7</text>
+      <text x="358" y="126" class="svg-body" text-anchor="end">4/4</text>
+      <text x="222" y="196" class="svg-mono">1 → 3</text>
+      <text x="358" y="196" class="svg-body" text-anchor="end">4/4</text>
+      <text x="222" y="216" class="svg-note">COW 复制出 3</text>
+      <text x="222" y="266" class="svg-mono">2 → 4</text>
+      <text x="358" y="266" class="svg-body" text-anchor="end">1/4</text>
+
+      <path class="svg-arrow" d="M184 101 H208" marker-end="url(#arrow)"></path>
+      <path class="svg-arrow" d="M184 191 H208" marker-end="url(#arrow)"></path>
+      <path class="svg-arrow" d="M184 281 H208" marker-end="url(#arrow)"></path>
+
+      <path class="svg-arrow" d="M370 120 H390 V93 H402" marker-end="url(#arrow)"></path>
+      <path class="svg-arrow" d="M370 190 H388 V159 H402" marker-end="url(#arrow)"></path>
+      <path class="svg-arrow" d="M370 260 H386 V225 H402" marker-end="url(#arrow)"></path>
+
+      <g class="svg-block shared">
+        <rect x="404" y="64" width="82" height="58" rx="7"></rect>
+        <text x="445" y="87" class="svg-mono" text-anchor="middle">P7</text>
+        <text x="445" y="106" class="svg-note" text-anchor="middle">A+B · ref 2</text>
+      </g>
+      <g class="svg-block a">
+        <rect x="404" y="130" width="82" height="58" rx="7"></rect>
+        <text x="445" y="153" class="svg-mono" text-anchor="middle">P3</text>
+        <text x="445" y="172" class="svg-note" text-anchor="middle">A · 4/4</text>
+      </g>
+      <g class="svg-block a">
+        <rect x="404" y="196" width="82" height="58" rx="7"></rect>
+        <text x="445" y="219" class="svg-mono" text-anchor="middle">P4</text>
+        <text x="445" y="238" class="svg-note" text-anchor="middle">A · 1/4</text>
+      </g>
+      <g class="svg-block free">
+        <rect x="404" y="262" width="82" height="58" rx="7"></rect>
+        <text x="445" y="285" class="svg-mono" text-anchor="middle">P0</text>
+        <text x="445" y="304" class="svg-note" text-anchor="middle">free</text>
+      </g>
+
+      <g class="svg-block b">
+        <rect x="494" y="64" width="82" height="58" rx="7"></rect>
+        <text x="535" y="87" class="svg-mono" text-anchor="middle">P1</text>
+        <text x="535" y="106" class="svg-note" text-anchor="middle">B · 4/4</text>
+      </g>
+      <g class="svg-block b">
+        <rect x="494" y="130" width="82" height="58" rx="7"></rect>
+        <text x="535" y="153" class="svg-mono" text-anchor="middle">P5</text>
+        <text x="535" y="172" class="svg-note" text-anchor="middle">B · 1/4</text>
+      </g>
+      <g class="svg-block free">
+        <rect x="494" y="196" width="82" height="58" rx="7"></rect>
+        <text x="535" y="219" class="svg-mono" text-anchor="middle">P2</text>
+        <text x="535" y="238" class="svg-note" text-anchor="middle">free</text>
+      </g>
+      <g class="svg-block free">
+        <rect x="494" y="262" width="82" height="58" rx="7"></rect>
+        <text x="535" y="285" class="svg-mono" text-anchor="middle">P6</text>
+        <text x="535" y="304" class="svg-note" text-anchor="middle">free</text>
+      </g>
+
+      <text x="8" y="352" class="svg-note">请求 B 的 block table：逻辑块 0 → 7（与 A 共享，ref=2），1 → 1，2 → 5。</text>
+      <text x="8" y="372" class="svg-note">A 写逻辑块 1 时触发 COW，复制出 P3；B 后写时 ref=1，原地写入。</text>
+    </svg>
+    <figcaption>逻辑块经 block table 映射到非连续物理块。图中状态对应模拟器第 ④ 步：A 的 L0/L1/L2 → P7/P3/P4；B 的 L0/L1/L2 → P7/P1/P5。块大小 B=4，编号沿用 Figure 6/8 的示意。</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>算需求。</strong>调度器算出这一步每个请求要新增多少 token；<code>allocate_slots</code> 把 token 数换算成块数，先看前缀缓存能不能命中，再决定从空闲池取多少块（<code>kv_cache_manager.py:401</code>）。</li>
+    <li><strong>建映射。</strong>块池返回物理块 ID；调度器把 <code>new_block_ids</code> 放进 <code>SchedulerOutput</code>（<code>sched/output.py:146-156</code>）。worker 的 <code>BlockTable</code> 把 ID 追加到请求对应的行。</li>
+    <li><strong>算槽位。</strong><code>compute_slot_mapping</code> 用 token position 和 block size 算出每个 token 的物理槽位（<code>block_table.py:153</code>）。这样 block table 不需要额外存「已填几个」，位置由序列长度直接决定。</li>
+    <li><strong>读 KV。</strong>attention kernel 按 block table 逐块读 K/V；块之间不需要连续。每张 GPU 只存自己负责的 attention head 的 KV，但使用同一套 block ID（§4.6）。</li>
+    <li><strong>释放。</strong>请求结束或抢占时，<code>free_blocks</code> 把引用减一；ref 归零的未缓存块放回空闲队列前端（LIFO，利于 GPU 局部性），有哈希的缓存块放回后端等待 LRU 淘汰（<code>block_pool.py:798</code>）。</li>
+  </ol>
+
+  <p>
+    这张图也解释了为什么「逻辑块连续」不等于「物理块连续」：逻辑块 0、1、2 是请求视角的顺序，物理块 7、3、4 可以散落在显存任意位置；真正把两者连起来的是中间那张表。请求 B 只需要在它自己的 block table 里把 L0 指向 7，就能和 A 共享同一份 prompt KV。
+  </p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>收益在共享和长 prompt 上，不在所有负载上</h2></div>
+  <p class="sec-sub">读完这节你应该知道：论文的节省区间、吞吐数字，以及为什么有些场景收益会消失。</p>
+
+  <p>
+    先看共享带来的内存节省。论文在 OPT-13B 上对比了 Alpaca 和 ShareGPT 两条 trace：parallel sampling 只共享 prompt，beam search 还能共享生成中的分支，所以后者的节省明显更大（§6.3 / Fig. 15）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 2：共享带来的 KV 内存节省（OPT-13B；Alpaca 为 Figure 15，ShareGPT 为 §6.3 同组实验）</caption>
+      <thead>
+        <tr><th>工作负载</th><th>parallel sampling</th><th>beam search</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Alpaca</td><td class="num">6.1%–9.8%</td><td class="num">37.6%–55.2%</td></tr>
+        <tr><td>ShareGPT</td><td class="num">16.2%–30.5%</td><td class="num">44.3%–66.3%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    吞吐方面，论文报告的是「在保持相近 normalized latency 的前提下，能承受更高的 request rate」。ShareGPT 基本采样下，vLLM 相对 Orca (Oracle) 高 <strong>1.7–2.7×</strong>，相对 Orca (Max) 高 <strong>2.7–8×</strong>，相对 FasterTransformer 最高 <strong>22×</strong>（§6.2）。beam search 的共享更多，OPT-13B + Alpaca 上相对 Orca (Oracle) 从基本采样的 1.3× 提升到 width=6 的 2.3×（§6.3）。shared prefix 更长时收益更明显：LLaMA-13B + WMT16 英德翻译，80-token one-shot 前缀是 1.67×，341-token few-shot 前缀是 3.58×（§6.4 / Fig. 16）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 3：论文报告的吞吐（§6.2–§6.4；均为与 Orca / FasterTransformer 的对比）</caption>
+      <thead>
+        <tr><th>场景</th><th>对比对象</th><th>结果</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>ShareGPT，基本采样</td><td>Orca (Oracle) / Orca (Max)</td><td class="num">1.7–2.7× / 2.7–8×</td></tr>
+        <tr><td>ShareGPT，基本采样</td><td>FasterTransformer</td><td class="num">最高 22×</td></tr>
+        <tr><td>OPT-13B + Alpaca，beam width 6</td><td>Orca (Oracle)</td><td class="num">1.3× → 2.3×</td></tr>
+        <tr><td>LLaMA-13B + WMT16，前缀 80 / 341 token</td><td>Orca (Oracle)</td><td class="num">1.67× / 3.58×</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    两个反直觉的发现。第一，parallel sampling 的节省只有 6.1%–9.8%（Alpaca），远低于 beam search 的 37.6%–55.2%：前者只共享 prompt，decode 阶段每个 sample 仍要独立块；后者 beam 之间还能共享生成中的块（§6.3 / Fig. 15）。第二，OPT-175B + Alpaca 上 vLLM 相对 Orca 的优势变弱：这个配置显存足够大、序列又短，Orca 也能 batch 很多请求，系统从 memory-bound 变成 compute-bound（§6.2）。分页管理的收益，取决于「显存是不是瓶颈」。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它没有消灭碎片，只是把碎片限制在最后一块</h2></div>
+  <p class="sec-sub">读完这节你应该知道：PagedAttention 解决不了什么，以及什么时候不该把它当成万能药。</p>
+
+  <ul>
+    <li><strong>最后一块仍有内部碎片。</strong>固定大小的块消除了外部碎片（§4）；剩下的内部碎片落在每个序列的最后一个块，最多浪费 <code>B−1</code> 个槽位；块越大，单序列尾部的浪费上限越大，共享粒度也越粗（§7.2）。论文的 16 是在「GPU 并行度」和「碎片」之间的折中；V1 今天默认 64（<code>cache.py:185</code>），与论文的 16 不同。</li>
+    <li><strong>kernel 多一次间接寻址。</strong>attention kernel 的延迟比 FasterTransformer 高 20–26%（§7.1 / Fig. 18a）。这个开销只影响 attention 算子，但如果工作负载本来就 compute-bound，或者 attention 占比很高，分页的收益会被吃掉。</li>
+    <li><strong>共享要求前缀完全相同。</strong>论文的 block table 共享是「同一段 token 的 KV 映射到同一物理块」；V1 用 block hash 做前缀缓存（<code>block_pool.py:203</code>），本 commit 还出现了部分块 COW 的路径（<code>single_type_kv_cache_manager.py:460</code>），但都不是语义相似检索。前缀不同，就无法共享。</li>
+    <li><strong>V1 的抢占是重算，不是论文的 swapping。</strong><code>_preempt_request</code> 释放块并把 <code>num_computed_tokens</code> 置 0（<code>scheduler.py:1876,1899</code>）；论文 §4.5 的 swap-out/swap-in 在这个调度器路径里没有对应实现。V1 另有独立的 <code>kv_offload/</code> 子系统，但不要把它和抢占式 swapping 混为一谈。</li>
+    <li><strong>compute-bound 时收益消失。</strong>论文 §6.2 的 OPT-175B + Alpaca 就是一个例子：显存足够大、序列短，Orca 也能 batch 很多请求，vLLM 的优势不再明显。§8 也明确说，静态形状的训练或 compute-bound 的非 LLM 负载，引入分页反而可能因为间接寻址变慢。</li>
+    <li><strong>它不是压缩算法。</strong>PagedAttention 减少的是预留、碎片和重复存储；KV Cache 的总量仍然随 token 数线性增长。序列越长，单请求的 KV 还是越大，只是不再需要为「可能的最大长度」一次性买单。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">使用判断</span><h4>什么时候值得用分页</h4></div>
+    <p><strong>值得：</strong>输出长度方差大、并发请求多、有共享 prompt 或并行采样/beam search，而且系统是 memory-bound。</p>
+    <p><strong>要谨慎：</strong>序列普遍短于块大小、没有可共享前缀、工作负载 compute-bound，或者对 attention 延迟极其敏感。此时先调小 block size，再评估分页的间接寻址是否值得。</p>
+  </div>
+
+  <p>
+    最后回到版本问题：论文的 16-token 默认值、swap/recompute 双路径、每请求 block table，是 2023 年 SOSP 版本的语义；今天 V1 的 64-token 默认值、worker 侧 block table、抢占重算，是 <code>e740bad</code> 的实现。两者共享同一个核心思想——<strong>逻辑块与物理块解耦</strong>——但读数字和读代码时，不能把两个时代的细节混在一起。
+  </p>
+</section>
+
+<footer>
+  <div>Efficient Memory Management for Large Language Model Serving with PagedAttention</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2309.06180v1" target="_blank" rel="noopener">arXiv 2309.06180v1</a> · SOSP 2023 · Kwon et al. · UC Berkeley<br>
+    代码：<a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vllm-project/vllm</a>，页面核对 commit <code>e740bad</code><br>
+    笔记：<a href="/paged-attention/">paged attention</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============================================================
+     1) block table 模拟器：两个请求共享 7-token 前缀
+     ============================================================ */
+  var steps = [
+    {
+      a: [{ id: 7, note: '4/4' }, { id: 1, note: '3/4 · COW' }, null],
+      b: [{ id: 7, note: '4/4' }, { id: 1, note: '3/4 · COW' }, null],
+      refs: { 7: 2, 1: 2 },
+      owners: { 7: 'a', 1: 'a' },
+      pool: { 7: 'A+B · 4/4', 1: 'A+B · 3/4' },
+      desc: 'prompt 7 个 token 切成 2 个逻辑块。A/B 的逻辑块 0、1 都映射到物理块 7、1，ref=2；尾块只填了 3/4，标记为 COW。'
+    },
+    {
+      a: [{ id: 7, note: '4/4' }, { id: 3, note: '4/4 · copy' }, null],
+      b: [{ id: 7, note: '4/4' }, { id: 1, note: '3/4 · 待写' }, null],
+      refs: { 7: 2, 1: 1, 3: 1 },
+      owners: { 7: 'a', 1: 'b', 3: 'a' },
+      pool: { 7: 'A+B · 4/4', 1: 'B · 3/4', 3: 'A · 4/4' },
+      desc: 'A 写第 8 个 token，落在共享尾块 L1。ref(1)=2，触发 COW：分配物理块 3，复制 L1 的内容，ref(1) 降为 1。A 现在映射 7、3。'
+    },
+    {
+      a: [{ id: 7, note: '4/4' }, { id: 3, note: '4/4' }, null],
+      b: [{ id: 7, note: '4/4' }, { id: 1, note: '4/4 full' }, null],
+      refs: { 7: 2, 1: 1, 3: 1 },
+      owners: { 7: 'a', 1: 'b', 3: 'a' },
+      pool: { 7: 'A+B · 4/4', 1: 'B · 4/4', 3: 'A · 4/4' },
+      desc: 'B 也写第 8 个 token。此时 ref(1)=1，直接原地写入，不复制；L1 填满 4/4。'
+    },
+    {
+      a: [{ id: 7, note: '4/4' }, { id: 3, note: '4/4' }, { id: 4, note: '1/4' }],
+      b: [{ id: 7, note: '4/4' }, { id: 1, note: '4/4' }, { id: 5, note: '1/4' }],
+      refs: { 7: 2, 1: 1, 3: 1, 4: 1, 5: 1 },
+      owners: { 7: 'a', 1: 'b', 3: 'a', 4: 'a', 5: 'b' },
+      pool: { 7: 'A+B · 4/4', 1: 'B · 4/4', 3: 'A · 4/4', 4: 'A · 1/4', 5: 'B · 1/4' },
+      desc: 'A、B 各写第 9 个 token，尾块已满，各自分配新物理块：A→4，B→5。逻辑映射 6 个，唯一物理块 5 个。'
+    },
+    {
+      a: [null, null, null],
+      b: [{ id: 7, note: '4/4' }, { id: 1, note: '4/4' }, { id: 5, note: '1/4' }],
+      refs: { 7: 1, 1: 1, 5: 1 },
+      owners: { 7: 'b', 1: 'b', 5: 'b' },
+      pool: { 7: 'B · 4/4', 1: 'B · 4/4', 5: 'B · 1/4' },
+      desc: 'A 完成。释放 A 的块：7 的 ref 2→1，3、4 的 ref→0 回到空闲池。B 仍持有 7、1、5。'
+    },
+    {
+      a: [null, null, null],
+      b: [null, null, null],
+      refs: {},
+      owners: {},
+      pool: {},
+      desc: 'B 完成。所有块释放，8 个物理块全部空闲。'
+    }
+  ];
+
+  var btIdx = 0;
+  var btNext = document.getElementById('bt-next');
+  var btReset = document.getElementById('bt-reset');
+  var btDesc = document.getElementById('bt-desc');
+  var btUsed = document.getElementById('bt-used');
+  var btShared = document.getElementById('bt-shared');
+  var btSaved = document.getElementById('bt-saved');
+  var stepButtons = document.querySelectorAll('[data-bt-step]');
+
+  function renderChip(el, block, who, refs) {
+    if (!el) return;
+    var idEl = el.querySelector('.id');
+    var noteEl = el.querySelector('.note');
+    if (!block) {
+      el.className = 'bt-chip free';
+      if (idEl) idEl.textContent = '—';
+      if (noteEl) noteEl.textContent = '未分配';
+      return;
+    }
+    var ref = refs[block.id] || 0;
+    var shared = ref > 1;
+    el.className = 'bt-chip ' + (shared ? 'shared' : who);
+    if (idEl) idEl.textContent = 'P' + block.id;
+    if (noteEl) noteEl.textContent = block.note + (shared ? ' · ref ' + ref : '');
+  }
+
+  function renderPool(id, note, ref, owner) {
+    var el = document.getElementById('p' + id);
+    if (!el) return;
+    var cls = 'slot free';
+    if (ref > 1) cls = 'slot shared';
+    else if (ref === 1) cls = 'slot used-' + (owner || 'a');
+    el.className = cls;
+    var idEl = el.querySelector('.id');
+    var noteEl = el.querySelector('.note');
+    if (idEl) idEl.textContent = 'P' + id;
+    if (noteEl) noteEl.textContent = ref === 0 ? 'free' : note;
+  }
+
+  function renderBt(i) {
+    var s = steps[i];
+    if (!s) return;
+    renderChip(document.getElementById('a0'), s.a[0], 'a', s.refs);
+    renderChip(document.getElementById('a1'), s.a[1], 'a', s.refs);
+    renderChip(document.getElementById('a2'), s.a[2], 'a', s.refs);
+    renderChip(document.getElementById('b0'), s.b[0], 'b', s.refs);
+    renderChip(document.getElementById('b1'), s.b[1], 'b', s.refs);
+    renderChip(document.getElementById('b2'), s.b[2], 'b', s.refs);
+
+    var used = 0, shared = 0;
+    var id;
+    for (id in s.refs) {
+      if (Object.prototype.hasOwnProperty.call(s.refs, id)) {
+        used += 1;
+        if (s.refs[id] > 1) shared += 1;
+      }
+    }
+    for (id = 0; id < 8; id += 1) {
+      renderPool(Number(id), s.pool[id] || 'free', s.refs[id] || 0, s.owners[id]);
+    }
+
+    var logical = 0;
+    var k;
+    for (k = 0; k < 3; k += 1) {
+      if (s.a[k]) logical += 1;
+      if (s.b[k]) logical += 1;
+    }
+    var saved = logical > 0 ? (logical - used) / logical * 100 : 0;
+
+    if (btDesc) btDesc.textContent = s.desc;
+    if (btUsed) btUsed.textContent = String(used);
+    if (btShared) btShared.textContent = String(shared);
+    if (btSaved) btSaved.textContent = saved.toFixed(1) + '%';
+    if (btNext) btNext.disabled = i === steps.length - 1;
+
+    for (k = 0; k < stepButtons.length; k += 1) {
+      var btn = stepButtons[k];
+      var idx = Number(btn.getAttribute('data-bt-step'));
+      btn.classList.toggle('active', idx === i);
+    }
+  }
+
+  if (stepButtons.length) {
+    for (var si = 0; si < stepButtons.length; si += 1) {
+      stepButtons[si].addEventListener('click', function () {
+        btIdx = Number(this.getAttribute('data-bt-step'));
+        renderBt(btIdx);
+      });
+    }
+  }
+  if (btNext) {
+    btNext.addEventListener('click', function () {
+      if (btIdx < steps.length - 1) {
+        btIdx += 1;
+        renderBt(btIdx);
+      }
+    });
+  }
+  if (btReset) {
+    btReset.addEventListener('click', function () {
+      btIdx = 0;
+      renderBt(btIdx);
+    });
+  }
+  renderBt(0);
+
+  /* ============================================================
+     2) block size 滑块：最后一块的内部碎片
+     ============================================================ */
+  var B_VALUES = [16, 32, 64, 128];
+  var LENS = [80, 341];
+  var TOTAL_TOKENS = 421;
+  var bs = document.getElementById('bs');
+  var bsVal = document.getElementById('bs-val');
+  var bsMode = document.getElementById('bs-mode');
+  var bsBlocks = document.getElementById('bs-blocks');
+  var bsSlots = document.getElementById('bs-slots');
+  var bsWaste = document.getElementById('bs-waste');
+  var bsPct = document.getElementById('bs-pct');
+  var bsUsedBar = document.getElementById('bs-used-bar');
+  var bsWasteBar = document.getElementById('bs-waste-bar');
+
+  function renderBs() {
+    if (!bs) return;
+    var idx = Number(bs.value);
+    var B = B_VALUES[idx];
+    var totalBlocks = 0;
+    var totalSlots = 0;
+    var i;
+    for (i = 0; i < LENS.length; i += 1) {
+      var n = Math.ceil(LENS[i] / B);
+      totalBlocks += n;
+      totalSlots += n * B;
+    }
+    var waste = totalSlots - TOTAL_TOKENS;
+    var pct = totalSlots > 0 ? waste / totalSlots * 100 : 0;
+
+    if (bsVal) bsVal.textContent = String(B);
+    if (bsMode) {
+      if (B === 16) bsMode.textContent = '论文默认（§7.2）';
+      else if (B === 64) bsMode.textContent = 'V1 默认（cache.py:185）';
+      else bsMode.textContent = '论文测试过的块大小（§7.2）';
+    }
+    if (bsBlocks) bsBlocks.textContent = String(totalBlocks);
+    if (bsSlots) bsSlots.textContent = String(totalSlots);
+    if (bsWaste) bsWaste.textContent = String(waste);
+    if (bsPct) bsPct.textContent = pct.toFixed(1) + '%';
+    if (bsUsedBar) bsUsedBar.style.width = (TOTAL_TOKENS / totalSlots * 100) + '%';
+    if (bsWasteBar) bsWasteBar.style.width = (waste / totalSlots * 100) + '%';
+  }
+
+  if (bs) {
+    bs.addEventListener('input', renderBs);
+    renderBs();
+  }
+})();
+</script>
+</body>
+</html>

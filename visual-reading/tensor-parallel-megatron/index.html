@@ -1,0 +1,863 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.04 | Table 1 | 8.3/8 |
+| 2.08 | Table 1 | 8.3*2/8 |
+| 16.6 | §1 | 8.3*2 |
+| 6400 | §5.1 | 51200/8 |
+| 19.7 | Table 2 + §5.1 | 3072*6400/1000000 |
+| 4.98 | Table 3 | 15.79-10.81 |
+| 31.5 | Table 3 | (15.79-10.81)/15.79*100 |
+| 3.27 | Table 3 | 66.51-63.24 |
+| 5.17 | Table 3 | (66.51-63.24)/63.24*100 |
+| 3 | §5.1 | 77-74 |
+| 5 | Table 7 | 82-77 |
+| 3 | Table 7 | 80-77 |
+| 58.5 | Table 8 | 2.34/4*100 |
+| 37.3 | Table 8 | 2.98/8*100 |
+| 25.17 | megatron/core/tensor_parallel/layers.py:1213 | 4096*4096*12/8/1000000 |
+| 48.0 | megatron/core/tensor_parallel/layers.py:1213 | 4096*4096*12/8*2/1048576 |
+| 128.0 | Figure 4 + §4（b=8,s=2048；h=4096 为页面默认） | 8*2048*4096*2/1048576 |
+| 512.0 | Figure 4 + §4（b=8,s=2048；h=4096 为页面默认） | 4*8*2048*4096*2/1048576 |
+| 896.0 | Figure 4 + §4（b=8,s=2048；h=4096 为页面默认） | 8*8*2048*4096*2*(7/8)/1048576 |
+| 14.16 | megatron/core/tensor_parallel/layers.py:1608 | 3072*3072*12/8/1000000 |
+| 27.0 | megatron/core/tensor_parallel/layers.py:1608 | 3072*3072*12/8*2/1048576 |
+| 48.0 | Figure 4 + §5.1/§4（b=8,s=1024,h=3072） | 8*1024*3072*2/1048576 |
+| 192.0 | Figure 4 + §5.1/§4（b=8,s=1024,h=3072） | 4*8*1024*3072*2/1048576 |
+| 336.0 | Figure 4 + §5.1/§4（b=8,s=1024,h=3072） | 8*8*1024*3072*2*(7/8)/1048576 |
+| 16.0 | megatron/core/tensor_parallel/layers.py:1761 | 8*2048*4096*2/8/1048576 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v4">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tensor Parallel · Megatron：一层 Transformer 两种切法，留下 4 次 all-reduce</title>
+<meta name="description" content="Megatron 的列并行与行并行如何把一层 Transformer 的 MLP、QKV 和输出投影切到 TP 张卡上；每层 2 次前向、2 次反向 all-reduce 的通信账，以及 Megatron-Core 的 sequence parallel 与 TP overlap 改了什么。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的矩阵示意与槽位微调 */
+.tp-matrix-wrap{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin:14px 0 6px}
+.tp-matrix{display:grid;grid-template-columns:repeat(16,1fr);gap:2px;flex:none}
+.tp-matrix span{display:block;width:16px;height:13px;border-radius:2px;background:var(--border)}
+.tp-matrix span.k0{background:var(--c1)}
+.tp-matrix span.k1{background:var(--c2)}
+.tp-matrix span.k2{background:var(--c3)}
+.tp-matrix span.k3{background:var(--accent)}
+.tp-axis{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);line-height:1.55}
+.tp-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--text-soft);margin-top:8px}
+.tp-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
+.tp-legend i.k0{background:var(--c1)}
+.tp-legend i.k1{background:var(--c2)}
+.tp-legend i.k2{background:var(--c3)}
+.tp-legend i.k3{background:var(--accent)}
+.tp-note{font-size:12.5px;color:var(--text-soft);margin:4px 0 12px}
+.tp-small{font-size:12.5px;color:var(--text-soft)}
+/* 完整源码路径很长，窄屏允许在任意字符处折行，避免撑破 500px */
+.wrap code{overflow-wrap:anywhere;word-break:break-word}
+@media (max-width:600px){
+  .tp-matrix span{width:11px;height:9px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Tensor Parallel</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">切法</a>
+      <a href="#train">通信</a>
+      <a href="#arch">数据流</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>System · Megatron-LM · 2019 → Megatron-Core</span>
+  <h1>Tensor Parallel：一层 Transformer 的两种切法</h1>
+  <p class="hero-sub">
+    8.3B 的训练状态装不进一张 32GB V100。Megatron 没有把层拆开，而是把<strong>每层的矩阵按列、按行各切一刀</strong>（attention 与 MLP 两个子块各一套）：
+    第一刀让每张卡独立算 GeLU，第二刀在出口做一次 all-reduce 把部分和加回来。
+    代价是每层前向 2 次、反向 2 次 all-reduce；收益是每卡线性层权重和 GEMM 同步缩到 <code>1/TP</code>。
+  </p>
+  <div class="meta">
+    <span>Shoeybi et al., NVIDIA · arXiv 1909.08053 v4 · Megatron-Core 70f7a26</span>
+    <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a26" target="_blank" rel="noopener">源码 ↗</a>
+    <a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/api-guide/tensor_parallel.html" target="_blank" rel="noopener">文档 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    Transformer 的两块计算都能拆成<strong>连续两个 GEMM</strong>：MLP 是 <code>h → 4h → h</code>，attention 是 <code>QKV → 头内注意力 → 输出投影</code>。
+    Megatron 把第一个 GEMM <em>按列切</em>，让每张卡拿到一部分输出通道；把第二个 GEMM <em>按行切</em>，让每张卡消费自己那份输入。
+  </p>
+  <p>
+    这样切的关键收益是中间不需要同步：GeLU、softmax 都在本卡的通道/头上独立完成。整个子块只在行并行的出口做<strong>一次 all-reduce</strong>，把各卡的部分和相加。一个 Transformer 层有 attention 和 MLP 两个子块，所以前向 2 次、反向 2 次。
+  </p>
+  <p>
+    通信量按激活大小走：每次 <code>b·s·h</code> 个元素，和 TP 度数无关；线性层权重则按 <code>1/TP</code> 缩小。8.3B 模型只用 8 路 TP（8 卡）时弱扩展效率 <em>77%</em>；再叠 64 路 DP、共 512 张 V100 后为 <em>74%</em>（§5.1）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">1.04<small>B</small></div>
+      <div class="k">TP=8 时每卡约 1.04B（8.3B / 8，LN/bias 有复制）；fp16 权重约 2.08 GB</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 4">4<small>次</small></div>
+      <div class="k">每层前向 2 + 反向 2，每次 <code>b·s·h</code>；8.3B 配置（b=8、s=1024、h=3072）fp16 约 48.0 MiB/次</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.1">6,400</div>
+      <div class="k">TP=8 时每卡词表分片（51,200 / 8）；嵌入分片约 19.7M 参数（h=3072）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>装不下，不只是因为「层太多」</h2></div>
+  <p class="sec-sub">先分清两种内存压力：层数堆高了放不下，和单层本身放不下。TP 解决的是后者。</p>
+
+  <p>
+    论文的出发点是 8.3B 参数的 GPT-2 式模型（§1）。按 fp16 存权重约 16.6 GB（8.3B × 2 B 的换算，见 LEDGER），而训练时还要放梯度、Adam 的优化器状态和每层的激活；单张 32GB V100（§5）装不下。
+    一个自然的想法是把 72 层分给 8 张卡，每张卡放 9 层。但这样做的瓶颈不在权重总量，而在<strong>每一层自己的 GEMM 和激活</strong>：PP 不切单层，单层的 GEMM 和激活尺寸不变；论文因此做层内切分，并与 PP 正交组合。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>一个线性层切开后，部分和必须先相加，才能过非线性</h4></div>
+    <p>
+      线性层是 <code>Y = XA</code>。如果按行切 <code>A</code>、按列切 <code>X</code>，得到的是
+      <code>X₁A₁ + X₂A₂</code>；但 GeLU 是非线性的：
+      <code>GeLU(X₁A₁ + X₂A₂) ≠ GeLU(X₁A₁) + GeLU(X₂A₂)</code>。
+      于是必须在 GeLU 之前做一次同步，把部分和加起来——这正好是 TP 想避免的通信点（§3 Eq. 2–3）。
+    </p>
+  </div>
+
+  <p>
+    论文的解法是换一个切法：<strong>先按列切 A，让每张卡的输出通道互不重叠</strong>。这样 GeLU 可以分别在每张卡上做，不需要先求和；
+    紧接着的第二个 GEMM 按行切，让每张卡用自己的那部分 GeLU 输出继续算，最后只加一次部分和。切分点从「非线性之前」挪到了「整个子块的出口」。
+  </p>
+</section>
+
+<!-- ================= 02 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>数据并行复制模型，流水并行切层，都绕不开单层</h2></div>
+  <p class="sec-sub">把三条并行轴放在一起看，才能看出 TP 为什么必须存在，以及它为什么总和 DP、PP 一起出现。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Data Parallel</span><h4>复制模型，切 batch</h4></div>
+      <p>每张卡放完整模型，喂不同 batch，反向时 all-reduce 梯度。它能把吞吐做上去，但<strong>每卡显存不降</strong>：模型参数、优化器状态、激活都还是完整一份。</p>
+      <p class="tp-small">适合「单卡放得下、想跑得更快」。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Pipeline Parallel</span><h4>切层，流水执行</h4></div>
+      <p>把第 1–9 层放卡 0、第 10–18 层放卡 1，以此类推。每卡只存一部分层，但<strong>单层的张量仍要完整放得下</strong>；并且流水线有气泡，边界还要传激活。</p>
+      <p class="tp-small">适合「层数很多、单层还算得动」。</p>
+    </div>
+  </div>
+
+  <p>
+    还有一条更早的路线是 Mesh-TensorFlow：用一套语言描述张量在哪些维度上分布，再编译出集合通信。论文没有走编译器路线，而是直接在 PyTorch 的 Transformer 实现里插入几个 autograd 算子——
+    <code>f</code> 在前向是恒等、反向做 all-reduce；<code>g</code> 在前向做 all-reduce、反向是恒等。Transformer 层的切分只靠这两个共轭算子拼出来（§3、Code 1）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">Megatron 的位置</span><h4>层内并行：切矩阵，不切层</h4></div>
+    <p>
+      论文明确把 TP 定位成与 PP <strong>正交且互补</strong>（§3 末段）。实际训练时常见组合是：TP 放在机箱内（NVLink），PP 跨机箱，DP 放在最外层复制。
+      8.3B 的配置就是 8 路 TP × 64 路 DP = 512 张卡（Appendix B.1）。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 03 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>第一刀切列，第二刀切行，中间不通信</h2></div>
+  <p class="sec-sub">看懂 MLP 的这两刀，attention 的 QKV 和输出投影是同一套动作换个矩阵形状。</p>
+
+  <h3>MLP：列并行接行并行</h3>
+  <p>
+    第一层是 <code>Y = GeLU(XA)</code>，其中 <code>X</code> 是 <code>[b, s, h]</code>，<code>A</code> 是 <code>[h, 4h]</code>。
+    把 <code>A</code> 按列切成 <code>[A₁, …, A_TP]</code>，每张卡算自己的 <code>Yᵢ = GeLU(XAᵢ)</code>，输出通道是 <code>4h/TP</code>。
+    第二层是 <code>Z = YB</code>，<code>B</code> 是 <code>[4h, h]</code>；把 <code>B</code> 按行切成 <code>[B₁; …; B_TP]</code>，每张卡算 <code>Zᵢ = YᵢBᵢ</code>，最后把所有 <code>Zᵢ</code> 相加：
+  </p>
+
+  <div class="eq">
+    [Y₁, …, Y<sub>TP</sub>] = [GeLU(XA₁), …, GeLU(XA<sub>TP</sub>)]<br>
+    Z = <span class="hl-c">Σ<sub>i</sub> Y<sub>i</sub>B<sub>i</sub></span> &nbsp;=&nbsp; all-reduce(Z₁, …, Z<sub>TP</sub>)
+  </div>
+  <div class="eq-cap">§3 Eq. 3 与 Figure 3a；求和发生在行并行出口，GeLU 之前没有同步</div>
+
+  <p>
+    换成 PyTorch 的权重形状（<code>nn.Linear(in, out)</code> 的权重是 <code>[out, in]</code>），列并行切的是输出维：每卡权重 <code>[4h/TP, h]</code>；
+    行并行切的是输入维：每卡权重 <code>[h, 4h/TP]</code>。两者各自是 <code>4h²/TP</code> 个参数，一层 MLP 合计 <code>8h²/TP</code>。
+  </p>
+
+  <h3>Attention：QKV 按头切，输出投影按行切</h3>
+  <p>
+    Multi-head attention 的 Q、K、V 投影可以拼成一个 <code>[3h, h]</code> 的矩阵（GQA 时是 <code>[h + 2h<sub>kv</sub>, h]</code>）。
+    论文把 QKV 投影按<strong>列</strong>切，让每张卡只拿自己负责的那几个头：每卡 <code>h/TP</code> 个头，每个头在自己的卡上完成 <code>softmax(QKᵀ/√d)V</code>，头与头之间不需要通信（§3、Figure 3b）。
+    随后的输出投影是 <code>[h, h]</code> 矩阵，按<strong>行</strong>切，出口做一次 all-reduce。
+  </p>
+  <p>
+    在 Megatron-Core 里，这个融合的 QKV 层是列并行线性层：非 TE 路径为 <code>ColumnParallelLinear</code>（<code>megatron/core/tensor_parallel/layers.py:1107</code>），TE 路径为 <code>TELayerNormColumnParallelLinear</code>（<code>megatron/core/extensions/transformer_engine.py:1551</code>）；attention 模块里的实例化见 <code>megatron/core/transformer/attention.py:1871–1886</code>。
+    GQA 时权重按 <code>[q₁ q₂ k₁ v₁ | q₃ q₄ k₂ v₂ | …]</code> 交错排列，切分时再拆成 q、k、v 三段（<code>megatron/core/transformer/attention.py:2034–2035</code>、<code>megatron/core/transformer/attention.py:2084–2097</code>）。
+  </p>
+
+  <h3>Embedding：按词表切，logits 不进 all-gather</h3>
+  <p>
+    输入 embedding 的论文记法是 <code>[h, vocab]</code>，按词表维切分后每张卡存 <code>vocab/TP</code> 列；输入 token 落到别的卡上时置零，最后做一次 all-reduce 得到完整 embedding（§3）。
+    Megatron-Core 的 <code>VocabParallelEmbedding</code> 权重布局为 <code>[vocab, h]</code>，对应每卡 <code>vocab/TP</code> 行（<code>megatron/core/tensor_parallel/layers.py:351</code>）。
+    输出 logits 如果先算成 <code>[b, s, vocab]</code> 再 all-gather，通信量是 <code>b·s·vocab</code>，比激活大得多；论文把并行 GEMM 的输出直接接上交叉熵，只传 <code>b·s</code> 个标量损失，把这一块通信压掉了（§3）。Megatron-Core 对应 <code>vocab_parallel_cross_entropy</code>（<code>megatron/core/tensor_parallel/cross_entropy.py:251</code>）。
+  </p>
+
+  <h3>自己动手：改 hidden、FFN、TP，看每卡切到什么</h3>
+  <p>
+    下面的计算器只算线性层权重，不含 bias、LayerNorm、embedding；通信按 all-reduce 的 payload 算。切换 Column / Row 可以看同一块权重是沿哪个维度被切开。
+  </p>
+
+  <div class="sim" id="tp-sim">
+    <div class="sim-top" id="tp-view">
+      <button class="rule-btn active" data-view="column">ColumnParallel<span class="r-sub">切输出维：W [out/TP, in]</span></button>
+      <button class="rule-btn" data-view="row">RowParallel<span class="r-sub">切输入维：W [out, in/TP]</span></button>
+    </div>
+
+    <div class="tp-matrix-wrap">
+      <div class="tp-axis">输出维<br>out ↕</div>
+      <div class="tp-matrix" id="tp-matrix" aria-hidden="true"></div>
+      <div class="tp-axis">输入维 in →<br><span id="tp-matrix-label">按行分组（输出维）</span></div>
+    </div>
+    <div class="tp-legend">
+      <span><i class="k0"></i>卡 0</span>
+      <span><i class="k1"></i>卡 1</span>
+      <span><i class="k2"></i>卡 2</span>
+      <span><i class="k3"></i>卡 3</span>
+      <span>颜色只表示分组；TP &gt; 4 时循环使用</span>
+    </div>
+
+    <div class="slots s5">
+      <div class="slot">
+        <div class="slot-name">当前切分</div>
+        <div class="slot-val" id="slot-shape">[2048, 4096]</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">每卡权重 / 层</div>
+        <div class="slot-val" id="slot-weight">25.17 M<br>48.0 MiB</div>
+        <div class="bar"><i class="b1" id="share-bar" style="width:12.5%"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">单次 all-reduce</div>
+        <div class="slot-val" id="slot-payload">128.0 MiB</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">每层 4 次载荷</div>
+        <div class="slot-val" id="slot-total">512.0 MiB</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">每卡 ring 流量 / 层</div>
+        <div class="slot-val" id="slot-ring">896.0 MiB</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>hidden h <span class="v" id="h-v">4096</span></label>
+        <input type="range" id="h" min="1024" max="8192" step="128" value="4096">
+      </div>
+      <div class="ctrl">
+        <label>FFN f <span class="v" id="f-v">16384</span></label>
+        <input type="range" id="f" min="2048" max="32768" step="1024" value="16384">
+      </div>
+      <div class="ctrl">
+        <label>TP degree <span class="v" id="t-v">8</span></label>
+        <input type="range" id="t" min="0" max="4" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label>batch b <span class="v" id="b-v">8</span></label>
+        <input type="range" id="b" min="1" max="64" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label>seq s <span class="v" id="s-v">2048</span></label>
+        <input type="range" id="s" min="512" max="8192" step="128" value="2048">
+      </div>
+      <div class="ctrl">
+        <label>dtype <span class="v">fp16 · 2 B</span></label>
+        <div class="tp-small" style="padding-top:2px">手算块与读数同口径</div>
+      </div>
+    </div>
+
+    <div class="readout" id="tp-readout" data-src="megatron/core/tensor_parallel/layers.py:1213">
+      <div class="r-head">切分对象 &amp; 通信</div>
+      <div id="tp-view-title"><strong>ColumnParallelLinear</strong>：切输出维（权重矩阵的行）</div>
+      <div id="tp-view-body">每卡权重 <code>[f/TP, h]</code>，输出 <code>[b, s, f/TP]</code>；这一层内部不需要通信。</div>
+    </div>
+
+    <p class="tp-note">
+      公式：每层参数 <code>(2hf + 4h²)/TP</code>（attention 按 MHA：QKV <code>3h²</code> + 输出 <code>h²</code>）；单次 all-reduce 载荷 <code>b·s·h</code> 个元素；
+      每层 4 次（2 前向 + 2 反向）；ring 每卡搬运 <code>8·b·s·h·(TP−1)/TP</code> 个 fp16 元素。
+    </p>
+  </div>
+
+  <details>
+    <summary>手算两组参数<span class="sum-sub">结果与上方读数逐位一致</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>口径：</strong>只计线性层权重（不含 bias / LayerNorm / embedding；attention 按 MHA，QKV <code>3h²</code> + 输出 <code>h²</code>）；权重按 fp16 的 2 B/元素 折算。
+        通信只计 all-reduce payload；ring 流量采用 <code>2N(TP−1)/TP</code> 的带宽模型，不含 kernel 启动和网络延迟。这是公式计算器，不模拟 NCCL 的实际调度。
+      </p>
+      <p class="mono" style="font-size:12.5px;line-height:1.95">
+        <strong>A：h=4096，f=16384，TP=8，b=8，s=2048（页面默认值）</strong><br>
+        每卡每层参数 = (2×4096×16384 + 4×4096²) / 8 = 25,165,824 = 25.17 M<br>
+        fp16 权重 = 25,165,824 × 2 / 2²⁰ = 48.0 MiB<br>
+        单次 all-reduce = 8 × 2048 × 4096 × 2 / 2²⁰ = 128.0 MiB<br>
+        每层 4 次 = 4 × 128.0 = 512.0 MiB<br>
+        ring 每卡 = 8 × 8 × 2048 × 4096 × 2 × (8−1)/8 / 2²⁰ = 896.0 MiB
+      </p>
+      <p class="mono" style="font-size:12.5px;line-height:1.95">
+        <strong>B：h=3072，f=12288，TP=8，b=8，s=1024（Table 2 的 8.3B 宽度）</strong><br>
+        每卡每层参数 = (2×3072×12288 + 4×3072²) / 8 = 14,155,776 = 14.16 M<br>
+        fp16 权重 = 14,155,776 × 2 / 2²⁰ = 27.0 MiB<br>
+        单次 all-reduce = 8 × 1024 × 3072 × 2 / 2²⁰ = 48.0 MiB<br>
+        每层 4 次 = 4 × 48.0 = 192.0 MiB<br>
+        ring 每卡 = 8 × 8 × 1024 × 3072 × 2 × (8−1)/8 / 2²⁰ = 336.0 MiB
+      </p>
+      <p>
+        注意 B 组只换了宽度，没有算 72 层、没有算 embedding 和优化器状态；它对应的是「一层 Transformer 的线性层」这笔账。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04 通信 ================= -->
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>每层都要同步，所以 TP 被关在 NVLink 机箱里</h2></div>
+  <p class="sec-sub">TP 的通信频率远高于 DP：不是每个 step 一次，而是每个 Transformer 层 4 次。这决定了它通常只放在机箱内的 8 张卡上。</p>
+
+  <h3>一张层内的通信账</h3>
+  <p>
+    记激活的 hidden 为 <code>h</code>、micro-batch 为 <code>b</code>、序列长为 <code>s</code>、元素字节数为 <code>d</code>。每次 all-reduce 的张量是 <code>[b, s, h]</code>，
+    每层前向 2 次、反向 2 次，所以每层每卡的 payload 是 <code>4·b·s·h·d</code> 字节；按 ring all-reduce 的带宽模型，每卡实际搬运约 <code>8·b·s·h·d·(TP−1)/TP</code> 字节。
+    这个量只随 <code>b·s·h</code> 增长，<strong>不随 TP 度数下降</strong>——TP 降低了每卡的 GEMM，但没有降低每卡要同步的激活。
+  </p>
+
+  <div class="eq">
+    V<sub>payload</sub> = 4 · b · s · h · d &nbsp;&nbsp;&nbsp;&nbsp;
+    V<sub>ring</sub> ≈ 8 · b · s · h · d · <span class="hl-c">(TP−1)/TP</span>
+  </div>
+  <div class="eq-cap">4 次来自 Figure 4 与 §3；ring 系数 2(TP−1)/TP 是标准 ring all-reduce 的每卡搬运量</div>
+
+  <p>
+    这就是 TP 与 DP 的物理差别：DP 的梯度 all-reduce 每个 step 一次，张量和参数同大；TP 的 all-reduce 每层 4 次，张量和激活同大。
+    层数一多，TP 的通信次数是 <code>4 × layers</code>，所以它对延迟和带宽都敏感。论文的 512 卡集群里，机箱内 NVSwitch 是 300 GB/s，跨机箱 InfiniBand 是 100 GB/s（§5），8 路 TP 可以放在一个 DGX-2H 机箱内。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">TP</span><h4>切每层的矩阵</h4></div>
+      <p>每层 4 次集合通信，张量 <code>[b,s,h]</code>；延迟敏感，放在 NVLink 域内。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PP / DP</span><h4>切层 / 切 batch</h4></div>
+      <p>PP 只在层边界传激活，DP 每个 step 传一次梯度；都可以跨机箱，常放在 TP 外层。</p>
+    </div>
+  </div>
+
+  <h3>Megatron-Core 加了什么：sequence parallel 与 TP overlap</h3>
+  <p>
+    原始 Megatron-LM 的 TP 只切矩阵，LayerNorm、dropout、残差这些逐元素操作仍在每张卡上<strong>完整复制</strong>（§3）。Megatron-Core 的 <code>sequence_parallel</code> 把这些区域的激活沿序列维再切一刀：
+    列并行层在 forward 前做 all-gather 把序列拼回来（<code>megatron/core/tensor_parallel/layers.py:697–698</code>），行并行层在出口做 reduce-scatter（<code>megatron/core/tensor_parallel/layers.py:1761–1764</code>），反向对应互换（<code>megatron/core/tensor_parallel/mappings.py:528–549</code>）。
+    配置项的注释直接指向 Korthikanti et al. 2022 的 <em>Reducing Activation Recomputation in Large Transformer Models</em>（<code>megatron/core/model_parallel_config.py:123–127</code>）。
+  </p>
+  <p>
+    结果是：残差流激活从每卡 <code>b·s·h</code> 降到 <code>b·s·h/TP</code>；通信字节不变（4 次 all-reduce 换成 2 次 AG + 2 次 RS 的前向，反向再各两次），但集合通信的<strong>调用次数从 4 变成 8</strong>。
+    省下的是显存，不是带宽。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top" id="sp-btns">
+      <button class="rule-btn active" data-sp="off">TP only<span class="r-sub">每层 4× all-reduce</span></button>
+      <button class="rule-btn" data-sp="on">TP + sequence parallel<span class="r-sub">AG / reduce-scatter</span></button>
+    </div>
+    <div class="slots s3">
+      <div class="slot">
+        <div class="slot-name">残差流激活 / 卡</div>
+        <div class="slot-val" id="sp-act">128.0 MiB</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">每层前向集合通信</div>
+        <div class="slot-val" id="sp-ops">2× all-reduce</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">每卡 ring 流量 / 层</div>
+        <div class="slot-val" id="sp-bw">896.0 MiB</div>
+      </div>
+    </div>
+    <div class="readout" data-src="megatron/core/tensor_parallel/mappings.py:528">
+      <div class="r-head">固定示例</div>
+      <div id="sp-msg">h=4096，b=8，s=2048，TP=8，fp16。TP only：残差/LayerNorm 区域每卡保留完整 <code>b·s·h</code>，每层 4 次 all-reduce，每卡 ring 流量 896.0 MiB。</div>
+    </div>
+  </div>
+
+  <p>
+    另一个 Core 侧的变化是 <code>tp_comm_overlap</code>：把 all-gather / reduce-scatter 与相邻 GEMM 流水起来，用 Transformer Engine 的通信计算重叠能力，而不是等 GEMM 算完再发集合通信（<code>megatron/core/model_parallel_config.py:325–338</code>）。
+    论文的实现描述只讲到「把通信插进 autograd 图」（§3），没有提通信重叠；这是工程实现层面的差异，不改变上面的切分数学。
+  </p>
+
+  <p class="tp-note">源码锚点：Megatron-Core commit <code>70f7a26</code>。路径均从仓库根写全，例如 <code>megatron/core/tensor_parallel/layers.py</code>。</p>
+</section>
+
+<!-- ================= 05 数据流 ================= -->
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>把两条子块画成同一条数据流</h2></div>
+  <p class="sec-sub">MLP 和 attention 的矩阵形状不同，但都是「列并行 → 本地非线性 → 行并行 → all-reduce」。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 560" role="img" aria-label="MLP 的列并行到行并行数据流，以及 attention 的 QKV 切分与输出投影">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--text-soft)"></path>
+        </marker>
+        <marker id="arrA" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--accent)"></path>
+        </marker>
+      </defs>
+
+      <!-- Panel A -->
+      <text x="20" y="26" font-size="15" font-weight="700" fill="var(--text)">MLP：ColumnParallel → GeLU → RowParallel</text>
+      <text x="20" y="47" font-size="11.5" fill="var(--text-soft)">每张卡只算自己那一段通道；同步只在行并行出口</text>
+
+      <rect x="20" y="155" width="84" height="52" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="62" y="177" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">X</text>
+      <text x="62" y="194" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">[b,s,h]</text>
+
+      <!-- lane 0 -->
+      <rect x="145" y="80" width="104" height="44" rx="7" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="197" y="99" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--c1)">A₀ · rank 0</text>
+      <text x="197" y="115" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[h × 4h/TP]</text>
+      <rect x="279" y="80" width="70" height="44" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="314" y="99" text-anchor="middle" font-size="11" fill="var(--text)">GeLU</text>
+      <text x="314" y="115" text-anchor="middle" font-size="10" fill="var(--text-soft)">本地</text>
+      <rect x="379" y="80" width="104" height="44" rx="7" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="431" y="99" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--c1)">B₀ · rank 0</text>
+      <text x="431" y="115" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[4h/TP × h]</text>
+      <rect x="513" y="80" width="86" height="44" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="556" y="99" text-anchor="middle" font-size="10.5" fill="var(--text)">部分和 Z₀</text>
+      <text x="556" y="115" text-anchor="middle" font-size="10" fill="var(--text-soft)">[b,s,h]</text>
+
+      <!-- lane i -->
+      <rect x="145" y="160" width="104" height="44" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="197" y="179" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--accent-deep)">Aᵢ · rank i</text>
+      <text x="197" y="195" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[h × 4h/TP]</text>
+      <rect x="279" y="160" width="70" height="44" rx="7" fill="var(--bg-surface)" stroke="var(--accent)"></rect>
+      <text x="314" y="179" text-anchor="middle" font-size="11" fill="var(--accent-deep)">GeLU</text>
+      <text x="314" y="195" text-anchor="middle" font-size="10" fill="var(--text-soft)">本地</text>
+      <rect x="379" y="160" width="104" height="44" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="431" y="179" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--accent-deep)">Bᵢ · rank i</text>
+      <text x="431" y="195" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[4h/TP × h]</text>
+      <rect x="513" y="160" width="86" height="44" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="556" y="179" text-anchor="middle" font-size="10.5" fill="var(--text)">部分和 Zᵢ</text>
+      <text x="556" y="195" text-anchor="middle" font-size="10" fill="var(--text-soft)">[b,s,h]</text>
+
+      <!-- lane t-1 -->
+      <rect x="145" y="240" width="104" height="44" rx="7" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="197" y="259" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--c2)">Aₜ₋₁ · rank TP−1</text>
+      <text x="197" y="275" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[h × 4h/TP]</text>
+      <rect x="279" y="240" width="70" height="44" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="314" y="259" text-anchor="middle" font-size="11" fill="var(--text)">GeLU</text>
+      <text x="314" y="275" text-anchor="middle" font-size="10" fill="var(--text-soft)">本地</text>
+      <rect x="379" y="240" width="104" height="44" rx="7" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="431" y="259" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--c2)">Bₜ₋₁ · rank TP−1</text>
+      <text x="431" y="275" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[4h/TP × h]</text>
+      <rect x="513" y="240" width="86" height="44" rx="7" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="556" y="259" text-anchor="middle" font-size="10.5" fill="var(--text)">部分和 Zₜ₋₁</text>
+      <text x="556" y="275" text-anchor="middle" font-size="10" fill="var(--text-soft)">[b,s,h]</text>
+
+      <!-- arrows X to A lanes -->
+      <path d="M104,176 C122,176 126,102 143,102" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M104,181 L143,181" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M104,186 C122,186 126,262 143,262" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <!-- arrows inside lanes -->
+      <path d="M249,102 L277,102" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M249,182 L277,182" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M249,262 L277,262" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M349,102 L377,102" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M349,182 L377,182" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M349,262 L377,262" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M483,102 L511,102" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M483,182 L511,182" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M483,262 L511,262" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <!-- partials to allreduce -->
+      <path d="M599,102 C622,102 630,160 647,170" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrA)"></path>
+      <path d="M599,182 L638,182" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrA)"></path>
+      <path d="M599,262 C622,262 630,204 647,194" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrA)"></path>
+      <circle cx="672" cy="182" r="30" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"></circle>
+      <text x="672" y="178" text-anchor="middle" font-size="18" font-weight="700" fill="var(--accent-deep)">Σ</text>
+      <text x="672" y="196" text-anchor="middle" font-size="9.5" fill="var(--accent-deep)">all-reduce</text>
+      <path d="M702,182 L726,182" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrA)"></path>
+      <rect x="730" y="155" width="88" height="52" rx="8" fill="var(--bg-soft)" stroke="var(--accent)"></rect>
+      <text x="774" y="177" text-anchor="middle" font-size="13" font-weight="600" fill="var(--text)">Y</text>
+      <text x="774" y="194" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">[b,s,h]</text>
+
+      <text x="145" y="68" font-size="11" font-weight="600" fill="var(--c1)">ColumnParallel（A 按列切）</text>
+      <text x="379" y="68" font-size="11" font-weight="600" fill="var(--accent)">RowParallel（B 按行切）</text>
+      <text x="20" y="296" font-size="11.5" fill="var(--text-muted)">前向只有 ⊕ 一次 all-reduce；反向在 A 侧对梯度做 all-reduce（f），B 侧恒等。</text>
+      <text x="20" y="313" font-size="11.5" fill="var(--text-muted)">attention 子块再贡献同样的一次 → 每层前向 2 次、反向 2 次。</text>
+
+      <line x1="20" y1="330" x2="840" y2="330" stroke="var(--border)" stroke-width="1"></line>
+
+      <!-- Panel B -->
+      <text x="20" y="356" font-size="15" font-weight="700" fill="var(--text)">Attention：QKV 列并行，头内计算，输出投影行并行</text>
+      <text x="20" y="377" font-size="11.5" fill="var(--text-soft)">QKV 按头切给每张卡；softmax 在头内完成，整段 attention 内部没有 all-reduce</text>
+
+      <rect x="20" y="408" width="76" height="48" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"></rect>
+      <text x="58" y="429" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--text)">X</text>
+      <text x="58" y="445" text-anchor="middle" font-size="10" fill="var(--text-soft)">[b,s,h]</text>
+
+      <rect x="130" y="398" width="128" height="68" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="194" y="418" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--accent-deep)">QKV 投影</text>
+      <text x="194" y="433" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">ColumnParallel</text>
+      <text x="194" y="449" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">每卡 h/TP 个头</text>
+
+      <rect x="292" y="404" width="112" height="56" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="348" y="424" text-anchor="middle" font-size="11" fill="var(--text)">MHA + softmax</text>
+      <text x="348" y="440" text-anchor="middle" font-size="10" fill="var(--text-soft)">头内本地计算</text>
+
+      <rect x="438" y="398" width="128" height="68" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="502" y="418" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--accent-deep)">输出投影</text>
+      <text x="502" y="433" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">RowParallel</text>
+      <text x="502" y="449" text-anchor="middle" font-size="10.5" fill="var(--text-muted)">[h, h] 按行切</text>
+
+      <path d="M96,432 L128,432" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M258,432 L290,432" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M404,432 L436,432" fill="none" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#arr)"></path>
+      <path d="M566,432 L610,432" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrA)"></path>
+      <circle cx="638" cy="432" r="26" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"></circle>
+      <text x="638" y="428" text-anchor="middle" font-size="16" font-weight="700" fill="var(--accent-deep)">Σ</text>
+      <text x="638" y="444" text-anchor="middle" font-size="9" fill="var(--accent-deep)">all-reduce</text>
+      <path d="M664,432 L696,432" fill="none" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#arrA)"></path>
+      <rect x="700" y="408" width="86" height="48" rx="8" fill="var(--bg-soft)" stroke="var(--accent)"></rect>
+      <text x="743" y="429" text-anchor="middle" font-size="12.5" font-weight="600" fill="var(--text)">Y</text>
+      <text x="743" y="445" text-anchor="middle" font-size="10" fill="var(--text-soft)">[b,s,h]</text>
+
+      <text x="20" y="500" font-size="11.5" fill="var(--text-muted)">QKV 权重 [3h, h]（GQA 为 [h+2h_kv, h]）按输出维切；输出投影 [h, h] 按输入维切。</text>
+      <text x="20" y="518" font-size="11.5" fill="var(--text-muted)">若 num_query_groups &lt; TP，Core 会先 all-gather 再切片（megatron/core/transformer/attention.py:2033–2053），不是干净的头切分。</text>
+      <text x="20" y="538" font-size="11" fill="var(--text-soft)">Megatron-Core 的 sequence parallel 会把 all-reduce 换成 all-gather / reduce-scatter；数据流不变。</text>
+    </svg>
+    <figcaption>
+      图 1：MLP 与 attention 的 TP 数据流。颜色只区分 rank；A、B 分别对应论文里的列并行与行并行权重。原始论文中 LayerNorm、dropout、残差在卡间复制（§3），Core 的 sequence parallel 改为沿序列维切分。
+    </figcaption>
+  </figure>
+
+  <p>
+    把图读成两句话：<strong>列并行负责「每张卡算不同通道」，行并行负责「每张卡消费自己的通道并求和」</strong>。
+    前者消掉了 GeLU 前的同步，后者把同步推迟到子块出口；两者合起来，一层里只剩两次前向 all-reduce（attention 一次、MLP 一次）。
+  </p>
+</section>
+
+<!-- ================= 06 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>8.3B 的 8 路切分换来 77% 弱扩展；1.2B 固定 batch 加到 8 卡只有 2.98× 强扩展</h2></div>
+  <p class="sec-sub">论文给了三组数字：8.3B 模型变大时的弱扩展、1.2B 固定 batch 加卡的强扩展、以及头数对扩展效率的影响。</p>
+
+  <h3>模型并行与模型+数据并行</h3>
+  <p>
+    Table 1 是四组 GPT-2 式配置。hidden size per head 固定 96，靠增加层数和头数把模型从 1.2B 推到 8.3B；8.3B 那行需要 8 路 TP，再叠 64 路 DP 就是 512 张卡。
+  </p>
+  <p class="tp-note">Table 1（arXiv v4）：扩展实验的配置。最后一列是 TP × DP 的总卡数。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>hidden</th><th>heads</th><th>layers</th><th>参数量</th><th>TP 卡数</th><th>TP + DP 卡数</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1.2B</td><td class="num">1536</td><td class="num">16</td><td class="num">40</td><td class="num">1.2B</td><td class="num">1</td><td class="num">64</td></tr>
+        <tr><td>2.5B</td><td class="num">1920</td><td class="num">20</td><td class="num">54</td><td class="num">2.5B</td><td class="num">2</td><td class="num">128</td></tr>
+        <tr><td>4.2B</td><td class="num">2304</td><td class="num">24</td><td class="num">64</td><td class="num">4.2B</td><td class="num">4</td><td class="num">256</td></tr>
+        <tr class="best"><td>8.3B</td><td class="num">3072</td><td class="num">32</td><td class="num">72</td><td class="num">8.3B</td><td class="num">8</td><td class="num">512</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    论文报告（§5.1）：8.3B、8 路模型并行达到线性扩展的 <strong>77%</strong>；叠上 64 路数据并行、总共 512 卡时是 <strong>74%</strong>，下降 3 个百分点（77 − 74）。
+    另一个口径来自 Abstract/§1：整个应用在 512 张 V100 上持续 <strong>15.1 PFLOPs</strong>，相对单卡 1.2B 基线（39 TFLOPs，峰值 30%）的每卡吞吐比值是 <strong>76%</strong>——它衡量的是「512 卡总吞吐 ÷ 512 ÷ 单卡基线」，不是 §5.1 的扩展效率，两者不要混用。
+  </p>
+
+  <h3>强扩展：卡越多，单卡 GEMM 越小</h3>
+  <p>
+    Table 8 固定 1.2B 模型和 batch=8，只增加 TP 卡数：2 卡 1.64×、4 卡 2.34×、8 卡 2.98×。
+    4 卡时还有 58.5% 的线性效率，8 卡只剩 37.3%；论文的解释是每卡计算量下降后，内存带宽和通信开销开始主导（Appendix D.2）。
+    这是「TP 不是越大越好」的直接证据。
+  </p>
+
+  <h3>反直觉：头越多，扩展效率越低</h3>
+  <p>
+    Table 7 固定 8.3B 和 8 路 TP，只改注意力头数：16 头（每头 192 维）是 82%，24 头（128 维）是 80%，32 头（96 维）是 77%，从 82% 到 77% 下降 5 个百分点（82 − 77）。
+    论文的解释是头数增加会让 self-attention 里的 GEMM 变小，同时 softmax 的元素变多（Appendix D.1）。这也是 TP 切分粒度受模型结构影响的例子：切得越碎，单卡 GEMM 的效率越低。
+  </p>
+  <p class="tp-note">Table 7（arXiv v4）：8.3B、8 路 TP 下，头数对扩展效率的影响。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Attention heads</th><th>Hidden size per head</th><th>Scaling efficiency</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">16</td><td class="num">192</td><td class="num">82%</td></tr>
+        <tr><td class="num">24</td><td class="num">128</td><td class="num">80%</td></tr>
+        <tr><td class="num">32</td><td class="num">96</td><td class="num">77%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    最终用于语言建模的 8.3B 配置（Table 2 的 8.3B 行；本页只引用这一行）是 72 层、hidden 3072、24 个头、每头 128 维、512 张卡、每 epoch 2.10 天。
+    它和 Table 1 的扩展配置（32 头）不同；论文只说明了两者不同，没有解释选择原因。 <span class="infer">推断</span>：24 头在 Table 7 里比 32 头的扩展效率高 3 个百分点（80 − 77），可能是精度与吞吐之间的折中；Table 7 只报告扩展效率，没有对应的下游精度。
+  </p>
+
+  <h3>语言建模结果</h3>
+  <p>
+    Table 3 是零样本结果。8.3B 的 WikiText103 困惑度是 10.81，对比此前最佳的 15.79，绝对低 4.98（15.79 − 10.81），相对低 31.5%（4.98 / 15.79）。
+    LAMBADA 准确率 66.51%，对比 63.24%，绝对高 3.27 个百分点（66.51 − 63.24），相对高 5.17%（3.27 / 63.24）。
+    论文没有做「同参数量、不同 TP 度数」的精度对照，所以不能把精度收益直接归给 TP。<span class="infer">推断</span>：结果主要来自模型变大，TP 的作用是让这个尺寸训得动。
+  </p>
+  <p class="tp-note">Table 3（arXiv v4）：零样本评测。困惑度越低越好，准确率越高越好。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>WikiText103 困惑度 ↓</th><th>LAMBADA 准确率 ↑</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>355M</td><td class="num">19.31</td><td class="num">45.18%</td></tr>
+        <tr><td>2.5B</td><td class="num">12.76</td><td class="num">61.73%</td></tr>
+        <tr class="best"><td>8.3B</td><td class="num">10.81</td><td class="num">66.51%</td></tr>
+        <tr><td>此前最佳</td><td class="num">15.79</td><td class="num">63.24%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 07 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>TP 不是越大越好：整除、机箱和 batch 都在限制它</h2></div>
+  <p class="sec-sub">下面这些条件不满足时，TP 要么直接报错，要么收益被通信吃掉。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">硬约束</span><h4>维度必须整除</h4></div>
+      <p>
+        <code>ColumnParallelLinear</code> 用 <code>divide(output_size, world_size)</code>（<code>megatron/core/tensor_parallel/layers.py:1213</code>），<code>RowParallelLinear</code> 用 <code>divide(input_size, world_size)</code>（<code>megatron/core/tensor_parallel/layers.py:1608</code>）；
+        <code>divide</code> 在不能整除时直接断言失败（<code>megatron/core/utils.py:599–608</code>，断言在 <code>ensure_divisibility</code> 599–601）。头数也要能被 TP 整除（<code>megatron/core/transformer/attention.py:365–367</code>）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">软约束</span><h4>通信放在 NVLink 域内</h4></div>
+      <p>
+        每层 4 次 all-reduce，跨机箱的 100 GB/s InfiniBand 很容易把 GEMM 的收益吃掉（§5 的 300 GB/s NVSwitch vs 100 GB/s IB）。常见做法是 TP ≤ 8、放在同一台 DGX 内，PP/DP 往外层放。
+      </p>
+    </div>
+  </div>
+
+  <h3>几个容易踩的边界</h3>
+  <ul>
+    <li><strong>GQA / MQA 的 TP 上限：</strong>当 <code>num_query_groups &lt; TP</code> 时，每张卡分不到完整的 KV 头；Core 的做法是先 all-gather QKV，再按 rank 切片（<code>megatron/core/transformer/attention.py:2033–2053</code>），多了一次通信，也不再是「头内本地计算」。</li>
+    <li><strong>词表要 padding：</strong>论文把 50,257 的词表补到 51,200，使每卡词表是 128 的倍数（§5.1）。TP 度数变了，padding 目标也要跟着变，否则各卡分到的词表大小和 GEMM 对齐都会变。</li>
+    <li><strong>小 batch 不划算：</strong>Table 8 的强扩展在 8 卡只有 2.98×；当 <code>b·s</code> 很小时，每卡 GEMM 太小，all-reduce 的固定延迟占比更高。</li>
+    <li><strong>TP 不省激活：</strong>原始 TP 只切线性层，LayerNorm、dropout、残差仍然复制；长序列训练还需要 activation checkpointing 或 sequence parallel（Core 的 <code>sequence_parallel</code>）。</li>
+    <li><strong>不减少总 FLOPs：</strong>TP 只是把同样的计算分给更多卡，并额外加上通信；模型能单卡放下且吞吐够用时，DP 更简单。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话选择</span><h4>单层放不下 → TP；层数放不下 → PP；吞吐不够 → DP</h4></div>
+    <p>
+      实际训练通常三者叠加：TP 在最内层（机箱内），PP 跨机箱切层，DP 在最外层复制。Megatron 的 8.3B 配置就是 8 路 TP × 64 路 DP（Appendix B.1）；PP 是论文明确说「正交且互补」的另一条轴（§3）。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism（arXiv 1909.08053 v4）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/1909.08053">https://arxiv.org/abs/1909.08053</a><br>
+    源码：<a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a26">NVIDIA/Megatron-LM @ 70f7a26</a><br>
+    笔记：<a href="/tensor_parallel/">tensor_parallel</a>
+  </div>
+  <div class="tp-note" style="margin-top:12px">
+    本页论文数字以 arXiv v4 为准；源码行号对应 Megatron-Core commit 70f7a26（路径均从仓库根写全，如 <code>megatron/core/tensor_parallel/layers.py</code>）。源码行为以该 commit 为准。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- 主交互：列/行并行计算器 ---------- */
+  var view = 'column';
+  var TP_CHOICES = [1, 2, 4, 8, 16];
+
+  function $(id) { return document.getElementById(id); }
+
+  function fmtM(n) { return (n / 1e6).toFixed(2) + ' M'; }
+  function fmtMiB(bytes) { return (bytes / 1048576).toFixed(1) + ' MiB'; }
+
+  function renderMatrix(t) {
+    var host = $('tp-matrix');
+    if (!host) return;
+    var rows = 16, cols = 16;
+    host.style.gridTemplateColumns = 'repeat(' + cols + ', 1fr)';
+    var html = '';
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var k = (view === 'column')
+          ? Math.floor(r * t / rows)
+          : Math.floor(c * t / cols);
+        html += '<span class="k' + (k % 4) + '"></span>';
+      }
+    }
+    host.innerHTML = html;
+  }
+
+  function update() {
+    var hEl = $('h'), fEl = $('f'), tEl = $('t'), bEl = $('b'), sEl = $('s');
+    if (!hEl || !fEl || !tEl || !bEl || !sEl) return;
+
+    var h = parseInt(hEl.value, 10);
+    var f = parseInt(fEl.value, 10);
+    var t = TP_CHOICES[parseInt(tEl.value, 10)];
+    var b = parseInt(bEl.value, 10);
+    var s = parseInt(sEl.value, 10);
+
+    var hV = $('h-v'), fV = $('f-v'), tV = $('t-v'), bV = $('b-v'), sV = $('s-v');
+    if (hV) hV.textContent = h;
+    if (fV) fV.textContent = f;
+    if (tV) tV.textContent = t;
+    if (bV) bV.textContent = b;
+    if (sV) sV.textContent = s;
+
+    var perLayerParams = (2 * h * f + 4 * h * h) / t;
+    var weightBytes = perLayerParams * 2;
+    var payloadBytes = b * s * h * 2;
+    var totalBytes = 4 * payloadBytes;
+    var ringBytes = 8 * b * s * h * 2 * (t - 1) / t;
+
+    var shapeEl = $('slot-shape');
+    var weightEl = $('slot-weight');
+    var payloadEl = $('slot-payload');
+    var totalEl = $('slot-total');
+    var ringEl = $('slot-ring');
+    var barEl = $('share-bar');
+
+    var fShard = Math.floor(f / t);
+    var hShard = Math.floor(h / t);
+    var divisible = (f % t === 0) && (h % t === 0) && (h % 4 === 0);
+
+    if (shapeEl) {
+      shapeEl.textContent = (view === 'column')
+        ? '[' + fShard + ', ' + h + ']'
+        : '[' + h + ', ' + fShard + ']';
+    }
+    if (weightEl) weightEl.innerHTML = fmtM(perLayerParams) + '<br>' + fmtMiB(weightBytes);
+    if (payloadEl) payloadEl.textContent = fmtMiB(payloadBytes);
+    if (totalEl) totalEl.textContent = fmtMiB(totalBytes);
+    if (ringEl) ringEl.textContent = fmtMiB(ringBytes);
+    if (barEl) barEl.style.width = (100 / t).toFixed(2) + '%';
+
+    var titleEl = $('tp-view-title');
+    var bodyEl = $('tp-view-body');
+    var readout = $('tp-readout');
+    if (view === 'column') {
+      if (titleEl) titleEl.innerHTML = '<strong>ColumnParallelLinear</strong>：切输出维（权重矩阵的行）';
+      if (bodyEl) bodyEl.innerHTML = '每卡权重 <code>[' + fShard + ', ' + h + ']</code>，输出 <code>[b, s, ' + fShard + ']</code>；这一层内部不需要通信。';
+      if (readout) readout.setAttribute('data-src', 'megatron/core/tensor_parallel/layers.py:1213');
+    } else {
+      if (titleEl) titleEl.innerHTML = '<strong>RowParallelLinear</strong>：切输入维（权重矩阵的列）';
+      if (bodyEl) bodyEl.innerHTML = '每卡权重 <code>[' + h + ', ' + fShard + ']</code>，输入 <code>[b, s, ' + fShard + ']</code>；输出是部分和 <code>[b, s, h]</code>，需要 1 次 all-reduce。';
+      if (readout) readout.setAttribute('data-src', 'megatron/core/tensor_parallel/layers.py:1608');
+    }
+
+    var labelEl = $('tp-matrix-label');
+    if (labelEl) labelEl.textContent = (view === 'column') ? '按行分组（输出维）' : '按列分组（输入维）';
+
+    if (!divisible) {
+      if (bodyEl) bodyEl.innerHTML += ' <span class="warn">注意：当前 f 或 h 不能被 TP 整除，源码的 divide() 会直接报错。</span>';
+    }
+
+    renderMatrix(t);
+  }
+
+  var viewBtns = document.querySelectorAll('#tp-view .rule-btn');
+  for (var i = 0; i < viewBtns.length; i++) {
+    viewBtns[i].addEventListener('click', function () {
+      for (var j = 0; j < viewBtns.length; j++) viewBtns[j].classList.remove('active');
+      this.classList.add('active');
+      view = this.getAttribute('data-view');
+      update();
+    });
+  }
+
+  var ids = ['h', 'f', 't', 'b', 's'];
+  for (var k = 0; k < ids.length; k++) {
+    var el = $(ids[k]);
+    if (el) el.addEventListener('input', update);
+  }
+
+  update();
+
+  /* ---------- 第二个交互：TP only vs TP + sequence parallel ---------- */
+  var spState = 'off';
+  var spConst = { h: 4096, b: 8, s: 2048, t: 8 };
+
+  function updateSP() {
+    var actEl = $('sp-act');
+    var opsEl = $('sp-ops');
+    var bwEl = $('sp-bw');
+    var msgEl = $('sp-msg');
+    if (!actEl || !opsEl || !bwEl || !msgEl) return;
+
+    var full = spConst.b * spConst.s * spConst.h * 2;
+    var shard = full / spConst.t;
+    var ring = 8 * spConst.b * spConst.s * spConst.h * 2 * (spConst.t - 1) / spConst.t;
+
+    if (spState === 'off') {
+      actEl.textContent = fmtMiB(full);
+      opsEl.textContent = '2× all-reduce';
+      bwEl.textContent = fmtMiB(ring);
+      msgEl.innerHTML = 'h=4096，b=8，s=2048，TP=8，fp16。TP only：残差/LayerNorm 区域每卡保留完整 <code>b·s·h</code>，每层 4 次 all-reduce，每卡 ring 流量 ' + fmtMiB(ring) + '。';
+    } else {
+      actEl.textContent = fmtMiB(shard);
+      opsEl.textContent = '2× AG + 2× RS';
+      bwEl.textContent = fmtMiB(ring);
+      msgEl.innerHTML = 'TP + sequence parallel：激活沿序列维切到 <code>b·s·h/TP</code>，每卡 ' + fmtMiB(shard) + '。前向变成 2 次 all-gather + 2 次 reduce-scatter（反向对应 2 RS + 2 AG），集合通信调用从 4 次变 8 次；ring 流量仍约 ' + fmtMiB(ring) + '。';
+    }
+  }
+
+  var spBtns = document.querySelectorAll('#sp-btns .rule-btn');
+  for (var m = 0; m < spBtns.length; m++) {
+    spBtns[m].addEventListener('click', function () {
+      for (var n = 0; n < spBtns.length; n++) spBtns[n].classList.remove('active');
+      this.classList.add('active');
+      spState = this.getAttribute('data-sp');
+      updateSP();
+    });
+  }
+
+  updateSP();
+})();
+</script>
+</body>
+</html>

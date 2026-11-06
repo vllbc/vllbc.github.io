@@ -1,0 +1,679 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 16 | ZeRO-Offload §2 | 2+2+4+4+4 |
+| 14 | ZeRO-Offload §2 | 16-2 |
+| 980 | §04 手算 1 | 14*70 |
+| 140 | §04 手算 1 | 2*70 |
+| 1120 | §04 手算 1 | 16*70 |
+| 87.5 | §04 手算 1 | (16-2)/16*100 |
+| 280 | §04 手算 1 | 4*70 |
+| 25.2 | §04 手算 1 | 31.5*0.8 |
+| 5.56 | §04 手算 1 | 2*70/25.2 |
+| 11.11 | §04 手算 1 | 4*70/25.2 |
+| 229.38 | §04 手算 1 | 8*70*16.384/40 |
+| 2.42 | §04 手算 1 | 2*70/25.2/(8*70*16.384/40)*100 |
+| 182 | §04 手算 2 | 14*13 |
+| 26 | §04 手算 2 | 2*13 |
+| 208 | §04 手算 2 | 16*13 |
+| 52 | §04 手算 2 | 4*13 |
+| 12.6 | §04 手算 2 | 15.75*0.8 |
+| 2.06 | §04 手算 2 | 2*13/12.6 |
+| 4.13 | §04 手算 2 | 4*13/12.6 |
+| 2.66 | §04 手算 2 | 8*13*1.024/40 |
+| 77.5 | §04 手算 2 | 2*13/12.6/(8*13*1.024/40)*100 |
+| 7 | ZeRO-Offload §6.2.2 | 28/4 |
+| 20 | ZeRO-Infinity §3 | 4*4+2+2 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPU Offloading 与显存管理 · 把显存墙拆成 GPU / CPU / NVMe 三层</title>
+<meta name="description" content="训练侧 ZeRO-Offload / ZeRO-Infinity / FSDP 的分层卸载，推理侧 weight offload 与 KV cache offload 的区别，以及 PCIe 带宽、重叠与收益边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+table caption{caption-side:top;text-align:left;font-size:12.5px;color:var(--text-soft);padding:0 0 8px;line-height:1.6}
+p code, li code, td code{overflow-wrap:anywhere}
+.nowrap{white-space:nowrap}
+footer a{overflow-wrap:anywhere}
+details.handcalc summary{font-weight:600}
+.handcalc .calc{
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:2;
+  background:var(--bg-soft);border-radius:var(--radius);padding:12px 14px;overflow-x:auto;
+}
+.svg-title{font-family:Inter,"Noto Sans SC",sans-serif;font-size:14px;font-weight:700;fill:var(--text)}
+.svg-tier{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.svg-tier-label{font-family:"JetBrains Mono",monospace;font-size:13px;font-weight:700;fill:var(--text)}
+.svg-txt{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11.5px;fill:var(--text-muted)}
+.svg-arrow-label{font-family:"JetBrains Mono",monospace;font-size:9.5px;fill:var(--text-soft)}
+.svg-arrow-a{stroke:var(--accent);stroke-width:1.7;fill:none}
+.svg-arrow-c1{stroke:var(--c1);stroke-width:1.7;fill:none}
+.svg-arrow-c2{stroke:var(--c2);stroke-width:1.7;fill:none;stroke-dasharray:5 4}
+.svg-head-a{fill:var(--accent)}
+.svg-head-c1{fill:var(--c1)}
+.svg-head-c2{fill:var(--c2)}
+.svg-divider{stroke:var(--border-strong);stroke-width:1;stroke-dasharray:4 5}
+@media (max-width:560px){
+  .sim{padding:16px}
+  .handcalc .calc{font-size:11.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">CPU Offloading</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#existing">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#bandwidth">带宽</a>
+      <a href="#flow">数据流</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>System · 训练与推理 · 2021–2026</span>
+  <h1>CPU Offloading：把显存墙拆成 GPU / CPU / NVMe 三层</h1>
+  <p class="hero-sub">
+    mixed precision + Adam 训练时，每个参数要占 <strong>16 B</strong> 的 model states：fp16 参数与梯度各 2 B，fp32 master weight、momentum、variance 各 4 B。
+    70B 模型仅这部分就是 <strong>1,120 GB</strong>，单卡 HBM 装不下。offload 把其中一部分搬到 CPU 或 NVMe，用 PCIe / NVLink 带宽换容量。
+    代价是每步多一次往返；能不能被计算盖住，决定了它是否划算。推理侧还有一条不同的路：weight offload 与 KV cache offload 搬的不是同一种东西。
+  </p>
+  <div class="meta">
+    <span>ZeRO-Offload · ZeRO-Infinity · PyTorch FSDP · vLLM</span>
+    <a href="https://arxiv.org/abs/2101.06840v1" target="_blank" rel="noopener">ZeRO-Offload ↗</a>
+    <a href="https://arxiv.org/abs/2104.07857v1" target="_blank" rel="noopener">ZeRO-Infinity ↗</a>
+    <a href="https://pytorch.org/docs/stable/fsdp.html" target="_blank" rel="noopener">FSDP 文档 ↗</a>
+    <a href="https://github.com/vllm-project/vllm/tree/e740bad" target="_blank" rel="noopener">vLLM 源码 @ e740bad ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    显存墙的主因不是权重本身，而是<strong>训练状态</strong>。按 ZeRO-Offload §2 的记账，一个参数要 16 B；70B 模型的 model states 是 1,120 GB，其中只有 140 GB 是 GPU 前向/反向真正需要的 fp16 参数。
+    剩下 980 GB 是梯度与 fp32 optimizer states，正是 offload 的对象。
+  </p>
+  <p>
+    训练侧的 offload 是<strong>分层</strong>的：ZeRO-Offload 把 fp16 梯度与 fp32 optimizer states 放 CPU，参数更新也在 CPU 做，GPU 只保留 fp16 参数（另有 activations）；ZeRO-Infinity 再把 partitioned params / gradients / optimizer states 放到 NVMe；FSDP 的 CPU offload 则把 sharded params、grads 与 optimizer step 一起下沉到 CPU。
+    每层都需要预取或流水线，否则 PCIe 延迟会直接暴露在关键路径上。
+  </p>
+  <p>
+    推理侧的 offload 要分成两件事：<strong>weight offload</strong> 降低静态权重的常驻显存，但每个 token 的 forward 都要读一次被卸载的权重；<strong>KV cache offload</strong> 降低动态 KV 池的常驻显存，只在 block 换出或 prefix cache 命中时搬 KV。
+    前者按 token 重复付费，后者按 block 付费，不能互相外推。
+  </p>
+  <p>
+    收益边界由<strong>传输/计算比</strong>决定。ZeRO-Offload 把每步 CPU↔GPU 流量压到 4M 字节，但小模型、小 batch、PCIe 3.0 或延迟敏感的 decode 仍可能让 offload 变成负收益；模型能装下时，offload 通常不值得。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§6.2.1">13B</div>
+      <div class="k">单张 32GB V100 可训练<br>PyTorch DDP 基线为 1.4B</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Abstract">40<small> TFLOPS/GPU</small></div>
+      <div class="k">单卡 V100、10B 模型的实测吞吐<br>PyTorch 1.4B 为 30 TFLOPS</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§8.2">20T</div>
+      <div class="k">512×V100 上 §8.2 实测描述到 20T 参数<br>§1 贡献列表称 32T</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>显存墙不是参数放不下，而是训练状态放不下</h2></div>
+  <p class="sec-sub">先算清一个参数在混合精度 Adam 下占多少字节，才能判断该卸载什么、不该卸载什么。</p>
+  <p>
+    ZeRO-Offload §2 给出的账本是：fp16 参数 2 B、fp16 梯度 2 B、fp32 master weight 4 B、Adam 的 momentum 与 variance 各 4 B，合计 <strong>16 B/参数</strong>。
+    ZeRO-Infinity §3 把 fp32 梯度也计入 optimizer states，得到 <strong>20 B/参数</strong>。两篇的记账口径不同，本页的计算统一采用 ZeRO-Offload 的 16 B 口径，并在手算里注明。
+  </p>
+  <div class="eq">
+    M<sub>states</sub> = 16 &times; M<sub>params</sub><br>
+    70B: 16 &times; 70 = 1,120 GB<br>
+    参数本身仍需: 2 &times; 70 = 140 GB
+  </div>
+  <p class="eq-cap">按十进制 GB（1 GB = 10<sup>9</sup> B）计；未计 activation、临时 buffer 与碎片。</p>
+  <p>
+    这不是“把 70B 权重塞进一张卡”的问题：fp16 权重本身就要 140 GB，单张 80GB GPU 仍放不下；offload 解决的是把 980 GB 的梯度与 optimizer states 移出 GPU，从而让每张卡保留完整的 fp16 参数，只把梯度与 optimizer states 的分片移到 CPU。
+    真正的前向/反向仍必须在 GPU 上完成，ZeRO-Offload §3.2 的原则是只把计算复杂度低于 O(MB) 的更新类计算放到 CPU。
+  </p>
+  <p>
+    推理的账本不同：bf16 权重是 2 B/参数，70B 约 140 GB；此外还有随上下文增长的 KV cache。vLLM 把 KV 作为独立的 block 池管理，并在 <code>vllm/config/cache.py:399-408</code> 提供单独的 <code>kv_offloading_size</code>，与权重显存分开核算。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>综合表 1 · 训练与推理的显存构成（依据 ZeRO-Offload §2、ZeRO-Infinity §3、vLLM 源码）</caption>
+      <thead>
+        <tr><th>组成</th><th>训练：混合精度 Adam</th><th>推理：BF16</th><th>是否可 offload</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>参数</td><td>fp16 副本 2 B + fp32 master 4 B，每参数</td><td>bf16 2 B，每参数</td><td>训练与推理都可</td></tr>
+        <tr><td>梯度</td><td>fp16 2 B；ZeRO-Infinity 另计 fp32 梯度 4 B</td><td>无</td><td>仅训练</td></tr>
+        <tr><td>Optimizer states</td><td>momentum + variance，8 B（fp32）</td><td>无</td><td>仅训练</td></tr>
+        <tr><td>Model states 合计</td><td>16 B/参数（ZeRO-Offload 口径）；20 B/参数（ZeRO-Infinity 口径）</td><td>2 B/参数，另有 KV</td><td>部分可</td></tr>
+        <tr><td>KV cache</td><td>无</td><td>随 token 增长，按 block 分配</td><td>推理可，KV offload</td></tr>
+        <tr><td>Activations</td><td>随 batch × seq 增长</td><td>随 batch × seq 增长，本页不展开</td><td>训练通常靠重计算；推理不在本页范围</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    ZeRO-Offload 的脚注明确把 activation offload 排除在范围外；ZeRO-Infinity §3 则用 activation checkpointing 把 residual states 压到可接受范围。也就是说，offload 主要处理 model states，不负责解决所有显存项。
+  </p>
+</section>
+
+<section class="block" id="existing">
+  <div class="sec-head"><span class="sec-num">02</span><h2>重计算、并行、offload：三条路把成本放在不同地方</h2></div>
+  <p class="sec-sub">重计算用算力换显存，并行用通信与多卡换显存，offload 用带宽换容量；先分清代价，才能判断何时该用哪条。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">重计算</span><h4>Activation checkpointing</h4></div>
+      <p>前向不保存全部激活，反向时重算。ZeRO-Infinity §3 给出的代价是约 <strong>0.33×</strong> 额外重计算；它压的是 activation，不减少参数、梯度与 optimizer states。</p>
+      <p class="src-note">ZeRO-Infinity §3；ZeRO-Offload §2</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">并行</span><h4>DP / TP / PP / 3D</h4></div>
+      <p>把模型状态切到多张 GPU 的聚合显存里。容量随卡数增长，但引入 all-gather / reduce-scatter / pipeline bubble；3D 并行还需要改模型切分。ZeRO-Infinity 摘要指出，仅为了放下一万亿参数就要约 800 张 V100。</p>
+      <p class="src-note">ZeRO-Infinity §1/§2；ZeRO-Offload §2</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Offload</span><h4>CPU / NVMe 分层</h4></div>
+      <p>把暂时不参与计算的 state 放到 CPU 或 NVMe，需要时再取回。容量来自主机内存与 SSD，代价是 PCIe / NVLink / NVMe 带宽，以及必须做预取与重叠。</p>
+      <p class="src-note">ZeRO-Offload §3/§4；ZeRO-Infinity §5</p>
+    </div>
+  </div>
+
+  <p>
+    FSDP 落在“并行”和“offload”之间：它先把参数、梯度、optimizer states 分片到各 rank，减少数据并行的冗余；再打开 <code>CPUOffload(offload_params=True)</code> 时，才把 sharded 参数与梯度进一步下沉到 CPU。
+    PyTorch 源码把这点写得很直白：参数不在计算中时 offload 到 CPU，梯度也一起下沉，因此 optimizer step 在 CPU 上跑（<code>torch/distributed/fsdp/api.py:231-242</code>）。FSDP2 的 <code>CPUOffloadPolicy</code> 则明确写到“parameters, gradients, and optimizer states to CPU”，并在 all-gather 前把 shard 拷回设备（<code>torch/distributed/fsdp/_fully_shard/_fsdp_api.py:239-255</code>）。
+  </p>
+  <p>
+    三条路不是互斥的。ZeRO-Offload 本身就是 ZeRO-2 的分片 + CPU offload；ZeRO-Infinity 又在 ZeRO-3 的分片之上加 CPU/NVMe；FSDP 也可以和 activation checkpointing 叠加。真正要问的是：<strong>被搬到慢速层级的那部分，是否能在下一次使用前被取回，且取回时间小于它遮住的 compute。</strong>
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>训练把状态分层，推理把权重和 KV 分开卸载</h2></div>
+  <p class="sec-sub">训练 offload 的对象是 optimizer states / gradients / params；推理 offload 的对象是静态权重或动态 KV。对象不同，数据流和付费频率也不同。</p>
+
+  <h3>3.1 训练侧：ZeRO-Offload 的 CPU 层，ZeRO-Infinity 的 NVMe 层</h3>
+  <p>
+    ZeRO-Offload §3.5 的策略是：<strong>fp16 参数留在 GPU，fp16 梯度、fp32 master weight、momentum、variance 全部放 CPU，参数更新在 CPU 执行</strong>。
+    前向/反向仍在 GPU；反向产生的梯度可以先在 GPU 上暂存，再按参数或小批量拷到 CPU，并与剩余反向计算重叠（§4.1）。每步 CPU↔GPU 的最小通信量是 <strong>4M</strong>：2M 梯度下行 + 2M 更新后的参数上行。
+  </p>
+  <div class="eq">
+    V<sub>step</sub> = 2M<sub>grads</sub> + 2M<sub>params</sub> = <span class="hl-c">4M bytes</span><br>
+    CPU 侧持有: 2M (fp16 grads) + 12M (fp32 master/m/v) = <span class="hl-a">14M bytes</span><br>
+    GPU 侧保留: <span class="hl-b">2M bytes</span>
+  </div>
+  <p class="eq-cap">ZeRO-Offload §3.5/§4.1；M 为参数个数，按每参数字节数直接换算。</p>
+  <p>
+    ZeRO-Infinity 在这之上再加一层 NVMe。它不再要求参数常驻 GPU：partitioned params、gradients、optimizer states 都可以在 GPU / CPU / NVMe 之间移动，由 infinity offload engine 负责调度；memory-centric tiling 把大算子切成 tile，避免单个 layer 必须靠 tensor parallel 才放得下（§5.1.3/§8.5）。
+    DeepSpeed 的实现把这些抽象落成配置：<code>offload_optimizer</code> 支持 stage 1/2/3，device 可选 <code>cpu</code> 或 <code>nvme</code>，且 optimizer computation 无论如何都在 CPU（<code>deepspeed/runtime/zero/offload_config.py:55-62</code>）；<code>offload_param</code> 只允许 stage 3（同文件 21-28）。
+    NVMe 路径不是简单 <code>write()</code>：它走 <code>swap_tensor</code> 的异步 IO 与 buffer pool（<code>deepspeed/runtime/swap_tensor/partitioned_optimizer_swapper.py:26-37</code>），并用 <code>pipeline_read</code>/<code>pipeline_write</code> 把 tile 读写与 CPU optimizer 计算重叠（<code>offload_config.py:84-94</code>）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>综合表 2 · 三层 offload 的对象与执行位置（DeepSpeed f47dc3e / PyTorch 2ee7a63）</caption>
+      <thead>
+        <tr><th>层级</th><th>训练侧放什么</th><th>推理侧放什么</th><th>谁执行计算</th><th>传输介质</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="nowrap">GPU</td><td>fp16 参数、activations；FSDP 的 all-gathered shard</td><td>权重、当前 token 的 KV block</td><td>forward / backward；attention / decode</td><td>HBM</td></tr>
+        <tr><td class="nowrap">CPU</td><td>fp16 梯度 + fp32 optimizer states（ZeRO-Offload）；FSDP sharded params / grads + optimizer（CPU step）</td><td>被 offload 的权重；被换出的 KV block</td><td>CPU Adam / optimizer step</td><td>PCIe 或 NVLink</td></tr>
+        <tr><td class="nowrap">NVMe</td><td>partitioned params + optimizer states（ZeRO-Infinity）</td><td>本页不展开；vLLM connector 另有 disk backend</td><td>CPU 分 tile 读入，再送 GPU</td><td>NVMe → CPU → GPU</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    FSDP 的 CPU offload 与 ZeRO-Offload 不是同一个切法。ZeRO-Offload 保留完整 fp16 参数副本在每张 GPU 上，只切梯度与 optimizer states；FSDP 先把参数也按 rank 切开，再把 shard 放到 CPU。
+    FSDP1 在初始化时要求开启 offload 的模块留在 CPU（<code>torch/distributed/fsdp/_init_utils.py:672-673</code>），local shard 与 <code>_cpu_grad</code> 预分配在 pinned CPU（<code>_flat_param.py:1258-1265</code>）；前向 all-gather 前用 <code>flat_param_to(device, non_blocking=True)</code> 把 shard 拷回设备（同文件 1335-1338）。梯度在 post-backward 阶段以 <code>non_blocking</code> 拷到 CPU（<code>_runtime_utils.py:969-991</code>），并在 CPU optimizer step 前显式同步（同文件 1107-1111）。
+    FSDP2 的 <code>CPUOffloadPolicy(pin_memory=True)</code> 默认用 pinned memory，让 H2D/D2H 拷贝可以与 compute 重叠（<code>_fsdp_api.py:248-252</code>）；shard 在 all-gather 前以 <code>non_blocking=True</code> 拷回设备（<code>_fsdp_param.py:1203-1206</code>）。
+  </p>
+
+  <h3>3.2 推理侧：weight offload 与 KV cache offload 是两笔账</h3>
+  <p>
+    vLLM 的 <code>cpu_offload_gb</code> 是“每张 GPU 卸载多少 GiB 权重”。源码把它描述成一种虚拟扩大显存的方式：24GB 卡设 10，就相当于 34GB 卡；代价是每次 forward 都要从 CPU 取一部分权重（<code>vllm/config/offload.py:23-32</code>）。
+    UVA 后端把参数放在 pinned CPU 内存，再用 CUDA view 让 GPU 直接读，省掉显式 copy，但仍然消耗 PCIe 带宽（<code>vllm/model_executor/offloader/uva.py:23-28</code>）；prefetch 后端则按层分组，用独立的 copy stream 异步 H2D，把传输藏到前面的层后面（<code>vllm/config/offload.py:54-68</code>、<code>offloader/prefetch.py:171-172</code>）。
+  </p>
+  <p>
+    KV cache offload 搬的是另一块内存。vLLM 用 <code>kv_offloading_size</code> 指定 CPU 侧的 KV 缓冲大小，默认不开启；<code>kv_offloading_backend</code> 支持 native 与 lmcache（<code>vllm/config/cache.py:399-408</code>）。
+    <code>SimpleCPUOffloadConnector</code> 的 CPU 容量默认是 8 GiB（<code>.../simple_cpu_offload_connector.py:55</code>），按 block 做 LRU；scheduler 只在 prefix cache 命中时请求把连续的 CPU block 取回（<code>vllm/v1/simple_kv_offload/manager.py:371-374</code>）。
+    传输走低优先级 stream，让 KV I/O 给 compute 让路（<code>worker.py:170-173</code>）；CPU block 是 pinned 的，并且只在 GPU→CPU store 完成后才允许被 load（同文件 241-251）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>综合表 3 · 推理侧两种 offload 的差别（vLLM e740bad 源码）</caption>
+      <thead>
+        <tr><th>维度</th><th>Weight offload</th><th>KV cache offload</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>对象</td><td>模型参数，静态，大小由参数量决定</td><td>KV block，动态，随请求与上下文长度增长</td></tr>
+        <tr><td>触发频率</td><td>每个 token 的 forward 都可能读取被卸载的层</td><td>block 换出时写，prefix cache 命中时读；当前 decode token 的 KV 留在 GPU</td></tr>
+        <tr><td>传输量</td><td>正比于被 offload 的权重，按 token 重复</td><td>正比于 block 大小与命中长度，按 block 计</td></tr>
+        <tr><td>目标</td><td>降低权重常驻显存，装下更大的模型</td><td>扩大 KV 池、提高并发或复用前缀，不降低权重占用</td></tr>
+        <tr><td>vLLM 配置</td><td><code>cpu_offload_gb</code>；prefetch 用 <code>offload_group_size</code></td><td><code>kv_offloading_size</code>；<code>kv_offloading_backend</code></td></tr>
+        <tr><td>源码</td><td><code>vllm/config/offload.py:23-32</code>；<code>offloader/uva.py:23-28</code></td><td><code>vllm/config/cache.py:399-408</code>；<code>simple_kv_offload/worker.py:170-173</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    两者可以同时开，但代价相加：weight offload 让每个 token 多读权重，KV offload 让 block 换入换出多走一次 PCIe；如果模型已经能装下，或者 decode 对每 token 延迟敏感，先不要动 weight offload。
+  </p>
+</section>
+
+<section class="block" id="bandwidth">
+  <div class="sec-head"><span class="sec-num">04</span><h2>4M 字节不是瓶颈，前提是它能被算力盖住</h2></div>
+  <p class="sec-sub">ZeRO-Offload 把每步 CPU↔GPU 流量压到 4M；是否值得，取决于传输时间与计算时间的比值，以及这段传输能否与反向/下一轮前向重叠。</p>
+
+  <p>
+    按 §3.5/§4.1，ZeRO-Offload 每步只搬 4M 字节：2M 梯度从 GPU 到 CPU，2M 更新后的参数从 CPU 回 GPU。这个量比 L2L 的 28M 小 <strong>7×</strong>（28M / 4M，ZeRO-Offload §6.2.2）。通信量小是它能用 CPU optimizer 还不掉太多吞吐的前提。
+  </p>
+  <div class="eq">
+    t<sub>xfer,serial</sub> = 4M / BW<br>
+    t<sub>xfer,overlap</sub> = 2M / BW<br>
+    t<sub>compute</sub> = 8 × M × T / P
+  </div>
+  <p class="eq-cap">全双工对称链路下，下行梯度与上行参数可同时进行，墙钟时间取 2M/BW；串行则取 4M/BW。计算量按 ZeRO-Infinity §4 Eq.7 的 8ND 口径，T 为每步 token 数，P 为有效算力。</p>
+
+  <p>
+    ZeRO-Infinity §4 进一步给出了效率公式：efficiency = AIT × BW / (AIT × BW + peak)，其中 AIT 是 arithmetic intensity（总计算 / 总数据移动）。带宽越低，AIT × BW 越小，通信占比越高。
+    §4.2 还指出一个关键差别：<strong>optimizer states 在 fwd/bwd 结束后才更新，不能像梯度那样与反向计算重叠</strong>，所以它对带宽的要求更高；NVMe 路径必须把 tile 读、CPU compute、tile 写三者流水起来（§5.2.2 补充：optimizer states 可以跨设备并行更新，但更新时点仍在 fwd/bwd 之后）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>Table 3（ZeRO-Infinity 原文）· 512 设备集群保持效率所需的慢速内存带宽</caption>
+      <thead>
+        <tr><th>指标</th><th>1× V100</th><th>10× V100</th><th>100× V100</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>每设备 slow memory 带宽 (GB/s)</td><td class="num">3.0</td><td class="num">30.0</td><td class="num">300.0</td></tr>
+        <tr><td>512 设备聚合带宽 (TB/s)</td><td class="num">1.5</td><td class="num">15.0</td><td class="num">150.0</td></tr>
+        <tr><td>GPU-to-GPU 带宽 (GB/s)</td><td class="num">70.0</td><td class="num">700.0</td><td class="num">7000.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    这张表的含义是：在 V100 世代，每设备 3 GB/s 的慢速内存带宽就够；算力涨 10× 时，需要 30 GB/s。PCIe 4.0 ×16 的理论单向带宽是 31.5 GB/s，刚好压线；按 80% 有效系数算是 25.2 GB/s，低于 30 GB/s。
+    ZeRO-Infinity §9 给出的对照是 Summit 用 NVLink 把 V100 连到 CPU 内存，达到 40 GB/s/GPU；这解释了为什么论文强调“慢速内存”不等于“慢速链路”，NVLink 级别的 CPU 链路可以满足 10× V100 的要求。
+  </p>
+  <p>
+    NVLink 本身主要是 GPU↔GPU 链路；CPU↔GPU 是否走 NVLink，取决于平台（Summit 是论文给出的例子）。在普通 PCIe 服务器上，offload 的重叠能力就取决于 pinned memory、copy stream 和 kernel 是否能同时跑。ZeRO-Offload 用 DPU（delayed parameter update）把 optimizer update 与下一轮 forward 重叠，代价是 1-step staleness（§6.2.4）；ZeRO-Infinity 用 tile pipeline 把 NVMe 读写、CPU Adam 和 GPU compute 串起来；FSDP 用 <code>non_blocking</code> 拷贝；vLLM 用独立 copy stream 与低优先级 KV stream。
+  </p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <button class="rule-btn co-bw" type="button" data-bw="12.6">PCIe 3.0 ×16<span class="r-sub">理论 15.75 × 0.8 = 12.6 GB/s</span></button>
+      <button class="rule-btn co-bw active" type="button" data-bw="25.2">PCIe 4.0 ×16<span class="r-sub">理论 31.5 × 0.8 = 25.2 GB/s</span></button>
+      <button class="rule-btn co-bw" type="button" data-bw="50.4">PCIe 5.0 ×16<span class="r-sub">理论 63.0 × 0.8 = 50.4 GB/s</span></button>
+      <button class="rule-btn co-bw" type="button" data-bw="40">NVLink 40<span class="r-sub">Summit 实测 40 GB/s</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="co-params">参数量 <span class="v" id="co-params-v">70B</span></label>
+        <input id="co-params" type="range" min="7" max="70" step="1" value="70">
+      </div>
+      <div class="ctrl">
+        <label for="co-tokens">每步 token 数 <span class="v" id="co-tokens-v">16,384</span></label>
+        <input id="co-tokens" type="range" min="1024" max="65536" step="1024" value="16384">
+      </div>
+      <div class="ctrl">
+        <label for="co-flops">有效算力 <span class="v" id="co-flops-v">40 TFLOPS</span></label>
+        <input id="co-flops" type="range" min="20" max="200" step="10" value="40">
+      </div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">GPU 保留</div><div class="slot-val" id="co-keep">140 GB</div></div>
+      <div class="slot"><div class="slot-name">CPU 接管</div><div class="slot-val" id="co-cpu">980 GB</div></div>
+      <div class="slot"><div class="slot-name">GPU 省下</div><div class="slot-val" id="co-saved">980 GB</div></div>
+      <div class="slot"><div class="slot-name">每步搬运</div><div class="slot-val" id="co-xfer">280 GB</div></div>
+      <div class="slot"><div class="slot-name">重叠传输</div><div class="slot-val" id="co-toverlap">5.56 s</div></div>
+      <div class="slot"><div class="slot-name">计算时间</div><div class="slot-val" id="co-tcompute">229.38 s</div></div>
+    </div>
+    <div class="readout" data-src="§3.3">
+      <div class="r-head">传输 / 计算</div>
+      <div>重叠传输占计算时间的 <strong id="co-ratio">2.42%</strong>；串行传输需 <strong id="co-serial">11.11 s</strong>。
+        <span id="co-verdict">传输可被计算时间盖住（2.42%）。</span></div>
+      <div class="bar" style="margin-top:10px"><i class="b1" id="co-bar1" style="width:2.42%"></i><i class="b2" id="co-bar2" style="width:97.58%"></i></div>
+      <div style="margin-top:8px;font-size:12px;color:var(--text-soft)">
+        口径：整模型总量，未按 DP/TP/PP 再分片；16 B/参数；PCIe 带宽为理论单向值 × 0.8；计算按 8ND；默认算力 40 TFLOPS/GPU 取自 ZeRO-Offload 在 10B 单卡 V100 的实测（Abstract）。未计 CPU Adam、activation、通信与 NUMA。
+      </div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 1：70B、16,384 tokens、PCIe 4.0 ×16 <span class="sum-sub">对应滑块默认值</span></summary>
+    <div class="details-body">
+      <div class="calc">
+        M = 70B；每参数 16 B；GPU 只留 fp16 参数（2 B/参数）<br>
+        GPU 保留 = 2 × 70 = 140 GB<br>
+        CPU 接管 = (16 − 2) × 70 = 14 × 70 = 980 GB<br>
+        GPU 省下 = 980 GB（占 1,120 GB 的 (16−2)/16 = 87.5%）<br>
+        每步搬运 = 4 × 70 = 280 GB（2M 梯度下行 + 2M 参数上行）<br>
+        PCIe 4.0 有效单向带宽 = 31.5 × 0.8 = 25.2 GB/s<br>
+        重叠传输 = 2 × 70 / 25.2 = 5.56 s<br>
+        串行传输 = 4 × 70 / 25.2 = 11.11 s<br>
+        计算时间 = 8 × 70 × 16.384 / 40 = 229.376 ≈ 229.38 s<br>
+        传输/计算 = 5.5556 / 229.376 = 2.42%
+      </div>
+      <p>结论：在这个 batch 与算力下，4M 的传输只占计算时间的 2.42%，PCIe 4.0 不是瓶颈。注意这还没有把 CPU Adam 的 optimizer 时间算进去；Table 4 显示 10B 时 CPU-Adam 单次 2.57 s，GPU Adam 为 1.00 s。</p>
+      <p>口径说明：140/980 GB 是整个模型的量，单卡放不下 140 GB 参数；实际 70B 需要多卡或 MP 分片，ZeRO-2/FSDP 还会把 optimizer states 按 DP rank 再切。交互器显示的是整模型总量，不是单卡实际值。</p>
+    </div>
+  </details>
+
+  <details class="handcalc">
+    <summary>手算 2：13B、1,024 tokens、PCIe 3.0 ×16 <span class="sum-sub">小模型 + 小 batch 的边界</span></summary>
+    <div class="details-body">
+      <div class="calc">
+        M = 13B；每参数 16 B；GPU 只留 fp16 参数（2 B/参数）<br>
+        GPU 保留 = 2 × 13 = 26 GB<br>
+        CPU 接管 = 14 × 13 = 182 GB<br>
+        GPU 省下 = 182 GB（占 208 GB 的 87.5%）<br>
+        每步搬运 = 4 × 13 = 52 GB<br>
+        PCIe 3.0 有效单向带宽 = 15.75 × 0.8 = 12.6 GB/s<br>
+        重叠传输 = 2 × 13 / 12.6 = 2.06 s<br>
+        串行传输 = 4 × 13 / 12.6 = 4.13 s<br>
+        计算时间 = 8 × 13 × 1.024 / 40 = 2.6624 ≈ 2.66 s<br>
+        传输/计算 = 2.0635 / 2.6624 = 77.50%
+      </div>
+      <p>结论：模型变小、batch 变小、链路降到 PCIe 3.0 后，重叠传输已经吃掉 77.50% 的计算时间；如果串行，传输 4.13 s 大于计算 2.66 s，offload 直接变成瓶颈。这就是“小模型不划算”的定量版本。</p>
+      <p><strong>简化与未覆盖</strong>：只算 model states，且为整模型总量，未按 DP/TP/PP 再分片；用十进制 GB；假设带宽稳定、无竞争；计算按 8ND，不含 attention 的 seq² 项与通信；未计 CPU Adam、activation、内存碎片与 NUMA 跨 socket。两组手算都按同一公式，JS 输出保留两位小数，与手算逐位一致。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>ZeRO-Offload 每步一次往返，推理每 token 或每 KV 块一次搬运</h2></div>
+  <p class="sec-sub">把两条数据流画在同一张分层图上，才能看出谁在重复付费：训练搬梯度与参数，weight offload 搬权重，KV offload 搬 block。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 470" role="img" aria-label="GPU、CPU、NVMe 三层，左侧为训练 offload 数据流，右侧为推理 weight 与 KV offload 数据流">
+      <defs>
+        <marker id="co-ar-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="svg-head-a"/></marker>
+        <marker id="co-ar-c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="svg-head-c1"/></marker>
+        <marker id="co-ar-c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="svg-head-c2"/></marker>
+      </defs>
+
+      <text x="220" y="24" text-anchor="middle" class="svg-title">训练：ZeRO-Offload / ZeRO-Infinity</text>
+      <text x="660" y="24" text-anchor="middle" class="svg-title">推理：vLLM weight / KV offload</text>
+      <line x1="490" y1="42" x2="490" y2="405" class="svg-divider"/>
+
+      <rect x="20" y="42" width="840" height="88" rx="12" class="svg-tier"/>
+      <text x="35" y="72" class="svg-tier-label">GPU</text>
+      <text x="110" y="68" class="svg-txt">训练：fp16 参数 2M + activations</text>
+      <text x="110" y="90" class="svg-txt">forward / backward 都在 GPU</text>
+      <text x="520" y="68" class="svg-txt">推理：权重 + 当前 KV blocks</text>
+      <text x="520" y="90" class="svg-txt">attention / decode 在 GPU</text>
+
+      <rect x="20" y="175" width="840" height="105" rx="12" class="svg-tier"/>
+      <text x="35" y="205" class="svg-tier-label">CPU</text>
+      <text x="110" y="202" class="svg-txt">训练：fp16 梯度 2M + fp32 optimizer states 12M</text>
+      <text x="110" y="224" class="svg-txt">CPU Adam 更新（ZeRO-Offload）</text>
+      <text x="110" y="246" class="svg-txt">FSDP：sharded params / grads + optimizer</text>
+      <text x="520" y="202" class="svg-txt">推理：offloaded weights / KV blocks</text>
+      <text x="520" y="224" class="svg-txt">UVA 零拷贝或异步 prefetch</text>
+      <text x="520" y="246" class="svg-txt">KV 按 block 换入 / 换出</text>
+
+      <rect x="20" y="325" width="840" height="80" rx="12" class="svg-tier"/>
+      <text x="35" y="355" class="svg-tier-label">NVMe</text>
+      <text x="110" y="352" class="svg-txt">训练：partitioned params + optimizer states（ZeRO-Infinity）</text>
+      <text x="110" y="374" class="svg-txt">按 tile 读入 CPU，再送 GPU</text>
+      <text x="520" y="352" class="svg-txt">推理：KV offload 以 CPU 为主；disk backend 另算</text>
+      <text x="520" y="374" class="svg-txt">本页不展开 NVMe 推理路径</text>
+
+      <line x1="58" y1="132" x2="58" y2="171" class="svg-arrow-a" marker-end="url(#co-ar-a)"/>
+      <text x="52" y="156" text-anchor="end" class="svg-arrow-label">grad ↓</text>
+      <line x1="86" y1="175" x2="86" y2="136" class="svg-arrow-a" marker-end="url(#co-ar-a)"/>
+      <text x="92" y="156" class="svg-arrow-label">param ↑</text>
+
+      <line x1="58" y1="282" x2="58" y2="321" class="svg-arrow-c2" marker-end="url(#co-ar-c2)"/>
+      <text x="52" y="306" text-anchor="end" class="svg-arrow-label">tile ↓</text>
+      <line x1="86" y1="325" x2="86" y2="286" class="svg-arrow-c2" marker-end="url(#co-ar-c2)"/>
+      <text x="92" y="306" class="svg-arrow-label">tile ↑</text>
+
+      <line x1="812" y1="175" x2="812" y2="136" class="svg-arrow-c1" marker-end="url(#co-ar-c1)"/>
+      <text x="806" y="156" text-anchor="end" class="svg-arrow-label">W/KV ↑</text>
+      <line x1="840" y1="132" x2="840" y2="171" class="svg-arrow-c1" marker-end="url(#co-ar-c1)"/>
+      <text x="846" y="156" class="svg-arrow-label">KV ↓</text>
+    </svg>
+    <figcaption>图 1 · 训练每步一次往返（梯度下行、参数上行）；推理 weight offload 每个 token 重读被卸载的权重，KV offload 只在 block 换出或 prefix 命中时搬运。箭头方向表示数据移动，粗细不代表带宽。</figcaption>
+  </figure>
+
+  <h3>训练一步的时序（ZeRO-Offload）</h3>
+  <ol>
+    <li>GPU 用常驻的 fp16 参数做 forward，不需要访问 CPU。</li>
+    <li>backward 产生梯度；梯度可以在计算过程中按参数或小批量拷到 CPU，与剩余反向图重叠（§4.1）。</li>
+    <li>多卡时先做 reduce-scatter，每张卡只把自己负责的梯度分片写到 CPU（§4.2）。</li>
+    <li>CPU 上用 CPU-Adam 更新 fp32 master weight、momentum、variance，并得到更新后的参数分片。</li>
+    <li>参数分片从 CPU 回 GPU，再 all-gather 成完整的 fp16 参数，供下一轮 forward 使用。</li>
+    <li>DPU 打开时，optimizer update 可以与下一轮 forward 重叠，代价是参数晚一步生效（1-step staleness，§6.2.4）。</li>
+  </ol>
+
+  <h3>推理的两种时序</h3>
+  <ul>
+    <li><strong>Weight offload</strong>：第 k 层 forward 前，UVA 直接读 CPU 上的权重，或 prefetch 线程把第 k+1 层权重拷到 GPU；每个 token 都要为被卸载的权重付一次 PCIe 带宽。KV 仍在 GPU，不因 weight offload 变小。</li>
+    <li><strong>KV cache offload</strong>：GPU KV 池按 LRU 把不活跃 block 写到 CPU；新请求命中 prefix 时，把连续 block 取回 GPU。当前 decode token 的 KV 留在 GPU，因此不会在每个 token 上重复搬整段 context。它降低的是 KV 常驻占用，不降低权重占用。</li>
+  </ul>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>论文实测：单卡 13B、单节点 70B、512 卡 20T</h2></div>
+  <p class="sec-sub">这些数字都带硬件与 batch 条件；换链路、换模型规模或换并行策略，结论会变。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>综合表 4 · ZeRO-Offload 实测（原文 Table 2 / Table 4 / §6.2）</caption>
+      <thead>
+        <tr><th>指标</th><th>条件</th><th>数值</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>最大可训练模型</td><td>单张 V100 32GB</td><td>13B；PyTorch DDP 基线 1.4B</td><td>§6.2.1</td></tr>
+        <tr><td>最大可训练模型</td><td>单台 DGX-2，16×V100</td><td>70B；Megatron 基线 15B，原文称 4.5×</td><td>§6.2.1</td></tr>
+        <tr><td>吞吐</td><td>单卡 V100，10B</td><td>40 TFLOPS/GPU；PyTorch 1.4B 为 30</td><td>Abstract、§6.2.2</td></tr>
+        <tr><td>吞吐</td><td>1–15B，单 DGX-2</td><td>最高 1.33× / 1.11× / 1.64× 于 PyTorch / ZeRO-2 / Megatron</td><td>§6.2.2</td></tr>
+        <tr><td>对比 L2L</td><td>单卡，billion-scale</td><td>平均高 14%（相对 L2L），最高 22%</td><td>§6.2.2</td></tr>
+        <tr><td>DPU</td><td>GPT-2，小 micro-batch</td><td>1.12–1.59×</td><td>§6.2.4</td></tr>
+        <tr><td>CPU-Adam 延迟</td><td>1B / 10B</td><td>0.22 s / 2.57 s；PT-CPU 1.39 s / 14.76 s；PT-GPU 0.10 s / 1.00 s</td><td>Table 4</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>综合表 5 · ZeRO-Infinity 实测（原文 Table 1 / §8）</caption>
+      <thead>
+        <tr><th>指标</th><th>条件</th><th>数值</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>最大模型</td><td>512×V100（32 台 DGX-2）</td><td>§1 贡献列表称 32T；§8.2 实测图描述到 20T，原文称 40× 于 3D 并行</td><td>§1/§8.2/Figure 5a</td></tr>
+        <tr><td>吞吐</td><td>512×V100</td><td>25+ PFLOPS；原文标注 40% of peak</td><td>Abstract/§1</td></tr>
+        <tr><td>单节点</td><td>单台 DGX-2，16×V100</td><td>1T 参数，无模型并行</td><td>Abstract/Figure 5c</td></tr>
+        <tr><td>模型规模对比</td><td>单节点，vs 数据并行</td><td>1T vs 1.4B，原文称 700×</td><td>§8.4</td></tr>
+        <tr><td>吞吐</td><td>4 节点 64×V100，1T</td><td>2.8+ PFLOPS；44 TFLOPS/GPU</td><td>§8.3</td></tr>
+        <tr><td>吞吐</td><td>512×V100，20T</td><td>34 TFLOPS/GPU（10T 为 43）</td><td>§8.2</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>三个反直觉的点</h3>
+  <ul>
+    <li><strong>卡多了，offload 可能反而更慢。</strong>ZeRO-Offload §6.2.3 报告：到 64/128 张 GPU 时 ZeRO-2 开始超过 ZeRO-Offload，因为两边都能跑相近的 batch，而 ZeRO-Offload 多了一层 CPU↔GPU 通信。offload 是容量工具，不是无限扩展的加速器。</li>
+    <li><strong>能装下不等于能扩展。</strong>L2L 在单卡上能训练 17B，比 ZeRO-Offload 的 13B 还大，但多卡训练时模型规模不再随卡数增长（§6.2.1/§6.2.2）。offload 策略决定了容量能否随卡数一起走。</li>
+    <li><strong>superlinear 来自聚合带宽与 CPU 算力。</strong>ZeRO-Infinity §8.3 在 1T 模型上从 64 卡扩到 512 卡，超过线性；原因是每加一个节点，PCIe/NVMe 聚合带宽和 CPU optimizer 算力也一起增加。反过来说，如果链路或 CPU 不随节点增长，这个收益会消失。</li>
+  </ul>
+  <p>
+    ZeRO-Infinity §8.2 还给出一个边界信号：20T 时吞吐从 10T 的 43 TFLOPS/GPU 降到 34 TFLOPS/GPU，原因不是 NVMe 带宽，而是每 GPU 的 batch 太小、CPU 内存放不下 activation checkpoint。offload 把容量问题转移到 CPU/NVMe 后，新的瓶颈会出现在主机内存与 batch 上。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候 offload 不划算：小模型、小 batch、延迟敏感、NUMA</h2></div>
+  <p class="sec-sub">offload 是把容量问题换成带宽问题；带宽不够、无法重叠或 CPU 侧成为瓶颈时，收益为负。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界 1</span><h4>PCIe 带宽压不住</h4></div>
+      <p>ZeRO-Offload 的 4M/步是理论最小值；如果每步 token 少、链路只有 PCIe 3.0，传输时间可能超过计算时间。ZeRO-Infinity §2 对 ZeRO-Offload 的评价是：它需要较大的 batch 才能保持效率，原因之一就是 PCIe 带宽有限。</p>
+      <p class="src-note">ZeRO-Infinity §2；本页 §04 手算 2</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界 2</span><h4>小模型本来就能装下</h4></div>
+      <p>模型能放进 GPU 时，offload 只增加拷贝与 CPU optimizer 开销。ZeRO-Offload Table 4 的实测是：1B 时 CPU-Adam 0.22 s，GPU Adam 0.10 s；10B 时 2.57 s 对 1.00 s。offload 的收益来自“否则装不下”，不是来自“CPU 更快”。</p>
+      <p class="src-note">ZeRO-Offload Table 4</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界 3</span><h4>延迟敏感的推理</h4></div>
+      <p>Weight offload 每 token 都要读被卸载的权重；UVA 零拷贝只是省掉显式 copy，带宽仍然要付。Prefetch 只有在“传输能被当前层 compute 盖住”时才有用；decode 每 token 的 compute 很短，几十 GB 的权重搬运很难藏住。KV offload 改善的是 KV 容量与 prefix 复用，不是 decode 的单 token 延迟。</p>
+      <p class="src-note">vLLM 源码 <code>config/offload.py:23-32</code>；<code>offloader/uva.py:23-28</code></p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">边界 4</span><h4>NUMA 与主机内存</h4></div>
+      <p>CPU offload 依赖 pinned memory；DeepSpeed 的 <code>pin_memory</code> 默认开启，并注明它需要足够的 memlock 限额与常驻内存（<code>offload_config.py:45-52/75-82</code>）。多 socket 机器上，GPU 连到哪个 CPU socket、CPU-Adam 线程落在哪个 NUMA 节点，都会改变有效带宽与 optimizer 时间。<code>offload_config.py</code> 本身不绑定 NUMA；DeepSpeed launcher 提供可选的 <code>--bind_cores_to_rank</code> / <code>--bind_core_list</code>（<code>deepspeed/launcher/launch.py:83-88</code>），<code>deepspeed/utils/numa.py:104</code> 用 numactl 做绑定。</p>
+      <p class="src-note">DeepSpeed <code>offload_config.py</code>；NUMA 影响为 <span class="infer">推断</span>（依据：pinned host memory 与 CPU Adam 多线程实现；<code>offload_config.py</code> 未绑定，launcher 的绑定是可选项）</p>
+    </div>
+  </div>
+
+  <h3>一张决策表</h3>
+  <div class="tbl-scroll">
+    <table>
+      <caption>综合表 6 · 什么时候优先考虑 offload（依据本页引用的论文与源码）</caption>
+      <thead>
+        <tr><th>场景</th><th>建议</th><th>依据</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>模型 + batch 已能放进 GPU</td><td>不要 offload；先调 batch 或换并行</td><td>CPU Adam 慢于 GPU Adam（Table 4）</td></tr>
+        <tr><td>单卡/单节点装不下，但 PCIe 4.0 以上且 batch 足够大</td><td>训练侧优先 ZeRO-Offload；需要更大规模再加 ZeRO-Infinity 的 NVMe 层</td><td>§6.2.1/§8.2 的容量结果</td></tr>
+        <tr><td>多卡已经很多（64/128）</td><td>先比较 ZeRO-2；offload 的 CPU↔GPU 开销可能不再划算</td><td>ZeRO-Offload §6.2.3</td></tr>
+        <tr><td>推理只是权重装不下、并发不高</td><td>可试 weight offload；优先 prefetch，避免 UVA 每 token 直读</td><td>vLLM <code>cpu_offload_gb</code> / prefetch 源码</td></tr>
+        <tr><td>推理要长上下文、多请求复用前缀</td><td>看 KV offload；它扩大 KV 池，不解决权重占用</td><td>vLLM <code>kv_offloading_size</code> 与 connector 源码</td></tr>
+        <tr><td>decode 延迟是硬 SLO</td><td>不要把权重放到 PCIe 后面；KV offload 也只适合容量换吞吐</td><td>weight offload 的 per-token 传输模型</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    <strong>不要把训练 offload 的数字外推到推理。</strong>训练每步搬一次梯度与参数，推理 weight offload 每个 token 搬一次被卸载的权重，KV offload 每个 block 搬一次 KV；三者的频率、体积、可重叠性都不同。ZeRO-Offload 的 4M/步和 vLLM 的 <code>cpu_offload_gb</code> 不是同一个量。
+  </p>
+  <p>
+    <strong>也不要把 CPU offload 的数字外推到 NVMe。</strong>ZeRO-Infinity 的 NVMe 层需要 tile 读写、CPU 内存中转与 fragmentation 控制；§5.2.2 明确提醒，NVMe↔CPU↔GPU 的往返会造成 CPU/GPU 内存碎片，容量够也可能 OOM。NVMe 适合极端规模，不适合作为默认的第一层。
+  </p>
+</section>
+
+<footer>
+  <div>CPU Offloading 与显存管理 · ZeRO-Offload / ZeRO-Infinity / PyTorch FSDP / vLLM</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2101.06840v1">ZeRO-Offload (arXiv 2101.06840v1)</a>；
+    <a href="https://arxiv.org/abs/2104.07857v1">ZeRO-Infinity (arXiv 2104.07857v1)</a><br>
+    源码：<a href="https://github.com/microsoft/DeepSpeed/tree/f47dc3e">DeepSpeed @ f47dc3e</a>；
+    <a href="https://github.com/pytorch/pytorch/tree/2ee7a63">PyTorch @ 2ee7a63</a>；
+    <a href="https://github.com/vllm-project/vllm/tree/e740bad">vLLM @ e740bad</a><br>
+    笔记：<a href="/cpu-offloading/">CPU offloading</a><br>
+    编号核对：ZeRO-Infinity 的 arXiv 编号为 2104.07857；2104.07858 经核对是另一篇论文（MoPQ）。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var params = document.getElementById('co-params');
+  var tokens = document.getElementById('co-tokens');
+  var flops = document.getElementById('co-flops');
+  var paramsV = document.getElementById('co-params-v');
+  var tokensV = document.getElementById('co-tokens-v');
+  var flopsV = document.getElementById('co-flops-v');
+  var keepEl = document.getElementById('co-keep');
+  var cpuEl = document.getElementById('co-cpu');
+  var savedEl = document.getElementById('co-saved');
+  var xferEl = document.getElementById('co-xfer');
+  var tOverlapEl = document.getElementById('co-toverlap');
+  var tComputeEl = document.getElementById('co-tcompute');
+  var ratioEl = document.getElementById('co-ratio');
+  var serialEl = document.getElementById('co-serial');
+  var verdictEl = document.getElementById('co-verdict');
+  var bar1 = document.getElementById('co-bar1');
+  var bar2 = document.getElementById('co-bar2');
+  if (!params || !tokens || !flops || !ratioEl) return;
+
+  var bw = 25.2;
+  var tabs = document.querySelectorAll('.co-bw');
+
+  function fmt(n, digits) {
+    return Number(n).toFixed(digits === undefined ? 2 : digits);
+  }
+  function comma(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function update() {
+    var n = Number(params.value);
+    var t = Number(tokens.value);
+    var f = Number(flops.value);
+    var keep = 2 * n;
+    var cpu = 14 * n;
+    var saved = 14 * n;
+    var xfer = 4 * n;
+    var tOverlap = (2 * n) / bw;
+    var tSerial = (4 * n) / bw;
+    var tCompute = (8 * n * t) / (f * 1000);
+    var ratio = (tOverlap / tCompute) * 100;
+
+    if (paramsV) paramsV.textContent = n + 'B';
+    if (tokensV) tokensV.textContent = comma(t);
+    if (flopsV) flopsV.textContent = f + ' TFLOPS';
+    if (keepEl) keepEl.textContent = fmt(keep, 0) + ' GB';
+    if (cpuEl) cpuEl.textContent = fmt(cpu, 0) + ' GB';
+    if (savedEl) savedEl.textContent = fmt(saved, 0) + ' GB';
+    if (xferEl) xferEl.textContent = fmt(xfer, 0) + ' GB';
+    if (tOverlapEl) tOverlapEl.textContent = fmt(tOverlap) + ' s';
+    if (tComputeEl) tComputeEl.textContent = fmt(tCompute) + ' s';
+    if (ratioEl) ratioEl.textContent = fmt(ratio) + '%';
+    if (serialEl) serialEl.textContent = fmt(tSerial) + ' s';
+    if (verdictEl) {
+      if (ratio <= 100) {
+        verdictEl.textContent = '传输可被计算时间盖住（' + fmt(ratio) + '%）。';
+      } else {
+        verdictEl.textContent = '传输超过计算时间（' + fmt(ratio) + '%），PCIe 成为瓶颈。';
+      }
+    }
+    var capped = Math.min(ratio, 100);
+    if (bar1) bar1.style.width = capped + '%';
+    if (bar2) bar2.style.width = (100 - capped) + '%';
+  }
+
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener('click', function () {
+      for (var j = 0; j < tabs.length; j++) {
+        tabs[j].classList.remove('active');
+      }
+      this.classList.add('active');
+      bw = Number(this.getAttribute('data-bw'));
+      update();
+    });
+  }
+  params.addEventListener('input', update);
+  tokens.addEventListener('input', update);
+  flops.addEventListener('input', update);
+  update();
+})();
+</script>
+</body>
+</html>

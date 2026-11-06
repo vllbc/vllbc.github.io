@@ -1,0 +1,1025 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 4 | 源码 verl/trainer/ppo/ray_trainer.py:1491 | 2*2 |
+| 28 | 源码 verl/trainer/ppo/ray_trainer.py:1553 | 2*2*(4+3) |
+| 12 | 源码 verl/trainer/ppo/core_algos.py:1175 | 2*2*3 |
+| 0.083333 | 源码 verl/trainer/ppo/core_algos.py:1175 | 1/12 |
+| 3 | 源码 verl/trainer/ppo/ray_trainer.py:1491 | 3*1 |
+| 21 | 源码 verl/trainer/ppo/ray_trainer.py:1553 | 3*1*(5+2) |
+| 6 | 源码 verl/trainer/ppo/core_algos.py:1175 | 3*1*2 |
+| 0.166667 | 源码 verl/trainer/ppo/core_algos.py:1175 | 1/6 |
+| 6.5 | 源码 verl/trainer/ppo/metric_utils.py:573 | (8+5)/2 |
+| 0.5 | 源码 verl/trainer/ppo/metric_utils.py:576 | 1/2 |
+| 21 | 源码 verl/trainer/ppo/metric_utils.py:687 | 2*4+8+5 |
+| 1.313 | 源码 verl/trainer/ppo/metric_utils.py:687 | 21/(2*8) |
+| 4 | 源码 verl/trainer/ppo/metric_utils.py:573 | (4+4)/2 |
+| 1 | 源码 verl/trainer/ppo/metric_utils.py:576 | 2/2 |
+| 14 | 源码 verl/trainer/ppo/metric_utils.py:687 | 2*3+4+4 |
+| 7 | 源码 verl/trainer/ppo/metric_utils.py:687 | 14/(1*2) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="commit-7de8f2e">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>verl 的 RL 数据流与指标 · 一个 batch 从 rollout 到 PPO 更新</title>
+<meta name="description" content="verl 精读：DataProto 的 tensor / non_tensor_batch / meta_info 三层，rollout 到 reward、old_log_prob、ref_log_prob、advantage、actor 更新的顺序，token-mean 的全局分母，以及 reward、response_length、clipfrac、KL、grad_norm、MFU、validation 指标的源码位置。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.flow text{font-family:Inter,"Noto Sans SC",sans-serif}
+.flow .panel{fill:var(--bg-soft);stroke:var(--border);stroke-width:1}
+.flow .box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.1}
+.flow .box-data{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.1}
+.flow .box-metric{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.1}
+.flow .box-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.1}
+.flow .title{fill:var(--text);font-size:12.5px;font-weight:700}
+.flow .label{fill:var(--text);font-size:11.5px;font-weight:600}
+.flow .small{fill:var(--text-muted);font-size:10.5px}
+.flow .mono{fill:var(--text);font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600}
+.flow .arrow{stroke:var(--border-strong);stroke-width:1.5;fill:none}
+.flow .arrow-head{fill:var(--border-strong)}
+.tbl-scroll table td:first-child code{white-space:nowrap}
+@media (max-width:560px){.sim{padding:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">verl RL Dataflow</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">计算与分片</a>
+      <a href="#flow">数据流</a>
+      <a href="#results">指标</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RL 训练 · verl · commit 7de8f2e</span>
+  <h1>verl 的 RL 数据流：一个 batch 怎样从 rollout 走到 PPO 更新</h1>
+  <p class="hero-sub">
+    一步 RL 里，同一个 batch 要同时承载 <strong>per-token 张量</strong>、<strong>per-sample 对象</strong>和 <strong>per-step 元信息</strong>。
+    DataProto 把这三类数据分成三层，reward 则被压成一个标量，写在每条序列最后一个有效 token 上（有效长度 L<sub>i</sub>&gt;0 时）。
+    本页沿着 <code>ray_trainer.py</code> 的 <code>fit()</code> 顺序，拆开 DataProto、reward、advantage 和 metrics 之间的数据流。
+  </p>
+  <div class="meta">
+    <span>verl @ 7de8f2e</span>
+    <a href="https://github.com/volcengine/verl/tree/7de8f2e61f7011679d56c74677ef7bea87d24946" target="_blank" rel="noopener">源码仓库 ↗</a>
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/protocol.py" target="_blank" rel="noopener">protocol.py ↗</a>
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/trainer/ppo/ray_trainer.py" target="_blank" rel="noopener">ray_trainer.py ↗</a>
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/trainer/ppo/metric_utils.py" target="_blank" rel="noopener">metric_utils.py ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    DataProto 不是一个新的 tensor 格式，它把 <strong>TensorDict</strong>、<strong>object ndarray 字典</strong>和 <strong>meta_info</strong> 拼在一个壳里。
+    三层的切法不同：tensor 和 non_tensor 按 batch 维切，meta_info 原样广播给每个分片（<code>verl/protocol.py:861-900</code>）。
+  </p>
+  <p>
+    reward 在默认路径上是一条序列一个标量。L<sub>i</sub>&gt;0 时它被写在最后一个有效 response token 上，其余位置为 0；L<sub>i</sub>=0 时索引 <code>-1</code> 会写进末列（见 01）。因此 <code>token_level_scores.sum(-1)</code> 仍能还原 reward
+    （<code>verl/experimental/reward_loop/reward_manager/base.py:76-81</code>、<code>verl/trainer/ppo/metric_utils.py:453</code>）。
+  </p>
+  <p>
+    loss 的默认聚合是 <code>token-mean</code>：分母不是 batch size，也不是最大序列长度，而是<strong>全局有效 response token 数</strong>。
+    FSDP 引擎把每个 rank 的 <code>loss_mask.sum()</code> 做一次 SUM all-reduce，再交给 <code>agg_loss</code>
+    （<code>verl/workers/engine/fsdp/transformer_impl.py:672-676</code>、<code>verl/trainer/ppo/core_algos.py:1170-1175</code>）。
+  </p>
+  <p>
+    指标在 <code>fit()</code> 尾部统一结算：<code>compute_data_metrics</code>、<code>compute_timing_metrics</code>、<code>compute_throughout_metrics</code>
+    各自选分母；同名 <code>std</code> 在 GRPO 和 validation 里用的是不同的估计量（<code>verl/trainer/ppo/metric_utils.py:974</code>、<code>verl/trainer/ppo/core_algos.py:321</code>）。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="源码 verl/protocol.py:326-328">3<small> 层</small></div>
+      <div class="k">DataProto 的三个字段<br>batch / non_tensor_batch / meta_info</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="源码 verl/experimental/reward_loop/reward_manager/base.py:79">1<small> 个 token</small></div>
+      <div class="k">默认 manager 下每条序列只有 1 个 reward 写入位置<br>L<sub>i</sub>&gt;0 时为最后一个有效 token；L<sub>i</sub>=0 时索引 -1 写末列</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="源码 verl/trainer/ppo/core_algos.py:1175">1/N</div>
+      <div class="k">token-mean 的每 token 权重<br>N = 全局有效 response token 数</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一步 RL 的 batch 同时装着张量、对象和元信息，reward 却只是一个标量</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 DataProto 要分三层，以及「reward 放在哪个 token 上」为什么会直接影响 loss 和 metrics。</p>
+
+  <p>
+    先看一步训练里 batch 需要装什么。模型前向和 loss 需要 per-token 的 <code>responses</code>、<code>attention_mask</code>、<code>response_mask</code>、
+    <code>old_log_probs</code>、<code>ref_log_prob</code>、<code>values</code>、<code>advantages</code>、<code>returns</code>；
+    reward 和验证需要 per-sample 的 <code>uid</code>、<code>data_source</code>、<code>reward_model</code>；调度和日志还需要 per-step 的
+    <code>temperature</code>、<code>global_steps</code>、<code>global_token_num</code>。这三类数据的形状和生命周期都不一样。
+  </p>
+
+  <p>
+    最关键的约定是 reward 的落点。默认路径把一条序列的 outcome reward 压成一个 float，写在<strong>最后一个有效 response token</strong> 上（仅当 L<sub>i</sub>&gt;0）：
+    其余 token 为 0。L<sub>i</sub>=0 时索引 <code>valid_response_length - 1 = -1</code> 会写到末列（padding 位置），这是源码的边界行为。
+    这样 <code>token_level_scores.sum(-1)</code> 仍能还原成每条序列的标量 reward
+    （<code>verl/trainer/ppo/metric_utils.py:453</code>）。
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">token_level_scores</span>[i, L<sub>i</sub> − 1] = r<sub>i</sub>（L<sub>i</sub>&gt;0；L<sub>i</sub>=0 时索引为 −1），其余位置为 0<br>
+    Σ<sub>t</sub> token_level_scores[i, t] = r<sub>i</sub>
+  </div>
+  <div class="eq-cap">
+    L<sub>i</sub> 是第 i 条序列的有效 response 长度，由 <code>attention_mask</code> 的 response 段求和得到
+    （<code>verl/experimental/reward_loop/reward_manager/base.py:77-80</code>）。L<sub>i</sub>=0（空 response / abort）时索引 −1 写到末列，而不是「最后一个有效 token」。
+  </div>
+
+  <p>
+    这个落点不是固定的 <code>R − 1</code>，而是 <code>L<sub>i</sub> − 1</code>。因为 batch 里的 response 是右填充的，不同序列的有效长度不同；
+    如果把 reward 写在固定末列，短序列的 reward 会落进 padding。batch 路径的 <code>assemble_rm_scores</code> 用
+    <code>valid_response_length - 1</code> 做 scatter（<code>base.py:79</code>）；单条轨迹路径在 <code>as_dict</code> 里直接写 <code>rm_scores[-1]</code>，
+    因为那条轨迹还没有被 batch padding（<code>verl/experimental/agent_loop/agent_loop.py:147-148</code>）。两条路径的索引写法不同，但在 L<sub>i</sub>&gt;0 时都指向「最后一个有效 token」；
+    L<sub>i</sub>=0 时 batch 路径的索引 −1 会写到末列（padding 位置），这是源码的边界行为。
+  </p>
+
+  <p>
+    这也解释了 metrics 为什么容易读错。同一个 batch，<code>response_length/mean</code> 会把 abort 的 0 长度样本算进去，
+    <code>response_length_non_aborted/mean</code> 则把它们排除
+    （<code>verl/trainer/ppo/metric_utils.py:573</code>、<code>:581</code>）。分母不同，两个数就不是同一个东西。
+    后面的 03 讲 DataProto 怎么保证三层对齐，04 讲 token-mean 的分母，05 讲一步的调用顺序，06 讲每个指标的分母。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>两条 reward 路线都产出 (B, R) 的 rm_scores，差别在谁来算分/提供 score</h2></div>
+  <p class="sec-sub">读完这节你应该知道：逐样本打分和批量 reward model 各自适合什么场景，以及 trainer 在什么条件下会跳过其中一条。</p>
+
+  <p>
+    路线 A 是<strong>逐样本打分</strong>。reward loop 的 worker 在 <code>compute_score_batch</code> 里为每个样本创建一个 asyncio task，
+    调用 <code>self.compute_score</code>（<code>verl/experimental/reward_loop/reward_loop.py:138-155</code>）：默认规则 reward 或自定义 reward function
+    走 <code>run_single</code>（<code>:148</code>、<code>:155</code>），启用 reward model 时走 <code>compute_score_disrm</code>（<code>:153</code>）。
+    默认的 <code>NaiveRewardManager</code> 只解码 response（prompt 不参与打分），读取 <code>data_source</code> 和 <code>ground_truth</code>，调用 <code>compute_score</code>，返回一个
+    <code>{"reward_score": ..., "reward_extra_info": ...}</code>（<code>verl/experimental/reward_loop/reward_manager/naive.py:34-99</code>）。
+    更早的 legacy 版本在 <code>verl/workers/reward_manager/naive.py:90-176</code> 里逐条 <code>for i in range(len(data))</code>，
+    它会同时解码 prompt 与 response；它的 docstring 明确说：一次慢的 <code>compute_score</code> 会阻塞整个训练循环，所以加了 SIGALRM 超时保护
+    （<code>naive.py:32-40</code>）。
+  </p>
+
+  <p>
+    路线 B 是<strong>批量 reward model</strong>。trainer 侧的 <code>compute_rm_score</code> 先把 batch 补到 worker 数的整数倍，
+    再 <code>chunk(num_workers)</code> 分给各个 worker，收集后按原始长度截断，最后把 scores 装配成 <code>(B, R)</code> 的 <code>rm_scores</code>
+    （<code>verl/experimental/reward_loop/reward_loop.py:343-363</code>）。装配同样是「每行一个写入位置」：
+    <code>rm_scores[arange(B), valid_response_length - 1] = scores</code>（<code>base.py:76-81</code>）。
+  </p>
+
+  <p>
+    trainer 只在一种情况下会走路线 B：<code>use_rm</code> 为真且 batch 里还没有 <code>rm_scores</code>
+    （<code>verl/trainer/ppo/ray_trainer.py:1563-1565</code>）。如果 agent loop 已经把 <code>rm_scores</code> 放进 rollout 输出，
+    trainer 直接调用 <code>extract_reward</code> 读出来（<code>:1568</code>；<code>verl/trainer/ppo/reward.py:160-167</code>）。
+    两条路线最终都落到同一个字段，DataProto 不需要知道 reward 是谁算的。
+  </p>
+
+  <p class="eq-cap">表 1 · reward 的两条落点（页面整理；出处见各单元格）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>路线</th><th>输入 → 输出</th><th>触发条件</th><th>代价</th><th>源码</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>逐样本 <code>compute_score</code></td>
+          <td>DataProtoItem → 一个 float，写入最后有效 token（L<sub>i</sub>&gt;0；L<sub>i</sub>=0 时写末列）</td>
+          <td>reward worker handle 可用：RM 关闭，或 RM 使用独立 resource pool（<code>reward_loop.py:320-322</code>）</td>
+          <td>每个样本一个 task；单样本慢会拖住一条轨迹，legacy 版本有超时保护</td>
+          <td><code>reward_loop.py:138-155</code>；<code>experimental/.../naive.py:34-99</code></td>
+        </tr>
+        <tr>
+          <td>批量 reward model</td>
+          <td>padded batch → <code>(B, R)</code> 的 <code>rm_scores</code></td>
+          <td><code>use_rm</code> 为真且 batch 内没有 <code>rm_scores</code>（<code>ray_trainer.py:1563-1565</code>）</td>
+          <td>补到 worker 数整数倍后分片；默认 8 个 worker（<code>reward.yaml:5</code>）</td>
+          <td><code>reward_loop.py:343-363</code>；<code>base.py:76-81</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    两条路线之外，还存在一条「复用」路径：如果 batch 里已经有 <code>rm_scores</code>，trainer 不会重新算
+    （<code>ray_trainer.py:1563</code>）。这也是为什么 reward model 和 rule-based reward 可以在同一个 trainer 里切换：
+    切换的是谁写 <code>rm_scores</code>，不是下游 loss 和 metrics 的读法。
+  </p>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三层各有各的切法：tensor 和 object 按行切，meta_info 原样广播</h2></div>
+  <p class="sec-sub">读完这节你应该知道：DataProto 的哪个字段会被 chunk/split 切开，哪个字段在每个分片里保持同一份，以及 union 为什么不会静默覆盖。</p>
+
+  <p>
+    DataProto 的定义只有三个字段：<code>batch</code> 是 TensorDict，<code>non_tensor_batch</code> 是 <code>dict[str, np.ndarray]</code>，
+    <code>meta_info</code> 是普通 dict（<code>verl/protocol.py:317-328</code>）。
+    <code>check_consistency</code> 强制 tensor 的 batch 维只有一维；<code>batch is not None</code> 且 <code>non_tensor_batch</code> 非空时，
+    non_tensor 的每个数组必须是 <code>numpy.ndarray</code>，且 <code>shape[0]</code> 等于 batch size（<code>verl/protocol.py:451-474</code>）。
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">batch</span> : TensorDict，dim0 是 batch<br>
+    <span class="hl-b">non_tensor_batch</span> : dict[str, np.ndarray]，shape[0] = batch<br>
+    <span class="hl-c">meta_info</span> : dict，per-step，不按样本切
+  </div>
+  <div class="eq-cap">三个字段的语义；字段定义在 <code>verl/protocol.py:326-328</code>，一致性检查在 <code>:451-474</code>。</div>
+
+  <h3>chunk：前两层按行切，meta_info 原样传给每个分片</h3>
+  <p>
+    <code>chunk(chunks)</code> 先在 dim0 上切 TensorDict，再按同样的 chunk 边界用 <code>np.array_split</code> 切每个 non_tensor 数组，
+    最后把同一个 <code>meta_info</code> 传给每个输出（<code>verl/protocol.py:861-900</code>）。如果没开 auto padding，
+    它还要求 <code>len(self) % chunks == 0</code>，否则直接断言失败（<code>:870-872</code>）。
+  </p>
+
+  <p>
+    这种设计让 <code>temperature</code>、<code>global_steps</code> 这类 per-step 标量不会在切分时被复制成 B 份
+    （<code>ray_trainer.py:1479</code>、<code>:1489</code>），也让 <code>uid</code>、<code>data_source</code>、<code>reward_model</code>
+    这些 per-sample 对象跟着行一起走。切分语义由字段决定，不需要每个调用点自己记。
+  </p>
+
+  <h3>其它算子：select / reorder / repeat 都同时作用于两层</h3>
+  <p>
+    <code>select_idxs</code> 用一个索引数组同时索引 TensorDict 和每个 non_tensor 数组（<code>verl/protocol.py:632-670</code>）；
+    <code>reorder</code> 在原地重排两层（<code>:960-966</code>）；<code>repeat</code> 在 <code>interleave=True</code> 时用
+    <code>repeat_interleave</code>/<code>np.repeat</code>，<code>interleave=False</code> 时 tensor 走 expand+reshape、non_tensor 走 <code>np.tile</code>，
+    两条分支都保持行对应（<code>:968-1010</code>，<code>np.tile</code> 在 <code>:1001-1004</code>）。<code>split(split_size)</code> 只是按切片反复调用
+    <code>__getitem__</code>（<code>:902-911</code>）。这些算子都不碰 meta_info，或者只把同一个 dict 传下去。
+  </p>
+
+  <h3>union：同名 key 必须相等，否则报错而不是覆盖</h3>
+  <p>
+    一步 RL 会多次调用 <code>batch.union(new_tensor)</code>：rollout 输出、old_log_probs、ref_log_prob、values 都是这样并进 batch 的。
+    <code>union</code> 分别合并三层（<code>verl/protocol.py:778-796</code>），每一层都有自己的相等性检查：
+  </p>
+  <ul>
+    <li><strong>tensor：</strong>两个 TensorDict 的 batch size 必须相同；同名 key 必须 <code>equal</code>，否则断言失败（<code>verl/protocol.py:109-122</code>）。</li>
+    <li><strong>non_tensor：</strong>同名数组做深比较，NaN 和 object dtype 也覆盖（<code>verl/protocol.py:188-199</code>）。</li>
+    <li><strong>meta_info：</strong>同名 key 必须 <code>==</code>，否则断言失败（<code>verl/utils/py_functional.py:151-168</code>）。</li>
+  </ul>
+  <p>
+    这带来一个容易忽略的行为：<code>union</code> 是<strong>原地修改</strong>左操作数并返回 <code>self</code>
+    （<code>verl/protocol.py:792-795</code>）。<code>batch = batch.union(x)</code> 看起来像纯函数，实际会改掉原来的 <code>batch</code>；
+    如果别处还持有同一个引用，会一起看到新 key。
+  </p>
+
+  <h3>padding：重复样本凑整除，collect 后再把尾部切掉</h3>
+  <p>
+    <code>pad_dataproto_to_divisor</code> 在长度不能被整除时，从 batch 头部取样本重复，拼到尾部，返回 <code>pad_size</code>
+    （<code>verl/protocol.py:85-99</code>）。dispatch 层把 <code>pad_size</code> 记进 kwargs（<code>verl/single_controller/base/decorator.py:91-117</code>），
+    worker 返回后 collect 层用 <code>output.select_idxs(indices[:-padding_count])</code> 把尾部切掉
+    （<code>verl/single_controller/ray/base.py:53-63</code>）。所以对调用方来说 padding 是透明的；
+    但对 worker 内部计算的 per-sample 指标，重复样本仍然参与过统计（这一点在 07 展开）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>先问「这个字段是 per-token、per-sample 还是 per-step」</h4></div>
+    <p>
+      per-token 放 <code>batch</code>，跟着 dim0 和序列维走；per-sample 放 <code>non_tensor_batch</code>，跟着 dim0 走；
+      per-step 放 <code>meta_info</code>，不切分、原样广播。选错层，chunk 和 union 的行为就会和预期不一致。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 04. 计算与分片 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>token-mean 的分母是全局有效 token 数，不是 batch size，也不是序列长度</h2></div>
+  <p class="sec-sub">读完这节你应该知道：response_mask 怎么从 attention_mask 来、全局 token 分母怎么在 DP 之间对齐、reward 打分为什么先补齐再分片。</p>
+
+  <p>
+    loss 的 token 权重来自 <code>response_mask</code>。trainer 先取 response 张量的宽度 <code>R</code>，再切
+    <code>attention_mask[:, -R:]</code>（<code>verl/trainer/ppo/ray_trainer.py:132-135</code>）。
+    response 张量是右填充的，模型输出回到 padding 布局时也在右侧补零（<code>verl/workers/utils/padding.py:141-144</code>），
+    所以最后 R 列正好是 response 段。到了 engine 里，<code>loss_mask</code> 直接等于 <code>response_mask</code>
+    （<code>verl/workers/utils/padding.py:77</code>）。
+  </p>
+
+  <p>
+    <code>agg_loss</code> 的 <code>token-mean</code> 分支做的是「masked sum ÷ 有效 token 数」：
+    如果 <code>batch_num_tokens</code> 没给，它就用本地 <code>loss_mask.sum()</code>；当 <code>dp_size &gt; 1</code> 时，它要求调用方传入全局
+    <code>batch_num_tokens</code>，否则直接抛错（<code>verl/trainer/ppo/core_algos.py:1170-1175</code>）。
+  </p>
+
+  <div class="eq">
+    L<sub>token-mean</sub> = Σ<sub>i,t</sub> m<sub>i,t</sub> · ℓ<sub>i,t</sub> / Σ<sub>all ranks</sub> Σ<sub>i,t</sub> m<sub>i,t</sub><br>
+    loss<sub>rank</sub> = local_sum / global_N × dp_size
+  </div>
+  <div class="eq-cap">
+    <code>m</code> 是 response_mask；<code>global_N</code> 是全局有效 token 数。源码：<code>core_algos.py:1170-1175</code>。
+  </div>
+
+  <p>
+    这个 <code>global_N</code> 不是 trainer 手算的。FSDP engine 在每个 rank 上先算
+    <code>batch_num_tokens = data["loss_mask"].sum()</code>，再对 DP 组做一次 <code>ReduceOp.SUM</code>，最后写回 TensorDict 的 non-tensor 区
+    （<code>verl/workers/engine/fsdp/transformer_impl.py:672-676</code>）。
+    <span class="infer">推断</span>（由 <code>core_algos.py:1175</code> 的 <code>* dp_size</code> 与 DDP 的梯度平均语义推出）：
+    每个 rank 的 loss 先乘 <code>dp_size</code>，DDP 再对梯度取平均，两步合起来等价于用全局 token 数做一次平均。
+  </p>
+
+  <p>
+    分片还有一层：<code>_balance_batch</code> 按每条序列的 workload 把所有序列重新排到各个 DP rank，使每个 rank 的总负载接近
+    （<code>verl/trainer/ppo/ray_trainer.py:1182-1250</code>）。workload 不是原始 token 数，而是
+    <code>24576 * seqlen + seqlen²</code>（<code>verl/utils/seqlen_balancing.py:27-46</code>），用 attention 的线性项与二次项近似 FLOPs。
+    它只改顺序，不改 token 总数；代码注释也说明这会改变 mini-batch 的组成，但 advantage 按 <code>uid</code> 计算，不受顺序影响
+    （<code>:1546-1548</code>）。
+  </p>
+
+  <h3>reward 打分的 worker 池：先补齐，再分片，最后按原长度截断</h3>
+  <p>
+    默认配置开 <code>8</code> 个 reward worker（<code>verl/trainer/config/reward/reward.yaml:5</code>）。
+    <code>compute_rm_score</code> 把 batch 补到 worker 数的整数倍，<code>chunk</code> 成等长分片，每个 worker 并发处理，
+    收集后把 padding 部分截掉（<code>verl/experimental/reward_loop/reward_loop.py:343-358</code>）。
+    这和 03 节的 DataProto padding 是同一套思路：先凑整除，再把尾部丢掉。
+  </p>
+
+  <p>
+    在默认的规则 reward 路径上，agent loop 会从可用的 reward worker handle 里随机选一个，远程调用 <code>compute_score</code>，
+    把返回的 <code>reward_score</code> 写进轨迹输出（<code>verl/experimental/agent_loop/agent_loop.py:1113-1115</code>）。
+    handle 只在「RM 关闭」或「RM 使用独立 resource pool」时返回（<code>reward_loop.py:320-322</code>）；
+    否则 reward 由 trainer 在 rollout 之后统一计算（<code>ray_trainer.py:1563-1565</code>）。
+  </p>
+
+  <p class="eq-cap">表 2 · 本 commit 的默认开关（页面整理；出处见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>配置</th><th>默认值</th><th>源码</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>algorithm.adv_estimator</code></td><td><code>gae</code></td><td><code>ppo_trainer.yaml:78</code></td></tr>
+        <tr><td><code>algorithm.use_kl_in_reward</code></td><td><code>False</code></td><td><code>ppo_trainer.yaml:102</code></td></tr>
+        <tr><td><code>actor.use_kl_loss</code></td><td><code>false</code></td><td><code>actor.yaml:103</code></td></tr>
+        <tr><td><code>actor.clip_ratio</code></td><td><code>0.2</code></td><td><code>actor.yaml:36</code></td></tr>
+        <tr><td><code>actor.loss_agg_mode</code></td><td><code>token-mean</code></td><td><code>actor.yaml:86</code></td></tr>
+        <tr><td><code>actor.entropy_coeff</code></td><td><code>0</code></td><td><code>actor.yaml:93</code></td></tr>
+        <tr><td><code>rollout.n</code></td><td><code>1</code></td><td><code>rollout.yaml:135</code></td></tr>
+        <tr><td><code>reward.reward_manager</code></td><td><code>register / naive</code></td><td><code>reward.yaml:18-19</code></td></tr>
+        <tr><td><code>reward.num_workers</code></td><td><code>8</code></td><td><code>reward.yaml:5</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    下面把这个 batch 的 token 账本做成可调参数的模拟。B 是 prompt 数，n 是 <code>rollout.n</code>，P 是 prompt 长度，R 是 response 长度。
+    它展示五个量：序列数 B×n、有效 response token 数、rm_scores 写入位置数、总 token 数，以及 token-mean 的每 token 归一化权重。
+  </p>
+
+  <div class="sim" id="batch-sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label for="bs-b">prompt 数 B <span class="v" id="bs-b-val">2</span></label>
+        <input id="bs-b" type="range" min="1" max="8" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label for="bs-n">rollout.n <span class="v" id="bs-n-val">2</span></label>
+        <input id="bs-n" type="range" min="1" max="8" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label for="bs-p">prompt 长度 P <span class="v" id="bs-p-val">4</span></label>
+        <input id="bs-p" type="range" min="1" max="32" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label for="bs-r">response 长度 R <span class="v" id="bs-r-val">3</span></label>
+        <input id="bs-r" type="range" min="1" max="32" step="1" value="3">
+      </div>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">序列数 B×n</div><div class="slot-val" id="bs-seq">4</div></div>
+      <div class="slot"><div class="slot-name">有效 response token</div><div class="slot-val" id="bs-resp">12</div></div>
+      <div class="slot"><div class="slot-name">rm_scores 写入位置数</div><div class="slot-val" id="bs-reward">4</div></div>
+      <div class="slot"><div class="slot-name">总 token（P+R）×序列</div><div class="slot-val" id="bs-total">28</div></div>
+    </div>
+
+    <div class="readout" data-src="源码 verl/trainer/ppo/metric_utils.py:679">
+      <div class="r-head">sum(global_token_num)（attention_mask 求和）</div>
+      <strong id="bs-total-readout">28</strong> token
+    </div>
+
+    <div class="readout" data-src="源码 verl/trainer/ppo/core_algos.py:1175">
+      <div class="r-head">token-mean 每 token 归一化权重</div>
+      <strong id="bs-weight">0.083333</strong> = 1 / <span id="bs-denom">12</span>
+    </div>
+
+    <p class="eq-cap">
+      默认参数是页面自定的 B=2、n=2、P=4、R=3；默认 <code>rollout.n</code> 是 1（<code>rollout.yaml:135</code>）。
+      模拟假设每条 response 都写满 R 个 token、没有 EOS 提前停止、没有 padding、没有截断。它是<strong>简化计算，不是源码逐行复现</strong>。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算两组：B、n、P、R 变化下的 token 账本<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A（默认）：B=2，n=2，P=4，R=3</strong></p>
+      <ol>
+        <li>序列数 = B × n = 2 × 2 = <code>4</code>。</li>
+        <li>有效 response token 数 = 4 × R = 4 × 3 = <code>12</code>。</li>
+        <li>总 token 数 = 4 × (P + R) = 4 × (4 + 3) = <code>28</code>。</li>
+        <li>token-mean 权重 = 1 / 12 = <code>0.083333</code>。</li>
+        <li><code>rm_scores</code> 写入位置数 = 每条序列 1 个 = <code>4</code>。</li>
+      </ol>
+      <p><strong>组 B：B=3，n=1，P=5，R=2</strong></p>
+      <ol>
+        <li>序列数 = 3 × 1 = <code>3</code>。</li>
+        <li>有效 response token 数 = 3 × 2 = <code>6</code>。</li>
+        <li>总 token 数 = 3 × (5 + 2) = <code>21</code>。</li>
+        <li>token-mean 权重 = 1 / 6 = <code>0.166667</code>。</li>
+        <li><code>rm_scores</code> 写入位置数 = 每条序列 1 个 = <code>3</code>。</li>
+      </ol>
+      <p>
+        JS 只做整数乘加和 <code>1/resp</code>，显示时用 <code>toFixed(6)</code>；上面两组参数在页面上逐位一致。
+        权重的分子 1 来自 <code>agg_loss</code> 的 token-mean 分支（<code>core_algos.py:1175</code>），
+        写入位置的 1 来自 <code>assemble_rm_scores</code> 的单点 scatter（<code>base.py:79</code>）。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">覆盖分支与差异清单</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>B×n 的序列数；每序列一个 reward 写入位置；token-mean 的 1/有效 token 数；
+        总 token 数按 attention_mask 求和的口径。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>空 response / abort（L<sub>i</sub>=0，索引 −1 写末列）；EOS 提前停止导致的有效长度差异；右填充与 <code>response_mask</code>；
+        DP 分片与 <code>dp_size</code> 缩放；mini-batch 划分；KL 惩罚、clip、entropy 对 loss 的额外项；
+        reward model 的分数分布与超时。真实 <code>global_N</code> 由 FSDP engine 的 all-reduce 得到
+        （<code>transformer_impl.py:672-676</code>），不是用 P、R 直接乘出来的。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05. 数据流 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一步的顺序是采样→打分→重算→参考→优势→critic→actor，指标在尾部统一结算</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每个阶段往 DataProto 里加了哪些 key，哪些阶段是可选的，以及 metrics 在什么时候被收集。</p>
+
+  <figure>
+    <svg class="flow" viewBox="0 0 840 590" role="img" aria-label="verl 一步 RL 训练的数据流：采样、打分、重算 log prob、参考 log prob、优势、critic、actor">
+      <defs>
+        <marker id="rl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-head"></path>
+        </marker>
+      </defs>
+
+      <g>
+        <rect x="20" y="20" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="45" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">01 采样</text>
+        <text x="80" y="64" text-anchor="middle" fill="var(--bg)" font-size="10.5">repeat + rollout</text>
+        <rect x="158" y="20" width="430" height="58" rx="8" class="box"></rect>
+        <text x="174" y="45" class="label">responses · response_mask · rollout_log_probs</text>
+        <text x="174" y="64" class="small">agent loop 默认在这里写入 rm_scores（1 个写入位置/序列）</text>
+        <rect x="606" y="20" width="214" height="58" rx="8" class="box-data"></rect>
+        <text x="622" y="45" class="mono">rollout/*</text>
+        <text x="622" y="64" class="small">生成长度、接受率等</text>
+      </g>
+      <line x1="80" y1="78" x2="80" y2="92" class="arrow" marker-end="url(#rl-arrow)"></line>
+
+      <g>
+        <rect x="20" y="92" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="117" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">02 打分</text>
+        <text x="80" y="136" text-anchor="middle" fill="var(--bg)" font-size="10.5">reward → score</text>
+        <rect x="158" y="92" width="430" height="58" rx="8" class="box-accent"></rect>
+        <text x="174" y="117" class="label">reward_tensor → token_level_scores</text>
+        <text x="174" y="136" class="small">每条序列一个标量，写在最后一个有效 response token（L&gt;0；L=0 时索引 -1 写末列）</text>
+        <rect x="606" y="92" width="214" height="58" rx="8" class="box-metric"></rect>
+        <text x="622" y="117" class="mono">critic/score/*</text>
+        <text x="622" y="136" class="small">尾部才汇总</text>
+      </g>
+      <line x1="80" y1="150" x2="80" y2="164" class="arrow" marker-end="url(#rl-arrow)"></line>
+
+      <g>
+        <rect x="20" y="164" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="189" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">03 重算</text>
+        <text x="80" y="208" text-anchor="middle" fill="var(--bg)" font-size="10.5">actor logprob</text>
+        <rect x="158" y="164" width="430" height="58" rx="8" class="box"></rect>
+        <text x="174" y="189" class="label">old_log_probs · entropys</text>
+        <text x="174" y="208" class="small">entropy 先算指标，再从 batch 里 pop 掉</text>
+        <rect x="606" y="164" width="214" height="58" rx="8" class="box-metric"></rect>
+        <text x="622" y="189" class="mono">actor/entropy</text>
+        <text x="622" y="208" class="small">token-mean 聚合</text>
+      </g>
+      <line x1="80" y1="222" x2="80" y2="236" class="arrow" marker-end="url(#rl-arrow)"></line>
+
+      <g>
+        <rect x="20" y="236" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="261" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">04 参考</text>
+        <text x="80" y="280" text-anchor="middle" fill="var(--bg)" font-size="10.5">ref logprob</text>
+        <rect x="158" y="236" width="430" height="58" rx="8" class="box"></rect>
+        <text x="174" y="261" class="label">ref_log_prob（KL 开启时才计算）</text>
+        <text x="174" y="280" class="small">默认 use_kl_in_reward=False、use_kl_loss=false</text>
+        <rect x="606" y="236" width="214" height="58" rx="8" class="box-metric"></rect>
+        <text x="622" y="261" class="mono">actor/reward_kl_penalty</text>
+        <text x="622" y="280" class="small">仅 KL in reward 路径</text>
+      </g>
+      <line x1="80" y1="294" x2="80" y2="308" class="arrow" marker-end="url(#rl-arrow)"></line>
+
+      <g>
+        <rect x="20" y="308" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="333" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">05 优势</text>
+        <text x="80" y="352" text-anchor="middle" fill="var(--bg)" font-size="10.5">GAE / GRPO</text>
+        <rect x="158" y="308" width="430" height="58" rx="8" class="box-accent"></rect>
+        <text x="174" y="333" class="label">token_level_rewards → advantages / returns</text>
+        <text x="174" y="352" class="small">先接 reward，再按需减 β·KL，最后算 advantage</text>
+        <rect x="606" y="308" width="214" height="58" rx="8" class="box-metric"></rect>
+        <text x="622" y="333" class="mono">critic/advantages/*</text>
+        <text x="622" y="352" class="small">response_mask 内统计</text>
+      </g>
+      <line x1="80" y1="366" x2="80" y2="380" class="arrow" marker-end="url(#rl-arrow)"></line>
+
+      <g>
+        <rect x="20" y="380" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="405" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">06 critic</text>
+        <text x="80" y="424" text-anchor="middle" fill="var(--bg)" font-size="10.5">value loss</text>
+        <rect x="158" y="380" width="430" height="58" rx="8" class="box"></rect>
+        <text x="174" y="405" class="label">values → vf_loss / vf_clipfrac</text>
+        <text x="174" y="424" class="small">critic 更新后，batch 里的 advantages 不变</text>
+        <rect x="606" y="380" width="214" height="58" rx="8" class="box-metric"></rect>
+        <text x="622" y="405" class="mono">critic/vf_loss</text>
+        <text x="622" y="424" class="small">critic 前缀由 rename 加上</text>
+      </g>
+      <line x1="80" y1="438" x2="80" y2="452" class="arrow" marker-end="url(#rl-arrow)"></line>
+
+      <g>
+        <rect x="20" y="452" width="120" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="80" y="477" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">07 actor</text>
+        <text x="80" y="496" text-anchor="middle" fill="var(--bg)" font-size="10.5">policy loss</text>
+        <rect x="158" y="452" width="430" height="58" rx="8" class="box-accent"></rect>
+        <text x="174" y="477" class="label">pg_loss / pg_clipfrac / ppo_kl / grad_norm</text>
+        <text x="174" y="496" class="small">mini-batch 内多次前向，指标由 actor/ 前缀 rename</text>
+        <rect x="606" y="452" width="214" height="58" rx="8" class="box-metric"></rect>
+        <text x="622" y="477" class="mono">actor/pg_loss</text>
+        <text x="622" y="496" class="small">最后统一写入 logger</text>
+      </g>
+
+      <text x="420" y="545" text-anchor="middle" class="small">尾部统一结算：compute_data_metrics / compute_timing_metrics / compute_throughout_metrics / variance proxy</text>
+      <text x="420" y="568" text-anchor="middle" class="small">可选项：ref_log_prob（KL 开关）、values（critic 开关）、validation（test_freq 触发）</text>
+    </svg>
+    <figcaption>
+      图 1 · 按 <code>verl/trainer/ppo/ray_trainer.py</code> 的 <code>fit()</code> 调用顺序整理的七段数据流。
+      图中把「reward 已经在 agent loop 写入」当作默认路径；若 <code>use_rm=True</code> 且 batch 里没有 <code>rm_scores</code>，
+      trainer 会在 02 打分步内、<code>extract_reward</code> 之前调用 <code>_compute_reward_colocate</code>（<code>ray_trainer.py:1561-1568</code>）。
+    </figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>采样：</strong>trainer 从 dataloader 取一个 prompt batch，加 <code>uid</code>，按 <code>rollout.n</code> 重复后交给 rollout
+      （<code>ray_trainer.py:1478-1491</code>）。rollout 输出 <code>responses</code>、<code>response_mask</code>、<code>rollout_log_probs</code>；
+      默认路径下 agent loop 还会把 reward 写进 <code>rm_scores</code>（<code>agent_loop.py:122-149</code>）。</li>
+    <li><strong>对齐：</strong>原始 prompt batch 也按 <code>n</code> 重复，然后与 rollout 输出 <code>union</code>
+      （<code>ray_trainer.py:1540-1541</code>）。如果 batch 里没有 <code>response_mask</code>，就从 <code>attention_mask</code> 末尾切一段补上
+      （<code>:1543-1544</code>）。</li>
+    <li><strong>打分：</strong>若 <code>use_rm</code> 为真且没有 <code>rm_scores</code>，先调用 reward model；随后 <code>extract_reward</code>
+      取出 <code>reward_tensor</code> 和额外信息（<code>ray_trainer.py:1561-1568</code>）。</li>
+    <li><strong>重算 old_log_probs：</strong>actor 对当前 batch 前向，返回 <code>old_log_probs</code> 和 <code>entropys</code>；
+      entropy 指标先算，再从 batch 里 pop 掉（<code>ray_trainer.py:1585-1601</code>）。</li>
+    <li><strong>参考 log prob：</strong>只有 <code>use_reference_policy</code> 为真时才计算。它由
+      <code>use_kl_in_reward</code> 或 <code>use_kl_loss</code> 触发（<code>verl/trainer/ppo/utils.py:75-79</code>），结果 <code>union</code> 进 batch
+      （<code>ray_trainer.py:1618-1622</code>）。</li>
+    <li><strong>values：</strong>只有 <code>use_critic</code> 为真时，critic 前向返回 <code>values</code> 并 <code>union</code> 进 batch
+      （<code>ray_trainer.py:1625-1628</code>）。默认 <code>adv_estimator=gae</code>，所以 critic 默认开启
+      （<code>verl/trainer/ppo/utils.py:96-101</code>）。</li>
+    <li><strong>优势：</strong>先把 <code>reward_tensor</code> 写成 <code>token_level_scores</code>，把 reward 额外信息写进 non_tensor
+      （<code>ray_trainer.py:1633-1636</code>）；如果开了 KL in reward，就减 <code>β·KL(old‖ref)</code>，否则
+      <code>token_level_rewards = token_level_scores</code>（<code>:1639-1645</code>）。最后调用 <code>compute_advantage</code>
+      （<code>:1667-1675</code>）。</li>
+    <li><strong>更新与结算：</strong>critic 更新（<code>:1677-1681</code>）、actor 更新（<code>:1689-1690</code>），
+      然后在尾部收集 data / timing / throughput / variance / spec 指标并 <code>logger.log</code>（<code>:1764-1802</code>）。</li>
+  </ol>
+
+  <p>
+    顺序上有两个容易看错的地方。第一，reward 的计算发生在 old_log_prob 之前，但 <code>token_level_scores</code> 是在优势阶段才写进 batch
+    （<code>ray_trainer.py:1561-1568</code> 对 <code>:1633</code>）。第二，entropy 是 old_log_prob 阶段算完就 pop 掉的临时字段
+    （<code>:1601</code>），后续的 actor 更新不会从 batch 里再读到它。
+  </p>
+
+  <p>
+    KL 的位置也要分清。KL in reward 用的是 <code>old_log_probs</code> 和 <code>ref_log_prob</code>
+    （<code>ray_trainer.py:100-102</code>），在优势之前执行；KL in loss 则是在 actor 的 mini-batch 内用当前 <code>log_prob</code>
+    和 <code>ref_log_prob</code> 计算（<code>verl/workers/utils/losses.py:172-182</code>）。两者默认都关闭
+    （<code>ppo_trainer.yaml:102</code>、<code>actor.yaml:103</code>）。
+  </p>
+</section>
+
+<!-- ================= 06. 指标 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>每个指标都能追到分子和分母；同名 std 在训练和验证里不是同一个估计量</h2></div>
+  <p class="sec-sub">读完这节你应该知道：reward、response_length、clipfrac、KL、grad_norm、MFU、throughput 分别怎么算，以及 validation 的 @N 指标为什么不能和训练指标混着读。</p>
+
+  <p>
+    指标分两批进来。第一批是各阶段就地写入 <code>metrics</code> dict 的标量，例如 old_log_prob 阶段的
+    <code>actor/entropy</code>（<code>ray_trainer.py:1596-1600</code>）、KL 阶段的
+    <code>actor/reward_kl_penalty</code>（<code>:1643</code>）、critic 和 actor 的返回值（<code>:1680</code>、<code>:1718</code>）。
+    第二批是尾部对整个 batch 的统计：<code>compute_data_metrics</code>（<code>:1772</code>）、
+    <code>compute_timing_metrics</code>（<code>:1783</code>）、<code>compute_throughout_metrics</code>（<code>:1786</code>）。
+  </p>
+
+  <p class="eq-cap">表 3 · 常用指标 key 与分母（页面整理；出处见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>key</th><th>分子 / 分母</th><th>源码</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>critic/score/mean</code></td>
+          <td>每条序列 <code>token_level_scores.sum(-1)</code> 的均值；只统计非 abort 样本</td>
+          <td><code>metric_utils.py:453</code>、<code>:471-475</code></td>
+        </tr>
+        <tr>
+          <td><code>critic/rewards/mean</code></td>
+          <td>每条序列 <code>token_level_rewards.sum(-1)</code> 的均值；同样排除 abort</td>
+          <td><code>metric_utils.py:454</code>、<code>:482-485</code></td>
+        </tr>
+        <tr>
+          <td><code>critic/advantages/mean</code></td>
+          <td><code>response_mask</code> 选中的 advantage 元素均值</td>
+          <td><code>metric_utils.py:490-495</code></td>
+        </tr>
+        <tr>
+          <td><code>response_length/mean</code></td>
+          <td><code>attention_mask[:, -R:].sum(-1)</code> 的均值；包含 abort 的 0</td>
+          <td><code>metric_utils.py:81-87</code>、<code>:573</code></td>
+        </tr>
+        <tr>
+          <td><code>response_length/clip_ratio</code></td>
+          <td><code>response_length == max_response_length</code> 的比例</td>
+          <td><code>metric_utils.py:576-578</code></td>
+        </tr>
+        <tr>
+          <td><code>actor/pg_clipfrac</code></td>
+          <td>被 clip 的 token 占 <code>response_mask</code> 有效 token 的比例</td>
+          <td><code>core_algos.py:1353</code></td>
+        </tr>
+        <tr>
+          <td><code>actor/ppo_kl</code></td>
+          <td><code>-(log_prob - old_log_prob)</code> 先把差值 clamp 到 <code>[-20, 20]</code>，再在 response token 上做 masked mean</td>
+          <td><code>core_algos.py:1336-1340</code></td>
+        </tr>
+        <tr>
+          <td><code>actor/entropy</code></td>
+          <td><code>agg_loss(entropys, response_mask)</code>，默认 token-mean</td>
+          <td><code>ray_trainer.py:1590-1597</code></td>
+        </tr>
+        <tr>
+          <td><code>actor/grad_norm</code></td>
+          <td>engine 返回的 <code>grad_norm</code>，由 <code>actor/</code> 前缀 rename；不做额外 all-reduce</td>
+          <td><code>engine_workers.py:236-249</code>、<code>ray_trainer.py:1371</code></td>
+        </tr>
+        <tr>
+          <td><code>perf/throughput</code></td>
+          <td><code>sum(global_token_num) / (step_time × n_gpus)</code></td>
+          <td><code>metric_utils.py:679-687</code></td>
+        </tr>
+        <tr>
+          <td><code>perf/mfu/actor</code></td>
+          <td><code>estimated_flops / promised_flops / world_size</code>；forward-only 再除 3</td>
+          <td><code>engine_workers.py:264-270</code>、<code>ray_trainer.py:1373</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    下面把其中三个 key 缩成两条序列的模拟：<code>response_length/mean</code>、<code>response_length/clip_ratio</code>
+    和 <code>perf/throughput</code>。P 是 prompt 长度，L 是最大 response 长度，r1 / r2 是两条序列的有效 response 长度，
+    t 是 step 时间，g 是 GPU 数。总 token 数按 <code>2×P + r1 + r2</code> 计算。
+  </p>
+
+  <div class="sim" id="metric-sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label for="ms-p">prompt 长度 P <span class="v" id="ms-p-val">4</span></label>
+        <input id="ms-p" type="range" min="1" max="32" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label for="ms-l">最大 response 长度 L <span class="v" id="ms-l-val">8</span></label>
+        <input id="ms-l" type="range" min="1" max="32" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label for="ms-r1">response 长度 r1 <span class="v" id="ms-r1-val">8</span></label>
+        <input id="ms-r1" type="range" min="1" max="32" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label for="ms-r2">response 长度 r2 <span class="v" id="ms-r2-val">5</span></label>
+        <input id="ms-r2" type="range" min="1" max="32" step="1" value="5">
+      </div>
+      <div class="ctrl">
+        <label for="ms-t">step 时间 t（秒） <span class="v" id="ms-t-val">2</span></label>
+        <input id="ms-t" type="range" min="1" max="10" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label for="ms-g">GPU 数 g <span class="v" id="ms-g-val">8</span></label>
+        <input id="ms-g" type="range" min="1" max="8" step="1" value="8">
+      </div>
+    </div>
+
+    <div class="slots s2">
+      <div class="slot"><div class="slot-name">response_length/mean</div><div class="slot-val" id="ms-mean">6.50</div></div>
+      <div class="slot"><div class="slot-name">response_length/clip_ratio</div><div class="slot-val" id="ms-clip">0.500</div></div>
+    </div>
+
+    <div class="readout" data-src="源码 verl/trainer/ppo/metric_utils.py:687">
+      <div class="r-head">perf/throughput（token / s / GPU）</div>
+      <strong id="ms-tp">1.313</strong>
+    </div>
+
+    <p class="eq-cap">
+      这是两条序列的简化模拟：mean 取 <code>(r1+r2)/2</code>，clip 取 <code>r_i == L</code> 的比例，throughput 取
+      <code>(2P+r1+r2)/(t×g)</code>。交互把 r1/r2 钳制在 L 以内（对应 <code>r_i ≤ max_response_length</code>）；
+      它不复现真实 batch 的 padding、abort 和 DP 分片。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算两组：长度、clip 与 throughput<span class="sum-sub">结果保留 2/3 位小数，JS 与手算同口径</span></summary>
+    <div class="details-body">
+      <p><strong>组 A（默认）：P=4，L=8，r1=8，r2=5，t=2，g=8</strong></p>
+      <ol>
+        <li>总 token = 2×P + r1 + r2 = 2×4 + 8 + 5 = <code>21</code>。</li>
+        <li><code>response_length/mean</code> = (8 + 5) / 2 = <code>6.50</code>。</li>
+        <li><code>clip_ratio</code> = 1 / 2 = <code>0.500</code>；只有 r1 等于 L。</li>
+        <li><code>throughput</code> = 21 / (2×8) = 21 / 16 = <code>1.3125</code>，页面显示 <code>1.313</code>。</li>
+      </ol>
+      <p><strong>组 B：P=3，L=4，r1=4，r2=4，t=1，g=2</strong></p>
+      <ol>
+        <li>总 token = 2×3 + 4 + 4 = <code>14</code>。</li>
+        <li><code>response_length/mean</code> = (4 + 4) / 2 = <code>4.00</code>。</li>
+        <li><code>clip_ratio</code> = 2 / 2 = <code>1.000</code>；两条都等于 L。</li>
+        <li><code>throughput</code> = 14 / (1×2) = <code>7.000</code>。</li>
+      </ol>
+      <p>
+        JS 用 <code>toFixed(2)</code> 显示 mean，<code>toFixed(3)</code> 显示 clip 和 throughput；中间值不取整。
+        组 A 的 <code>1.3125</code> 在显示时才变成 <code>1.313</code>。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">覆盖分支与差异清单</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>两条序列的 mean；<code>response_length == max_response_length</code> 的 clip 计数；
+        <code>total_tokens / (time × n_gpus)</code> 的 throughput 口径。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>abort 样本（<code>response_length == 0</code>）；<code>response_length_non_aborted/*</code>；
+        prompt 长度分布；DP/TP 划分；<code>global_token_num</code> 的实际来源；per-token timing 的分母差异；
+        validation 的 @N 聚合。真实 <code>response_length/mean</code> 由 batch 内所有序列求均值
+        （<code>metric_utils.py:573</code>），不是两条序列的手算。
+      </p>
+    </div>
+  </details>
+
+  <h3>同名 std：GRPO 用样本标准差，validation 用总体标准差</h3>
+  <p>
+    GRPO 的 advantage 归一化在 <code>core_algos.py</code> 里用 <code>torch.std(scores_tensor)</code>
+    （<code>verl/trainer/ppo/core_algos.py:321</code>）。PyTorch 的 <code>torch.std</code> 默认做 Bessel 校正，分母是
+    <code>N − 1</code>；当组内只有一个样本时，代码直接把 std 设为 <code>1.0</code>（<code>:315-317</code>）。
+  </p>
+  <p>
+    validation 的 <code>std@N</code> 走的是另一条路：<code>process_validation_metrics</code> 里 <code>np_std = np.std</code>
+    （<code>verl/trainer/ppo/metric_utils.py:974</code>），对每个 uid 的 N 个样本，仅在 <code>N&gt;1</code> 时才计算
+    <code>float(np_std(var_vals))</code>（<code>:1019-1020</code>）。<code>numpy.std</code> 默认不做 Bessel 校正，分母是 <code>N</code>。
+    GRPO 归一化用样本标准差（<code>torch.std</code>，<code>ddof=1</code>）；validation 的 <code>std@N</code>（仅 <code>N&gt;1</code> 时计算；<code>np.std</code>，<code>ddof=0</code>）不是同一个估计量，直接比较会得到不可解释的差。
+  </p>
+
+  <h3>validation 按 uid 聚合，再按 data_source 分组</h3>
+  <p>
+    <code>_validate</code> 先把每个验证样本按 <code>val_kwargs.n</code> 重复（<code>ray_trainer.py:617-619</code>），
+    收集 <code>uid</code>（<code>:670</code>）和 <code>data_source</code>（<code>:691</code>）。
+    <code>process_validation_metrics</code> 按 <code>(data_source, uid)</code> 分组（<code>metric_utils.py:948-953</code>），
+    对每个 uid 的 N 个样本先算 <code>mean@N</code>（<code>:1017</code>）；仅当 <code>N&gt;1</code> 时再算 <code>std@N</code>（<code>:1019-1020</code>）。
+    <code>N&gt;1</code> 时，用 bootstrap 算 <code>best@N</code> / <code>worst@N</code>（<code>:1027-1040</code>）；如果样本里有 <code>pred</code>，
+    还算 <code>maj@N</code>（<code>:1042-1057</code>）。bootstrap 次数 <code>1000</code>（<code>:976</code>），只在这个 <code>N&gt;1</code> 分支执行；
+    默认 <code>val_kwargs.n=1</code>（<code>rollout.yaml:175</code>）时，只有 <code>mean@1</code>，没有 <code>std</code> / <code>best</code> / <code>worst</code> / <code>maj</code> 这类 @N 指标。
+    最后对 uid 取平均（<code>:1062-1073</code>）。
+  </p>
+  <p>
+    <code>_val_metrics_update</code> 把 <code>acc</code> 优先当作 core variable，没有 <code>acc</code> 才用 <code>reward</code>
+    （<code>ray_trainer.py:724-725</code>）；只有 <code>mean/maj/best</code> 的 <code>@n_max</code> 结果会进 <code>val-core</code>，
+    其余进 <code>val-aux</code>（<code>:729-738</code>）。这决定了日志里哪些 validation 指标会被高亮。
+  </p>
+
+  <h3>reduce_metrics：先按 Metric 的显式 aggregation，再回退到 key 子串</h3>
+  <p>
+    actor 和 critic 的 worker 会返回一组 micro-batch 指标列表。worker 先对包装成 <code>Metric</code> 的列表调用
+    <code>Metric.aggregate_dp</code>，按对象自带的显式 aggregation（MEAN / SUM / MIN / MAX）在 DP 之间聚合
+    （<code>verl/workers/engine_workers.py:358-368</code>；<code>aggregate_dp</code> 定义在
+    <code>verl/utils/metric/utils.py:139-156</code>）。trainer 侧的 <code>reduce_metrics</code> 先判断值是不是 <code>Metric</code>：
+    是就调用 <code>val.aggregate()</code>，按显式 aggregation 聚合（<code>verl/utils/metric/utils.py:49-51</code>、<code>:123-136</code>）；
+    其余未包装成 <code>Metric</code> 的值才按 key 子串回退——含 <code>max</code> 用 <code>np.max</code>，含 <code>min</code> 用 <code>np.min</code>，
+    否则用 <code>np.mean</code>（<code>:52-57</code>）。所以给指标改名时，要先区分它是否已经是 Metric；纯列表形式的指标才依赖名字里的子串。
+  </p>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>DataProto 把 batch 放在 driver 上；它保证对齐，但不保证免费</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些行为是 DataProto 的保证，哪些是默认路径的假设，以及换 reward / 换 trainer 时最先要检查什么。</p>
+
+  <ul>
+    <li>
+      <strong>全量 batch 在 driver 上汇合：</strong>ref_log_prob 和 old_log_prob 的 worker 输出在 engine 侧
+      <code>.cpu()</code> 后返回（<code>verl/workers/engine_workers.py:755</code>、<code>:763</code>），values 则在 driver 侧
+      由 <code>no_padding_2_padding</code> 重建（<code>ray_trainer.py:1252-1262</code>）；各阶段结果逐次 <code>union</code>
+      进同一个 DataProto（<code>ray_trainer.py:1541</code>、<code>:1610</code>、<code>:1622</code>、<code>:1628</code>）。
+      序列越长、batch 越大，driver 侧的 CPU 内存和 union 次数越值得关注；本页不讨论流式分页。
+    </li>
+    <li>
+      <strong>padding 的重复样本只保证形状：</strong><code>pad_dataproto_to_divisor</code> 用重复样本来凑整除
+      （<code>verl/protocol.py:85-99</code>），collect 后才把尾部切掉（<code>verl/single_controller/ray/base.py:58-63</code>）。
+      worker 内部如果先算 per-sample 指标，重复样本会参与统计，再把结果平均到 driver。
+      <span class="infer">推断</span>（依据：重复发生在 dispatch 前，截断发生在 collect 后）：padding 比例高时，worker 侧指标会偏向被重复的样本。
+    </li>
+    <li>
+      <strong>response_mask 依赖 padding 约定：</strong>trainer 直接取 <code>attention_mask[:, -R:]</code>
+      （<code>ray_trainer.py:132-135</code>）。<span class="infer">推断</span>（依据：rollout 输出按左 prompt、右 response 组织，
+      且 response 右填充，见 <code>verl/workers/utils/padding.py:141-144</code>）：这个切片的前提是 prompt 在左、response 在右、response 右填充；
+      如果自定义 collate 改了这个约定，mask 不会报错，只会静默错位，loss 和所有 response_length 指标会一起偏。
+    </li>
+    <li>
+      <strong>union 不覆盖冲突 key：</strong>同名 key 值不等时直接断言失败（<code>verl/protocol.py:109-122</code>、<code>:188-199</code>）。
+      这是保护，也是限制：想用同名 key 覆盖旧值，必须先 <code>pop</code> 再并，不能指望 <code>union</code> 做覆盖写。
+      另外 <code>union</code> 是原地修改（<code>:792-795</code>），持有旧引用的代码会看到新字段。
+    </li>
+    <li>
+      <strong>默认 reward 是 outcome 级：</strong>一条序列只有一个标量，L<sub>i</sub>&gt;0 时写在最后一个有效 token 上（<code>base.py:76-81</code>）；
+      L<sub>i</sub>=0 时索引 <code>-1</code> 会写进末列（padding），不是最后一个有效 token。如果要做 token-level reward、process reward 或逐 turn reward，
+      需要自定义 reward manager / reward loop：<code>rm_scores</code> 是 <code>(B, R)</code> 张量，形状本身可承载多个非零位置，但默认 reward manager 只写一个位置（<code>base.py:79</code>）。
+    </li>
+    <li>
+      <strong>默认 KL 关闭：</strong><code>use_kl_in_reward=False</code>、<code>use_kl_loss=false</code>
+      （<code>ppo_trainer.yaml:102</code>、<code>actor.yaml:103</code>），所以默认不会启用 reference policy
+      （<code>verl/trainer/ppo/utils.py:75-79</code>），也不会产生 <code>actor/reward_kl_penalty</code> 或 <code>kl_loss</code>。
+      如果日志里找不到这些 key，先检查这两个开关，而不是怀疑指标收集。
+    </li>
+    <li>
+      <strong>本页对应的是 legacy trainer：</strong><code>verl/trainer/ppo/ray_trainer.py</code> 在本 commit 标了
+      <code>@deprecated("... Please use `trainer.use_v1=True` instead.")</code>（<code>:285</code>）。
+      v1 trainer 的字段名、reward loop 和 metrics 路径可能不同；本页的源码锚点都指向这个 commit 的 legacy 文件。
+    </li>
+    <li>
+      <strong>指标名是接口：</strong><code>reduce_metrics</code> 先按 <code>Metric</code> 的显式 aggregation 聚合，未包装成 <code>Metric</code> 的值才按 key 子串选择 max/min/mean（<code>verl/utils/metric/utils.py:49-57</code>），
+      validation 的 <code>@N</code> 后缀决定它是 <code>val-core</code> 还是 <code>val-aux</code>
+      （<code>ray_trainer.py:729-738</code>）。改 key 名会同时改聚合方式和日志分组，不能当成纯改名。
+    </li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>先确认三件事，再读训练日志</h4></div>
+    <p>
+      第一，reward 是哪条路径写的：agent loop 的 <code>rm_scores</code>，还是 trainer 的 reward model；
+      第二，loss 的分母是全局 token 数还是本地 token 数（<code>dp_size &gt; 1</code> 时必须用全局数）；
+      第三，指标是训练 batch 的还是 validation 的 <code>@N</code> 聚合。三件事里任何一件换了，数字都不能直接横比。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>verl · RL 训练数据流与指标（commit 7de8f2e）</div>
+  <div class="src">
+    源码：<a href="https://github.com/volcengine/verl/tree/7de8f2e61f7011679d56c74677ef7bea87d24946" target="_blank" rel="noopener">volcengine/verl @ 7de8f2e</a><br>
+    关键文件：<a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/protocol.py" target="_blank" rel="noopener">verl/protocol.py</a> ·
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/trainer/ppo/ray_trainer.py" target="_blank" rel="noopener">verl/trainer/ppo/ray_trainer.py</a> ·
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/trainer/ppo/core_algos.py" target="_blank" rel="noopener">verl/trainer/ppo/core_algos.py</a> ·
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/trainer/ppo/metric_utils.py" target="_blank" rel="noopener">verl/trainer/ppo/metric_utils.py</a> ·
+    <a href="https://github.com/volcengine/verl/blob/7de8f2e61f7011679d56c74677ef7bea87d24946/verl/experimental/reward_loop/reward_loop.py" target="_blank" rel="noopener">verl/experimental/reward_loop/reward_loop.py</a><br>
+    说明：本页直接读源码整理；站内笔记见 <a href="/metrics%E6%80%BB%E7%BB%93/">metrics总结</a>；行号以 commit 7de8f2e 为准。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var sim = document.getElementById('batch-sim');
+  if (sim) {
+    var b = document.getElementById('bs-b');
+    var n = document.getElementById('bs-n');
+    var p = document.getElementById('bs-p');
+    var r = document.getElementById('bs-r');
+    var bVal = document.getElementById('bs-b-val');
+    var nVal = document.getElementById('bs-n-val');
+    var pVal = document.getElementById('bs-p-val');
+    var rVal = document.getElementById('bs-r-val');
+    var seqEl = document.getElementById('bs-seq');
+    var respEl = document.getElementById('bs-resp');
+    var rewardEl = document.getElementById('bs-reward');
+    var totalEl = document.getElementById('bs-total');
+    var totalReadout = document.getElementById('bs-total-readout');
+    var weightEl = document.getElementById('bs-weight');
+    var denomEl = document.getElementById('bs-denom');
+
+    if (b && n && p && r && bVal && nVal && pVal && rVal && seqEl && respEl && rewardEl && totalEl && totalReadout && weightEl && denomEl) {
+      var renderBatch = function () {
+        var B = parseInt(b.value, 10) || 0;
+        var N = parseInt(n.value, 10) || 0;
+        var P = parseInt(p.value, 10) || 0;
+        var R = parseInt(r.value, 10) || 0;
+        var seq = B * N;
+        var resp = seq * R;
+        var total = seq * (P + R);
+        var weight = resp > 0 ? 1 / resp : 0;
+
+        bVal.textContent = String(B);
+        nVal.textContent = String(N);
+        pVal.textContent = String(P);
+        rVal.textContent = String(R);
+        seqEl.textContent = String(seq);
+        respEl.textContent = String(resp);
+        rewardEl.textContent = String(seq);
+        totalEl.textContent = String(total);
+        totalReadout.textContent = String(total);
+        weightEl.textContent = weight.toFixed(6);
+        denomEl.textContent = String(resp);
+      };
+
+      b.addEventListener('input', renderBatch);
+      n.addEventListener('input', renderBatch);
+      p.addEventListener('input', renderBatch);
+      r.addEventListener('input', renderBatch);
+      renderBatch();
+    }
+  }
+
+  var msim = document.getElementById('metric-sim');
+  if (msim) {
+    var mp = document.getElementById('ms-p');
+    var ml = document.getElementById('ms-l');
+    var mr1 = document.getElementById('ms-r1');
+    var mr2 = document.getElementById('ms-r2');
+    var mt = document.getElementById('ms-t');
+    var mg = document.getElementById('ms-g');
+    var mpVal = document.getElementById('ms-p-val');
+    var mlVal = document.getElementById('ms-l-val');
+    var mr1Val = document.getElementById('ms-r1-val');
+    var mr2Val = document.getElementById('ms-r2-val');
+    var mtVal = document.getElementById('ms-t-val');
+    var mgVal = document.getElementById('ms-g-val');
+    var meanEl = document.getElementById('ms-mean');
+    var clipEl = document.getElementById('ms-clip');
+    var tpEl = document.getElementById('ms-tp');
+
+    if (mp && ml && mr1 && mr2 && mt && mg && mpVal && mlVal && mr1Val && mr2Val && mtVal && mgVal && meanEl && clipEl && tpEl) {
+      var renderMetric = function () {
+        var P = parseInt(mp.value, 10) || 0;
+        var L = parseInt(ml.value, 10) || 0;
+        var R1 = Math.min(parseInt(mr1.value, 10) || 0, L);
+        var R2 = Math.min(parseInt(mr2.value, 10) || 0, L);
+        if (R1 !== parseInt(mr1.value, 10)) mr1.value = String(R1);
+        if (R2 !== parseInt(mr2.value, 10)) mr2.value = String(R2);
+        var T = parseInt(mt.value, 10) || 1;
+        var G = parseInt(mg.value, 10) || 1;
+        var total = 2 * P + R1 + R2;
+        var mean = (R1 + R2) / 2;
+        var clipCount = (R1 === L ? 1 : 0) + (R2 === L ? 1 : 0);
+        var clip = clipCount / 2;
+        var throughput = total / (T * G);
+
+        mpVal.textContent = String(P);
+        mlVal.textContent = String(L);
+        mr1Val.textContent = String(R1);
+        mr2Val.textContent = String(R2);
+        mtVal.textContent = String(T);
+        mgVal.textContent = String(G);
+        meanEl.textContent = mean.toFixed(2);
+        clipEl.textContent = clip.toFixed(3);
+        tpEl.textContent = throughput.toFixed(3);
+      };
+
+      mp.addEventListener('input', renderMetric);
+      ml.addEventListener('input', renderMetric);
+      mr1.addEventListener('input', renderMetric);
+      mr2.addEventListener('input', renderMetric);
+      mt.addEventListener('input', renderMetric);
+      mg.addEventListener('input', renderMetric);
+      renderMetric();
+    }
+  }
+})();
+</script>
+</body>
+</html>

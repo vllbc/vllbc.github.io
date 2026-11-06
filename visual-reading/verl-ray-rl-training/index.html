@@ -1,0 +1,632 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 4 | verl/workers/rollout/llm_server.py:452-478 | 8/(2*1*1) |
+| 0.333 | verl/single_controller/ray/base.py:641 | 1/3 |
+| 1024 | verl/trainer/config/data/legacy_data.yaml:42 | 1024*1 |
+| 4 | verl/trainer/config/actor/actor.yaml:18 | 1024/256 |
+| 12 | verl/trainer/ppo/v1/trainer_separate_async.py:149-152 | 8+4 |
+| 2 | verl/workers/rollout/llm_server.py:452-478 | 4/(2*1*1) |
+| 8192 | verl/trainer/ppo/ray_trainer.py:1491 | 1024*8 |
+| 1024 | verl/trainer/ppo/v1/trainer_separate_async.py:60 | 4*256 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="7de8f2e">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>verl + Ray · 一次 PPO 迭代怎么拆给五种角色</title>
+<meta name="description" content="从 verl commit 7de8f2e 源码看 RayWorkerGroup、ResourcePool、WorkerDict、DataProto 与 colocate/separate_async 的资源账。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.flow{
+  text-align:left;white-space:pre-wrap;font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:12.5px;line-height:1.85;
+}
+.two-col > .card,.three-col > .card{min-width:0}
+.two-col code,.three-col code{font-size:12px;overflow-wrap:normal}
+.sim-note{font-size:12.5px;color:var(--text-soft);margin-top:2px;line-height:1.7}
+.sim-note.warn{color:var(--accent-deep)}
+.slot .slot-val{min-height:42px}
+.slot .slot-note{font-size:11px;color:var(--text-soft);margin-top:6px;line-height:1.5}
+.slot.active-slot{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 3px rgba(192,78,45,.10)}
+.slot .bar{height:6px}
+@media (max-width:880px){
+  .two-col code,.three-col code{overflow-wrap:anywhere}
+  p code,li code{overflow-wrap:anywhere}
+}
+@media (max-width:500px){
+  .flow{font-size:11px}
+  .eq{font-size:13px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">verl + Ray</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#routes">两条路</a>
+      <a href="#method">方法</a>
+      <a href="#step">训练账</a>
+      <a href="#arch">架构</a>
+      <a href="#effect">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>系统源码 · Ray · commit 7de8f2e</span>
+  <h1>verl + Ray：一次 PPO 迭代，如何拆给五种角色</h1>
+  <p class="hero-sub">rollout 要的是推理副本，训练要的是数据并行，reward 可能只跑 CPU，advantage 留在 driver。verl 用 single controller 把这些阶段包装成普通函数调用；colocate 省下 GPU，separate_async 换来 overlap，代价分别写在显存和 assert 里。</p>
+  <div class="meta">
+    <span>volcengine/verl · 读的是 commit 7de8f2e</span>
+    <a href="https://github.com/volcengine/verl/tree/7de8f2e" target="_blank" rel="noopener">源码 ↗</a>
+    <a href="https://verl.readthedocs.io/en/latest/single_controller.html" target="_blank" rel="noopener">single controller 文档 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>verl 的核心不是某个 PPO 变体，而是 <strong>single controller + WorkerGroup</strong>：driver 上写的是普通 Python 数据流，<code>@register</code> 决定参数怎么切给 worker、结果怎么收回来。</p>
+  <p><strong>colocate</strong> 让 Actor/Rollout/Reference/Critic 共享 <code>global_pool</code>，每个 worker 进程只申请 <code>1/max_colocate_count</code> 张 GPU；<strong>separate_async</strong> 另建独立 rollout 池，用额外 GPU 换异步 overlap。</p>
+  <p><code>rollout.n</code> 只放大样本数，不改变 actor 更新次数：batch 和 mini-batch 都乘 n，更新次数仍是 <code>train_batch_size / ppo_mini_batch_size</code>。</p>
+  <p>代价同样是结构性的：colocate 要显存同时装下训练与推理引擎，且阶段串行；separate 要跨池同步权重，并满足 <code>train_batch_size = parameter_sync_step × ppo_mini_batch_size</code> 等约束。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="verl/workers/rollout/llm_server.py:452-478">4<small>副本</small></div><div class="k">8 GPU ÷ TP=2；rollout 并行度</div></div>
+    <div class="metric"><div class="v" data-src="verl/single_controller/ray/base.py:641">1/3<small>GPU</small></div><div class="k">每个 worker 进程申请的份额；上限 3 个进程/卡</div></div>
+    <div class="metric"><div class="v" data-src="verl/trainer/config/data/legacy_data.yaml:42">1024<small>prompt</small></div><div class="k">每 step 的 prompt 数；× rollout.n 才是样本数</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>一次 PPO step 里，五个阶段的并行方式并不相同</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么不能把 rollout、reward、训练简单塞进同一个进程，也不能各自开一套集群。</p>
+  <p>把 PPO 写成单机脚本时，一个 step 就是一条直线：取 batch → generate → reward → 算 old/ref log prob → advantage → update。写成分布式后，这条数据流没有变，变的是每一段各自需要的并行方式。</p>
+  <ul>
+    <li><strong>rollout：</strong>vLLM/SGLang 副本，副本数按 <code>world_size ÷ (TP × DP × PP)</code> 计算，TP 是推理侧的张量并行（<code>verl/workers/rollout/llm_server.py:452-478</code>）。</li>
+    <li><strong>old_log_prob / reference：</strong>前向计算，按数据并行把 batch 切开；reference 在无 LoRA 时与 actor 融进同一个 <code>ActorRolloutRefWorker</code>（<code>verl/trainer/main_ppo_v0.py:48-53</code>）。</li>
+    <li><strong>reward：</strong>规则奖励可以在 CPU/AgentLoop 侧打分；reward model 可以共享 <code>global_pool</code>，也可以单独开 <code>reward_pool</code>（<code>verl/trainer/main_ppo_v0.py:75-82</code>）。</li>
+    <li><strong>advantage：</strong>轻量计算留在 driver，按 uid 分组（<code>verl/trainer/ppo/ray_trainer.py:1667-1675</code> 调用；uid 分组在 <code>ray_trainer.py:240-245</code>，组内统计在 <code>core_algos.py:304-329</code>）。</li>
+    <li><strong>actor / critic update：</strong>训练引擎按 DP 切 mini-batch，<code>mini_batch_size ÷ data_parallel_size</code> 才是单卡 batch（<code>verl/workers/engine_workers.py:302-305</code>）。</li>
+  </ul>
+  <p>矛盾在于两件事同时成立：阶段之间有严格数据依赖，必须按顺序走；阶段的资源形态又不同，rollout 要推理副本，训练要数据并行。把 8 张卡固定分给某一阶段，其余阶段就闲置；把所有角色塞进同一组卡，又得在显存里同时容纳两套引擎。</p>
+  <p>single-controller 设计要解决的就是这个错位：数据流仍然用 Python 写在 driver 上，资源怎么绑、参数怎么切，交给 WorkerGroup 在调用时决定。</p>
+</section>
+
+<section class="block" id="routes">
+  <div class="sec-head"><span class="sec-num">02</span><h2>verl 没有二选一：同池分时，或独立 rollout 池</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两条路各自省了什么、又在哪里付出代价。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>同池 colocate</h4></div>
+      <p>Actor/Rollout/Reference/Critic 映射到 <code>global_pool</code>（角色 mapping 在 <code>verl/trainer/main_ppo_v0.py:54,65</code>；池配置在 <code>:70-73</code>）；<code>create_colocated_worker_cls</code> 把多个角色的类实例塞进同一个 Ray actor，<code>spawn</code> 再切成多个虚拟 WorkerGroup（<code>verl/trainer/ppo/<wbr>ray_trainer.py:870-880</code>）。</p>
+      <p>GPU 账：<code>max_colocate_count=3</code> 决定每个 placement-group bundle 的 CPU 配额与 worker 的 GPU 分数（<code>1/3</code>，<code>verl/single_controller/<wbr>ray/base.py:200,641</code>），允许最多三个角色/实例共享同一张物理卡；当前 <code>create_colocated_worker_cls</code> 的 WorkerDict 融合路径通常每卡一个 actor，多角色在同一进程内实例化（<code>base.py:1032-1046</code>）。</p>
+      <p>卡在哪：默认 <code>trainer_mode: sync</code> 下阶段严格串行；v0 <code>RayPPOTrainer</code> 路径里 rollout 结束后 replicas 先 sleep（<code>ray_trainer.py:1513-1514</code>），训练完再 update weights（<code>ray_trainer.py:1714-1716</code>；v1 sync 对应 <code>trainer_sync.py:40-42,35-38</code>）；显存必须同时容得下训练引擎与推理引擎。v1 的 <code>colocate_async</code> 开启 partial rollout，在同一池里做异步重叠（<code>verl/trainer/ppo/v1/trainer_colocate_async.py:19-24</code>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>独立 rollout 池</h4></div>
+      <p><code>rollout.nnodes &gt; 0</code> 时，rollout 拥有自己的一组 GPU（<code>verl/trainer/config/rollout/<wbr>rollout.yaml:10-14</code>）；v1 <code>separate_async</code> 用 standalone server manager 起副本（<code>verl/trainer/ppo/v1/<wbr>trainer_separate_async.py:167-183</code>）。</p>
+      <p>GPU 账：总卡数 = 训练卡 + <code>rollout.n_gpus_per_node × rollout.nnodes</code>。默认 <code>rollout.nnodes=0</code>，所以这条路必须显式打开。</p>
+      <p>卡在哪：权重每步跨池同步（<code>trainer_separate_async.py:398-401</code>）；还要满足 <code>train_batch_size = parameter_sync_step × ppo_mini_batch_size</code>（<code>:60-64</code>）、checkpoint backend 不能是 <code>naive</code>（<code>:69-71</code>）、reward model 必须独立池（<code>:72-75</code>）。</p>
+    </div>
+  </div>
+  <p>两条路共用同一个 driver 数据流，换的只是 ResourcePool 和 role mapping。它们不是两套彼此独立的训练栈：共享 WorkerGroup/DataProto API，但 trainer 子类与调度、权重同步路径不同——v1 注册了 <code>PPOTrainerSync</code>、<code>PPOTrainerColocateAsync</code>、<code>PPOTrainerSeparateAsync</code>（<code>verl/trainer/ppo/v1/trainer_sync.py:25</code>、<code>trainer_colocate_async.py:20</code>、<code>trainer_separate_async.py:46</code>），v0 另有 <code>RayPPOTrainer</code>。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Single controller：driver 写普通 Python，WorkerGroup 把它变成 RPC</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Worker、WorkerGroup、ResourcePool、DataProto 各自负责什么，以及一次调用是怎么被切开的。</p>
+
+  <h3>ResourcePool 先把 GPU 变成可复用的 bundle</h3>
+  <p><code>ResourcePoolManager</code> 接收一个 <code>{池名: [每节点进程数]}</code> 的配置，为每个池建一个 <code>RayResourcePool</code>（<code>verl/trainer/main_ppo_v0.py:70-99</code>）。每个进程对应一个 placement-group bundle：<code>{"CPU": max_colocate_count, "GPU": 1}</code>（<code>verl/single_controller/ray/base.py:150-152</code>）。</p>
+  <p>真正让多个 worker 共享一张卡的是下一行：worker 创建时申请 <code>num_gpus = 1 / max_colocate_count</code>（<code>base.py:641</code>）。Ray 看到的是小数 GPU，物理卡仍是一张；这是调度上限，默认最多 3 个这样的进程可以落在同一张卡上（是否真的拆成 3 个进程，取决于角色是否走独立 WorkerGroup）。</p>
+
+  <h3>WorkerGroup 在调用时决定怎么切</h3>
+  <p><code>WorkerGroup._bind_worker_method</code> 扫描被 <code>@register</code> 装饰的方法，从 <code>DISPATCH_MODE_FN_REGISTRY</code> 取出对应的 dispatch/collect 函数（<code>verl/single_controller/base/worker_group.py:185-225</code>）。<code>ONE_TO_ALL</code> 把参数复制给所有 worker；<code>DP_COMPUTE_PROTO</code> 的 dispatch 用 <code>DataProto.chunk</code> 把数据切成 world_size 份（实现见 <code>verl/single_controller/base/decorator.py:167-177</code>，collect/concat 见 <code>:191-199</code>；注册表在 <code>:308-321</code>）。</p>
+  <div class="eq flow">driver:  actor_rollout_wg.update_actor(batch)
+           │ dispatch_fn = DP_COMPUTE_PROTO
+           ▼
+worker:  @register(Dispatch.DP_COMPUTE_PROTO)
+           batch.chunk(world_size) → 每个 rank 一份
+           │ collect_fn = concat
+           ▼
+driver:  DataProto.concat(...) → 交给下一阶段</div>
+  <p class="eq-cap">图式说明：方法名不变，切分与收集发生在 WorkerGroup 生成的包装函数里。</p>
+
+  <h3>WorkerDict 让“多个角色”变成同一个 Ray actor 里的多个实例</h3>
+  <p><code>create_colocated_worker_cls</code> 构造一个 <code>WorkerDict</code>，在 <code>DISABLE_WORKER_INIT=1</code> 的环境里依次实例化传入的各个角色类，再把带前缀的方法绑到父类上（<code>verl/single_controller/ray/base.py:1032-1046</code>）。<code>spawn(prefix_set)</code> 返回按前缀切开的虚拟 WorkerGroup（<code>base.py:742-760</code>）。</p>
+  <p>所以 <code>self.actor_rollout_wg</code> 和 <code>self.critic_wg</code> 看起来是两个组，底层是同一批 Ray actor（同一批进程、同一批 GPU），<code>spawn</code> 只改变 driver 看到的视图。当前 <code>ray_trainer</code> 仍调用这个函数（<code>ray_trainer.py:873</code>），函数上方已标注 <code>deprecated, switching to FusedWorker</code>（<code>base.py:1011</code>）——行为还在，实现正在换代。</p>
+
+  <h3>DataProto 是阶段之间的共同交换协议</h3>
+  <p>它只有三个字段：<code>batch</code>（TensorDict）、<code>non_tensor_batch</code>（dict）、<code>meta_info</code>（dict）（<code>verl/protocol.py:326-328</code>）。<code>__len__</code> 优先取 TensorDict 的 batch 维，没有再取 <code>non_tensor_batch</code> 中某个键对应数组的长度（<code>protocol.py:334-340</code>）。DP 切分前如果长度不能被 world_size 整除，会先补齐再切（<code>protocol.py:74-99</code>）。</p>
+
+  <div class="sim" id="vr-sim">
+    <div class="sim-top">
+      <button class="rule-btn active" data-mode="colocate" type="button">colocate<span class="r-sub">global_pool · 8 GPU</span></button>
+      <button class="rule-btn" data-mode="separate" type="button">separate_async<span class="r-sub">8 train + 4 rollout</span></button>
+    </div>
+
+    <div class="slots" id="vr-phases">
+      <div class="slot active-slot" id="vr-phase-0">
+        <div class="slot-name">01 rollout</div>
+        <div class="slot-val" id="vr-phase-val-0">8 / 8 GPU</div>
+        <div class="bar"><i id="vr-phase-bar-0" class="b1" style="width:100%"></i></div>
+        <div class="slot-note">生成 B×n 条 response</div>
+      </div>
+      <div class="slot" id="vr-phase-1">
+        <div class="slot-name">02 reward</div>
+        <div class="slot-val" id="vr-phase-val-1">0 / 8 GPU</div>
+        <div class="bar"><i id="vr-phase-bar-1" class="b2" style="width:0%"></i></div>
+        <div class="slot-note">规则奖励在 CPU；RM 另算</div>
+      </div>
+      <div class="slot" id="vr-phase-2">
+        <div class="slot-name">03 advantage</div>
+        <div class="slot-val" id="vr-phase-val-2">0 / 8 GPU</div>
+        <div class="bar"><i id="vr-phase-bar-2" class="b3" style="width:0%"></i></div>
+        <div class="slot-note">driver 按 uid 分组算均值/方差</div>
+      </div>
+      <div class="slot" id="vr-phase-3">
+        <div class="slot-name">04 actor update</div>
+        <div class="slot-val" id="vr-phase-val-3">8 / 8 GPU</div>
+        <div class="bar"><i id="vr-phase-bar-3" class="b1" style="width:100%"></i></div>
+        <div class="slot-note">mini-batch 再按 DP 切</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label for="vr-n">rollout.n <span class="v" id="vr-n-val">1</span></label>
+        <input id="vr-n" type="range" min="1" max="16" step="1" value="1">
+      </div>
+      <div class="ctrl">
+        <label for="vr-b">train_batch_size <span class="v" id="vr-b-val">1024</span></label>
+        <input id="vr-b" type="range" min="256" max="2048" step="256" value="1024">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="vr-next" type="button">下一步 →</button>
+      <button class="act ghost" id="vr-reset" type="button">重置</button>
+    </div>
+
+    <div class="readout" data-src="verl/trainer/ppo/ray_trainer.py:1491">
+      <div class="r-head">rollout 输入 / 输出</div>
+      <div><strong id="vr-samples">1024</strong> 条请求 = <span id="vr-echo-b">1024</span> prompts × <span id="vr-echo-n">1</span>。每个 prompt 采样 n 条，DataProto 先 <code>repeat</code> 再送进 rollout。</div>
+    </div>
+    <div class="readout" data-src="verl/workers/rollout/llm_server.py:452-478">
+      <div class="r-head">rollout 副本 / GPU 占用</div>
+      <div><strong id="vr-replicas">4</strong> 个副本，当前模式占用 <strong id="vr-gpu">8</strong> 张 GPU（训练 <span id="vr-train-gpu">8</span> + 独立 rollout <span id="vr-roll-gpu">0</span>）。</div>
+    </div>
+    <div class="readout" data-src="verl/checkpoint_engine/base.py:601">
+      <div class="r-head">通信</div>
+      <div>阶段间的 DataProto 由 driver 分发/收集；权重同步 <strong id="vr-sync-comm">1 次/step · 同池</strong>。同池同步在训练/推理引擎之间搬运权重，跨池则走 checkpoint engine。</div>
+    </div>
+    <div class="readout" data-src="verl/trainer/ppo/ray_trainer.py:1353; verl/workers/engine_workers.py:322-324">
+      <div class="r-head">actor 更新次数</div>
+      <div>每 step 更新 <strong id="vr-updates">4</strong> 次 = B ÷ 256 × ppo_epochs(1)；n 被约掉。v0 路径的循环在 <code>engine_workers.py:322-324</code>。</div>
+    </div>
+    <div class="readout" data-src="verl/trainer/ppo/ray_trainer.py:1509-1716">
+      <div class="r-head">当前阶段</div>
+      <div id="vr-phase-desc">rollout：AgentLoop 把 B×n 条 prompt 切成 chunk，分给各 agent loop worker；真正生成由 LLMServerManager 管的 vLLM/SGLang 副本完成。</div>
+      <div class="sim-note" id="vr-mode-note">colocate：所有角色共享 global_pool；阶段之间串行，rollout 结束会先 sleep replicas。</div>
+    </div>
+    <div class="sim-note">以下为 v0 <code>RayPPOTrainer</code> 路径的读数与锚点；默认 v1 sync 的对应位置：n 展开在 <code>agent_loop_tq.py:113-131</code>，权重同步在 <code>trainer_sync.py:31-38</code>，advantage 在 <code>trainer_base.py:1794</code>。</div>
+  </div>
+
+  <details>
+    <summary>手算：两组参数 → 与交互读数逐位对账<span class="sum-sub">JS 与下面用同一组公式</span></summary>
+    <div class="details-body">
+      <p>口径：<code>samples = B × n</code>；<code>updates = B ÷ 256 × 1</code>；<code>副本 = rollout GPU ÷ (TP × DP × PP)</code>，TP=2、DP=1、PP=1；colocate 的训练 GPU 为 8，separate 的 standalone rollout GPU 为 4。</p>
+      <p><strong>组 A · colocate，n=1，B=1024：</strong><br>
+      samples = 1024 × 1 = <code>1024</code><br>
+      updates = 1024 ÷ 256 × 1 = <code>4</code><br>
+      replicas = 8 ÷ (2 × 1 × 1) = <code>4</code><br>
+      GPU = 8 + 0 = <code>8</code>；权重同步 = <code>1 次/step · 同池</code></p>
+      <p><strong>组 B · separate_async，n=8，B=1024：</strong><br>
+      samples = 1024 × 8 = <code>8192</code><br>
+      updates = 1024 ÷ 256 × 1 = <code>4</code>（n 同时出现在分子和 mini-batch 分母）<br>
+      replicas = 4 ÷ (2 × 1 × 1) = <code>2</code><br>
+      GPU = 8 + 4 = <code>12</code>；权重同步 = <code>1 次/step · 跨池</code></p>
+      <p>把滑块调到这两组，页面读数应分别显示 1024 / 4 / 4 / 8 和 8192 / 4 / 2 / 12。separate_async 默认还要求 B=1024（4 × 256），改 B 时要同步改 <code>parameter_sync_step</code> 或 <code>ppo_mini_batch_size</code>，否则启动断言失败（<code>verl/trainer/ppo/v1/trainer_separate_async.py:60-64</code>）。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="step">
+  <div class="sec-head"><span class="sec-num">04</span><h2>一个 PPO step 的账：B×n 条样本，B/M 次更新</h2></div>
+  <p class="sec-sub">读完这节你应该知道：batch 维度在哪一步被放大、n 为什么会在更新次数里消失、默认配置下一次 step 到底跑了多少东西。</p>
+
+  <div class="eq">
+    样本数 = <span class="hl-c">train_batch_size × rollout.n</span><br>
+    每 step 更新次数 = <span class="hl-c">train_batch_size ÷ ppo_mini_batch_size × ppo_epochs</span><br>
+    rollout 副本数 = <span class="hl-a">world_size ÷ (TP × DP × PP)</span><br>
+    每 worker GPU 份额 = <span class="hl-b">1 ÷ max_colocate_count</span>
+  </div>
+  <p class="eq-cap">默认值：B=1024、M=256、n=1、epochs=1、world=8、TP=2、DP=1、PP=1、max_colocate_count=3。</p>
+
+  <p><strong>口径：</strong>以下为 v0 <code>RayPPOTrainer</code> 路径（<code>verl/trainer/ppo/ray_trainer.py</code>）。<code>ppo_trainer.yaml:232</code> 默认 <code>use_v1: true</code>；默认 v1 sync 的对应位置：n 展开在 <code>verl/trainer/ppo/v1/agent_loop_tq.py:113-131</code>，样本合并走 TransferQueue，权重同步在 <code>verl/trainer/ppo/v1/trainer_sync.py:31-38</code>，advantage 在 <code>verl/trainer/ppo/v1/trainer_base.py:1788-1797</code>（<code>num_repeat</code> 在 <code>:1794</code>）。数值结论 <code>B/M</code> 不随路径变化。</p>
+
+  <p>第一步放大发生在 rollout 前（v0 路径）：<code>gen_batch.repeat(repeat_times=rollout_n)</code> 把 B 条 prompt 变成 B×n 条请求（<code>verl/trainer/ppo/ray_trainer.py:1490-1491</code>）。rollout 回来后，原始 batch 也按同样的 n 重复，再与生成结果 <code>union</code>（<code>ray_trainer.py:1540-1541</code>）。</p>
+  <p>第二步放大发生在 actor update 前：<code>ppo_mini_batch_size</code> 也乘 n（<code>ray_trainer.py:1352-1353</code>），再交给训练引擎按 DP size 除（<code>verl/workers/engine_workers.py:302-305</code>）。于是更新次数是 <code>(B×n) ÷ (M×n) = B/M</code>：n 同时出现在分子和分母，抵消了。</p>
+
+  <p class="eq-cap">表 1 · 默认配置下一次 PPO step 的资源账；数字来自配置默认值或源码公式。</p>
+  <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:24%"><col style="width:20%"><col style="width:12%"><col style="width:44%"></colgroup>
+      <thead><tr><th>量</th><th>公式</th><th class="num">默认值</th><th>源码</th></tr></thead>
+      <tbody>
+        <tr><td>每 step prompt 数</td><td>—</td><td class="num">1024</td><td><code>verl/trainer/config/data/legacy_data.yaml:42</code></td></tr>
+        <tr><td>rollout 请求数</td><td>1024 × 1</td><td class="num">1024</td><td><code>verl/trainer/ppo/ray_trainer.py:1491</code></td></tr>
+        <tr><td>rollout 副本数</td><td>8 ÷ (2×1×1)</td><td class="num">4</td><td><code>verl/workers/rollout/llm_server.py:452-478</code></td></tr>
+        <tr><td>actor mini-batch（全局样本）</td><td>256 × 1</td><td class="num">256</td><td><code>verl/trainer/config/actor/actor.yaml:18</code></td></tr>
+        <tr><td>actor 更新次数 / step</td><td>1024 ÷ 256 × 1</td><td class="num">4</td><td><code>verl/trainer/ppo/ray_trainer.py:1353</code>；<code>verl/workers/engine_workers.py:322-324</code></td></tr>
+        <tr><td>每 worker GPU 份额</td><td>1 ÷ 3</td><td class="num">0.333</td><td><code>verl/single_controller/ray/base.py:641</code></td></tr>
+        <tr><td>colocate 总 GPU</td><td>1 × 8</td><td class="num">8</td><td><code>verl/trainer/config/ppo_trainer.yaml:168-171</code></td></tr>
+        <tr><td>separate 示例总 GPU</td><td>8 + 4</td><td class="num">12</td><td><code>verl/trainer/config/rollout/rollout.yaml:10-14</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>GRPO 的 advantage 也在 driver 上完成：先按 <code>uid</code> 把 n 条 response 分到同一组（<code>ray_trainer.py:240-245</code>），再算组内均值与标准差（<code>torch.std</code> 默认做 N−1 校正），<code>(r_i − mean) ÷ (std + ε)</code> 广播到 response 的每个 token（<code>verl/trainer/ppo/core_algos.py:304-329</code>）。如果 n=1，组内只有一个样本，代码把 mean 设为 0、std 设为 1（<code>core_algos.py:315-317</code>）。</p>
+</section>
+
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Driver 只发 RPC，GPU 上的 WorkerDict 才是执行者</h2></div>
+  <p class="sec-sub">读完这节你应该能按图说出：一次 <code>update_actor</code> 从 driver 出发，经过哪几层才落到 GPU。</p>
+
+  <figure>
+    <svg viewBox="0 0 1000 620" role="img" aria-label="verl Ray 分布式训练架构图">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <rect x="20" y="20" width="250" height="110" rx="12" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.5"></rect>
+      <text x="38" y="48" font-size="15" font-weight="700" fill="var(--c1)">Driver（CPU）</text>
+      <text x="38" y="72" font-size="12" fill="var(--text)">TaskRunner / RayPPOTrainer</text>
+      <text x="38" y="94" font-size="12" fill="var(--text-muted)">只写数据流、发 RPC、算 advantage</text>
+      <text x="38" y="114" font-size="11" fill="var(--text-soft)" font-family="JetBrains Mono,monospace">RayPPOTrainer.fit()</text>
+
+      <rect x="320" y="20" width="250" height="110" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="338" y="48" font-size="15" font-weight="700" fill="var(--text)">ResourcePoolManager</text>
+      <text x="338" y="72" font-size="12" fill="var(--text-muted)">resource_pool_spec</text>
+      <text x="338" y="94" font-size="11" fill="var(--text-soft)" font-family="JetBrains Mono,monospace">global_pool</text>
+      <text x="338" y="114" font-size="11" fill="var(--text-soft)" font-family="JetBrains Mono,monospace">reward_pool / teacher_pool</text>
+
+      <rect x="620" y="20" width="360" height="110" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="638" y="48" font-size="15" font-weight="700" fill="var(--text)">PlacementGroup bundles</text>
+      <text x="638" y="72" font-size="12" fill="var(--text-muted)">每个 bundle：1 GPU + max_colocate_count CPU 槽</text>
+      <g font-family="JetBrains Mono,monospace" font-size="11" fill="var(--text-soft)">
+        <text x="638" y="96">GPU0</text><text x="690" y="96">GPU1</text><text x="742" y="96">GPU2</text><text x="794" y="96">…</text><text x="830" y="96">GPU7</text>
+        <text x="638" y="116">每个 worker 申请 1/3 GPU</text>
+      </g>
+
+      <line x1="270" y1="75" x2="318" y2="75" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <line x1="570" y1="75" x2="618" y2="75" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></line>
+
+      <rect x="20" y="185" width="960" height="195" rx="14" fill="var(--bg-surface)" stroke="var(--accent)" stroke-width="1.8"></rect>
+      <text x="38" y="213" font-size="15" font-weight="700" fill="var(--accent-deep)">Ray 执行层：WorkerGroup + 管理器 actors</text>
+      <text x="420" y="213" font-size="12" fill="var(--text-muted)">WorkerGroup 的方法由 @register 绑定；调用被 dispatch/chunk，结果被 collect/concat</text>
+
+      <rect x="40" y="235" width="600" height="125" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.2"></rect>
+      <text x="58" y="260" font-size="13" font-weight="700" fill="var(--accent-deep)">WorkerDict（每个 Ray actor 一个）</text>
+      <text x="58" y="282" font-size="11" fill="var(--text)" font-family="JetBrains Mono,monospace">ActorRolloutRefWorker + TrainingWorker</text>
+      <rect x="58" y="296" width="100" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="76" y="322" font-size="12" fill="var(--text)">Actor</text>
+      <rect x="170" y="296" width="100" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="184" y="322" font-size="12" fill="var(--text)">Rollout</text>
+      <rect x="282" y="296" width="110" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="294" y="322" font-size="12" fill="var(--text)">Reference</text>
+      <rect x="404" y="296" width="100" height="42" rx="7" fill="var(--bg-surface)" stroke="var(--border-strong)"></rect>
+      <text x="418" y="322" font-size="12" fill="var(--text)">Critic</text>
+      <text x="516" y="322" font-size="10.5" fill="var(--text-soft)">→ 同一个 GPU 进程</text>
+      <text x="58" y="355" font-size="10.5" fill="var(--text-soft)">spawn(prefix_set) 把它们暴露成不同的虚拟 WorkerGroup</text>
+
+      <rect x="660" y="235" width="140" height="125" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="674" y="260" font-size="13" font-weight="700" fill="var(--text)">RewardLoop</text>
+      <text x="674" y="284" font-size="11" fill="var(--text-muted)">规则奖励 / RM</text>
+      <text x="674" y="306" font-size="10.5" fill="var(--text-soft)">无 RM 时走 CPU</text>
+      <text x="674" y="328" font-size="10.5" fill="var(--text-soft)">有 RM 时可独立池</text>
+
+      <rect x="818" y="235" width="145" height="125" rx="10" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.2"></rect>
+      <text x="832" y="260" font-size="13" font-weight="700" fill="var(--text)">AgentLoop</text>
+      <text x="832" y="284" font-size="11" fill="var(--text-muted)">多轮 / 工具调用</text>
+      <text x="832" y="306" font-size="10.5" fill="var(--text-soft)">chunk prompts</text>
+      <text x="832" y="328" font-size="10.5" fill="var(--text-soft)">async gather</text>
+
+      <line x1="500" y1="135" x2="500" y2="183" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <text x="510" y="164" font-size="11" fill="var(--text-soft)">init_workers()</text>
+
+      <rect x="20" y="420" width="560" height="105" rx="12" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.5"></rect>
+      <text x="38" y="448" font-size="15" font-weight="700" fill="var(--c2)">DataProto（阶段之间）</text>
+      <text x="38" y="472" font-size="12" fill="var(--text)" font-family="JetBrains Mono,monospace">batch: TensorDict · non_tensor_batch · meta_info</text>
+      <text x="38" y="494" font-size="11.5" fill="var(--text-muted)">repeat(n) → chunk(world_size) → concat → union</text>
+      <text x="38" y="514" font-size="11" fill="var(--text-soft)">rollout 输出、reward、old_log_prob、advantage 都挂在同一个对象上</text>
+
+      <rect x="620" y="420" width="360" height="105" rx="12" fill="var(--bg-surface)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="638" y="448" font-size="15" font-weight="700" fill="var(--text)">LLMServerManager</text>
+      <text x="638" y="472" font-size="12" fill="var(--text-muted)">vLLM / SGLang replicas</text>
+      <text x="638" y="494" font-size="11" fill="var(--text-soft)" font-family="JetBrains Mono,monospace">副本 = world ÷ (TP×DP×PP)</text>
+      <text x="638" y="514" font-size="11" fill="var(--text-soft)">sleep / wake / update_weights 由 checkpoint manager 驱动</text>
+
+      <line x1="860" y1="360" x2="860" y2="418" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arr)"></line>
+      <text x="870" y="392" font-size="11" fill="var(--text-soft)">generate</text>
+
+      <line x1="580" y1="472" x2="618" y2="472" stroke="var(--c2)" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arr)"></line>
+      <line x1="300" y1="380" x2="300" y2="418" stroke="var(--c2)" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arr)"></line>
+      <text x="312" y="402" font-size="11" fill="var(--text-soft)">dispatch / collect</text>
+
+      <rect x="620" y="550" width="360" height="52" rx="10" fill="var(--c3-soft)" stroke="var(--c3)" stroke-width="1.3" stroke-dasharray="5 3"></rect>
+      <text x="638" y="572" font-size="12.5" font-weight="700" fill="var(--c3)">可选：standalone rollout pool</text>
+      <text x="638" y="592" font-size="11" fill="var(--text-muted)">仅 v1 separate_async，rollout.nnodes &gt; 0 时启用</text>
+    </svg>
+    <figcaption>图 1 · Driver 只持有 WorkerGroup 的句柄；真正的模型进程落在 PlacementGroup 的 bundle 上。WorkerDict 可以同时装 actor_rollout_ref 与 critic，<code>spawn</code> 只改变暴露给 driver 的视图；DataProto 在阶段之间被 repeat、chunk、concat。虚线框是 v1 <code>separate_async</code> 才启用的独立 rollout 池。</figcaption>
+  </figure>
+</section>
+
+<section class="block" id="effect">
+  <div class="sec-head"><span class="sec-num">06</span><h2>colocate 省 GPU，separate 买 overlap；n 不改变更新次数</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两种资源路线在默认配置下的具体账，以及三个容易反直觉的结论。</p>
+
+  <p class="eq-cap">表 2 · 两条资源路线的对照；示例配置为训练 8 GPU、standalone rollout 4 GPU。</p>
+  <div class="tbl-scroll">
+    <table>
+      <colgroup><col style="width:14%"><col style="width:43%"><col style="width:43%"></colgroup>
+      <thead><tr><th>维度</th><th>colocate</th><th>separate_async</th></tr></thead>
+      <tbody>
+        <tr><td>训练 GPU</td><td>8</td><td>8</td></tr>
+        <tr><td>独立 GPU</td><td>0</td><td>4</td></tr>
+        <tr><td>副本</td><td>8 ÷ (2×1×1) = 4</td><td>4 ÷ (2×1×1) = 2</td></tr>
+        <tr><td>权重同步</td><td>同池，step 末 1 次（<code>ray_trainer.py:1714-1716</code>）</td><td>跨池，step 末 1 次（<code>trainer_separate_async.py:398-401</code>）</td></tr>
+        <tr><td>显存</td><td>与训练共享；rollout 的 KV cache 预算默认 0.5（<code>rollout.yaml:46</code>）</td><td>独立池，各自预算</td></tr>
+        <tr><td>约束</td><td><code>hybrid_engine=true</code>（<code>ppo_trainer.yaml:60</code>）；v0 入口有 assert（<code>ray_trainer.py:334</code>）</td><td><code>B = parameter_sync_step×M</code>（<code>:60-64</code>）；backend ≠ naive（<code>:69-71</code>）；RM 独立池（<code>:72-75</code>）</td></tr>
+        <tr><td>适用</td><td>卡少、阶段可串行</td><td>卡多、需要 rollout 与训练 overlap</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 1</span><h4>n 在更新次数里被约掉</h4></div>
+      <p>样本数从 B 变成 B×n，mini-batch 也从 M 变成 M×n，更新次数仍是 <code>B/M</code>。把 n 从 1 调到 16，actor 每 step 的更新次数不变，变的是每次更新的样本量和 rollout 成本（v0 <code>ray_trainer.py:1352-1353,1490-1491</code>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 2</span><h4>colocate 不等于同时跑</h4></div>
+      <p>同池的收益是“不用为每个阶段单独买卡”，不是“rollout 和训练并行”。同步 fit 循环里 rollout 结束会先 <code>sleep_replicas()</code>，actor update 完再 <code>update_weights()</code>（v0 <code>ray_trainer.py:1513-1514,1714-1716</code>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">反直觉 3</span><h4>副本数由 TP 决定，不只由卡数决定</h4></div>
+      <p>4 张独立 rollout GPU 在 TP=2 下只有 2 个副本；TP 翻倍，副本数减半。公式里的分母是 <code>TP×DP×PP</code>，不是单卡数（<code>llm_server.py:452-478</code>）。</p>
+    </div>
+  </div>
+
+
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>这套架构的边界，写在 assert 和配置里</h2></div>
+  <p class="sec-sub">读完这节你应该知道：什么时候别开 colocate、什么时候 separate_async 根本起不来，以及控制面真正的成本在哪。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">硬约束</span><h4>不是所有入口都支持拆开 rollout 与训练</h4></div>
+    <p>v0 的 <code>RayPPOTrainer</code> 在构造时直接 <code>assert self.hybrid_engine</code>（<code>verl/trainer/ppo/ray_trainer.py:333-334</code>）。把 <code>actor_rollout_ref.hybrid_engine</code> 设为 false 只在 v1 <code>separate_async</code> 路径可用；v0 路径会在启动时失败。</p>
+    <p><code>separate_async</code> 还要求：<code>rollout.nnodes &gt; 0</code>（<code>trainer_separate_async.py:65-68</code>）、checkpoint backend 不能是 <code>naive</code>（<code>:69-71</code>）、有 reward model 时必须 <code>enable_resource_pool=True</code>（<code>:72-75</code>）、以及 <code>train_batch_size = parameter_sync_step × ppo_mini_batch_size</code>（<code>:60-64</code>）。少一条就启动失败，不是运行期降级。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">显存</span><h4>colocate 的 0.5 不是“训练只占一半”</h4></div>
+    <p><code>gpu_memory_utilization: 0.5</code> 是 vLLM/SGLang 给 KV cache 的预算（<code>verl/trainer/config/rollout/rollout.yaml:45-46</code>），不是训练侧显存上限。训练侧还有参数、梯度、优化器状态和激活；两套引擎的峰值叠加才是 colocate 的真实门槛。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">控制面</span><h4>每个阶段的数据都要过一遍 driver / Ray object store</h4></div>
+    <p>advantage 明确写在 driver 上算（<code>ray_trainer.py:1667</code>）；WorkerGroup 的 <code>DP_COMPUTE_PROTO</code> 会先 chunk、必要时 padding，再把结果 concat 回来（<code>verl/protocol.py:74-99</code>；dispatch 在 <code>decorator.py:167-177</code>，collect 在 <code>:191-199</code>）。B×n 很大或序列很长时，driver 内存和序列化开销会先于 GPU 成为瓶颈。<span class="infer">推断</span>（依据：数据流由 driver 统一持有；代码注释称 advantage 为 light-weight，说明作者已把它放在 driver 以避开 GPU 通信）。</p>
+    <p><code>max_colocate_count</code> 是调度上限，不是性能收益：每个 worker 申请 <code>1/3</code> 张 GPU，一张卡最多容纳 3 个这样的进程；第 4 个要么等别的卡，要么把该值调大后重新分片（<code>verl/single_controller/ray/base.py:200,641</code>）。融合路径下通常每卡一个 actor，多角色在同一进程内实例化（<code>base.py:1032-1046</code>），并不需要真的开满 3 个进程。</p>
+  </div>
+
+  <p>还有一条产品边界：<code>AgentLoopManager</code> 的 worker 是 Ray actor，按节点做软亲和调度，再把 prompt chunk 后 <code>asyncio.gather</code>（<code>verl/experimental/agent_loop/agent_loop.py:1295-1310,1335-1341</code>）。它服务的是 RL 采样，不是高 QPS 在线推理；别把训练期的 rollout 拓扑直接当 serving 架构用。</p>
+</section>
+
+<footer>
+  <div>verl · HybridFlow 的 single-controller 实现（commit 7de8f2e）</div>
+  <div class="src">
+    源码：<a href="https://github.com/volcengine/verl/tree/7de8f2e" target="_blank" rel="noopener">volcengine/verl</a><br>
+    文档：<a href="https://verl.readthedocs.io/en/latest/single_controller.html" target="_blank" rel="noopener">The Design of verl.single_controller</a><br>
+    笔记：<a href="/verl_ray执行流程源码解析/">veRL 基于 Ray 的执行流程源码解析</a> · <a href="/verl_colocate实现源码解析/">colocate 实现源码解析</a> · <a href="/agent_loop/">AgentLoop</a> · <a href="/dataproto/">DataProto</a> · <a href="/batch_size解释/">batch_size 解释</a>
+  </div>
+  <details>
+    <summary>博客笔记（2026-06）与当前源码的差异<span class="sum-sub">只列会改变结论的部分</span></summary>
+    <div class="details-body">
+      <p><strong>“所有模型共享 global_pool”：</strong>这是笔记写作时对 v0 默认配置的概括。当前 commit 已有 <code>reward_pool</code> 与 <code>teacher_pool</code>（<code>verl/trainer/main_ppo_v0.py:75-95</code>），v1 <code>separate_async</code> 还可以有 standalone rollout 池。对当前版本，这句话只在“默认 reward/teacher 都放 global_pool”的前提下成立。</p>
+      <p><strong>AgentLoopManager 的构造：</strong>笔记里是 <code>AgentLoopManager(..., worker_group=self.actor_rollout_wg, ...)</code>；当前代码先建 <code>LLMServerManager</code>，再把 <code>llm_client</code> 传给 <code>AgentLoopManager.create</code>（<code>ray_trainer.py:951-965</code>）。接口变了，agent loop 的职责没变。</p>
+      <p><strong>batch_size 归一化：</strong>笔记里的 <code>ppo_mini_batch_size *= n; //= dp_size // sp</code> 是旧 FSDP worker 的写法；当前 <code>_update_actor</code> 只做 <code>* n</code>（<code>ray_trainer.py:1352-1353</code>），DP 切分下移到训练引擎（<code>engine_workers.py:302-305</code>）。数值结论 <code>B/M</code> 不变，但引用代码时要按新位置。</p>
+    </div>
+  </details>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('vr-sim');
+  if (!sim) return;
+
+  var N_DEFAULT = 1;
+  var B_DEFAULT = 1024;
+  var MINI_BATCH = 256;
+  var TRAIN_GPU = 8;
+  var ROLLOUT_GPU_SEPARATE = 4;
+  var TP = 2;
+  var DP = 1;
+  var PP = 1;
+  var PHASES = 4;
+
+  var state = {
+    mode: 'colocate',
+    n: N_DEFAULT,
+    b: B_DEFAULT,
+    phase: 0
+  };
+
+  var nInput = document.getElementById('vr-n');
+  var bInput = document.getElementById('vr-b');
+  var nVal = document.getElementById('vr-n-val');
+  var bVal = document.getElementById('vr-b-val');
+  var samplesEl = document.getElementById('vr-samples');
+  var echoB = document.getElementById('vr-echo-b');
+  var echoN = document.getElementById('vr-echo-n');
+  var replicasEl = document.getElementById('vr-replicas');
+  var gpuEl = document.getElementById('vr-gpu');
+  var trainGpuEl = document.getElementById('vr-train-gpu');
+  var rollGpuEl = document.getElementById('vr-roll-gpu');
+  var updatesEl = document.getElementById('vr-updates');
+  var syncCommEl = document.getElementById('vr-sync-comm');
+  var phaseDesc = document.getElementById('vr-phase-desc');
+  var modeNote = document.getElementById('vr-mode-note');
+  var nextBtn = document.getElementById('vr-next');
+  var resetBtn = document.getElementById('vr-reset');
+  var modeButtons = sim.querySelectorAll('.rule-btn[data-mode]');
+
+  var phaseDescs = [
+    'rollout：AgentLoop 把 B×n 条 prompt 切成 chunk，分给各 agent loop worker；真正生成由 LLMServerManager 管的 vLLM/SGLang 副本完成。',
+    'reward：规则奖励在 CPU/AgentLoop 侧打分；如果接了 reward model，它共享 global_pool 或走独立 reward_pool，结果写回 token_level_scores。',
+    'advantage：driver 按 uid 分组，算组内均值与标准差，把 (r − mean) ÷ (std + ε) 广播到 response 的每个 token；这一步不占 GPU。',
+    'actor update：mini-batch = ppo_mini_batch_size × n，训练引擎再按 DP size 除；更新次数 = B ÷ M × ppo_epochs。'
+  ];
+
+  function calc() {
+    var rolloutGpu = state.mode === 'separate' ? ROLLOUT_GPU_SEPARATE : 0;
+    var totalGpu = TRAIN_GPU + rolloutGpu;
+    var replicaGpu = state.mode === 'separate' ? ROLLOUT_GPU_SEPARATE : TRAIN_GPU;
+    var replicas = Math.floor(replicaGpu / (TP * DP * PP));
+    var samples = state.b * state.n;
+    var updates = Math.floor(state.b / MINI_BATCH);
+    return {
+      rolloutGpu: rolloutGpu,
+      totalGpu: totalGpu,
+      replicas: replicas,
+      samples: samples,
+      updates: updates
+    };
+  }
+
+  function phaseGpuActive(phase, c) {
+    if (state.mode === 'colocate') {
+      return phase === 0 || phase === 3 ? TRAIN_GPU : 0;
+    }
+    if (phase === 0) return c.rolloutGpu;
+    if (phase === 3) return TRAIN_GPU;
+    return 0;
+  }
+
+  function render() {
+    var c = calc();
+
+    if (nVal) nVal.textContent = state.n;
+    if (bVal) bVal.textContent = state.b;
+    if (samplesEl) samplesEl.textContent = c.samples;
+    if (echoB) echoB.textContent = state.b;
+    if (echoN) echoN.textContent = state.n;
+    if (replicasEl) replicasEl.textContent = c.replicas;
+    if (gpuEl) gpuEl.textContent = c.totalGpu;
+    if (trainGpuEl) trainGpuEl.textContent = TRAIN_GPU;
+    if (rollGpuEl) rollGpuEl.textContent = c.rolloutGpu;
+    if (updatesEl) updatesEl.textContent = c.updates;
+    if (syncCommEl) syncCommEl.textContent = state.mode === 'colocate' ? '1 次/step · 同池' : '1 次/step · 跨池';
+
+    for (var i = 0; i < PHASES; i++) {
+      var slot = document.getElementById('vr-phase-' + i);
+      var val = document.getElementById('vr-phase-val-' + i);
+      var bar = document.getElementById('vr-phase-bar-' + i);
+      var active = phaseGpuActive(i, c);
+      if (slot) {
+        if (i === state.phase) slot.classList.add('active-slot');
+        else slot.classList.remove('active-slot');
+      }
+      if (val) val.textContent = active + ' / ' + c.totalGpu + ' GPU';
+      if (bar) bar.style.width = (c.totalGpu > 0 ? (active / c.totalGpu * 100) : 0) + '%';
+    }
+
+    if (phaseDesc) phaseDesc.textContent = phaseDescs[state.phase];
+
+    if (modeNote) {
+      if (state.mode === 'colocate') {
+        modeNote.textContent = 'colocate：所有角色共享 global_pool；阶段之间串行，rollout 结束会先 sleep replicas。';
+        modeNote.className = 'sim-note';
+      } else {
+        var valid = state.b === 1024;
+        modeNote.textContent = valid
+          ? 'separate_async：训练 8 GPU + standalone rollout 4 GPU；rollout 与训练可 overlap，权重每步跨池同步。'
+          : 'separate_async 默认要求 B = parameter_sync_step × M = 4 × 256 = 1024；当前 B=' + state.b + '，需同步改 parameter_sync_step 或 ppo_mini_batch_size。';
+        modeNote.className = valid ? 'sim-note' : 'sim-note warn';
+      }
+    }
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    for (var i = 0; i < modeButtons.length; i++) {
+      var btn = modeButtons[i];
+      if (btn.getAttribute('data-mode') === mode) btn.classList.add('active');
+      else btn.classList.remove('active');
+    }
+    render();
+  }
+
+  for (var i = 0; i < modeButtons.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        setMode(btn.getAttribute('data-mode'));
+      });
+    })(modeButtons[i]);
+  }
+
+  if (nInput) {
+    nInput.addEventListener('input', function () {
+      state.n = parseInt(nInput.value, 10) || N_DEFAULT;
+      render();
+    });
+  }
+  if (bInput) {
+    bInput.addEventListener('input', function () {
+      state.b = parseInt(bInput.value, 10) || B_DEFAULT;
+      render();
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener('click', function () {
+      state.phase = (state.phase + 1) % PHASES;
+      render();
+    });
+  }
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      state.mode = 'colocate';
+      state.n = N_DEFAULT;
+      state.b = B_DEFAULT;
+      state.phase = 0;
+      if (nInput) nInput.value = String(N_DEFAULT);
+      if (bInput) bInput.value = String(B_DEFAULT);
+      for (var j = 0; j < modeButtons.length; j++) {
+        if (modeButtons[j].getAttribute('data-mode') === 'colocate') modeButtons[j].classList.add('active');
+        else modeButtons[j].classList.remove('active');
+      }
+      render();
+    });
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>

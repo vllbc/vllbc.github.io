@@ -1,0 +1,837 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 84 | §01 | 7*(2*2+8) |
+| 10.5 | §03 | 7*(2*2+8)/8 |
+| 1.75 | §03 | 7*2/8 |
+| 7 | §03 | 7*8/8 |
+| 14 | §03 | 7*2 |
+| 12.5 | §01 | 1/8*100 |
+| 8 | 源码 torch/distributed/fsdp/_flat_param.py:2790 | 16/2 |
+| 4 | 源码 torch/distributed/fsdp/_flat_param.py:2790 | 16/4 |
+| 2 | §06 | (3+5)/4 |
+| 4 | 源码 torch/distributed/fsdp/_flat_param.py:710-713,759-763 | (3+5+5+3)/4 |
+| 3 | §06 | 1+2 |
+| 50 | §06 | (3-2)/2*100 |
+| 25 | §06 | (4-3)/4*100 |
+| 24.5 | §03 | 7*(2*2+8)/8+7*2 |
+| 36.75 | §03 | 3*7*(8-1)/8*2 |
+| 24.5 | §04 | 2*7*(8-1)/8*2 |
+| 208 | §03 | 13*(2*4+8) |
+| 52 | §03 | 13*(2*4+8)/4 |
+| 13 | §03 | 13*4/4 |
+| 26 | §03 | 13*8/4 |
+| 104 | §03 | 13*(2*4+8)/4+13*4 |
+| 78 | §03 | 2*13*(4-1)/4*4 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="2ee7a63">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FSDP1 vs FSDP2 · 同一套 1/N，两种参数表示</title>
+<meta name="description" content="从 PyTorch 源码对照 FSDP1 的 FlatParameter 与 FSDP2 的 per-parameter DTensor：分片、padding、all-gather/reduce-scatter、显存账本，以及与 TP/PP 的组合方式。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.metric .v.text{font-size:19px}
+.svg-title{font-family:"Inter","Noto Sans SC",sans-serif;font-size:17px;font-weight:700;fill:var(--text)}
+.svg-sub{font-family:"Noto Sans SC",sans-serif;font-size:12.5px;fill:var(--text-muted)}
+.svg-label{font-family:"JetBrains Mono",monospace;font-size:11.5px;fill:var(--text-muted)}
+.svg-note{font-family:"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-soft)}
+.svg-strong{font-family:"Inter","Noto Sans SC",sans-serif;font-size:12px;font-weight:600;fill:var(--text)}
+.legend-svg{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-muted)}
+.sim-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:10px 0 0}
+.calc-detail{font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.9}
+/* 长源码路径在窄屏必须能断行，否则 500px 下会横向溢出 */
+code{overflow-wrap:anywhere;word-break:break-word}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">FSDP1 vs FSDP2</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#arch">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>System · PyTorch · commit 2ee7a63</span>
+  <h1>FSDP1 vs FSDP2：同一套 1/N，两种参数表示</h1>
+  <p class="hero-sub">
+    两者都把参数、梯度、优化器状态切到每张卡只留 <code>1/N</code>，前向前 all-gather，反向后 reduce-scatter。
+    真正的分水岭是<strong>切的单位</strong>：FSDP1 把一个 module 的参数压成一条 <code>FlatParameter</code> 再切，FSDP2 让每个参数自己成为 <code>DTensor(Shard(0))</code>。
+    这个选择决定了 padding、state dict、优化器看到什么，以及能不能和 TP/EP 直接拼。
+  </p>
+  <div class="meta">
+    <span>PyTorch Distributed · FSDP</span>
+    <a href="https://pytorch.org/docs/stable/fsdp.html" target="_blank" rel="noopener">FSDP 文档 ↗</a>
+    <a href="https://pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank" rel="noopener">FSDP2 API ↗</a>
+    <a href="https://github.com/pytorch/pytorch/issues/114299" target="_blank" rel="noopener">FSDP2 RFC ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>常驻显存的账，两者一样。</strong>FULL_SHARD 下每卡参数、梯度、优化器状态都约为 <code>1/N</code>；7B bf16 + AdamW、N=8 时是 <span class="mono" data-src="§03">10.5 GB</span>，而完整副本是 <span class="mono" data-src="§01">84 GB</span>。
+  </p>
+  <p>
+    <strong>FSDP1 的代价在「打包」。</strong>它把 module 内所有参数 flatten 成一条 1D 的 <code>FlatParameter</code>：<code>use_orig_params=True</code> 时每个原始参数前补 padding 到 16 B 边界（bf16 对齐单位是 8 个元素，最多补 7 个），同一路径下整条再补到 N 的倍数。切出来的 chunk 边界可能落在某个参数中间。
+  </p>
+  <p>
+    <strong>FSDP2 换成分片单位 = 单个参数。</strong>每个参数单独 chunk 成 DTensor，优化器直接拿到 DTensor；sharded state dict 与训练表示一致，不需要为了保存而 all-gather。但「按参数分片」不等于「按参数通信」——一个 <code>fully_shard</code> group 仍然一次 all-gather、一次 reduce-scatter。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="torch/distributed/fsdp/_flat_param.py:1104">1/N</div>
+      <div class="k">FULL_SHARD 下每卡常驻参数<br>梯度与优化器状态同为 1/N；N=8 即 <span data-src="§01">12.5%</span></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="torch/distributed/fsdp/_flat_param.py:2790">16 B</div>
+      <div class="k">FSDP1 地址对齐粒度<br>bf16 每参数最多补 7 个元素</div>
+    </div>
+    <div class="metric">
+      <div class="v text" data-src="torch/distributed/fsdp/_fully_shard/_fsdp_param.py:362">1 个参数</div>
+      <div class="k">FSDP2 的分片单位<br>通信仍按 module group 合并</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>先把「每卡一份」变成「每卡 1/N 份」——难点不在公式，在表示</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 1/N 只是起点，真正影响工程的是这 1/N 在内存里怎么摆。</p>
+
+  <p>DDP 的账本很直观：每张卡都放一份完整的参数、梯度、优化器状态。用 <code>P</code> 表示参数量，<code>b<sub>p</sub></code>、<code>b<sub>g</sub></code> 表示参数和梯度的字节数，<code>b<sub>opt</sub></code> 表示每个参数的优化器状态字节数，每卡常驻就是：</p>
+
+  <div class="eq">
+    M<sub>DDP</sub> = P × (b<sub>p</sub> + b<sub>g</sub> + b<sub>opt</sub>)
+  </div>
+  <div class="eq-cap">完整副本；不含激活、临时缓冲与碎片</div>
+
+  <p>按 7B 参数、bf16 参数与梯度、AdamW 的 fp32 一阶/二阶动量（8 B/param）算，完整副本是 <strong data-src="§01">84 GB</strong>。这已经超过一张 80 GB 卡的可分配显存，而且还没算激活。FSDP 的思路是把这三类状态都切成 <code>N</code> 份，每卡只留一份：</p>
+
+  <div class="eq">
+    M<sub>FSDP</sub> = P × (b<sub>p</sub> + b<sub>g</sub> + b<sub>opt</sub>) / N
+  </div>
+  <div class="eq-cap">FULL_SHARD 的常驻账；7B、N=8、bf16 时为 <span data-src="§03">10.5 GB</span></div>
+
+  <p>这个 <code>1/N</code> 的结论对 FSDP1 和 FSDP2 都成立。真正的问题是：<strong>这 1/N 在内存里长什么样？</strong>是一条被 flatten 的连续 buffer，还是许多个独立的参数分片？这个表示方式会连带影响三件事：</p>
+
+  <ul>
+    <li><strong>padding：</strong>为了对齐或整除，分片里可能夹着永远不会被计算用到的元素。</li>
+    <li><strong>state dict：</strong>保存时能不能直接写分片，还是必须先 all-gather 回完整参数。</li>
+    <li><strong>组合：</strong>参数已经是 DTensor 时，TP/EP 的分片能不能和 FSDP 的分片叠在同一个 mesh 上。</li>
+  </ul>
+
+  <p>下面的 02 先看前人怎么做，03 再把两种表示拆开。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>从 DDP 到 ZeRO 再到 FSDP：分片对象越来越多，表示问题越来越尖</h2></div>
+  <p class="sec-sub">这一节建立对照：DDP 解决通信去中心化，ZeRO/FSDP 解决显存，但「怎么表示一份分片」是 FSDP 才真正暴露的问题。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">DDP</span><h4>只分数据，不分状态</h4></div>
+      <p>每张卡维护完整模型，反向后用 ring all-reduce 同步梯度。实现简单、通信与计算重叠好，但显存随参数量线性增长。</p>
+      <p><strong>卡在哪：</strong>模型 + 优化器状态超过单卡时，DDP 只能换更大的卡，不能靠加卡解决。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">ZeRO / FSDP</span><h4>把状态切开，计算前再拼回</h4></div>
+      <p>ZeRO-1 切优化器状态，ZeRO-2 再切梯度，ZeRO-3 连参数一起切。FSDP 的 FULL_SHARD 对应最后一档：前向前 all-gather 参数，反向后 reduce-scatter 梯度。</p>
+      <p><strong>代价：</strong>每步多出两次 all-gather（前向、反向各一次）和一次 reduce-scatter；通信量随 <code>N</code> 增大而趋近 <code>3P</code> 个元素。</p>
+    </div>
+  </div>
+
+  <p>把 ZeRO 的三个阶段和每卡常驻写成一张表，差别一目了然（<code>b</code> 为参数/梯度字节数，优化器状态按 <code>b<sub>opt</sub></code> 计）：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 1 · 分片对象与每卡常驻（不含激活；ZeRO 阶段名为 DeepSpeed 术语）</caption>
+      <thead>
+        <tr><th>方案</th><th>参数</th><th>梯度</th><th>优化器状态</th><th>每卡常驻</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DDP</td><td>完整</td><td>完整</td><td>完整</td><td><code>P × (2b + b<sub>opt</sub>)</code></td></tr>
+        <tr><td>ZeRO-1</td><td>完整</td><td>完整</td><td>1/N</td><td><code>2Pb + P b<sub>opt</sub>/N</code></td></tr>
+        <tr><td>ZeRO-2</td><td>完整</td><td>1/N</td><td>1/N</td><td><code>Pb + P(b + b<sub>opt</sub>)/N</code></td></tr>
+        <tr><td>ZeRO-3 / FSDP FULL_SHARD</td><td>1/N</td><td>1/N</td><td>1/N</td><td><code>P(2b + b<sub>opt</sub>)/N</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>这张表只说明「切哪些状态」，没有说明「切出来的东西长什么样」。FSDP1 和 FSDP2 的分歧就在后者。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">设计动机</span><h4>FSDP2 RFC 对 FlatParameter 的原话</h4></div>
+    <p>FSDP2 的设计文档（PyTorch issue #114299）把旧实现的限制归结为 <em>“mainly from the flat parameter construct”</em>，目标是 <em>“simplicity and composability in the new design”</em>。它列出的四个直接收益是：fp8 与非 fp8 参数可以混在同一次 all-gather；frozen 与 non-frozen 参数可以混在同一通信组而不额外占显存；sharded state dict 与训练表示一致；以及给 <code>torch.compile</code> 留出重排通信组的空间。</p>
+    <p>同一份 RFC 还把新老组件一一对应：<code>FSDPParamGroup</code> 对应 <code>FlatParamHandle</code>，<code>FSDPParam</code> 大致对应 <code>FlatParameter</code>，<code>fully_shard</code> + <code>FSDPState</code> 对应 <code>FullyShardedDataParallel</code>。这不是一次小修，而是把「一个 flat buffer」拆成「每个参数一个对象」。</p>
+  </div>
+
+  <p>FSDP1 把这些策略暴露成 <code>ShardingStrategy</code>：<code>FULL_SHARD</code>、<code>SHARD_GRAD_OP</code>、<code>NO_SHARD</code>、<code>HYBRID_SHARD</code>。FSDP2 没有这个枚举，只用 <code>reshard_after_forward</code> 控制「前向后是否释放完整参数」（<code>_fully_shard.py:102-120</code>）；该参数默认 <code>None</code>，非根模块解析为 <code>True</code>、根模块解析为 <code>False</code>（<code>:201-202</code>）。FSDP2 没有命名 <code>NO_SHARD</code> 模式：复制场景直接用 DDP，或用 2D mesh 的 shard 维 = 1 模拟复制（PyTorch issue #152710，非正式用法）。FSDP1 的 <code>NO_SHARD</code> 已弃用并建议 DDP（<code>api.py:50-55</code>）。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>FSDP1 先打包再切，FSDP2 每个参数自己切</h2></div>
+  <p class="sec-sub">两种表示都能做到 1/N；差别在 padding、state dict，以及优化器看到的参数类型。</p>
+
+  <h3>FSDP1：一条 FlatParameter，切完再分发</h3>
+
+  <p>FSDP1 的 <code>FlatParameter</code> 是一个 1D 的 <code>nn.Parameter</code>，由 module 内所有原始参数 flatten 后拼接而成（<code>torch/distributed/fsdp/_flat_param.py:202</code>）。拼接不是简单 concat：</p>
+
+  <ul>
+    <li><strong>地址对齐：</strong>当 <code>use_orig_params=True</code> 时，从第二个参数起，按需在参数前插入 padding，使其起始地址落在 16 B 边界（<code>_flat_param.py:565-567</code>、<code>:710-713</code>、<code>:2790-2795</code>）；对齐单位 <code>a = 16 / bytes(dtype)</code>，单个参数最多补 <code>a−1</code> 个元素。按前向/反向参数 dtype 算，bf16 下对齐单位是 <span class="mono" data-src="torch/distributed/fsdp/_flat_param.py:2790">8 个元素</span>（16/2），fp32 下是 <span class="mono" data-src="torch/distributed/fsdp/_flat_param.py:2790">4 个元素</span>（16/4）。</li>
+    <li><strong>世界规模对齐（仅 <code>use_orig_params=True</code>）：</strong>拼完后再补到 <code>N</code> 的倍数，保证每个 rank 的 chunk 等长（<code>_flat_param.py:759-763</code>；<code>aligned_numel</code> 只在 <code>use_orig_params=True</code> 时非 0，见 <code>:565-566</code>、<code>:609-613</code>）。默认 <code>use_orig_params=False</code> 时没有 world padding；<code>torch.chunk</code> 可能返回不等长 chunk，代码补到 <code>chunks[0].numel()</code>，即每卡有效 <code>ceil(L/N)</code>。</li>
+    <li><strong>切分：</strong>对 1D flat tensor 做 <code>torch.flatten(tensor).chunk(N)</code>（<code>_flat_param.py:1104</code>），每个 rank 拿一个 chunk；默认 <code>use_orig_params=False</code> 时 chunk 可能不等长，代码按 <code>chunks[0].numel()</code> 补齐；chunk 边界可能落在某个原始参数中间。</li>
+  </ul>
+
+  <div class="eq">
+    L = Σ s<sub>i</sub> + Σ pad<sub>align,i</sub> + pad<sub>world</sub> &nbsp;（<code>use_orig_params=True</code>）<br>
+    pad<sub>align,i</sub> = (−T<sub>i−1</sub>) mod a, &nbsp; T<sub>i−1</sub> = Σ<sub>j&lt;i</sub>(s<sub>j</sub> + pad<sub>align,j</sub>)<br>
+    a = 16 / bytes(dtype), &nbsp; pad<sub>world</sub> = (−T<sub>last</sub>) mod N<br>
+    shard<sub>r</sub> = ceil(L / N)
+  </div>
+  <div class="eq-cap">FSDP1 的 flat 长度与每卡有效 chunk；对齐/world padding 只在 <code>use_orig_params=True</code> 时存在（默认 <code>False</code> 时 L = Σs<sub>i</sub>，无 padding；<code>torch.chunk</code> 返回不等长 chunk 时补到 <code>chunks[0].numel()</code>）</div>
+
+  <p>默认 <code>use_orig_params=False</code>（<code>fully_sharded_data_parallel.py:412</code>），优化器看到的是整条 <code>FlatParameter</code>；<code>named_parameters()</code> 也会暴露它。官方文档明确写了这一点，并指出 <code>use_orig_params=True</code> 是使用 <code>torch.compile()</code> 的必要条件。</p>
+
+  <h3>FSDP2：每个参数一个 DTensor(Shard(0))</h3>
+
+  <p>FSDP2 的入口是 <code>torch.distributed.fsdp.fully_shard(module, *, mesh=None, reshard_after_forward=None, shard_placement_fn=None, mp_policy=..., offload_policy=..., ignored_params=None, dp_mesh_dims=None)</code>（<code>torch/distributed/fsdp/_fully_shard/_fully_shard.py:102</code>）。<code>torch/distributed/_composable/fsdp/fully_shard.py:3-8</code> 只是向后兼容的 re-export；真正的 composable 实现在 <code>_fully_shard/</code> 目录。</p>
+
+  <p>它把 <code>module.parameters()</code> 原地从普通 <code>Tensor</code> 换成 DTensor，默认每个参数按 dim-0 分片（<code>_fsdp_param.py:307</code>）。分片过程是：</p>
+
+  <ul>
+    <li>对每个参数单独做 <code>_chunk_with_empty(param_data, N, dim=0)</code>，第 <code>i</code> 个参数的分片大小是 <code>ceil(s<sub>i</sub>/N)</code>（<code>_fsdp_param.py:362-369</code>）。</li>
+    <li>分片先补到该参数 chunk 0 的大小，再包装成 <code>nn.Parameter(to_sharded_dtensor(...))</code>（<code>_fsdp_param.py:394-398</code>）。所以优化器直接拿到 DTensor，而不是 flat view。</li>
+    <li>每个参数有独立的 <code>padded_sharded_param_size</code>；padding 是按参数算的，不会把一个参数的边界和另一个参数混在一条 chunk 里。</li>
+  </ul>
+
+  <div class="eq">
+    shard<sub>i</sub> = ceil(s<sub>i</sub> / N)<br>
+    pad<sub>i</sub> = shard<sub>i</sub> × N − s<sub>i</sub>
+  </div>
+  <div class="eq-cap">FSDP2 的单参数分片；<code>_chunk_with_empty</code> 保证空参数也能拿到一个空 chunk</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">官方文档</span><h4>分片单位的一句话对照</h4></div>
+    <p>对 FSDP1，文档写的是 <em>“flattens, concatenates, and chunks a group of tensors together”</em>；对 FSDP2，写的是 <em>“chunks each parameter on dim-0 across the data parallel workers (using torch.chunk(dim=0))”</em>。</p>
+    <p>这两句只描述<strong>分片</strong>，不描述<strong>通信</strong>。两者不是一回事：FSDP2 仍然把 group 内所有参数的分片拼在一次 collective 里，下一张卡解释这一点。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">最容易混的一点</span><h4>分片粒度 ≠ 通信粒度</h4></div>
+    <p>FSDP2 按参数分片，但<strong>不是</strong>每个参数发一次 collective。<code>fully_shard(module)</code> 会为这个 module 建一个 group；group 内所有参数在一次 all-gather 里拼起来，梯度在一次 reduce-scatter 里拆开（<code>_fully_shard.py:145-152</code>，<code>_fsdp_collectives.py:341</code>、<code>:561</code>）。分片单位是参数，通信单位仍是 group。</p>
+    <p>这也解释了为什么文档强调要 bottom-up、按层调用 <code>fully_shard</code>：group 的边界就是你给的 module 边界，直接决定 all-gather 的粒度。</p>
+  </div>
+
+  <h3>自己算：每卡到底放多少</h3>
+  <p>下面的账本把参数、梯度、优化器状态分开算。拖动参数量、世界规模、精度，或切换分片策略；所有数字都按同一组公式实时重算。</p>
+
+  <div class="sim" id="mem-sim">
+    <div class="sim-top" id="strat-btns">
+      <button class="rule-btn active" data-strat="full">FULL_SHARD<span class="r-sub">FSDP1 默认 / FSDP2 需显式 True（默认 None）</span></button>
+      <button class="rule-btn" data-strat="gradop">SHARD_GRAD_OP<span class="r-sub">FSDP1 / FSDP2 需显式 False（默认 None）</span></button>
+      <button class="rule-btn" data-strat="noshard">NO_SHARD<span class="r-sub">仅 FSDP1；已标记 deprecated</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>参数量 P <span class="v" id="p-v">7.0 B</span></label>
+        <input type="range" id="p" min="0.5" max="70" step="0.5" value="7">
+      </div>
+      <div class="ctrl">
+        <label>世界规模 N <span class="v" id="n-v">8</span></label>
+        <input type="range" id="n" min="1" max="64" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label>参数/梯度精度 <span class="v" id="dtype-v">bf16</span></label>
+        <input type="range" id="dtype" min="0" max="1" step="1" value="0">
+      </div>
+    </div>
+
+    <div class="slots" id="mem-slots">
+      <div class="slot">
+        <div class="slot-name">参数</div>
+        <div class="slot-val" id="s-param">—</div>
+        <div class="bar"><i class="b1" id="bar-param" style="width:0"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">梯度</div>
+        <div class="slot-val" id="s-grad">—</div>
+        <div class="bar"><i class="b3" id="bar-grad" style="width:0"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">优化器状态</div>
+        <div class="slot-val" id="s-opt">—</div>
+        <div class="bar"><i class="b2" id="bar-opt" style="width:0"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">常驻合计</div>
+        <div class="slot-val" id="s-total">—</div>
+        <div class="bar"><i class="b1" id="bar-total" style="width:100%"></i></div>
+      </div>
+    </div>
+
+    <div class="readout" id="mem-readout" data-src="§03">
+      <div class="r-head">每卡账本</div>
+      <div id="mem-msg">—</div>
+    </div>
+
+    <div class="readout" id="mem-comm" data-src="§04">
+      <div class="r-head">通信量 / iter / 卡</div>
+      <div id="mem-comm-msg">—</div>
+    </div>
+
+    <p class="sim-note">
+      口径：优化器状态固定按 AdamW fp32 的 <span class="mono" data-src="§03">8 B/param</span>；
+      参数和梯度按所选精度（bf16 2 B、fp32 4 B）；1 GB = 10<sup>9</sup> B；不含激活、通信缓冲和碎片。
+      「最坏峰值」= 峰值时刻的常驻 + 一份完整参数（FULL_SHARD 下这份副本只在 all-gather 期间存在，SHARD_GRAD_OP 下保留到反向结束；NO_SHARD 没有额外副本，峰值就是常驻），不含反向中的完整梯度缓冲；按层 wrapping 时峰值只多当前层的完整参数。
+    </p>
+  </div>
+
+  <details>
+    <summary>手算对账：两组参数<span class="sum-sub">与滑块同口径，逐位可复算</span></summary>
+    <div class="details-body calc-detail">
+      <p><strong>组 A：</strong>P=7B，N=8，bf16，FULL_SHARD。</p>
+      <ul>
+        <li>参数分片 = 7×2/8 = 1.75 GB</li>
+        <li>梯度分片 = 7×2/8 = 1.75 GB</li>
+        <li>优化器分片 = 7×8/8 = 7.00 GB</li>
+        <li>常驻合计 = 1.75 + 1.75 + 7.00 = 10.50 GB</li>
+        <li>最坏峰值（含一份完整参数）= 10.50 + 7×2 = 24.50 GB（整模型一个 group 时，all-gather 再放一份 14.00 GB 的完整参数；不含反向中的完整梯度缓冲）</li>
+        <li>通信 = 3×7×(8−1)/8×2 = 36.75 GB（2 次 all-gather + 1 次 reduce-scatter）</li>
+      </ul>
+      <p><strong>组 B：</strong>P=13B，N=4，fp32，SHARD_GRAD_OP。</p>
+      <ul>
+        <li>全量副本 = 13×(2×4+8) = 208.00 GB；分片后常驻 52 GB 可放进 4 张卡；峰值 104 GB 仍需按层 wrapping</li>
+        <li>参数常驻分片 = 13×4/4 = 13.00 GB；计算时展开为完整 52.00 GB</li>
+        <li>梯度分片 = 13×4/4 = 13.00 GB</li>
+        <li>优化器分片 = 13×8/4 = 26.00 GB</li>
+        <li>常驻合计 = 13.00 + 13.00 + 26.00 = 52.00 GB</li>
+        <li>最坏峰值（含一份完整参数）= 52.00 + 13×4 = 104.00 GB（完整参数保留到反向结束；不含反向中的完整梯度缓冲）</li>
+        <li>通信 = 2×13×(4−1)/4×4 = 78.00 GB（1 次 all-gather + 1 次 reduce-scatter）</li>
+      </ul>
+      <p>把滑块拉到同样参数应显示同样的数；若不一致，以脚本输出为准并在报告里记下差异。</p>
+    </div>
+  </details>
+
+  <p><strong>这组账本说明什么：</strong>FULL_SHARD 和 SHARD_GRAD_OP 的常驻分片相同，区别在通信——前者反向还要再 all-gather 一次。SHARD_GRAD_OP 在前向后不释放完整参数，省掉这次 all-gather，但高峰持续时间更长。NO_SHARD 完全不省显存，官方已把它标为 deprecated，建议直接用 DDP。</p>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>通信量由策略决定，不是由 FSDP1/FSDP2 决定</h2></div>
+  <p class="sec-sub">读完这节你应该知道：FULL_SHARD、SHARD_GRAD_OP、NO_SHARD 各自的通信账，以及 FSDP2 在工程上换掉了什么。</p>
+
+  <p>先看 7B、N=8、bf16 的三种策略。常驻和通信都按上一节的公式算，<code>GB</code> 为十进制：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 2 · 7B 参数、N=8、bf16、AdamW 8 B/param；最坏峰值按整模型一个 group，计一份完整参数副本（FULL_SHARD 在 all-gather 期，SHARD_GRAD_OP 保留到反向结束），不含反向中的完整梯度缓冲（不含激活；1 GB = 10<sup>9</sup> B）</caption>
+      <thead>
+        <tr><th>策略</th><th>每卡常驻</th><th>最坏峰值（含完整参数）</th><th>通信 / iter / 卡</th><th>FSDP2 等价</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>FULL_SHARD</td><td>10.50 GB</td><td>24.50 GB</td><td>36.75 GB</td><td><code>reshard_after_forward=True</code>（需显式；默认 <code>None</code>）</td></tr>
+        <tr><td>SHARD_GRAD_OP</td><td>10.50 GB</td><td>24.50 GB</td><td>24.50 GB</td><td><code>reshard_after_forward=False</code>（需显式；默认 <code>None</code>，近似）</td></tr>
+        <tr><td>NO_SHARD</td><td>84.00 GB</td><td>84.00 GB</td><td>24.50 GB</td><td>无命名模式；复制场景用 DDP</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>FULL_SHARD 每卡每步的通信量是 <code>3P(N−1)/N</code> 个元素：前向 all-gather、反向 all-gather、反向 reduce-scatter。N 越大越接近 <code>3P</code>。SHARD_GRAD_OP 和 NO_SHARD 都是 <code>2P(N−1)/N</code>：前者是 1 次 all-gather + 1 次 reduce-scatter，后者是 1 次 all-reduce。</p>
+
+  <p>注意 SHARD_GRAD_OP 的「省」不在峰值数字上，而在<strong>高峰的持续时间</strong>：它前向后不 reshard，完整参数一直留到反向结束；FULL_SHARD 在前向后就把完整参数释放，反向需要时再 all-gather。对激活很大、层数很多的模型，这个区别会直接决定能不能放下。</p>
+
+  <h3>FSDP1 的运行时：三条 stream 和一个 rate limiter</h3>
+
+  <p>FSDP1 在 <code>_runtime_utils.py</code> 里把 unshard、post-backward、pre-unshard 放在不同 CUDA stream 上（<code>_runtime_utils.py:240-270</code>），用 <code>limit_all_gathers</code> 限制同时在飞的 all-gather 数量（<code>:297-308</code>）。前向的 pre-hook 调 <code>_unshard</code>；梯度在 <code>_post_backward_hook</code>（<code>:701</code>）调用的 <code>_reduce_grad</code> 里走 <code>dist.reduce_scatter_single</code>（<code>:766</code>、<code>:848-858</code>），<code>_post_backward_reshard</code> 只负责 reshard（<code>:793-799</code>）。</p>
+
+  <h3>FSDP2 的运行时：显式 stream，不做 record_stream</h3>
+
+  <p>FSDP2 把通信状态收进 <code>FSDPParamGroup</code>：all-gather 的 copy-in、all-gather、reduce-scatter 各有自己的 stream（<code>_fsdp_param_group.py:93-120</code>）。官方文档明确说它采用一套避免 <code>torch.Tensor.record_stream</code> 的内存管理方式，因此不需要 <code>limit_all_gathers=True</code>；也没有 <code>bucket_cap_mb</code>，group 的边界完全由你调用 <code>fully_shard</code> 的 module 决定。</p>
+
+  <p>混合精度也换了 API：FSDP1 用 <code>MixedPrecision</code>，FSDP2 用 <code>MixedPrecisionPolicy</code>（<code>_fsdp_api.py:15</code>）。语义是「all-gather 时把参数 cast 到 <code>param_dtype</code>，优化器仍按原始 dtype 更新」；<code>reduce_dtype</code> 控制梯度归约精度。这不是 autocast 的替代品，cast 发生在 all-gather 这个边界上。</p>
+
+  <h3>和 TP / PP 组合：FSDP2 的分片是「可叠加」的</h3>
+
+  <p>FSDP 本身是数据并行维度的分片；TP 是层内维度，PP 是层间维度。组合时，FSDP 的 shard group 只应覆盖同一份模型副本——对 PP 来说就是同一个 stage 的 DP 副本，不能跨 stage all-gather 不存在的参数 <span class="infer">推断</span>（由 FSDP 的 all-gather 语义与 PP 的分 stage 所有权推出）。</p>
+
+  <ul>
+    <li><strong>TP：</strong>FSDP2 的参数可以是 DTensor。<code>_init_sharding_spec_tp</code> 明确处理「DP mesh + TP/EP mesh」的组合，支持 1D TP/EP 或 2D EP+TP，mesh ndim 2–4（<code>_fsdp_param.py:740-790</code>）。也就是说 TP 的分片和 FSDP 的分片可以落在同一个 DTensor 的 placement 里，而不是先把 TP 参数拆回普通 Tensor 再 flatten。</li>
+    <li><strong>HSDP：</strong>二维 mesh 上，FSDP2 用 <code>(Replicate(), Shard(0))</code>：第 0 维跨节点复制，第 1 维在节点内分片。FSDP1 对应的策略是 <code>HYBRID_SHARD</code>，通过 <code>device_mesh</code> 构造。</li>
+    <li><strong>PP：</strong>每个 pipeline stage 有自己的 FSDP group；stage 内的层按 bottom-up 调 <code>fully_shard</code>。不要把一个 stage 的参数和另一个 stage 放进同一个 group。</li>
+  </ul>
+
+  <p>二维 mesh 的构造入口是 <code>torch.distributed.device_mesh.init_device_mesh</code>（<code>torch/distributed/device_mesh.py:1640</code>），<code>DeviceMesh</code> 类本身在 <code>:188</code>。传给 <code>fully_shard</code> 的 DP mesh 是 1D 或 2D：1D 是纯 FSDP，2D 是 HSDP（<code>_fully_shard.py:185-190</code>）；和 TP/EP 组合后，内部 SPMD mesh 可以是 2–4 维（<code>_fsdp_param.py:740-790</code>）。</p>
+</section>
+
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次迭代的六步：shard → all-gather → forward → reshard → all-gather → reduce-scatter</h2></div>
+  <p class="sec-sub">这张图把两种表示放在同一张时间线上：左边是 FSDP1 的 flat chunk，右边是 FSDP2 的 per-parameter DTensor。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 760" width="100%" role="img" aria-labelledby="fsdp-svg-title fsdp-svg-desc" style="display:block;height:auto">
+      <title id="fsdp-svg-title">FSDP1 FlatParameter 与 FSDP2 per-parameter DTensor 的分片对比</title>
+      <desc id="fsdp-svg-desc">上半部分：FSDP1 把四个参数 flatten 成一条带对齐 padding 的 FlatParameter，再按 N=4 切成四个 chunk；chunk 边界可能切断参数。下半部分：FSDP2 让每个参数单独按 N=4 切成 DTensor 分片，rank r 持有每个参数的第 r 块；collective 仍按 group 合并。</desc>
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-soft)"></path>
+        </marker>
+        <pattern id="padhatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="6" height="6" fill="var(--bg-soft)"></rect>
+          <line x1="0" y1="0" x2="0" y2="6" stroke="var(--border-strong)" stroke-width="1.2"></line>
+        </pattern>
+      </defs>
+
+      <!-- ============ FSDP1 ============ -->
+      <text x="20" y="28" class="svg-title">FSDP1 · FlatParameter</text>
+      <text x="20" y="49" class="svg-sub">先把 module 内所有参数 flatten 成 1D，补对齐与世界规模 padding（仅 use_orig_params=True 路径），再按 N=4 切</text>
+
+      <text x="20" y="82" class="svg-label">原始参数</text>
+      <rect x="96" y="66" width="86" height="24" rx="4" fill="var(--c1)"></rect>
+      <text x="139" y="82" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">P1</text>
+      <rect x="188" y="66" width="116" height="24" rx="4" fill="var(--c2)"></rect>
+      <text x="246" y="82" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">P2</text>
+      <rect x="310" y="66" width="62" height="24" rx="4" fill="var(--c3)"></rect>
+      <text x="341" y="82" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">P3</text>
+      <rect x="378" y="66" width="104" height="24" rx="4" fill="var(--accent)"></rect>
+      <text x="430" y="82" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">P4</text>
+
+      <line x1="96" y1="96" x2="96" y2="112" stroke="var(--text-soft)" stroke-width="1" stroke-dasharray="3 3"></line>
+      <line x1="482" y1="96" x2="482" y2="112" stroke="var(--text-soft)" stroke-width="1" stroke-dasharray="3 3"></line>
+
+      <text x="20" y="104" class="svg-label">FlatParameter</text>
+      <rect x="96" y="112" width="86" height="22" rx="3" fill="var(--c1)"></rect>
+      <rect x="182" y="112" width="10" height="22" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <rect x="192" y="112" width="116" height="22" rx="3" fill="var(--c2)"></rect>
+      <rect x="308" y="112" width="10" height="22" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <rect x="318" y="112" width="62" height="22" rx="3" fill="var(--c3)"></rect>
+      <rect x="380" y="112" width="10" height="22" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <rect x="390" y="112" width="104" height="22" rx="3" fill="var(--accent)"></rect>
+      <rect x="494" y="112" width="16" height="22" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <text x="512" y="128" class="svg-note">world pad</text>
+
+      <text x="20" y="164" class="svg-label">按 N=4 切</text>
+      <line x1="96" y1="140" x2="96" y2="176" stroke="var(--text-soft)" stroke-width="1"></line>
+      <line x1="200" y1="140" x2="200" y2="176" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="4 3"></line>
+      <line x1="304" y1="140" x2="304" y2="176" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="4 3"></line>
+      <line x1="408" y1="140" x2="408" y2="176" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="4 3"></line>
+      <line x1="510" y1="140" x2="510" y2="176" stroke="var(--text-soft)" stroke-width="1"></line>
+      <text x="148" y="170" text-anchor="middle" class="svg-note">chunk 0</text>
+      <text x="252" y="170" text-anchor="middle" class="svg-note">chunk 1</text>
+      <text x="356" y="170" text-anchor="middle" class="svg-note">chunk 2</text>
+      <text x="459" y="170" text-anchor="middle" class="svg-note">chunk 3</text>
+
+      <text x="20" y="202" class="svg-label">每卡持有</text>
+      <rect x="96" y="186" width="100" height="30" rx="4" fill="var(--bg)"></rect>
+      <rect x="96" y="186" width="86" height="30" fill="var(--c1)"></rect>
+      <rect x="182" y="186" width="10" height="30" fill="url(#padhatch)"></rect>
+      <rect x="192" y="186" width="4" height="30" fill="var(--c2)"></rect>
+      <text x="146" y="206" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">rank 0</text>
+
+      <rect x="204" y="186" width="100" height="30" rx="4" fill="var(--bg)"></rect>
+      <rect x="204" y="186" width="100" height="30" fill="var(--c2)"></rect>
+      <text x="254" y="206" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">rank 1</text>
+
+      <rect x="312" y="186" width="100" height="30" rx="4" fill="var(--bg)"></rect>
+      <rect x="312" y="186" width="62" height="30" fill="var(--c3)"></rect>
+      <rect x="374" y="186" width="10" height="30" fill="url(#padhatch)"></rect>
+      <rect x="384" y="186" width="28" height="30" fill="var(--accent)"></rect>
+      <text x="362" y="206" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">rank 2</text>
+
+      <rect x="420" y="186" width="90" height="30" rx="4" fill="var(--bg)"></rect>
+      <rect x="420" y="186" width="76" height="30" fill="var(--accent)"></rect>
+      <rect x="496" y="186" width="14" height="30" fill="url(#padhatch)"></rect>
+      <text x="465" y="206" text-anchor="middle" class="svg-strong" fill="var(--bg-surface)">rank 3</text>
+
+      <text x="530" y="200" class="svg-note">chunk 边界切断 P2 / P4</text>
+
+      <line x1="96" y1="232" x2="96" y2="254" stroke="var(--text-soft)" stroke-width="1" marker-end="url(#arr)"></line>
+      <text x="108" y="248" class="svg-note">all-gather：4 个 chunk → 一条完整 flat</text>
+      <line x1="510" y1="232" x2="510" y2="254" stroke="var(--text-soft)" stroke-width="1" marker-end="url(#arr)"></line>
+      <text x="522" y="248" class="svg-note">reduce-scatter → 4 chunk</text>
+
+      <!-- ============ FSDP2 ============ -->
+      <line x1="20" y1="288" x2="700" y2="288" stroke="var(--border)" stroke-width="1"></line>
+      <text x="20" y="320" class="svg-title">FSDP2 · per-parameter DTensor</text>
+      <text x="20" y="341" class="svg-sub">每个参数单独 chunk，rank r 持有每个参数的第 r 块；collective 仍按 group 合并</text>
+
+      <text x="20" y="378" class="svg-label">P1</text>
+      <rect x="80" y="364" width="120" height="20" rx="3" fill="var(--c1)"></rect>
+      <rect x="200" y="364" width="120" height="20" rx="3" fill="var(--c1)"></rect>
+      <rect x="320" y="364" width="120" height="20" rx="3" fill="var(--c1)"></rect>
+      <rect x="440" y="364" width="120" height="20" rx="3" fill="var(--c1)"></rect>
+      <rect x="560" y="364" width="42" height="20" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <text x="602" y="379" class="svg-note">pad</text>
+
+      <text x="20" y="413" class="svg-label">P2</text>
+      <rect x="80" y="399" width="120" height="20" rx="3" fill="var(--c2)"></rect>
+      <rect x="200" y="399" width="120" height="20" rx="3" fill="var(--c2)"></rect>
+      <rect x="320" y="399" width="120" height="20" rx="3" fill="var(--c2)"></rect>
+      <rect x="440" y="399" width="120" height="20" rx="3" fill="var(--c2)"></rect>
+      <rect x="560" y="399" width="42" height="20" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <text x="602" y="414" class="svg-note">pad</text>
+
+      <text x="20" y="448" class="svg-label">P3</text>
+      <rect x="80" y="434" width="120" height="20" rx="3" fill="var(--c3)"></rect>
+      <rect x="200" y="434" width="120" height="20" rx="3" fill="var(--c3)"></rect>
+      <rect x="320" y="434" width="120" height="20" rx="3" fill="var(--c3)"></rect>
+      <rect x="440" y="434" width="120" height="20" rx="3" fill="var(--c3)"></rect>
+      <rect x="560" y="434" width="42" height="20" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <text x="602" y="449" class="svg-note">pad</text>
+
+      <text x="20" y="483" class="svg-label">P4</text>
+      <rect x="80" y="469" width="120" height="20" rx="3" fill="var(--accent)"></rect>
+      <rect x="200" y="469" width="120" height="20" rx="3" fill="var(--accent)"></rect>
+      <rect x="320" y="469" width="120" height="20" rx="3" fill="var(--accent)"></rect>
+      <rect x="440" y="469" width="120" height="20" rx="3" fill="var(--accent)"></rect>
+      <rect x="560" y="469" width="42" height="20" fill="url(#padhatch)" stroke="var(--border-strong)" stroke-width="0.6"></rect>
+      <text x="602" y="484" class="svg-note">pad</text>
+
+      <text x="80" y="514" text-anchor="middle" class="svg-note">chunk 0</text>
+      <text x="200" y="514" text-anchor="middle" class="svg-note">chunk 1</text>
+      <text x="320" y="514" text-anchor="middle" class="svg-note">chunk 2</text>
+      <text x="440" y="514" text-anchor="middle" class="svg-note">chunk 3</text>
+      <text x="560" y="514" text-anchor="middle" class="svg-note">pad</text>
+
+      <text x="20" y="552" class="svg-label">rank 视图</text>
+      <text x="20" y="584" class="svg-label">rank 0</text>
+      <rect x="80" y="566" width="120" height="18" rx="3" fill="var(--c1)"></rect>
+      <rect x="80" y="588" width="120" height="18" rx="3" fill="var(--c2)"></rect>
+      <rect x="80" y="610" width="120" height="18" rx="3" fill="var(--c3)"></rect>
+      <rect x="80" y="632" width="120" height="18" rx="3" fill="var(--accent)"></rect>
+
+      <text x="210" y="584" class="svg-label">rank 1</text>
+      <rect x="270" y="566" width="120" height="18" rx="3" fill="var(--c1)"></rect>
+      <rect x="270" y="588" width="120" height="18" rx="3" fill="var(--c2)"></rect>
+      <rect x="270" y="610" width="120" height="18" rx="3" fill="var(--c3)"></rect>
+      <rect x="270" y="632" width="120" height="18" rx="3" fill="var(--accent)"></rect>
+
+      <text x="400" y="584" class="svg-label">rank 2</text>
+      <rect x="460" y="566" width="120" height="18" rx="3" fill="var(--c1)"></rect>
+      <rect x="460" y="588" width="120" height="18" rx="3" fill="var(--c2)"></rect>
+      <rect x="460" y="610" width="120" height="18" rx="3" fill="var(--c3)"></rect>
+      <rect x="460" y="632" width="120" height="18" rx="3" fill="var(--accent)"></rect>
+
+      <text x="590" y="584" class="svg-label">rank 3</text>
+      <rect x="650" y="566" width="42" height="18" rx="3" fill="var(--c1)"></rect>
+      <rect x="650" y="588" width="42" height="18" rx="3" fill="var(--c2)"></rect>
+      <rect x="650" y="610" width="42" height="18" rx="3" fill="var(--c3)"></rect>
+      <rect x="650" y="632" width="42" height="18" rx="3" fill="var(--accent)"></rect>
+
+      <text x="20" y="672" class="svg-note">每个彩色块 = 一个 DTensor(Shard(0))；rank r 持有每参数第 r 块，共 4 个分片。</text>
+      <text x="20" y="692" class="svg-note">通信仍按 group 合并：一次 all-gather 拼回 4 个完整参数，reduce-scatter 反向拆分。</text>
+
+      <line x1="80" y1="716" x2="690" y2="716" stroke="var(--text-soft)" stroke-width="1" marker-end="url(#arr)"></line>
+      <text x="80" y="736" class="svg-note">all-gather / reduce-scatter：group 级，不是 per-parameter 级</text>
+    </svg>
+    <figcaption>
+      图 1 · FSDP1 的 flat chunk 与 FSDP2 的 per-parameter DTensor 对比（示意图，不按真实比例）。
+      FSDP1 的 padding 与切分见 <code>_flat_param.py:565-567</code>、<code>:759-763</code>、<code>:1104</code>；
+      FSDP2 的单参数 chunk 与 DTensor 包装见 <code>_fsdp_param.py:362-369</code>、<code>:394-398</code>。
+    </figcaption>
+  </figure>
+
+  <details>
+    <summary>读图：为什么 FSDP1 的 chunk 会切断参数<span class="sum-sub">以及为什么 FSDP2 的通信仍然按 group 走</span></summary>
+    <div class="details-body">
+      <p><strong>FSDP1：</strong>切的是整条 <code>FlatParameter</code>，不是单个参数。chunk 的边界由 <code>L/N</code> 决定，和原始参数的边界无关。图中 rank 0 的 chunk 同时包含 P1 的尾部、对齐 padding 和 P2 的开头；rank 2 的 chunk 同时包含 P3、padding 和 P4 的开头。要把某个参数取出来，必须先用 flat metadata（<code>_numels_with_padding</code>、<code>_shapes</code>、<code>_fqns</code>）把 flat view 拆回原始形状。</p>
+      <p><strong>FSDP2：</strong>每个参数单独 chunk，所以 rank r 的存储是「每个参数的第 r 块」这一组独立分片。它们不是一条连续 buffer；每个分片自己是一个 DTensor。但 collective 不是按参数发的：<code>FSDPParamGroup</code> 会把 group 内所有参数的 all-gather input 拼在一起，一次通信拿回整个 group 的完整参数（<code>_fsdp_collectives.py:341-380</code>）。所以「分片单位 = 参数」和「通信单位 = group」同时成立。</p>
+      <p>图中 FSDP2 每行末尾的斜线 padding 表示该参数自己的 <code>ceil(s_i/N)</code> 余量；它不会跨参数共享。FSDP1 的斜线 padding 则是整条 flat 的对齐/world-size 余量。两者的 padding 归属不同，这是下一节显存对比的根源。</p>
+    </div>
+  </details>
+
+  <p>把六步按时间排开：</p>
+  <ol>
+    <li><strong>初始化：</strong>FSDP1 构造 <code>FlatParameter</code> 并按 <code>N</code> 切；FSDP2 把每个参数换成 <code>DTensor(Shard(0))</code>。</li>
+    <li><strong>前向前：</strong>all-gather 出完整参数。FSDP1 是一条 flat buffer；FSDP2 是 group 内所有参数分片的拼接。</li>
+    <li><strong>前向：</strong>用完整参数计算。FSDP1 的 <code>use_orig_params=True</code> 会提供原始参数的 view；FSDP2 的普通参数是 all-gather buffer 的 view，DTensor 参数（TP/EP）保持自己的 placement。</li>
+    <li><strong>前向后：</strong>如果 <code>reshard_after_forward=True</code>（FSDP2 需显式；默认 <code>None</code> 按非根 <code>True</code>、根 <code>False</code> 解析），释放完整参数，只留分片；<code>False</code> 则保留到反向结束。</li>
+    <li><strong>反向前：</strong>如果前向后释放了，需要再次 all-gather；这就是 FULL_SHARD 的第二次 all-gather。</li>
+    <li><strong>反向后：</strong>reduce-scatter 梯度，释放完整参数，优化器在分片上更新。</li>
+  </ol>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>省下的是 1/N，不是 1/N²——真正的差别在状态字典和组合</h2></div>
+  <p class="sec-sub">这一节回答两个容易混的问题：per-parameter DTensor 到底省不省显存？FSDP2 换来的工程收益是什么？</p>
+
+  <h3>先算一笔「分片粒度」的账</h3>
+  <p>取两个很小的参数，大小分别是 3 和 5 个元素，N=4，bf16。这个例子故意让参数不能被 N 整除，好把 padding 的归属看清楚：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 3 · 3 + 5 个元素、N=4、bf16 时每卡持有的元素数（FSDP1 的 a=8 仅适用于 <code>use_orig_params=True</code> 行；FSDP2 的每参数分片大小（含 padding）是 <code>ceil(s<sub>i</sub>/N)</code>；按 P1=3、P2=5 的顺序）</caption>
+      <thead>
+        <tr><th>实现</th><th>计算</th><th>每卡元素数</th><th>padding 归属</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>FSDP1 默认（<code>use_orig_params=False</code>）</td><td><code>ceil((3+5)/4)</code></td><td>2</td><td>无 padding（8 能被 4 整除）</td></tr>
+        <tr><td>FSDP1（<code>use_orig_params=True</code>）</td><td>P2 前对齐 pad 5，再 world pad 3：<code>(3+5+5+3)/4</code></td><td>4</td><td>P2 前对齐 + 整条 world-size 余量</td></tr>
+        <tr class="best"><td>FSDP2</td><td><code>ceil(3/4)+ceil(5/4)</code> = 1+2</td><td>3</td><td>每个参数自己的 chunk 余量</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>结论很反直觉：<strong>FSDP2 的 per-parameter 分片不是无条件的显存胜利。</strong>在这个例子里，它比 FSDP1 默认多 <span class="mono" data-src="§06">50%</span>（相对 2 个元素/卡），比 <code>use_orig_params=True</code> 少 <span class="mono" data-src="§06">25%</span>（相对 4 个元素/卡）。原因很简单：FSDP1 把所有参数合成一条再切，边界可以互相借位；FSDP2 每个参数都要各自向上取整，小参数多的时候反而更容易浪费。</p>
+
+  <p>这也解释了为什么「FSDP2 更省显存」不能一概而论。两者的常驻比例都是 <code>1/N</code>；真正的差异是 padding 的归属、临时 buffer 的管理方式，以及 state dict 能不能直接写分片。对 LLM 这种参数大、形状通常能被 N 整除的模型，padding 差异很小；对大量小参数（LayerNorm、bias、router）的模型，FSDP1 的 flat 打包反而可能更省 <span class="infer">推断</span>（由表 3 的取整公式外推）。</p>
+
+  <h3>状态字典：一个要拼回，一个直接写</h3>
+
+  <p>FSDP2 的官方文档把 per-parameter sharding 的直接收益写成 <em>“communication-free (sharded) state dicts”</em>：训练时参数就是 DTensor，保存 sharded state dict 时按分片写即可，不需要先把完整参数 all-gather 回来。RFC 的表述更直接：<em>“Sharded and local state dicts are equivalent.”</em></p>
+
+  <p>FSDP1 也支持 sharded state dict，但保存前同样要先 unshard：<code>_common_unshard_pre_state_dict_hook</code>（<code>torch/distributed/fsdp/_state_dict_utils.py:148-167</code>）说明 FULL 与 SHARDED 保存都会走它（composable <code>NO_SHARD</code> 等例外直接返回），<code>_sharded_pre_state_dict_hook</code>（<code>:504-530</code>）也会调用它；sharded load 路径还会 all-gather（<code>_sharded_pre_load_state_dict_hook</code>，<code>:582-662</code>；<code>:658</code> 的 <code>dist.all_gather_single</code> 仅在 <code>_use_dtensor=False</code> 时执行，<code>_use_dtensor=True</code> 走 <code>:668</code> 的 DTensor all-gather，仍有通信）。因此显存尖峰不只属于 full 保存，sharded 保存同样要临时放一份完整参数；FSDP2 的 sharded 才不需要 all-gather。FSDP2 把「训练表示」和「分片表示」统一了，checkpoint 路径更短；代价是它不直接支持 full state dict，需要 <code>DTensor.full_tensor()</code> 或分布式 checkpoint（DCP）。</p>
+
+  <h3>组合：FSDP2 的 DTensor 可以和 TP/EP 叠加</h3>
+
+  <p>FSDP1 的 <code>FlatParameter</code> 是普通 1D Tensor，不是 DTensor；TP/EP 的分片信息不在它里面。FSDP2 的每个参数本来就是 DTensor，<code>_init_sharding_spec_tp</code> 可以把 DP mesh 和 TP/EP mesh 拼成一个 SPMD mesh，再给参数一个组合 placement（<code>_fsdp_param.py:740-790</code>）。这是「per-parameter」相对「flat buffer」最实质的工程差异之一：分片不再是二选一，而是可以沿多个 mesh 维度叠加。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">设计文档的说法</span><h4>RFC 对收益的原始表述</h4></div>
+    <p>RFC 列出的四条收益是：fp8 权重和非 fp8 参数可以混在同一次 all-gather；frozen 与 non-frozen 参数可以混在同一通信组而不额外占显存；sharded state dict 与训练表示一致；以及给 <code>torch.compile</code> 留出重排通信组的空间。它还称原型在 Llama-like 模型上 <em>“achieving on-par throughput while using less memory”</em>——这是设计文档的自述，不是论文表格里的 benchmark。</p>
+    <p>RFC 写作时给出的代码量对比是约 3k 行 vs 原 FSDP 约 14k 行；这是当时原型的状态，不应直接当成今天两个实现的 LOC 对比。</p>
+  </div>
+
+  <h3>一张表把差异收拢</h3>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 4 · FSDP1 与 FSDP2 的实现差异（源码 commit 2ee7a63 与官方文档）</caption>
+      <thead>
+        <tr><th>维度</th><th>FSDP1</th><th>FSDP2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>API</td><td><code>FullyShardedDataParallel(module, ...)</code> 包装器</td><td><code>fully_shard(module, ...)</code>，返回 <code>FSDPModule</code>；原地替换参数</td></tr>
+        <tr><td>参数表示</td><td>一个 module 一条 <code>FlatParameter</code></td><td>每个参数一个 <code>DTensor(Shard(0))</code></td></tr>
+        <tr><td>分片单位</td><td>整条 flat 按 N chunk；边界可切断参数</td><td>单参数按 N chunk；每参数独立 padding</td></tr>
+        <tr><td>策略开关</td><td><code>ShardingStrategy</code>：FULL_SHARD / SHARD_GRAD_OP / NO_SHARD / HYBRID_SHARD</td><td><code>reshard_after_forward=True/False/int</code>（默认 <code>None</code>）；无命名 NO_SHARD，复制场景用 DDP</td></tr>
+        <tr><td>通信单位</td><td>每个 FlatParameter group 一次 all-gather / reduce-scatter</td><td>每个 <code>FSDPParamGroup</code> 一次；参数分片在 collective 内拼接</td></tr>
+        <tr><td>state dict</td><td>full / sharded / local；full 与 sharded 保存都要先 unshard，sharded load 还会 all-gather</td><td>sharded 与训练表示一致；full 走 DCP / <code>full_tensor()</code></td></tr>
+        <tr><td>混合精度</td><td><code>MixedPrecision</code></td><td><code>MixedPrecisionPolicy</code>；cast 发生在 all-gather 边界</td></tr>
+        <tr><td>TP/EP 组合</td><td>flat 参数不是 DTensor；TP 的分片信息不在 FlatParameter 里</td><td>参数本身是 DTensor；DP + TP/EP 可落在同一 SPMD mesh</td></tr>
+        <tr><td>调优旋钮</td><td><code>auto_wrap_policy</code>、<code>bucket_cap_mb</code>、<code>limit_all_gathers</code></td><td>group 边界由 <code>fully_shard</code> 的 module 决定；无 bucket_cap_mb；无 limit_all_gathers</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>最后一行值得展开：FSDP2 没有 <code>bucket_cap_mb</code>，不是说它不关心通信效率，而是把「桶」换成了你划分的 module group。你调 <code>fully_shard</code> 的粒度，就是在调 all-gather/reduce-scatter 的粒度。官方文档也明确说，只对最顶层 module 调一次 <code>fully_shard</code> 会变成前向、反向各一次巨大的阻塞通信，<em>“almost never what you want”</em>。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别用 FSDP2——以及 FSDP1 迁移前该核对什么</h2></div>
+  <p class="sec-sub">这一节列的是边界条件，不是使用教程。先确认你的场景没有撞上这些约束。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">先别分片</span><h4>模型能放进单卡</h4></div>
+      <p>如果参数 + 梯度 + 优化器状态 + 激活能放进一张卡，DDP 或单卡更简单：没有 all-gather/reduce-scatter 的额外通信，也没有 sharded state dict 的复杂度。</p>
+      <p>FSDP 的收益随 <code>N</code> 增长，但通信也随 <code>N</code> 增长；小模型上通信占比更高，先算账再决定。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">先算网络</span><h4>互联带宽不够</h4></div>
+      <p>FULL_SHARD 每步约 <code>3P(N−1)/N</code> 个元素的通信量。N 很大时，all-gather 和 reduce-scatter 的延迟会压过计算；没有 NVLink/InfiniBand 的机器上，先做通信账再决定。</p>
+      <p>FSDP2 没有 <code>bucket_cap_mb</code>，group 边界就是通信边界；不要把整个模型塞进一个 group 再指望它自动重叠。</p>
+    </div>
+  </div>
+
+  <h3>FSDP2 的硬约束</h3>
+  <ul>
+    <li><strong>优化器要认识 DTensor：</strong>参数在 <code>fully_shard</code> 后是 DTensor，优化器必须用它构造；先建优化器再调 <code>fully_shard</code> 的旧习惯要改。</li>
+    <li><strong>没有命名 NO_SHARD：</strong><code>fully_shard</code> 的签名里没有 <code>sharding_strategy</code>（<code>_fully_shard.py:102-120</code>）。需要完全不分片时用 DDP；FSDP1 的 <code>NO_SHARD</code> 也已被标记 deprecated，官方建议 DDP（<code>api.py:50-55</code>）。</li>
+    <li><strong>full state dict 不是直接支持：</strong>用 <code>DTensor.full_tensor()</code> 或 DCP；如果下游工具只吃普通 full state dict，迁移时要预留一层转换。</li>
+    <li><strong>粒度要 bottom-up：</strong><code>fully_shard</code> 应该按层调用，再调根模块；只调根会得到前向、反向各一次巨大的阻塞 all-gather（<code>_fully_shard.py:145-152</code> 与官方文档）。</li>
+    <li><strong>nonzero dim 的不均匀分片还不支持：</strong>源码在 <code>_fsdp_param.py:353-359</code> 明确 raise <code>NotImplementedError</code>；默认 dim-0 分片可以处理不均匀大小。</li>
+    <li><strong>共享参数：</strong>共享参数必须属于同一个 FSDP group；跨 group 共享会报错（<code>_fully_shard/_fsdp_state.py:236-248</code>，错误信息明确提示 “another FSDP group”）。可以用 <code>fully_shard([module_a, module_b])</code> 把两个模块放进同一个 group。</li>
+  </ul>
+
+  <h3>FSDP1 迁移前要核对的点</h3>
+  <ul>
+    <li><strong><code>use_orig_params=False</code> 是默认值：</strong><code>named_parameters()</code> 暴露的是 <code>FlatParameter</code>，不是原始参数；需要逐参数优化器设置、冻结/可训练混用、或 <code>torch.compile</code> 时，要显式设 <code>True</code>（<code>fully_sharded_data_parallel.py:412</code>；官方文档称 <code>True</code> 是 <code>torch.compile()</code> 的必要条件）。</li>
+    <li><strong>state dict 的显存尖峰：</strong>在分片策略下，full 和 sharded 保存都要先把 flat 参数还原成完整参数；模型在单卡放不下时，这个尖峰可能比训练本身还难扛。sharded 只改变落盘格式，不消除这次 unshard/all-gather。</li>
+    <li><strong>共享参数与冻结参数：</strong>FSDP1 对共享参数的支持有限；<code>use_orig_params=False</code> 时每个实例的参数必须整体冻结或整体可训练。迁移到 FSDP2 前先确认这些约束是否已经绕开。</li>
+    <li><strong><code>NO_SHARD</code> 已 deprecated：</strong>如果现在的代码只是拿 FSDP 当 DDP 用，直接换 DDP 更合适（<code>api.py:50-55</code>）。</li>
+  </ul>
+
+  <h3>和 TP / PP 的边界</h3>
+  <ul>
+    <li><strong>三维并行是乘积关系：</strong>TP × PP × FSDP 的并行度不能超过总卡数；增加 FSDP 的 <code>N</code> 会同步增加 all-gather/reduce-scatter 的通信量。</li>
+    <li><strong>PP 的 stage 边界就是 FSDP group 的边界：</strong>同一个 FSDP group 不能跨 stage；否则 all-gather 会试图拉取不属于本 stage 的参数 <span class="infer">推断</span>（由 FSDP 的 all-gather 语义与 PP 的分 stage 所有权推出）。</li>
+    <li><strong>TP 与 FSDP 的 mesh 要分开：</strong>FSDP2 支持 DP mesh + TP/EP mesh 的组合，但要求 mesh 维度与 placement 对齐；不要手工把两套 process group 混在一个 1D mesh 里。</li>
+  </ul>
+
+  <p>最后，FSDP 不解决激活显存。如果训练仍然 OOM，先上 activation checkpointing，再考虑继续增大 <code>N</code>。分片只减少参数/梯度/优化器状态，不减少每层的中间激活；激活的大小取决于 batch、序列长度和模型宽度，本页的账本没有把它算进去。</p>
+</section>
+
+<footer>
+  <div>Fully Sharded Data Parallel · FSDP1 vs FSDP2</div>
+  <div class="src">
+    源码：<a href="https://github.com/pytorch/pytorch/commit/2ee7a63cc8feb9171418ac602c0434dbb88348a1" target="_blank" rel="noopener">pytorch/pytorch @ 2ee7a63</a><br>
+    文档：<a href="https://pytorch.org/docs/stable/fsdp.html" target="_blank" rel="noopener">FSDP</a> ·
+    <a href="https://pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank" rel="noopener">fully_shard</a> ·
+    <a href="https://github.com/pytorch/pytorch/issues/114299" target="_blank" rel="noopener">FSDP2 RFC</a> ·
+    <a href="https://github.com/pytorch/pytorch/issues/152710" target="_blank" rel="noopener">#152710</a><br>
+    笔记：<a href="/fsdp/">fsdp</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('mem-sim');
+  if (!sim) return;
+
+  var pEl = document.getElementById('p');
+  var nEl = document.getElementById('n');
+  var dtypeEl = document.getElementById('dtype');
+  var pV = document.getElementById('p-v');
+  var nV = document.getElementById('n-v');
+  var dtypeV = document.getElementById('dtype-v');
+  var msg = document.getElementById('mem-msg');
+  var commMsg = document.getElementById('mem-comm-msg');
+  var sParam = document.getElementById('s-param');
+  var sGrad = document.getElementById('s-grad');
+  var sOpt = document.getElementById('s-opt');
+  var sTotal = document.getElementById('s-total');
+  var barParam = document.getElementById('bar-param');
+  var barGrad = document.getElementById('bar-grad');
+  var barOpt = document.getElementById('bar-opt');
+  var barTotal = document.getElementById('bar-total');
+  var buttons = document.querySelectorAll('#strat-btns .rule-btn');
+
+  if (!pEl || !nEl || !dtypeEl || !msg || !commMsg || !sParam || !sGrad || !sOpt || !sTotal) return;
+
+  var strategy = 'full';
+  var OPT_BYTES = 8; // AdamW fp32: exp_avg + exp_avg_sq, 4 B each
+
+  function fmtGB(bytes) {
+    if (!isFinite(bytes) || bytes <= 0) return '0';
+    var gb = bytes / 1e9;
+    if (gb >= 1000) return (gb / 1000).toFixed(2) + ' TB';
+    if (gb >= 1) return gb.toFixed(2) + ' GB';
+    return (gb * 1000).toFixed(0) + ' MB';
+  }
+
+  function setBar(el, fraction) {
+    if (!el) return;
+    var pct = Math.max(0, Math.min(1, fraction)) * 100;
+    el.style.width = pct.toFixed(2) + '%';
+  }
+
+  function render() {
+    var P = parseFloat(pEl.value) * 1e9;
+    var N = parseInt(nEl.value, 10);
+    var b = parseInt(dtypeEl.value, 10) === 0 ? 2 : 4;
+
+    pV.textContent = parseFloat(pEl.value).toFixed(1) + ' B';
+    nV.textContent = String(N);
+    dtypeV.textContent = b === 2 ? 'bf16' : 'fp32';
+
+    var paramFull = P * b;
+    var gradFull = P * b;
+    var optFull = P * OPT_BYTES;
+    var fullTotal = paramFull + gradFull + optFull;
+
+    var param, grad, opt, total, peak, comm, commText, stratName, fsdp2;
+
+    if (strategy === 'full') {
+      param = paramFull / N;
+      grad = gradFull / N;
+      opt = optFull / N;
+      total = param + grad + opt;
+      peak = N === 1 ? total : total + paramFull;
+      comm = 3 * P * (N - 1) / N * b;
+      commText = '2 次 all-gather + 1 次 reduce-scatter';
+      stratName = 'FULL_SHARD';
+      fsdp2 = '<code>reshard_after_forward=True</code>（需显式；默认 <code>None</code>）';
+    } else if (strategy === 'gradop') {
+      param = paramFull / N;
+      grad = gradFull / N;
+      opt = optFull / N;
+      total = param + grad + opt;
+      peak = N === 1 ? total : total + paramFull;
+      comm = 2 * P * (N - 1) / N * b;
+      commText = '1 次 all-gather + 1 次 reduce-scatter';
+      stratName = 'SHARD_GRAD_OP';
+      fsdp2 = '<code>reshard_after_forward=False</code>（需显式；默认 <code>None</code>，近似）';
+    } else {
+      param = paramFull;
+      grad = gradFull;
+      opt = optFull;
+      total = fullTotal;
+      peak = total;
+      comm = 2 * P * (N - 1) / N * b;
+      commText = '1 次 all-reduce';
+      stratName = 'NO_SHARD';
+      fsdp2 = '无命名模式；复制场景用 DDP（FSDP1 的 NO_SHARD 已 deprecated）';
+    }
+
+    if (N === 1) commText = 'N=1，collective 为 no-op';
+
+    sParam.textContent = fmtGB(param);
+    sGrad.textContent = fmtGB(grad);
+    sOpt.textContent = fmtGB(opt);
+    sTotal.textContent = fmtGB(total);
+
+    setBar(barParam, param / total);
+    setBar(barGrad, grad / total);
+    setBar(barOpt, opt / total);
+    setBar(barTotal, 1);
+
+    var peakNote;
+    if (strategy === 'noshard') {
+      peakNote = '最坏峰值（含完整参数） <strong>' + fmtGB(peak) + '</strong>：NO_SHARD 不做 all-gather，梯度走 all-reduce，峰值就是常驻';
+    } else if (strategy === 'gradop' && N !== 1) {
+      peakNote = '最坏峰值（含完整参数） <strong>' + fmtGB(peak) + '</strong>：完整参数保留到反向结束，峰值 = 常驻 + 一份完整参数 ' + fmtGB(paramFull) + '；不含反向中的完整梯度缓冲';
+    } else if (N === 1) {
+      peakNote = '最坏峰值（含完整参数） <strong>' + fmtGB(peak) + '</strong>：N=1 时 all-gather 是 no-op，没有额外的完整参数副本';
+    } else {
+      peakNote = '最坏峰值（含完整参数） <strong>' + fmtGB(peak) + '</strong>：整模型一个 group 时，all-gather 还要放一份完整参数 ' + fmtGB(paramFull) + '；不含反向中的完整梯度缓冲';
+    }
+
+    msg.innerHTML =
+      '<strong>' + stratName + '</strong>：每卡常驻 <strong>' + fmtGB(total) + '</strong>' +
+      '（参数 ' + fmtGB(param) + ' + 梯度 ' + fmtGB(grad) + ' + 优化器 ' + fmtGB(opt) + '）<br>' +
+      peakNote + '<br>' +
+      'FSDP2 等价：' + fsdp2;
+
+    commMsg.innerHTML =
+      '<strong>' + fmtGB(comm) + ' / iter / 卡</strong>：' + commText + '<br>' +
+      '公式：<code>P=' + parseFloat(pEl.value).toFixed(1) + 'B</code>，<code>N=' + N + '</code>，<code>b=' + b + ' B</code>；' +
+      (strategy === 'full' ? '<code>3P(N−1)/N×b</code>' : '<code>2P(N−1)/N×b</code>');
+  }
+
+  buttons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      buttons.forEach(function (x) { x.classList.remove('active'); });
+      btn.classList.add('active');
+      strategy = btn.getAttribute('data-strat') || 'full';
+      render();
+    });
+  });
+
+  [pEl, nEl, dtypeEl].forEach(function (el) {
+    el.addEventListener('input', render);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

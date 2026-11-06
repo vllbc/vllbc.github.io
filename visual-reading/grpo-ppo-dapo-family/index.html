@@ -1,0 +1,1051 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 20 | Table 1 | 50-30 |
+| 3 | Table 1 | 50-47 |
+| 6 | Table 1 | 36-30 |
+| 2 | Table 1 | 38-36 |
+| 3 | Table 1 | 41-38 |
+| 1 | Table 1 | 42-41 |
+| 8 | Table 1 | 50-42 |
+| 3.1 | Table 1 | 97.3-94.2 |
+| 2.3 | Table 4 | 97.3-95.0 |
+| 5.0 | Table 4 | 74.8-69.8 |
+| 6.7 | Table 4 | 97.3-90.6 |
+| 0.3 | Table 4 | 74.8-74.5 |
+| 20480 | §4.1 | 16384+4096 |
+| 0.5 | §3.1 | 50/100 |
+| 2 | §1 | 1/0.5 |
+| 0.5 | §4.1 Eq.3 | 2/4 |
+| 0.5 | §4.1 Eq.3 | 1/2 |
+| 1 | §4.1 Eq.3 | 0.5/0.5 |
+| -1 | §4.1 Eq.3 | -0.5/0.5 |
+| 1.3 | §3 Eq.7 | 1.3*1 |
+| -0.7 | §3 Eq.7 | 0.7*-1 |
+| 1.28 | DAPO §4.1 Eq.10 | 1+0.28 |
+| 0.8 | §3 Eq.7 | 1-0.2 |
+| -0.8 | §3 Eq.7 | 0.8*-1 |
+| 0.5 | §4.1 Eq.3 | 4/8 |
+| 0.25 | §3.3 Eq.12 | 2/8 |
+| 0.75 | §3.3 Eq.12 | 6/8 |
+| 3 | §3.3 Eq.12 | 0.75/0.25 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRPO / PPO / DAPO 家族 · 同一张目标函数，七种算法</title>
+<meta name="description" content="从 PPO 的 clipped surrogate 与 critic，到 GRPO 的组内优势、DAPO 的 clip-higher / 动态采样 / token 级损失 / 超长奖励塑造，再到 CISPO、SAPO、SAO、OPD：逐项对比目标函数、优势估计、KL 与长度归一化。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有微调；公共样式来自 base.css */
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+details.handcalc{margin-top:12px}
+.handcalc .calc{font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.9;background:var(--bg-soft);border-radius:8px;padding:10px 12px;margin:8px 0}
+.sim-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:10px 0 0}
+.tbl-scroll .tbl-wide{min-width:1040px}
+.tbl-scroll .tbl-mid{min-width:760px}
+.tbl-center td,.tbl-center th{text-align:center}
+.tbl-left td:first-child{font-weight:600}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.3}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}
+.svg-ln{stroke:var(--border-strong);stroke-width:1.4;fill:none}
+.svg-dash{stroke:var(--text-soft);stroke-width:1.2;fill:none;stroke-dasharray:5 4}
+.arrow-head{fill:var(--border-strong)}
+.svg-t{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft)}
+.svg-l{font-family:Inter,"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-muted)}
+@media(max-width:560px){figure{padding:14px}.sim{padding:18px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GRPO / DAPO 家族</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">目标函数</a>
+      <a href="#accounting">三本账</a>
+      <a href="#pipeline">数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM-RL · 2017–2026 · 算法家族</span>
+  <h1>从 PPO 到 DAPO、SAO 与 OPD：同一张目标函数，七种算法</h1>
+  <p class="hero-sub">
+    PPO 用 critic 把序列奖励摊到每个 token，GRPO 改用组内相对奖励省掉 critic，DAPO 再拆开裁剪、采样、长度归一化和超长奖励。
+    CISPO、SAPO、SAO、OPD 各自只改其中一项：裁剪对象、门控形状、采样方式或监督信号。
+    把它们放在一张表里，差异不在名字，而在<strong>优势从哪来、clip 裁什么、KL 放哪、长度怎么归一化</strong>。
+  </p>
+  <div class="meta">
+    <span>PPO / DeepSeekMath / DAPO / SAO / MiniMax-M1 / SAPO / verl OPD</span>
+    <a href="https://arxiv.org/abs/1707.06347" target="_blank" rel="noopener">PPO ↗</a>
+    <a href="https://arxiv.org/abs/2402.03300" target="_blank" rel="noopener">GRPO ↗</a>
+    <a href="https://arxiv.org/abs/2503.14476" target="_blank" rel="noopener">DAPO ↗</a>
+    <a href="https://arxiv.org/abs/2607.07508" target="_blank" rel="noopener">SAO ↗</a>
+    <a href="https://arxiv.org/abs/2506.13585" target="_blank" rel="noopener">CISPO ↗</a>
+    <a href="https://arxiv.org/abs/2511.20347" target="_blank" rel="noopener">SAPO ↗</a>
+    <a href="https://verl.readthedocs.io/en/latest/algo/opd.html" target="_blank" rel="noopener">OPD 文档 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    PPO 的核心不是名字，而是 Eq.7 的 <code>min</code>：未裁剪的 <code>r·Â</code> 和裁剪后的 <code>clip(r)·Â</code> 取较小者。
+    它需要一个 <code>Â<sub>t</sub></code>；PPO 用 critic + GAE 把序列末端的奖励摊到每个 token。代价是第二个同量级模型，以及“每个 token 的价值”本身很难学。
+  </p>
+  <p>
+    GRPO 去掉 critic：同一问题采样 G 条回答，奖励在组内减均值、除标准差，整条回答的所有 token 共用这个 <code>Â</code>。
+    DeepSeekMath 的设置是 <code>G=64</code>、<code>β=0.04</code>；它省掉了 value model，但组内全对或全错时 <code>Â=0</code>，样本级归一化也让长短回答的权重不同。
+  </p>
+  <p>
+    DAPO 在 GRPO 上拧四个开关：解耦上下 clip（<code>0.2 / 0.28</code>）、过滤全对或全错组、把损失从样本级改成 token 级、对超长样本做软惩罚。
+    它不是新 critic，而是把“哪些 token 该学、每组该不该学、长度怎么算”拆开。
+  </p>
+  <p>
+    再往后，CISPO 把裁剪从 token 更新移到 IS 权重并停梯度，SAPO 用平滑门控替代硬裁剪，SAO 把 group 采样换成单 rollout + DIS mask + 更强的 value model，OPD 把 reward 换成 teacher 的 token 分布。
+    它们不是一条单向升级链；共同点只是都在改同一张目标函数的某一项。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="DAPO Table 1">50<small> avg@32</small></div>
+      <div class="k">DAPO 在 AIME 2024、Qwen2.5-32B 上的分数；同一张表里 naive GRPO 为 30，差 20 个百分点</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="SAO Table 1">97.3<small> Pass@1</small></div>
+      <div class="k">SAO 在 AIME2025、Qwen3-30B-A3B-Thinking-2507 上的分数；同表 GRPO（w/ python）为 84.2</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 5">88.2<small>%</small></div>
+      <div class="k">DeepSeekMath-RL 7B 在 GSM8K、CoT 设定下的准确率；同表 MATH 为 51.7%</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>PPO 的 clip 很便宜，贵的是它背后那个 critic</h2></div>
+  <p class="sec-sub">先建立共同认知：clipped surrogate 本身只是一个逐 token 的乘法与取小；真正决定训练成本的是 <code>Â<sub>t</sub></code> 从哪来。</p>
+
+  <p>
+    PPO 的目标写在 Eq.7。记 <code>r<sub>t</sub>(θ) = π<sub>θ</sub>(a<sub>t</sub>|s<sub>t</sub>) / π<sub>θ<sub>old</sub></sub>(a<sub>t</sub>|s<sub>t</sub>)</code>，它是新旧策略对同一个动作的概率比：
+  </p>
+  <div class="eq">
+    L<sup>CLIP</sup>(θ) = Ê<sub>t</sub>[ min( <span class="hl-a">r<sub>t</sub>(θ) Â<sub>t</sub></span>, <span class="hl-b">clip(r<sub>t</sub>(θ), 1−ε, 1+ε) Â<sub>t</sub></span> ) ]
+  </div>
+  <div class="eq-cap">PPO 原文 Eq.7；<code>ε</code> 的示例取值为 0.2（§3）。当 <code>r</code> 落在区间外时，裁剪项把梯度与 θ 脱钩，<code>min</code> 使目标成为未裁剪目标的悲观下界。</div>
+
+  <p>
+    <code>min</code> 的几何含义很直接：对正优势，<code>r</code> 超过上界后目标不再随 <code>r</code> 增长；对负优势，<code>r</code> 低于下界后目标也不再随 <code>r</code> 下降。
+    它限制的是“单次更新能把一个 token 的概率推多远”，而不是“这个 token 该不该学”。后者由 <code>Â<sub>t</sub></code> 决定。
+  </p>
+
+  <p>
+    PPO 用 value function <code>V(s)</code> 和 GAE 得到 <code>Â<sub>t</sub></code>。PPO 原文 Eq.11 给出截断 GAE：
+  </p>
+  <div class="eq">
+    Â<sub>t</sub> = δ<sub>t</sub> + (γλ) δ<sub>t+1</sub> + … + (γλ)<sup>T−t+1</sup> δ<sub>T−1</sub>
+  </div>
+  <div class="eq-cap">PPO 原文 Eq.11；GAE 本身来自 Schulman et al. 2015（arXiv:1506.02438），PPO 表格里的 <code>λ=0.95</code>、<code>γ=0.99</code> 是实验超参。λ 在偏差与方差之间插值：λ=0 只看一步 TD，λ=1 看完整回报。</div>
+
+  <p>
+    在 LLM RLHF 里，这个 critic 的代价被放大。DeepSeekMath §4.1 的原话是：PPO 里的 value function 通常是和 policy model 同量级的另一个模型，带来 substantial memory and computational burden；
+    而且在 LLM 场景中，reward model 通常只给最后一个 token 打分，训练一个“每个 token 都准”的 value function 会更困难。前者是显存与吞吐，后者是信号质量。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">四个账本问题</span><h4>后面每个算法，都可以按这四问答一次</h4></div>
+    <ul>
+      <li><strong>优势从哪来？</strong>critic + GAE、组内相对奖励、还是 teacher 分布？</li>
+      <li><strong>clip / mask 裁什么？</strong>裁概率比、裁 IS 权重、用软门控，还是直接 mask 掉 token？</li>
+      <li><strong>KL 放在哪？</strong>塞进 reward、作为 loss 的独立项，还是完全移除？</li>
+      <li><strong>长度怎么归一化？</strong>先按响应平均再按批次平均，还是直接除以全 batch 的 token 总数？</li>
+    </ul>
+  </div>
+
+  <p>
+    这四问不是分类学，而是会直接改变梯度的形状。比如 KL 放进 reward 时，<code>Â<sub>t</sub></code> 里已经包含了对参考模型的惩罚；KL 作为 loss 项时，<code>Â<sub>t</sub></code> 只反映任务奖励。
+    两种写法在论文里都叫“PPO/GRPO”，但梯度不是同一个东西。后面的对比都按“目标函数实际写了什么”来，不按名字。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>GRPO 拿掉 critic，代价是把信用分配压成组内一个标量</h2></div>
+  <p class="sec-sub">PPO 用 critic 买 per-token 信用；GRPO 用组内比较省掉 critic。两条路的代价不同，不是简单的“谁更先进”。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">PPO</span><h4>critic + GAE：每个 token 一个优势</h4></div>
+      <p>价值网络给出 <code>V(s<sub>t</sub>)</code>，GAE 把 TD 残差按 <code>(γλ)</code> 加权，得到逐 token 的 <code>Â<sub>t</sub></code>。信用粒度细，理论成熟。</p>
+      <p><strong>代价：</strong>多一个同量级模型；长文本下 value 估计噪声大；LLM 往往只在序列末给奖励，per-token value 更难训。</p>
+      <p>在 RLHF 工程里，KL 通常还被塞进 reward：<code>r<sub>t</sub> = r<sub>φ</sub> − β log(π<sub>θ</sub>/π<sub>ref</sub>)</code>，这样 <code>Â<sub>t</sub></code> 里已经含 KL。DeepSeekMath Eq.2 描述的就是这个写法。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">GRPO</span><h4>组内相对奖励：整条回答一个优势</h4></div>
+      <p>同一问题采样 <code>G</code> 条回答，奖励在组内标准化；整条回答的所有 token 共用 <code>Â<sub>i,t</sub> = (r<sub>i</sub> − mean(r)) / std(r)</code>。不需要 critic。</p>
+      <p><strong>代价：</strong>组内全对或全错时分子为 0；同一条回答里所有 token 共享一个数；硬 clip 的上界会压住低概率“探索型” token。</p>
+      <p>GRPO 把 KL 从 reward 移到 loss，用 Eq.4 的逐 token 估计量；DeepSeekMath 的设置是 <code>G=64</code>、<code>β=0.04</code>。</p>
+    </div>
+  </div>
+
+  <p>GRPO 的目标函数（DeepSeekMath Eq.3）是 PPO clip 目标加一个 KL 项，归一化方式改成了“先 token、再组内”（先在每条回答内对 token 取平均，再对 G 条回答取平均）：</p>
+  <div class="eq">
+    J<sub>GRPO</sub>(θ) = E[ (1/G) Σ<sub>i=1</sub><sup>G</sup> (1/|o<sub>i</sub>|) Σ<sub>t=1</sub><sup>|o<sub>i</sub>|</sup> ( min( r<sub>i,t</sub>Â<sub>i,t</sub>, clip(r<sub>i,t</sub>, 1−ε, 1+ε)Â<sub>i,t</sub> ) − β D<sub>KL</sub>[π<sub>θ</sub> ‖ π<sub>ref</sub>] ) ]
+  </div>
+  <div class="eq-cap">DeepSeekMath Eq.3；<code>Â<sub>i,t</sub></code> 在同一组内对整条回答是常数。KL 估计量用 Eq.4：<code>π<sub>ref</sub>/π<sub>θ</sub> − log(π<sub>ref</sub>/π<sub>θ</sub>) − 1</code>，论文注明它保证非负。</div>
+
+  <p>
+    这些缺口正好对应 DAPO 的四个改动：全对/全错组没有梯度，对应动态采样；样本级归一化让长短回答权重不同，对应 token 级损失；上界压住低概率 token，对应 clip-higher；超长样本被截断后统一罚分，对应 overlong reward shaping。
+    所以 DAPO 不是“又一个新的 critic”，而是把 GRPO 里混在一起的几件事拆开。
+  </p>
+
+  <p style="font-size:12.5px;color:var(--text-soft);margin:18px 0 -6px">本页表 1：PPO 与 GRPO 在优势、基线、KL、长度归一化四个维度上的对照（整理表，不是原文表号）。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>维度</th><th>PPO</th><th>GRPO</th><th>差别落在哪</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>优势来源</td><td>critic + GAE，逐 token</td><td>组内标准化，整条回答共享</td><td>显存 / 信用粒度</td></tr>
+        <tr><td>基线</td><td><code>V(s<sub>t</sub>)</code></td><td><code>mean(r<sub>1</sub>…r<sub>G</sub>)</code></td><td>基线是否条件在状态上</td></tr>
+        <tr><td>KL 位置</td><td>通常在 reward 里（RLHF 约定）</td><td>loss 里的独立项</td><td><code>Â</code> 是否已含 KL</td></tr>
+        <tr><td>长度归一化</td><td>逐 token / 逐序列，按实现</td><td><code>(1/G)Σ(1/|o<sub>i</sub>|)Σ<sub>t</sub></code></td><td>长短回答的总权重</td></tr>
+        <tr><td>典型失效</td><td>critic 噪声、显存</td><td>零方差组、长度偏差</td><td>下一节展开</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">注：PPO 侧按 Eq.7/11 与 DeepSeekMath Eq.2 的 RLHF 写法；GRPO 侧按 DeepSeekMath Eq.3/4。两列的“典型失效”是结构性描述，不是论文实验结论。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>这些算法，改的都是同一张目标函数的不同项</h2></div>
+  <p class="sec-sub">先看目标函数的逐项差异，再看每个方法把哪一项换掉；最后用一个可调模拟器把“组内优势 + clip”算一遍。</p>
+
+  <h3>3.1 PPO / GRPO：裁概率比，KL 一个在 reward、一个在 loss</h3>
+  <p>
+    PPO 和 GRPO 的信任域都作用在概率比 <code>r<sub>i,t</sub></code> 上：<code>min(r·Â, clip(r,1−ε,1+ε)·Â)</code>。
+    差别在 <code>Â</code> 和 KL：PPO 的 <code>Â</code> 来自 critic，KL 常被塞进 reward；GRPO 的 <code>Â</code> 来自组内标准化，KL 是 Eq.3 里的独立项。
+    两种写法都能写成“带信任域的策略梯度”，但梯度的组成不同。
+  </p>
+  <p>
+    GRPO 的组内优势有一个容易忽略的细节：<code>std(r)</code> 的分母论文没有在公式里区分 <code>÷G</code> 与 <code>÷(G−1)</code>。
+    本页的模拟统一用总体标准差 <code>÷G</code>；复现时要和实现对齐，因为 G=4 或 8 时两种分母的数值差别不小。
+  </p>
+
+  <h3>3.2 DAPO：四个开关分别改 clip、采样、长度和超长奖励</h3>
+  <p><strong>Clip-Higher（Eq.10）。</strong>把单一的 <code>ε</code> 拆成 <code>ε<sub>low</sub></code> 和 <code>ε<sub>high</sub></code>，只抬高上界。DAPO §4.1 的设置是 <code>ε<sub>low</sub>=0.2</code>、<code>ε<sub>high</sub>=0.28</code>。论文 §3.1 的理由是：上界会限制低概率“探索型” token 的概率提升，抬高上界可以缓解熵坍塌；<code>ε<sub>low</sub></code> 保持 0.2，因为增大 <code>ε<sub>low</sub></code> 会把低概率 token 的概率压到 0。</p>
+  <div class="eq">
+    J<sub>DAPO</sub>(θ) = E[ (1/Σ<sub>i</sub>|o<sub>i</sub>|) Σ<sub>i</sub> Σ<sub>t</sub> min( r<sub>i,t</sub>Â<sub>i,t</sub>, clip(r<sub>i,t</sub>, 1−ε<sub>low</sub>, 1+ε<sub>high</sub>)Â<sub>i,t</sub> ) ]
+  </div>
+  <div class="eq-cap">DAPO Eq.10 / Eq.12；<code>ε<sub>low</sub>=0.2</code>、<code>ε<sub>high</sub>=0.28</code>（§4.1）。Eq.10 与 Eq.12 的分母相同（都是 <code>1/Σ<sub>i</sub>|o<sub>i</sub>|</code>）；Eq.10 的改动是 clip，Eq.12 的改动是相对 GRPO Eq.3 的样本级归约改为 token 级归约。</div>
+
+  <p><strong>Dynamic Sampling（Eq.11）。</strong>对每个 prompt 采样一组回答，只保留“既有正确又有错误”的组，满足 <code>0 &lt; |{o<sub>i</sub> | is_equivalent(a,o<sub>i</sub>)}| &lt; G</code>。全对或全错的组不进 batch；采样不够就继续采，直到 batch 填满。这样每个进入训练的组都有非零优势，避免零梯度组稀释 batch 梯度。</p>
+  <div class="eq">
+    0 &lt; |{ o<sub>i</sub> | is_equivalent(a, o<sub>i</sub>) }| &lt; G
+  </div>
+  <div class="eq-cap">DAPO Eq.11 的约束；Algorithm 1 第 6–8 行：过滤后若 buffer 不足 N，就继续采样而不更新。</div>
+
+  <p><strong>Token-Level Loss（Eq.12）。</strong>GRPO 先对每条回答的 token 取平均，再对 G 条回答取平均；DAPO 直接对所有回答的所有 token 求和，再除以总 token 数。前者的每条回答总权重相同，后者每个 token 权重相同。DAPO §3.3 报告后者让长回答对梯度的影响更大；§4.2 报告它让训练更稳、长度增长更健康。</p>
+
+  <p><strong>Overlong Reward Shaping（Eq.13）。</strong>超过 <code>L<sub>max</sub>−L<sub>cache</sub></code> 后开始线性罚分，超过 <code>L<sub>max</sub></code> 后固定罚 <code>−1</code>：</p>
+  <div class="eq">
+    R<sub>length</sub>(y) = 0 &nbsp; if |y| ≤ L<sub>max</sub>−L<sub>cache</sub><br>
+    = ((L<sub>max</sub>−L<sub>cache</sub>) − |y|) / L<sub>cache</sub> &nbsp; if L<sub>max</sub>−L<sub>cache</sub> &lt; |y| ≤ L<sub>max</sub><br>
+    = −1 &nbsp; if |y| &gt; L<sub>max</sub>
+  </div>
+  <div class="eq-cap">DAPO Eq.13；§4.1 设置 <code>L<sub>max</sub>=16384</code>、<code>L<sub>cache</sub>=4096</code>，因此最大生成长度为 <span data-src="§4.1">20480</span> 个 token。另有 Overlong Filtering：把被截断样本的 loss mask 掉。</div>
+
+  <div class="sim" id="adv-sim">
+    <div class="sim-top" id="adv-modes">
+      <button type="button" class="rule-btn active" data-g="4">G = 4<span class="r-sub">reward [1,0,1,0]</span></button>
+      <button type="button" class="rule-btn" data-g="8">G = 8<span class="r-sub">reward [1,0,1,1,0,0,1,0]</span></button>
+    </div>
+    <p style="font-size:13px;color:var(--text-muted);margin:0 0 4px">点一个样本，再用滑块改它的概率比 <code>r</code>；看组内优势与 clip 后的目标值。</p>
+    <div class="slots" id="adv-slots"></div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>选中样本 i <span class="v" id="adv-idx-v">0</span></label>
+        <input type="range" id="adv-idx" min="0" max="3" step="1" value="0">
+      </div>
+      <div class="ctrl">
+        <label>概率比 r <span class="v" id="adv-r-v">1.300</span></label>
+        <input type="range" id="adv-r" min="0.5" max="1.5" step="0.01" value="1.3">
+      </div>
+      <div class="ctrl">
+        <label>ε_low <span class="v" id="adv-el-v">0.200</span></label>
+        <input type="range" id="adv-el" min="0" max="0.5" step="0.01" value="0.2">
+      </div>
+      <div class="ctrl">
+        <label>ε_high <span class="v" id="adv-eh-v">0.280</span></label>
+        <input type="range" id="adv-eh" min="0" max="0.5" step="0.01" value="0.28">
+      </div>
+    </div>
+    <div class="readout" data-src="DeepSeekMath §4.1 Eq.3">
+      <div class="r-head">组内统计与 clip 目标</div>
+      <div id="adv-out"></div>
+    </div>
+    <p class="sim-note">
+      简化模拟：奖励只有 0 / 1，标准差用总体标准差（÷G），<code>r</code> 由滑块给定，不由模型前向计算。
+      未覆盖：真实 token 级 ratio、KL 项、动态采样、多轮 off-policy 更新；因此它只验证 Eq.3 的组内标准化与 Eq.7 的 min/clip 算术，不代表完整训练。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 A：G=4 的组内优势与 clip 目标 <span class="sum-sub">与交互 1 同参数逐位一致（三位小数）</span></summary>
+    <div class="details-body">
+      <p>奖励 <code>[1, 0, 1, 0]</code>，G=4。均值：</p>
+      <div class="calc">mean = (1+0+1+0)/4 = 0.500</div>
+      <p>总体方差 <code>((1−0.5)²+(0−0.5)²+(1−0.5)²+(0−0.5)²)/4 = 0.25</code>，总体标准差 <code>std = 1/2 = 0.500</code>。</p>
+      <p>样本 0：<code>Â = (1−0.5)/0.5 = +1.000</code>；样本 1：<code>Â = (0−0.5)/0.5 = −1.000</code>。</p>
+      <p><strong>正优势：</strong>取样本 0，<code>r=1.300</code>，<code>ε_low=0.2</code>、<code>ε_high=0.28</code>。未裁剪 <code>r·Â = 1.300×1 = 1.300</code>；裁剪 <code>clip(1.3, 0.8, 1.28)=1.280</code>；目标 <code>min(1.300, 1.280)=1.280</code>。</p>
+      <p><strong>负优势：</strong>取样本 1，<code>r=0.700</code>，<code>Â=−1.000</code>。未裁剪 <code>0.700×(−1) = −0.700</code>；裁剪 <code>clip(0.7, 0.8, 1.28)=0.800</code>；目标 <code>min(−0.700, 0.800×(−1)=−0.800) = −0.800</code>。</p>
+      <p>注意负优势这一支：<code>min</code> 选的是更小的 <code>−0.800</code>，也就是裁剪分支。它的梯度为 0，这正是 PPO 在“坏 token 的概率已经被压得足够低”时停止继续压低的方式。</p>
+    </div>
+  </details>
+
+  <h3>3.3 CISPO：裁 IS 权重并停梯度，而不是把 token 的梯度裁没</h3>
+  <p>
+    CISPO 的出发点是：PPO/GRPO 的 clip 会让高 <code>r<sub>t</sub></code> 的稀有 token 在第一次 on-policy 更新后就不再贡献梯度。MiniMax-M1 §3.1 把这类 token 描述为推理路径的“分叉点”（例如 <em>However</em>、<em>Recheck</em>、<em>Wait</em>、<em>Aha</em>），它们在 base 模型里概率低，更新时 <code>r<sub>t</sub></code> 往往很大，于是被裁掉。
+  </p>
+  <div class="eq">
+    J<sub>CISPO</sub>(θ) = E[ (1/Σ<sub>i</sub>|o<sub>i</sub>|) Σ<sub>i</sub> Σ<sub>t</sub> <span class="hl-c">sg( r̂<sub>i,t</sub>(θ) )</span> Â<sub>i,t</sub> log π<sub>θ</sub>(o<sub>i,t</sub> | q, o<sub>i,&lt;t</sub>) ]
+  </div>
+  <div class="eq-cap">MiniMax-M1 Eq.4；<code>r̂ = clip(r, 1−ε<sub>low</sub><sup>IS</sup>, 1+ε<sub>high</sub><sup>IS</sup>)</code>（Eq.5），<code>sg</code> 表示 stop-gradient。论文说下界没有真正启用，<code>ε<sub>low</sub><sup>IS</sup></code> 设得很大，只调上界。</div>
+
+  <p>
+    关键差别是裁剪对象：PPO/GRPO 裁的是“目标里的 token 更新”，CISPO 裁的是“IS 权重”，并且把权重停梯度。于是每个 token 都还能通过 <code>log π<sub>θ</sub></code> 贡献梯度，权重只作为一个固定系数；代价是梯度有轻微偏差（论文 §3.1 自己说明）。
+    CISPO 还给了 Eq.6/7 的统一形式，用 token mask 模拟 PPO 的信任域：<code>Â&gt;0 且 r&gt;1+ε<sub>high</sub></code> 时 mask 为 0，<code>Â&lt;0 且 r&lt;1−ε<sub>low</sub></code> 时 mask 为 0。它不使用 KL 项，并借用了 DAPO 的动态采样与长度惩罚。
+  </p>
+  <p>
+    引言（§1）称 <span data-src="§1">2×</span> 加速。正文对 CISPO vs DAPO/GRPO 的受控对比只给 Figure 2 的曲线，没有给出可直接转录的 AIME 分数（MiniMax-M1 最终模型分数见 Table 2）。
+  </p>
+
+  <h3>3.4 SAPO：把硬裁剪换成平滑门控</h3>
+  <p>
+    SAPO 的观察是 token 级重要性比方差大，硬裁剪在“稳定”和“保留学习信号”之间只能二选一：GSPO 在序列级裁，少数离群 token 会让整条序列的梯度被抑制；GRPO 在 token 级裁，边界是断开的。
+    SAPO 用一个温度控制的软门控替换硬裁剪：
+  </p>
+  <div class="eq">
+    J<sub>SAPO</sub>(θ) = E[ (1/G) Σ<sub>i</sub> (1/|y<sub>i</sub>|) Σ<sub>t</sub> <span class="hl-c">f<sub>i,t</sub>(r<sub>i,t</sub>(θ))</span> Â<sub>i,t</sub> ]
+  </div>
+  <div class="eq-cap">SAPO Eq.5；<code>f<sub>i,t</sub>(x) = σ(τ<sub>i,t</sub>(x−1)) · (4/τ<sub>i,t</sub>)</code>（Eq.6），<code>τ<sub>i,t</sub> = τ<sub>pos</sub></code> 若 <code>Â&gt;0</code>，否则 <code>τ<sub>neg</sub></code>。因子 <code>4/τ</code> 使 <code>r=1</code> 处的梯度与未裁剪目标相同。</div>
+
+  <p>
+    门控在 <code>r=1</code> 处取 1，向两侧平滑衰减；<code>τ</code> 越大衰减越快。论文设置 <code>τ<sub>pos</sub>=1.0</code>、<code>τ<sub>neg</sub>=1.05</code>（§5.1 的受控实验），并解释负优势需要更快的衰减，因为负 token 的更新会抬高大量未采样 token 的 logits，词表大时更容易不稳。
+    在“token 级 log-ratio 方差小”的假设下，逐 token 门控会聚合成序列级的 <code>sech²(τ/2 · log s<sub>i</sub>)</code>，因此它既有序列连贯性，又能只降权离群 token。目标函数 Eq.5 没有 KL 项。
+  </p>
+  <p>
+    论文在 Qwen3-30B-A3B-Base 的 cold-start 模型上比较 GSPO 与 GRPO-R2，报告 SAPO 训练更稳、最终 Pass@1 更高；但正文只给 Figure 4 的曲线，没有给出可转录的最终数值。Qwen3-VL 的实验同样只给 Figure 6 的曲线。
+  </p>
+
+  <h3>3.5 SAO：group size 1，DIS mask，critic 回来但换了训练方式</h3>
+  <p>
+    SAO 处理的是异步 agentic RL：同步 group 采样必须等最慢的一条 rollout，长链路任务里这个等待很贵；异步又会引入 policy lag。SAO 直接把 group 采样换成“每个 prompt 一条 rollout”，于是 GRPO 的组内基线消失，优势估计回到 value model。
+  </p>
+  <div class="eq">
+    L(θ) = Ê<sub>t</sub>[ <span class="hl-c">f(r<sub>t</sub>(θ), ε<sub>ℓ</sub>, ε<sub>h</sub>)</span> Â<sub>t</sub> log π<sub>θ</sub>(a<sub>t</sub>|s<sub>t</sub>) ]<br>
+    r<sub>t</sub>(θ) = exp( log π<sub>θ</sub>(a<sub>t</sub>|s<sub>t</sub>) − log π<sub>rollout</sub>(a<sub>t</sub>|s<sub>t</sub>) )<br>
+    f(x; ε<sub>ℓ</sub>, ε<sub>h</sub>) = x &nbsp; if 1−ε<sub>ℓ</sub> &lt; x &lt; 1+ε<sub>h</sub>; &nbsp; 0 &nbsp; otherwise
+  </div>
+  <div class="eq-cap">SAO Eq.1–3；DIS 直接用 rollout 引擎的 log-prob 当行为策略，不再追踪 <code>π<sub>θ<sub>old</sub></sub></code>。区间外的 token 整段 mask 掉（梯度为 0），而不是只裁目标。</div>
+
+  <p>
+    单 rollout 的梯度方差像 REINFORCE，SAO 用三件事补：critic 每个 policy 更新训 <code>K=2</code> 次；critic 的 attention 层冻结，只训 MoE 投影；agentic 轨迹跨 action→observation 边界时，用 skip-observation GAE 把 Bellman target 直接连到下一个 action：
+  </p>
+  <div class="eq">
+    Â(a<sub>i,N</sub>) = δ + γλ Â(a<sub>i+1,0</sub>) &nbsp;&nbsp; δ = r<sub>t</sub> + γ V(a<sub>i+1,0</sub>) − V(a<sub>i,N</sub>)
+  </div>
+  <div class="eq-cap">SAO Eq.4/5；<code>a<sub>i,N</sub></code> 是第 i 个 action 的最后一个 token，<code>a<sub>i+1,0</sub></code> 是下一个 action 的第一个 token；observation token 由环境生成，不进入 value 链路。</div>
+
+  <p>
+    设置：batch 128、group size 1、max length 128k、policy lr <code>1e-6</code>、critic lr <code>5e-6</code>；数学/TIR 的 <code>ε<sub>ℓ</sub>=0.3</code>、<code>ε<sub>h</sub>=5.0</code>，coding 的 <code>ε<sub>ℓ</sub>=0.8</code>、<code>ε<sub>h</sub>=3.0</code>（§4.1）。
+  </p>
+
+  <h3>3.6 OPD：把 reward 换成 teacher 的 token 分布</h3>
+  <p>
+    OPD（On-Policy Distillation）不采样“奖励”，而是让学生在自己的 rollouts 上接受 teacher 的逐 token 分布监督。这样状态分布与推理时对齐（on-policy），监督信号又比序列级 0/1 reward 密集。
+  </p>
+  <div class="eq">
+    L<sub>OPD</sub>(θ) = E<sub>x, y∼π<sub>θ</sub></sub>[ (1/|y|) Σ<sub>t</sub> D( π<sub>θ</sub>(·|s<sub>t</sub>), ν(·|s<sub>t</sub>), y<sub>t</sub> ) ]
+  </div>
+  <div class="eq-cap">verl 官方文档 OPD 页的损失形式；<code>s<sub>t</sub>=(x,y<sub>&lt;t</sub>)</code>，<code>ν</code> 是 teacher。文档把实现分成 GKD OPD（默认，teacher top-k forward KL，直接反传）与 PG OPD（单样本 reverse KL 估计当 reward，<code>r<sub>t</sub>=sg(log ν(y<sub>t</sub>|s<sub>t</sub>) − log π<sub>θ</sub>(y<sub>t</sub>|s<sub>t</sub>))</code>，走 PPO 更新）。</div>
+
+  <p>
+    <strong>出处说明：</strong>OPD 在笔记里没有对应单篇论文，笔记把来源指向 verl 官方文档的 OPD 页；本页的公式与 GKD/PG 区分按该文档写。按论文谱系追溯的原始出处，本页标注为“<strong>笔记简称，原始出处待核</strong>”，不引用任何二手博客的数字。
+  </p>
+
+  <p style="font-size:12.5px;color:var(--text-soft);margin:18px 0 -6px">本页表 2：算法家族的目标函数逐项对照；“口径”列区分论文原文与工程实现约定。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-wide">
+      <thead>
+        <tr><th>方法</th><th>目标函数核心</th><th>Â 来源</th><th>信任域机制</th><th>KL</th><th>长度归一化</th><th>口径</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>PPO</td>
+          <td><code>min(r·Â, clip(r,1−ε,1+ε)·Â)</code></td>
+          <td>critic + GAE</td>
+          <td>概率比 clip，ε=0.2</td>
+          <td>通常在 reward 里（RLHF 约定）</td>
+          <td>按实现，逐 token 或逐序列</td>
+          <td>论文 Eq.7/11；KL 位置是工程约定</td>
+        </tr>
+        <tr>
+          <td>GRPO</td>
+          <td><code>min(r·Â, clip(r,1−ε,1+ε)·Â) − βD<sub>KL</sub></code></td>
+          <td><code>(R<sub>i</sub>−mean)/std</code>，整条共享</td>
+          <td>概率比 clip</td>
+          <td>loss 独立项，β=0.04</td>
+          <td><code>(1/G)Σ(1/|o<sub>i</sub>|)Σ<sub>t</sub></code></td>
+          <td>论文 Eq.3/4</td>
+        </tr>
+        <tr>
+          <td>DAPO</td>
+          <td><code>min(r·Â, clip(r,1−ε<sub>low</sub>,1+ε<sub>high</sub>)·Â)</code></td>
+          <td>GRPO 组内优势</td>
+          <td>非对称 clip，0.2 / 0.28</td>
+          <td>移除（§2.3）</td>
+          <td><code>(1/Σ<sub>i</sub>|o<sub>i</sub>|)Σ<sub>i</sub>Σ<sub>t</sub></code></td>
+          <td>论文 Eq.10–13</td>
+        </tr>
+        <tr>
+          <td>CISPO</td>
+          <td><code>sg(clip(r,1−ε<sub>low</sub><sup>IS</sup>,1+ε<sub>high</sub><sup>IS</sup>))·Â·log π</code></td>
+          <td>GRPO 组内优势</td>
+          <td>裁 IS 权重并停梯度</td>
+          <td>无（§3.1）</td>
+          <td>token 级</td>
+          <td>论文 §3.1 Eq.4/5</td>
+        </tr>
+        <tr>
+          <td>SAPO</td>
+          <td><code>σ(τ(r−1))·(4/τ)·Â</code></td>
+          <td>GRPO 组内优势</td>
+          <td>平滑门控，τ<sub>pos</sub>/τ<sub>neg</sub></td>
+          <td>Eq.5 无 KL 项</td>
+          <td><code>(1/G)Σ(1/|y<sub>i</sub>|)Σ<sub>t</sub></code></td>
+          <td>论文 §3 Eq.5/6</td>
+        </tr>
+        <tr>
+          <td>SAO</td>
+          <td><code>f(r)·Â·log π</code>，区间外 f=0</td>
+          <td>critic + skip-observation GAE</td>
+          <td>双侧 token mask</td>
+          <td>正文未列 KL 项</td>
+          <td>token 级</td>
+          <td>论文 §3.1 Eq.1–5</td>
+        </tr>
+        <tr>
+          <td>OPD</td>
+          <td><code>E[(1/|y|)Σ<sub>t</sub>D(π<sub>θ</sub>,ν)]</code></td>
+          <td>teacher 分布，不是 Â</td>
+          <td>无 PPO clip</td>
+          <td>文档建议多数情况关闭 ref KL</td>
+          <td>token 平均 <code>1/|y|</code></td>
+          <td>verl 文档；笔记简称，原始出处待核</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">注：逐行按各文公式转录；OPD 一行来自 verl 文档，不是论文 Eq。</p>
+</section>
+
+<section class="block" id="accounting">
+  <div class="sec-head"><span class="sec-num">04</span><h2>组内优势、长度归一化、KL 位置：三本账决定行为</h2></div>
+  <p class="sec-sub">目标函数只写了“怎么更新”；这一节把三个最容易被忽略的账本拆开：Â 的统计量、长度的权重、KL 的位置。</p>
+
+  <h3>4.1 优势账本：组内均值/标准差，还是 critic 的逐 token 估计</h3>
+  <p>
+    GRPO 的 Â 是组内标准化：<code>Â<sub>i</sub> = (R<sub>i</sub> − mean(R)) / std(R)</code>。它把“这一条比同组平均好多少”压成一个标量，然后复制给整条回答的所有 token。
+    这样做的好处是不需要 critic；代价是同一回答里所有 token 共享一个数，且组内奖励没有差异时 Â 为 0。
+  </p>
+  <p>
+    DAPO 的动态采样把“Â 为 0”的组直接过滤掉；SAO 则因为 group size 1，根本不用组内基线，改用 critic + GAE。CISPO 和 SAPO 沿用 GRPO 的组内优势，只是改了信任域；OPD 没有 Â，监督信号是 teacher 的分布。
+  </p>
+
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>方法</th><th>Â 的估计</th><th>组规模 / 采样</th><th>零方差组怎么处理</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PPO</td><td>critic + GAE，逐 token</td><td>一条轨迹；可多 epoch</td><td>无组概念</td><td>Eq.7/11</td></tr>
+        <tr><td>GRPO</td><td><code>(R<sub>i</sub>−mean)/std</code></td><td>G=64（DeepSeekMath）</td><td>没有专门处理；全同组梯度为 0</td><td>§4.1/§4.2</td></tr>
+        <tr><td>DAPO</td><td>同 GRPO</td><td>每个 prompt 16 条回答</td><td>动态采样过滤全对/全错</td><td>§3.2/§4.1</td></tr>
+        <tr><td>SAO</td><td>critic + skip-observation GAE</td><td>group size 1</td><td>不适用（没有组）</td><td>§3.1–3.2</td></tr>
+        <tr><td>CISPO</td><td>GRPO 组内优势</td><td>正文未给具体 G</td><td>借用 DAPO 动态采样</td><td>§3.1</td></tr>
+        <tr><td>SAPO</td><td>GRPO 组内优势</td><td>公式含 G，正文未给具体值</td><td>正文未展开</td><td>§3 Eq.5</td></tr>
+        <tr><td>OPD</td><td>teacher 分布，不是 Â</td><td>无组</td><td>不适用</td><td>verl 文档</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">本页表 3（整理表）：组规模均按各文正文能查到的设置填写；“未给”表示正文没有写出具体数值，不是断言论文没有做实验。</p>
+
+  <p>
+    标准差的除数是第二个容易踩的坑。GRPO 论文的公式只写 <code>std(r)</code>，没有在正文区分 <code>÷G</code> 与 <code>÷(G−1)</code>；本页模拟统一用 <code>÷G</code>。
+    在 G=4、奖励 <code>[1,0,1,0]</code> 时，<code>÷G</code> 得到 0.500，<code>÷(G−1)</code> 得到 0.577；Â 会从 <code>±1.000</code> 变成 <code>±0.866</code>。复现时先对齐分母，再比较结果。
+  </p>
+
+  <h3>4.2 长度账本：样本级 vs token 级，权重差多少</h3>
+  <p>
+    GRPO 的 Eq.3 是样本级归约：先在每条回答内部对 token 取平均，再对 G 条回答取平均。DAPO 的 Eq.12 是 token 级归约：所有回答的所有 token 一起求和，再除以总 token 数。
+    两条公式都合法，但对长短回答的权重不同。
+  </p>
+
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>归约</th><th>公式</th><th>两条回答（长度 2 / 6）的总权重</th><th>每个 token 的权重</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>样本级（GRPO）</td><td><code>(1/G)Σ<sub>i</sub>(1/|o<sub>i</sub>|)Σ<sub>t</sub></code></td><td>各 1/2 = 0.500</td><td>短回答 1/2 × 1/2 = 0.250；长回答 1/2 × 1/6 = 0.083</td></tr>
+        <tr><td>token 级（DAPO）</td><td><code>(1/Σ<sub>i</sub>|o<sub>i</sub>|)Σ<sub>i</sub>Σ<sub>t</sub></code></td><td>2/8 = 0.250；6/8 = 0.750</td><td>每条 token 都是 1/8 = 0.125</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">本页表 4（整理表）：G=2、长度 2 与 6 的玩具设定；权重由两条公式直接算出，不是论文实验数字。</p>
+
+  <div class="sim" id="len-sim">
+    <div class="slots s2" id="len-slots"></div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>回答 1 长度 L<sub>1</sub> <span class="v" id="len-l1-v">2</span></label>
+        <input type="range" id="len-l1" min="1" max="12" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label>回答 2 长度 L<sub>2</sub> <span class="v" id="len-l2-v">6</span></label>
+        <input type="range" id="len-l2" min="1" max="12" step="1" value="6">
+      </div>
+    </div>
+    <div class="readout" data-src="§3.3 Eq.12">
+      <div class="r-head">两种归约下的权重</div>
+      <div id="len-out"></div>
+    </div>
+    <p class="sim-note">
+      简化模拟：只比较两条回答的权重，不计算 advantage、reward 或梯度；假设两条回答长度固定、没有截断。
+      未覆盖：G&gt;2、变长 batch、padding/EOS mask、overlong reward shaping。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 B：G=8 的组内统计与长度权重 <span class="sum-sub">与交互 1/2 同参数逐位一致（三位小数）</span></summary>
+    <div class="details-body">
+      <p><strong>组内统计。</strong>奖励 <code>[1,0,1,1,0,0,1,0]</code>，G=8。均值 <code>4/8 = 0.500</code>；每个奖励与均值相差 <code>±0.5</code>，总体方差 <code>8×(0.5)²/8 = 0.25</code>，总体标准差 <code>1/2 = 0.500</code>。样本 0 的 <code>Â = (1−0.5)/0.5 = +1.000</code>。</p>
+      <p><strong>长度权重。</strong>取 L<sub>1</sub>=2、L<sub>2</sub>=6，总 token 数 <code>2+6=8</code>。样本级：每条回答总权重 <code>1/2 = 0.500</code>。token 级：回答 1 <code>2/8 = 0.250</code>，回答 2 <code>6/8 = 0.750</code>；长回答拿到短回答的 <code>0.750/0.250 = 3.000</code> 倍权重。</p>
+      <p>这就是“长度偏差”的算术来源：token 级归约并不是“更公平”，它把总权重按 token 数分配；样本级归约则是每条回答一份。哪个更好取决于任务：长 CoT 里长回答的 token 也需要被惩罚或奖励，token 级更合适；如果长回答只是重复啰嗦，token 级会放大它的影响，需要 overlong shaping 或过滤配合。</p>
+    </div>
+  </details>
+
+  <p>
+    DAPO 的 overlong shaping 只处理“超过 <code>L<sub>max</sub>−L<sub>cache</sub></code>”的部分：<code>L<sub>max</sub>=16384</code>、<code>L<sub>cache</sub>=4096</code>，因此 <code>16384−4096=12288</code> 以内不罚，12288–16384 线性罚，超过 16384 固定罚 −1。
+    它解决的是“截断样本被错误罚分”的噪声，不是“所有长回答都该短”的偏好；长度偏置仍然由归约方式和 reward 决定。
+  </p>
+
+  <h3>4.3 KL 账本：同一个系数，放在 reward 和 loss 里不是一回事</h3>
+  <p style="font-size:12.5px;color:var(--text-soft);margin:18px 0 -6px">本页表 5：KL 位置账本，以及它对 Â 的影响。</p>
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>方法</th><th>KL 位置</th><th>系数 / 设置</th><th>对 Â 的影响</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PPO + RLHF</td><td>reward shaping</td><td><code>r<sub>t</sub> = r<sub>φ</sub> − β log(π<sub>θ</sub>/π<sub>ref</sub>)</code></td><td>Â 里已含 KL</td><td>DeepSeekMath Eq.2</td></tr>
+        <tr><td>GRPO</td><td>loss 独立项</td><td>β=0.04</td><td>Â 只含任务奖励，KL 不进 Â</td><td>Eq.3/4，§4.2</td></tr>
+        <tr><td>DAPO</td><td>移除</td><td>—</td><td>Â 只含任务奖励</td><td>§2.3</td></tr>
+        <tr><td>CISPO</td><td>无</td><td>—</td><td>Â 只含任务奖励</td><td>§3.1</td></tr>
+        <tr><td>SAPO</td><td>Eq.5 无 KL 项</td><td>—</td><td>Â 只含任务奖励</td><td>§3 Eq.5</td></tr>
+        <tr><td>SAO</td><td>正文未列 KL 项</td><td>—</td><td>Â 来自 critic</td><td>§3.1</td></tr>
+        <tr><td>OPD</td><td>文档建议多数情况关闭 ref KL</td><td>—</td><td>监督来自 teacher 分布</td><td>verl 文档</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">注：KL 的位置按各文公式/正文填写；“无”表示该方法的目标函数没有 KL 项，不是“KL 一定不需要”。</p>
+
+  <p>
+    为什么位置重要？因为 Â 是策略梯度的系数。KL 在 reward 里时，Â 已经包含“离参考模型多远”的惩罚，clip 之后仍然带着它；KL 在 loss 里时，Â 只反映任务奖励，KL 单独加在目标上。
+    这两种写法在数学上都可以成立，但梯度的量纲、系数 β 的最优值、以及“clip 裁的是任务优势还是任务+KL 优势”都不同。跨论文比较时，先看 KL 在哪，再看数字。
+  </p>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次迭代的数据流：rollout 先进组，再进 clip</h2></div>
+  <p class="sec-sub">把公式放回一次训练迭代：采样、打分、算优势、更新。GRPO/DAPO 在“组”上分叉，PPO/SAO 在“critic”上分叉，OPD 在“监督信号”上分叉。</p>
+
+  <figure>
+    <svg viewBox="0 0 760 330" role="img" aria-label="训练数据流：问题 q 采样 G 条 rollout，reward 打分，计算组内优势或 critic 优势，最后做 clip 更新">
+      <defs>
+        <marker id="fam-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0 0 L8 4 L0 8 Z" class="arrow-head"/>
+        </marker>
+      </defs>
+      <rect class="svg-box" x="10" y="30" width="130" height="76" rx="10"/>
+      <text x="75" y="58" text-anchor="middle" class="svg-t">问题 q</text>
+      <text x="75" y="80" text-anchor="middle" class="svg-s">同一 prompt</text>
+
+      <rect class="svg-box" x="162" y="30" width="130" height="76" rx="10"/>
+      <text x="227" y="58" text-anchor="middle" class="svg-t">G 条 rollout</text>
+      <text x="227" y="80" text-anchor="middle" class="svg-s">π_old 采样</text>
+
+      <rect class="svg-box" x="314" y="30" width="130" height="76" rx="10"/>
+      <text x="379" y="58" text-anchor="middle" class="svg-t">reward</text>
+      <text x="379" y="80" text-anchor="middle" class="svg-s">规则 / 模型</text>
+
+      <rect class="svg-hot" x="466" y="30" width="130" height="76" rx="10"/>
+      <text x="531" y="58" text-anchor="middle" class="svg-t">优势 Â</text>
+      <text x="531" y="80" text-anchor="middle" class="svg-s">组内 / critic</text>
+
+      <rect class="svg-box" x="618" y="30" width="130" height="76" rx="10"/>
+      <text x="683" y="58" text-anchor="middle" class="svg-t">clip 更新</text>
+      <text x="683" y="80" text-anchor="middle" class="svg-s">min(rÂ, clip·Â)</text>
+
+      <path class="svg-ln" d="M140 68 L158 68" marker-end="url(#fam-ar)"/>
+      <path class="svg-ln" d="M292 68 L310 68" marker-end="url(#fam-ar)"/>
+      <path class="svg-ln" d="M444 68 L462 68" marker-end="url(#fam-ar)"/>
+      <path class="svg-ln" d="M596 68 L614 68" marker-end="url(#fam-ar)"/>
+
+      <text x="227" y="132" text-anchor="middle" class="svg-l">G = 64 / 16 / 1</text>
+      <text x="227" y="150" text-anchor="middle" class="svg-s">按论文设置</text>
+
+      <text x="531" y="132" text-anchor="middle" class="svg-l">GRPO / DAPO</text>
+      <text x="531" y="150" text-anchor="middle" class="svg-s">组内相对</text>
+      <text x="531" y="176" text-anchor="middle" class="svg-l">PPO / SAO</text>
+      <text x="531" y="194" text-anchor="middle" class="svg-s">critic + GAE</text>
+
+      <text x="683" y="132" text-anchor="middle" class="svg-l">μ 次更新</text>
+
+      <path class="svg-dash" d="M683 106 L683 270 L227 270 L227 110" marker-end="url(#fam-ar)"/>
+      <text x="455" y="292" text-anchor="middle" class="svg-s">新一批 rollout：旧策略快照 / rollout 引擎 log-prob</text>
+    </svg>
+    <figcaption>图：一次迭代的抽象数据流。覆盖 GRPO/DAPO 的组内优势、PPO/SAO 的 critic 优势、以及 Eq.7 的 clip 更新；不覆盖具体框架的 batch 组织、分布式采样、异步队列与旧策略快照实现。</figcaption>
+  </figure>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Step 1</span><h4>rollout：采样并记录 log-prob</h4></div>
+      <p>GRPO/DAPO 对每个 prompt 采样 G 条回答；SAO 每个 prompt 一条，完成即送入训练；OPD 采样学生自己的轨迹。实现里通常由推理引擎生成 token，再由训练引擎重算 log-prob，因为两套引擎的数值不完全相同。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Step 2</span><h4>reward：规则、模型或 teacher</h4></div>
+      <p>DAPO 用最终答案的规则 verifier；PPO/RLHF 用 reward model；SAO 的在线实验用 LLM judge；OPD 不用 reward，teacher 给逐 token 分布。不同的 reward 决定不同的 reward hacking 风险。</p>
+    </div>
+  </div>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Step 3</span><h4>advantage：组内、critic 或 teacher</h4></div>
+      <p>组内：<code>(R<sub>i</sub>−mean)/std</code>；critic：<code>V(s)</code> + GAE；teacher：<code>D(π<sub>θ</sub>,ν)</code>。这一步决定“信用分配”的粒度：整条回答、逐 token，还是逐 token 分布。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Step 4</span><h4>update：clip、mask 或 gate</h4></div>
+      <p>PPO/GRPO/DAPO 裁概率比；CISPO 裁 IS 权重并停梯度；SAPO 用软门控；SAO 把区间外的 token 直接 mask；OPD 直接对分布散度反传或把它当 reward。一次 rollout 通常做 μ 次更新。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">工程约定</span><h4>这些不在论文 Eq 里，但会改变结果</h4></div>
+    <ul>
+      <li><strong>旧策略 log-prob：</strong>rollout 引擎与训练引擎的 log-prob 可能对不上；多轮更新时通常要保存 <code>π<sub>θ<sub>old</sub></sub></code> 的 log-prob，或按快照重算。</li>
+      <li><strong>标准差分母：</strong>论文只写 <code>std</code>；实现可能用总体 <code>÷G</code> 或无偏 <code>÷(G−1)</code>，G 小的时候差别明显。</li>
+      <li><strong>clip 参数名：</strong><code>ε</code>、<code>ε_low/ε_high</code>、<code>clip_ratio_low/high</code> 在不同框架里指同一件事，但默认值不一定相同。</li>
+      <li><strong>loss 归约：</strong>样本级、token 级、batch 级分母不同；同一个“GRPO”在不同代码库里可能是不同的长度加权。</li>
+    </ul>
+  </div>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>同一模型同一基准才有可比性：把论文数字放回各自的条件</h2></div>
+  <p class="sec-sub">下面只做并列，不做跨论文排名。模型、数据、解码、评测次数不同的数字，不能相加，也不能说“谁比谁高多少”。</p>
+
+  <h3>6.1 可转录的实测数字</h3>
+  <div class="tbl-scroll">
+    <table class="tbl-wide">
+      <thead>
+        <tr><th>方法</th><th>模型</th><th>数据 / 设定</th><th>基准（口径）</th><th>数值</th><th>原文位置</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GRPO</td><td>DeepSeekMath-RL 7B</td><td>GSM8K + MATH 的 CoT 数据</td><td>GSM8K 准确率</td><td class="num">88.2%</td><td>Table 5</td></tr>
+        <tr><td>GRPO</td><td>DeepSeekMath-RL 7B</td><td>同上</td><td>MATH 准确率</td><td class="num">51.7%</td><td>Table 5</td></tr>
+        <tr><td>DAPO</td><td>Qwen2.5-32B</td><td>DAPO-Math-17K</td><td>AIME 2024 avg@32</td><td class="num">50</td><td>DAPO Table 1</td></tr>
+        <tr><td>SAO</td><td>Qwen3-30B-A3B-Thinking-2507</td><td>TIR SFT 初始化</td><td>AIME2025 Pass@1</td><td class="num">97.3</td><td>SAO Table 1</td></tr>
+        <tr><td>SAO</td><td>同上</td><td>同上</td><td>BeyondAIME Pass@1</td><td class="num">74.8</td><td>SAO Table 1</td></tr>
+        <tr><td>SAO</td><td>同上</td><td>OpenHands，最多 300 轮</td><td>SWE-Bench Verified</td><td class="num">29.8</td><td>SAO Table 2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">本页表 6：数字逐格转录自原文；GRPO 的两行来自同一张 Table 5，DAPO 来自 Table 1，SAO 来自 Table 1/2。不同行的模型与基准不同，不能跨行比较。</p>
+
+  <h3>6.2 DAPO 的累加消融：每一步加了多少</h3>
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>配置（按 DAPO Table 1 的累加顺序）</th><th>AIME 2024 avg@32</th><th>相对上一行</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>DeepSeek-R1-Zero-Qwen-32B</td><td class="num">47</td><td>—</td></tr>
+        <tr><td>Naive GRPO</td><td class="num">30</td><td>—</td></tr>
+        <tr><td>+ Overlong Filtering</td><td class="num">36</td><td class="num">+6</td></tr>
+        <tr><td>+ Clip-Higher</td><td class="num">38</td><td class="num">+2</td></tr>
+        <tr><td>+ Soft Overlong Punishment</td><td class="num">41</td><td class="num">+3</td></tr>
+        <tr><td>+ Token-level Loss</td><td class="num">42</td><td class="num">+1</td></tr>
+        <tr class="best"><td>+ Dynamic Sampling（DAPO）</td><td class="num">50</td><td class="num">+8</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">本页表 7：转录自 DAPO Table 1。它是<strong>累加</strong>消融，不是逐项独立消融；“+8”是在已有五项之上的边际，不是动态采样单独的因果效应。DAPO 比 R1-Zero-Qwen-32B 高 <span data-src="DAPO Table 1">3</span> 个百分点，同时只用了后者 <span data-src="§4.2">50%</span> 的训练步数。</p>
+
+  <p>
+    这张表最容易被误读的地方是“token-level loss 只涨 1 分”。DAPO §3.3 明确说它对分数的贡献较小，但让训练更稳、长度增长更健康；只看 AIME 分数会漏掉它的作用。
+    同样，动态采样的 +8 是在特定累加顺序下的结果，而且它增加了采样量；论文 §3.2 说该策略不一定会拖慢训练，§4.2 报告整体训练时间没有明显变差，因为生成阶段本来就被长尾样本主导。
+  </p>
+
+  <h3>6.3 SAO 的消融：单 rollout 之外，value model 的改动各值多少</h3>
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>变体</th><th>AIME2025</th><th>BeyondAIME</th><th>与 SAO 的差</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>SAO</td><td class="num">97.3</td><td class="num">74.8</td><td>—</td></tr>
+        <tr><td>w/o Faster value</td><td class="num">95.0</td><td class="num">69.8</td><td class="num">−2.3 / −5.0</td></tr>
+        <tr><td>w/o Frozen attention</td><td class="num">90.6</td><td class="num">74.5</td><td class="num">−6.7 / −0.3</td></tr>
+        <tr><td>Vanilla VAPO（w/o DIS）</td><td class="num">91.3</td><td class="num">69.0</td><td>—</td></tr>
+        <tr><td>Running mean baseline</td><td class="num">79.8</td><td class="num">55.3</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">本页表 8：转录自 SAO Table 4（另见 SAO Table 3）。差值为 SAO 减该变体：AIME 上 frozen-attention 的缺口为 <span data-src="SAO Table 4">6.7</span> 个百分点，BeyondAIME 上 faster-value 的缺口为 <span data-src="SAO Table 4">5.0</span> 个百分点（表中 Running mean 的缺口更大，不能把这两项读成全表最大）。</p>
+
+  <p>
+    SAO 的结论不是“单 rollout 一定更好”，而是“单 rollout + DIS + 更强的 value model”这一组一起才成立。SAO Table 1 里 SAO 为 <span data-src="SAO Table 1">97.3</span>，仅加 DIS 的 SAO 为 <span data-src="SAO Table 1">94.2</span>，GRPO+DIS 为 <span data-src="SAO Table 1">93.5</span>；单 rollout 本身没有带来这 3.1 个百分点的差距（97.3 − 94.2），value model 的训练方式才是后半段的分水岭（<span class="infer">推断</span>）。
+    论文还报告标准 GRPO 在约 <span data-src="§4.2">160</span> 步崩溃，SAO 稳定训练约 <span data-src="§1">1000</span> 步；vanilla VAPO 在约 <span data-src="§4.4">90</span> 步崩溃。
+  </p>
+
+  <h3>6.4 只给曲线、没有可转录分数的结果</h3>
+  <div class="tbl-scroll">
+    <table class="tbl-mid">
+      <thead>
+        <tr><th>方法</th><th>论文报告</th><th>可核位置</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>CISPO</td><td>相同训练步数下优于 GRPO / DAPO；用 50% 步数追平 DAPO；引言（§1）称 2× 加速</td><td>§3.1（50%）、§1（2×），Figure 2</td></tr>
+        <tr><td>SAPO</td><td>训练更稳、最终 Pass@1 更高；Qwen3-VL 上四个基准都报告提升</td><td>§5.1 Figure 4；§5.2 Figure 6</td></tr>
+        <tr><td>OPD</td><td>文档给损失、GKD/PG 两种模式和配置，不给基准数字</td><td>verl OPD 文档</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size:12.5px;color:var(--text-soft);margin-top:-6px">本页表 9：这三项的可比受控结果在原文/文档中没有可直接转录的最终分数（CISPO 的最终模型分数见 MiniMax-M1 Table 2，但不属于同一受控对比）；页面不把二手博客的数字补进来。</p>
+
+  <p>
+    把三组结果放在一起看，能说的只有：DAPO 在 Qwen2.5-32B / AIME 2024 上从 30 到 50；SAO 在 Qwen3-30B-A3B / AIME2025 上到 97.3；GRPO 在 DeepSeekMath 7B / GSM8K 上到 88.2%。
+    不能把不同模型、数据、基准、评测次数下的分数直接相减。跨论文比较只能比机制，不能比分数。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>这些方法各自解决一段，不是一条单向升级链</h2></div>
+  <p class="sec-sub">边界按五个维度看：reward hacking、长度偏差、group size、离线/在线、实现差异。每一条都决定“这个方法在你的场景里是否成立”。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">边界一</span><h4>Reward hacking：规则奖励不是免疫，只是换了攻击面</h4></div>
+    <p>
+      DAPO §2.4 明确说 reward model 容易 reward hacking，所以改用可验证任务的最终答案正确性作为 reward。规则 verifier 降低了“模型讨好 reward model”的风险，但没有消除“模型钻规则漏洞”的风险：格式、答案等价判定、截断处理都可能被利用（<span class="infer">推断</span>）。
+      SAO 的在线实验用 LLM judge 打 style reward，这类 judge 本身可以被优化；OPD 用 teacher 分布，teacher 的错误会被学生模仿。三种监督信号的 hacking 面不同，不能互相替代（<span class="infer">推断</span>）。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">边界二</span><h4>长度偏差：token 级不是“更公平”，只是换了权重</h4></div>
+    <p>
+      GRPO 的样本级归约给每条回答相同总权重，短回答的每个 token 权重更大；DAPO 的 token 级归约给每个 token 相同权重，长回答的总权重更大。
+      哪个更合适取决于任务：长 CoT 里长回答的 token 也需要被学习，token 级更自然；但如果长回答只是重复，token 级会放大噪声。
+      DAPO 的 overlong shaping 只处理超过 <code>L<sub>max</sub>−L<sub>cache</sub></code> 的样本，不改变预算内的长度偏好；它不能替代对 reward 和归约方式的设计。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界三</span><h4>Group size：G 越大基线越稳，采样越贵</h4></div>
+    <p>
+      GRPO 的 G=64 是 DeepSeekMath 的设置；DAPO 每个 prompt 16 条回答；SAO 直接把 G 降到 1。G 越大，组内均值的方差越小，但 rollout 成本线性增加；G 越小，优势噪声越大，SAO 因此需要 critic 和更强的 value model 来补（<span class="infer">推断</span>）。
+      动态采样还会额外增加采样量：它要一直采到 batch 里全是“非全对非全错”的组。论文说整体训练时间没有明显变差，但这是在其同步系统和长尾生成特征下的结论，不是所有系统都成立（<span class="infer">推断</span>）。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">边界四</span><h4>离线/在线：异步省等待，但引入 policy lag</h4></div>
+    <p>
+      GRPO/DAPO 的组内比较假设同一组的 rollout 来自相近的策略；异步训练里，一条轨迹可能横跨多次策略更新，组内策略漂移会让 Â 失真。SAO 的 DIS 直接用 rollout 引擎的 log-prob 当行为策略，不再追踪 <code>π<sub>θ<sub>old</sub></sub></code>，并用双侧 mask 把偏离太远的 token 整段去掉。
+      代价是它接受一定的 off-policy 偏差；论文说这是“controlled degree of off-policy bias”，不是无偏估计。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">边界五</span><h4>实现差异：同一个名字，可能不是同一张目标函数</h4></div>
+    <p>
+      标准差用 <code>÷G</code> 还是 <code>÷(G−1)</code>、KL 放 reward 还是 loss、loss 用样本级还是 token 级、旧策略 log-prob 是保存还是重算——这些都不在论文的 Eq 里，但会改变梯度。
+      本页的模拟只覆盖 Eq.3 的组内标准化和 Eq.7 的 min/clip 算术；不覆盖真实 token 级 ratio、KL、动态采样、多轮更新和分布式实现。把页面里的数字当成“公式算术”，不要当成“复现实验”。
+    </p>
+  </div>
+
+  <h3>什么时候别用：先问四个问题</h3>
+  <ul>
+    <li><strong>你的 reward 是否可验证？</strong>如果是开放任务、只能用 reward model 或 judge，PPO/RLHF 的 KL 约束和 reward hacking 防护仍然重要；DAPO 的规则奖励前提不成立。</li>
+    <li><strong>你的组内奖励会有差异吗？</strong>如果大多数组全对或全错，GRPO 的 Â 大量为 0；DAPO 的动态采样能过滤，但需要更多采样，且难题本身可能仍然全错。</li>
+    <li><strong>你能承担 critic 吗？</strong>如果能，PPO/SAO 的逐 token 信用更细；如果不能，GRPO/DAPO 的组内基线更省显存。SAO 的 single rollout 还需要一个足够强的 value model 和异步基础设施。</li>
+    <li><strong>你有 teacher 吗？</strong>OPD 需要 teacher 的 token 分布和同 tokenizer 的学生；没有 teacher 时，它不适用。CISPO/SAPO 则是在 group-based RL 内部换信任域，不改变监督信号。</li>
+  </ul>
+
+  <p style="margin-top:22px">
+    一句话总结：<strong>这个家族不是“PPO → GRPO → DAPO → SAO”的版本号序列。</strong>
+    PPO 买的是逐 token 信用，GRPO 省掉 critic 但把信用压成组内标量，DAPO 拆开 clip/采样/长度，CISPO 和 SAPO 改信任域的形状，SAO 改采样方式并把 critic 请回来，OPD 改监督信号。
+    选型时先看你的瓶颈是哪一本账：优势、长度、KL，还是 rollout 吞吐。
+  </p>
+</section>
+
+<footer>
+  <div>PPO · DeepSeekMath / GRPO · DAPO · SAO · MiniMax-M1 / CISPO · SAPO · verl OPD</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/1707.06347" target="_blank" rel="noopener">PPO arXiv:1707.06347</a> ·
+    <a href="https://arxiv.org/abs/1506.02438" target="_blank" rel="noopener">GAE arXiv:1506.02438</a> ·
+    <a href="https://arxiv.org/abs/2402.03300" target="_blank" rel="noopener">DeepSeekMath arXiv:2402.03300</a> ·
+    <a href="https://arxiv.org/abs/2503.14476" target="_blank" rel="noopener">DAPO arXiv:2503.14476</a> ·
+    <a href="https://arxiv.org/abs/2607.07508" target="_blank" rel="noopener">SAO arXiv:2607.07508</a> ·
+    <a href="https://arxiv.org/abs/2506.13585" target="_blank" rel="noopener">MiniMax-M1 arXiv:2506.13585</a> ·
+    <a href="https://arxiv.org/abs/2511.20347" target="_blank" rel="noopener">SAPO arXiv:2511.20347</a> ·
+    <a href="https://verl.readthedocs.io/en/latest/algo/opd.html" target="_blank" rel="noopener">verl OPD 文档</a>
+  </div>
+  <div class="src">
+    版本：PPO v2；DeepSeekMath v3；DAPO v2；SAO v1；SAPO v2；MiniMax-M1 v1。链接均为 abs 页，以各文上述版本为准。
+  </div>
+  <div class="src">
+    笔记：<a href="/grpo/">grpo</a> ·
+    <a href="/ppo/">ppo</a> ·
+    <a href="/dapo/">dapo</a> ·
+    <a href="/cispo/">CISPO</a> ·
+    <a href="/sapo/">SAPO</a> ·
+    <a href="/opd/">OPD</a> ·
+    <a href="/sao/">SAO</a>
+  </div>
+  <div class="src" style="margin-top:18px">
+    <strong>笔记勘误（按原文修正，未改动笔记文件）：</strong><br>
+    1. SAPO 笔记把软门控写成 <code>r/(τ+r)</code> 或 <code>sigmoid(log r/τ)</code>；原文 Eq.6 是 <code>σ(τ(r−1))·4/τ</code>，页面按原文写。<br>
+    2. SAPO 笔记的参考没有引用 SAPO 论文，只列了“Qwen3 Technical Report（RL 优化部分）”与一篇博客；本页使用的是独立论文 arXiv:2511.20347（Qwen Team），并核对了 Eq.5/6 与 τ 设置。<br>
+    3. GRPO 笔记把 KL 描述成“sentence-level”；原文 Eq.3 是把逐 token 的 KL 估计量放进 token 求和内，区别在“KL 放 loss 还是 reward”，不是句子级与 token 级之分。<br>
+    4. CISPO 笔记说“PPO 的裁剪是直接对梯度进行裁剪”；更准确的说法是 PPO 裁目标/概率比，梯度归零是裁剪区间外的一种后果。页面按“裁概率比 vs 裁 IS 权重”表述。<br>
+    5. dapo 笔记只列了四个技巧，没有给 Eq.10–13 与 DAPO Table 1 的数值；页面补了公式、超参和累加消融。<br>
+    6. OPD 笔记的出处是 verl 官方文档，不是单篇论文；页面把论文谱系上的原始出处标为“待核”，没有补二手来源。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  function fmt3(x) {
+    if (Math.abs(x) < 0.0005) x = 0;
+    return x.toFixed(3);
+  }
+  function sign3(x) {
+    if (Math.abs(x) < 0.0005) x = 0;
+    return (x >= 0 ? '+' : '') + x.toFixed(3);
+  }
+  function clamp(x, lo, hi) {
+    return Math.max(lo, Math.min(hi, x));
+  }
+
+  /* ---------------- 交互 1：组内优势 + clip ---------------- */
+  var REWARDS = {
+    4: [1, 0, 1, 0],
+    8: [1, 0, 1, 1, 0, 0, 1, 0]
+  };
+  var advState = { g: 4, idx: 0 };
+
+  function advStats() {
+    var rs = REWARDS[advState.g];
+    var G = rs.length;
+    var sum = 0;
+    var i;
+    for (i = 0; i < G; i++) sum += rs[i];
+    var mean = sum / G;
+    var sq = 0;
+    for (i = 0; i < G; i++) sq += (rs[i] - mean) * (rs[i] - mean);
+    var variance = sq / G;
+    var std = Math.sqrt(variance);
+    var adv = [];
+    for (i = 0; i < G; i++) adv.push(std > 1e-12 ? (rs[i] - mean) / std : 0);
+    return { rs: rs, G: G, mean: mean, std: std, adv: adv };
+  }
+
+  function renderAdvSlots() {
+    var host = document.getElementById('adv-slots');
+    if (!host) return;
+    var st = advStats();
+    host.innerHTML = '';
+    for (var i = 0; i < st.G; i++) {
+      var slot = document.createElement('div');
+      slot.className = 'slot' + (i === advState.idx ? ' hit' : '');
+      slot.setAttribute('data-i', String(i));
+      slot.innerHTML =
+        '<div class="slot-name">r' + i + ' = ' + st.rs[i] + '</div>' +
+        '<div class="slot-val">Â ' + sign3(st.adv[i]) + '</div>';
+      host.appendChild(slot);
+    }
+  }
+
+  function renderAdv() {
+    var out = document.getElementById('adv-out');
+    if (!out) return;
+    var st = advStats();
+    var idx = Math.min(advState.idx, st.G - 1);
+    var rEl = document.getElementById('adv-r');
+    var elEl = document.getElementById('adv-el');
+    var ehEl = document.getElementById('adv-eh');
+    var r = rEl ? parseFloat(rEl.value) : 1.3;
+    var el = elEl ? parseFloat(elEl.value) : 0.2;
+    var eh = ehEl ? parseFloat(ehEl.value) : 0.28;
+    var adv = st.adv[idx];
+    var unclipped = r * adv;
+    var clippedR = clamp(r, 1 - el, 1 + eh);
+    var clipped = clippedR * adv;
+    var obj = Math.min(unclipped, clipped);
+
+    out.innerHTML =
+      '<div>组均值 mean = <strong>' + fmt3(st.mean) + '</strong>；总体标准差 std = <strong>' + fmt3(st.std) + '</strong>（÷G）</div>' +
+      '<div>选中样本 r<sub>' + idx + '</sub> = ' + st.rs[idx] + '，Â = <strong>' + sign3(adv) + '</strong></div>' +
+      '<div>r = ' + fmt3(r) + '；unclipped r·Â = ' + sign3(unclipped) + '；clip(r) = <span data-src="DAPO §4.1 Eq.10">' + fmt3(clippedR) + '</span>；clipped = ' + sign3(clipped) + '</div>' +
+      '<div>目标 min = <strong>' + sign3(obj) + '</strong></div>';
+
+    var idxV = document.getElementById('adv-idx-v');
+    if (idxV) idxV.textContent = String(idx);
+    var rV = document.getElementById('adv-r-v');
+    if (rV) rV.textContent = fmt3(r);
+    var elV = document.getElementById('adv-el-v');
+    if (elV) elV.textContent = fmt3(el);
+    var ehV = document.getElementById('adv-eh-v');
+    if (ehV) ehV.textContent = fmt3(eh);
+  }
+
+  function setG(g) {
+    advState.g = g;
+    advState.idx = 0;
+    var idxEl = document.getElementById('adv-idx');
+    if (idxEl) {
+      idxEl.max = String(g - 1);
+      idxEl.value = '0';
+    }
+    var btns = document.querySelectorAll('#adv-modes .rule-btn');
+    for (var i = 0; i < btns.length; i++) {
+      if (parseInt(btns[i].getAttribute('data-g'), 10) === g) {
+        btns[i].classList.add('active');
+      } else {
+        btns[i].classList.remove('active');
+      }
+    }
+    renderAdvSlots();
+    renderAdv();
+  }
+
+  var advModes = document.getElementById('adv-modes');
+  if (advModes) {
+    advModes.addEventListener('click', function (ev) {
+      var btn = ev.target.closest ? ev.target.closest('.rule-btn') : null;
+      if (!btn) return;
+      var g = parseInt(btn.getAttribute('data-g'), 10);
+      if (g === 4 || g === 8) setG(g);
+    });
+  }
+
+  var advSlots = document.getElementById('adv-slots');
+  if (advSlots) {
+    advSlots.addEventListener('click', function (ev) {
+      var slot = ev.target.closest ? ev.target.closest('.slot') : null;
+      if (!slot) return;
+      var i = parseInt(slot.getAttribute('data-i'), 10);
+      if (isNaN(i)) return;
+      advState.idx = i;
+      var idxEl = document.getElementById('adv-idx');
+      if (idxEl) idxEl.value = String(i);
+      renderAdvSlots();
+      renderAdv();
+    });
+  }
+
+  ['adv-idx', 'adv-r', 'adv-el', 'adv-eh'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', function () {
+      if (id === 'adv-idx') {
+        advState.idx = parseInt(el.value, 10);
+        renderAdvSlots();
+      }
+      renderAdv();
+    });
+  });
+
+  /* ---------------- 交互 2：样本级 vs token 级权重 ---------------- */
+  function renderLen() {
+    var l1El = document.getElementById('len-l1');
+    var l2El = document.getElementById('len-l2');
+    if (!l1El || !l2El) return;
+    var l1 = parseInt(l1El.value, 10);
+    var l2 = parseInt(l2El.value, 10);
+    var total = l1 + l2;
+    var wToken1 = l1 / total;
+    var wToken2 = l2 / total;
+
+    var l1v = document.getElementById('len-l1-v');
+    if (l1v) l1v.textContent = String(l1);
+    var l2v = document.getElementById('len-l2-v');
+    if (l2v) l2v.textContent = String(l2);
+
+    var host = document.getElementById('len-slots');
+    if (host) {
+      host.innerHTML =
+        '<div class="slot">' +
+          '<div class="slot-name">回答 1 · L=' + l1 + '</div>' +
+          '<div class="slot-val">样本级 0.500 / token 级 ' + fmt3(wToken1) + '</div>' +
+          '<div class="bar"><i class="b1" style="width:' + (wToken1 * 100).toFixed(1) + '%"></i></div>' +
+        '</div>' +
+        '<div class="slot">' +
+          '<div class="slot-name">回答 2 · L=' + l2 + '</div>' +
+          '<div class="slot-val">样本级 0.500 / token 级 ' + fmt3(wToken2) + '</div>' +
+          '<div class="bar"><i class="b3" style="width:' + (wToken2 * 100).toFixed(1) + '%"></i></div>' +
+        '</div>';
+    }
+
+    var out = document.getElementById('len-out');
+    if (!out) return;
+    var ratio = wToken1 > 1e-9 ? wToken2 / wToken1 : 0;
+    out.innerHTML =
+      '<div>总 token 数 = ' + l1 + ' + ' + l2 + ' = <strong>' + total + '</strong></div>' +
+      '<div>样本级：两条回答各 <strong>1/2 = 0.500</strong>（每条回答总权重相同）</div>' +
+      '<div>token 级：回答 1 = <strong>' + l1 + '/' + total + ' = ' + fmt3(wToken1) + '</strong>；回答 2 = <strong>' + l2 + '/' + total + ' = ' + fmt3(wToken2) + '</strong></div>' +
+      '<div>回答 2 / 回答 1 权重比 = <strong>' + fmt3(ratio) + '</strong></div>';
+  }
+
+  ['len-l1', 'len-l2'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', renderLen);
+  });
+
+  /* 初始化 */
+  renderAdvSlots();
+  renderAdv();
+  renderLen();
+})();
+</script>
+</body>
+</html>

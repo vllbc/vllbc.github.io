@@ -1,0 +1,497 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1296 | §3.3.4 | 54*24 |
+| 3.09 | §3.3.4 | 1296/419 |
+| 419.42 | §3.3.4 | 1296/3.09 |
+| 0.50 | §3.3.4 | 1/2 |
+| 209.71 | §3.3.4 | (1296/3.09)*(1/2) |
+| 64.80 | §3.3.4 | (1296/1)*0.05 |
+| 78.82 | §3.3.4 | (1296-209.71-64.80)/1296*100 |
+| 1.00 | §3.3.4 | 2/2 |
+| 419.42 | §3.3.4 | (1296/3.09)*(2/2) |
+| 62.64 | §3.3.4 | (1296-419.42-64.80)/1296*100 |
+| 0.14 | §3.3.4 | 0.28/2 |
+| 58.72 | §3.3.4 | (1296/3.09)*0.14 |
+| 57.86 | §3.3.4 | (1296/0.28)*0.0125 |
+| 91.00 | §3.3.4 | (1296-58.72-57.86)/1296*100 |
+| 4628.5714 | §3.3.4 | 1296/0.28 |
+| 3 | §3.3.4 | 0.05*60 |
+| 45 | §3.3.4 | 0.0125*3600 |
+| 126 | Table 5 | 0.301*419 |
+| 35.3 | Table 5 | 148/419*100 |
+| 246 | Table 5 | 126+72+19+17+6+6 |
+| 268 | Table 5 | 148+72+19+17+6+6 |
+| 58.71 | Table 5 | 246/419*100 |
+| 63.96 | Table 5 | 268/419*100 |
+| 2 | Table 4 | 43-41 |
+| 5 | Table 4 | 43-38 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ultra-Scale 训练容错 · 419 次意外中断与 checkpoint 账本</title>
+<meta name="description" content="Llama 3 405B 在 16,384 张 H100 上的 54 天预训练快照中记录 419 次意外中断，仍报告高于 90% 的有效训练时间。讲清 checkpoint 组成、分片、异步、恢复流程与 MTBF 权衡。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.table-cap{font-size:12.5px;color:var(--text-soft);margin:18px 0 0;line-height:1.7}
+.table-note{font-size:12.5px;color:var(--text-soft);margin:10px 0 0;line-height:1.7}
+.details-body code{word-break:break-all}
+.sim .slot-val{font-size:13.5px}
+.tl-axis{stroke:var(--border-strong);stroke-width:2}
+.tl-cp{fill:var(--c1);stroke:var(--c1)}
+.tl-cp-line{stroke:var(--c1);stroke-width:2}
+.tl-fail{fill:var(--accent);stroke:var(--accent)}
+.tl-fail-line{stroke:var(--accent);stroke-width:2;stroke-dasharray:5 4}
+.tl-lost{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1}
+.tl-arrow{fill:none;stroke:var(--accent);stroke-width:2}
+.tl-label{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--text-muted)}
+.tl-label-hot{font-family:Inter,"Noto Sans SC",sans-serif;font-size:13px;fill:var(--accent-deep);font-weight:600}
+.tl-small{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+@media (max-width:500px){.sim{padding:18px 14px}.rule-btn{flex:1 1 100%}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Ultra-Scale 容错</div>
+    <nav>
+      <a href="#problem">01 问题</a>
+      <a href="#prior">02 已有方案</a>
+      <a href="#method">03 核心方法</a>
+      <a href="#ledger">04 账本</a>
+      <a href="#recovery">05 恢复</a>
+      <a href="#results">06 效果</a>
+      <a href="#limits">07 边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>分布式训练 · 2024</span>
+  <h1>Ultra-Scale 训练的容错：419 次意外中断，为什么有效训练时间还能高于 90%</h1>
+  <p class="hero-sub">Llama 3 405B 在最多 16,384 张 H100 上的 54 天预训练快照中记录到 419 次意外中断，仍报告高于 90% 的有效训练时间。checkpoint 把恢复变成“回到最近快照 + 重跑”，代价是写带宽、存储和一致性。</p>
+  <div class="meta">
+    <span>Meta Llama Team · arXiv 2407.21783v3</span>
+    <a href="https://arxiv.org/abs/2407.21783v3" target="_blank" rel="noopener">原文 ↗</a>
+    <a href="https://github.com/huggingface/nanotron" target="_blank" rel="noopener">nanotron ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>万卡训练的故障不是例外：Llama 3 405B 的 54 天快照里，466 次作业中断，其中 419 次是意外中断；按这个计数折算，集群平均每 3.09 小时就有一次意外中断（本页按 54 天 ÷ 419 折算，不是论文给出的 MTBF 指标）。同步训练里，单卡故障可能要求整个作业重启。</p>
+  <p>checkpoint 把恢复变成“回到最近快照 + 重跑”。频率越高，丢失的工作越少，但每次停顿和写入量越大；同步 checkpoint 的停顿落在关键路径上，异步 checkpoint 把磁盘写入挪到后台，但快照复制仍要占时间。</p>
+  <p>Llama 3 的实测是：在 16,384 张 H100 的 54 天预训练快照、419 次意外中断下，有效训练时间仍高于 90%，只有 3 次需要重大人工干预。论文没有报告 checkpoint 间隔和单次停顿，所以不能从 90% 反推出这两个参数。</p>
+  <p>本页用一个简化账本把 trade-off 算清楚：有效时间 ≈ 1 − I/(2·MTBF) − C/I。它不替代论文数据，只用来解释为什么“更频繁”不一定更好。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="§3.3.4">419</div><div class="k">54 天内的意外中断次数（另有 47 次计划中断）</div></div>
+    <div class="metric"><div class="v" data-src="§3.3.4">&gt;90<small>%</small></div><div class="k">有效训练时间：有用训练时间 / 总耗时</div></div>
+    <div class="metric"><div class="v" data-src="§3.3.4">58.7<small>%</small></div><div class="k">GPU 问题占全部意外中断的比例</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>规模上来后，故障从“意外”变成“日常”</h2></div>
+  <p class="sec-sub">读完这节你应该知道：万卡训练的故障间隔有多短，为什么一次单卡故障会放大成整个作业的重启。</p>
+  <p>Llama 3 405B 的训练最多用到 16,384 张 H100（Table 4）。论文对这套集群的判断很直接：16K GPU 训练的复杂度和潜在故障场景超过他们运维过的更大 CPU 集群；训练是同步的，单张 GPU 故障可能要求整个作业重启（§3.3.4）。</p>
+  <p>论文给出一个 54 天的预训练快照：期间共 466 次作业中断，47 次是计划中断（固件升级、配置或数据更新），419 次是意外中断（§3.3.4）。把 419 次摊到 54 天，得到 <strong>3.09 小时/次</strong>的集群级平均间隔（本页折算，不是论文给出的 MTBF 指标）。换句话说，按这个快照，集群平均每 3 小时左右就要处理一次意外中断。</p>
+  <div class="eq">
+    MTBF<sub>cluster</sub> = 54 天 × 24 h / 419 = <span class="hl-c">3.09 h</span>
+  </div>
+  <p class="eq-cap">按 §3.3.4 的 419 次意外中断折算；这是“集群级”间隔，不是单卡 MTBF。</p>
+  <p>故障来源并不集中在“GPU 坏了”这一项。Table 5 的类别里，Faulty GPU 148 次、GPU HBM3 Memory 72 次、Software Bug 54 次、Network Switch/Cable 35 次、Host Maintenance 32 次；GPU 相关类别合计仍是最大头，论文正文写 GPU 问题占 58.7%（§3.3.4）。</p>
+  <p>这就是万卡容错的基本矛盾：在 16K 卡的尺度上，故障不再是低频例外；同步训练又把单点故障的恢复粒度放大到整个作业。checkpoint 不是“可选优化”，而是把故障损失限制在一个可计算窗口内的基础设施。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>同步 checkpoint 把恢复变成“回到快照再重跑”</h2></div>
+  <p class="sec-sub">读完这节你应该知道：最直接的方案为什么有效，又为什么会在万卡规模上撞到停顿和写带宽。</p>
+  <p>最直接的容错方案是周期性 checkpoint：所有 rank 停下来，把模型、优化器、学习率调度器、RNG 和数据读取位置写进共享存储，然后继续训练。故障发生后，作业重启，加载最近一次完整 checkpoint，从那个 iteration 继续，未 checkpoint 的 step 全部重跑。</p>
+  <p>Llama 3 也做周期性 checkpoint；论文未说明它是同步还是异步。§3.3.1 写明：checkpoint 保存每张 GPU 的模型状态，单卡范围 1 MB 到 4 GB；目标是<strong>缩短 checkpoint 期间的 GPU 停顿</strong>，同时<strong>提高 checkpoint 频率</strong>以减少恢复后丢失的工作。这两句话本身就是一对矛盾：频率越高，丢失越少，但停顿和写入次数越多。</p>
+  <p>存储侧的压力是实打的。Llama 3 的存储 fabric 基于 Tectonic，240 PB、7,500 台 SSD 服务器，持续吞吐 2 TB/s、峰值 7 TB/s；论文特别指出，checkpoint 写入是高度突发的，会在短时间内打满存储 fabric（§3.3.1）。</p>
+  <p>同步方案还有两个结构性代价：</p>
+  <ul>
+    <li><strong>停顿在关键路径上。</strong>所有 rank 必须等 checkpoint 完成或至少等状态复制完成，GPU 才能继续算；这部分时间直接进入总耗时。</li>
+    <li><strong>恢复粒度是整作业。</strong>同步训练里，一张卡或一个节点的故障可能触发整个作业重启；重启、排队、加载、回滚都要算进故障成本（§3.3.4）。</li>
+  </ul>
+  <p>工程侧可以对照 Hugging Face Ultra-Scale Playbook 的 “Lessons learned on benchmarking”：他们遇到 Slurm 强制终止作业、进程清理失败、作业无限挂起，并把大量时间花在缩短集群重启和 idle time 上。这是工程资料，不是论文实验数字；本页只在说明“恢复流程本身也是成本”时引用。</p>
+  <p>所以“同步 checkpoint + 重跑”不是错，而是把问题从“故障不可控”变成了“窗口可计算”：剩下的问题是怎么让窗口更小、让停顿更短。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>把状态切片、异步写出，checkpoint 才能跟上故障率</h2></div>
+  <p class="sec-sub">读完这节你应该知道：一个可恢复的 checkpoint 里到底有什么，分布式框架怎么分片和写元数据，异步写又把停顿挪到了哪里。</p>
+  <p>以下实现细节来自 PyTorch、Megatron、DeepSpeed 源码与 nanotron 文档；论文数字只来自 Llama 3 §3.3.1、§3.3.4、Table 4、Table 5。</p>
+
+  <h3>checkpoint 里不只有权重</h3>
+  <p>一个能“原地续训”的 checkpoint 至少包含：模型参数、优化器状态（例如 Adam 的 m/v 与 fp32 master weights）、学习率调度器、RNG 状态、数据加载器位置、当前 iteration。少任何一项，恢复后都不是同一条训练轨迹。</p>
+  <p>三个框架的保存入口都体现了这一点。DeepSpeed 的 <code>save_checkpoint</code> 保存 module state、optimizer states、LR scheduler 和 client_state，并要求所有进程一起调用——每个进程要写自己的 master weights 和 optimizer states（<code>deepspeed/runtime/engine.py:4914</code>）。Megatron 的 <code>save_checkpoint</code> 接收 model、optimizer、opt_param_scheduler、dataloader iterator 和 iteration（<code>megatron/training/checkpointing.py:640</code>）。Nanotron 的文档把 checkpoint 拆成 <code>model/</code>、<code>optimizer/</code>、<code>lr_scheduler/</code>、<code>random/</code> 和一个 <code>checkpoint_metadata.json</code>，后者记录 version、topology 和恢复所需元数据（nanotron <code>docs/docs.md</code>）。</p>
+  <p>Llama 3 给了一个尺度感：单张 GPU 的模型状态在 1 MB 到 4 GB 之间（§3.3.1）。论文只写 model state，未说明是否含优化器状态 <span class="infer">推断</span>；405B 模型的完整 checkpoint 只会更大。</p>
+
+  <h3>分片：每个 rank 只写自己那一块</h3>
+  <p>PyTorch Distributed Checkpoint（DCP）的 <code>save</code> 明确按 SPMD 工作：每个 rank 只保存本地 shard，不把所有状态 gather 到 rank 0（<code>torch/distributed/checkpoint/state_dict_saver.py:89</code>）。checkpoint 的元数据记录每个 tensor 的 chunk offsets/sizes、planner data 和 storage data（<code>torch/distributed/checkpoint/metadata.py:154</code>；chunk 结构见 <code>metadata.py:24</code>）。加载时按元数据把 shard 映射回当前模型的切分。</p>
+  <p>Megatron 的 <code>dist_checkpointing</code> 把“sharded state dict”同时当作保存输入和加载指南：<code>load</code> 的文档说，加载需要现有的 sharded state dict 作为 guidance（<code>megatron/core/dist_checkpointing/serialization.py:78</code>）；保存和加载分别由 <code>TorchDistSaveShardedStrategy</code> 和 <code>TorchDistLoadShardedStrategy</code> 实现（<code>megatron/core/dist_checkpointing/strategies/torch.py:684</code>、<code>:924</code>）。非 sharded 的公共状态在 current format 里作为 <code>common_state</code> ShardedObject 存进 checkpoint，legacy 才走 <code>common.pt</code>（<code>serialization.py:212</code>）。</p>
+  <p>DeepSpeed 的 ZeRO checkpoint 按 DP rank 写文件，文件名形如 <code>zero_pp_rank_&lt;dp&gt;_mp_rank_&lt;mp&gt;_optim_states.pt</code>（<code>deepspeed/runtime/engine.py:4358</code>；前缀常量见 <code>deepspeed/checkpoint/constants.py:41</code>）。加载时先读 <code>latest</code> 文件拿到 tag，再按文件加载（<code>deepspeed/runtime/engine.py:4426</code>）。</p>
+  <p>Nanotron 的文档则直接承认：checkpoint <strong>不是 topology-agnostic</strong>，因为 random states 和 sharded tensors 都和切分方式绑定；他们计划用 <code>checkpoint_reshape</code> 解决（nanotron <code>docs/docs.md</code>）。这解释了弹性训练为什么难：换卡数不是“多开几个进程”，而是要把旧切分映射到新切分。</p>
+
+  <h3>异步：把磁盘写入挪出关键路径</h3>
+  <p>DCP 的 <code>async_save</code> 先做 staging：把 state_dict 复制到 staging storage（默认 CPU 内存），然后在独立线程里调用 <code>save</code>（<code>torch/distributed/checkpoint/state_dict_saver.py:221</code>）。staging 的目的就是制造一个“training-safe”的快照：复制完成后，训练继续更新参数，不会影响正在序列化的那份数据（<code>torch/distributed/checkpoint/staging.py:40</code>）。</p>
+  <p>Megatron 的 <code>--async-save</code> 走 <code>dist_checkpointing.save(..., async_sharded_save=True, ...)</code>（<code>megatron/training/checkpointing.py:945</code>）；如果上一次异步保存还没结束，它会打印警告，建议增大 checkpoint 间隔（<code>checkpointing.py:696</code>）。这说明异步不是无限提速：写入队列会堆积，后台写和下一轮训练会争 CPU 内存、网络和存储带宽。</p>
+  <p>把三种方案放在一起看：同步 checkpoint 的停顿约等于写完整状态的时间；异步 checkpoint 的停顿约等于 staging 复制的时间，磁盘写入与后续训练 overlap；但异步需要双缓冲/额外 CPU 内存，而且写不完时仍会反压。checkpoint 频率的上限，最终由“写带宽 + 可用内存”决定，而不是由愿望决定。</p>
+</section>
+
+<section class="block" id="ledger">
+  <div class="sec-head"><span class="sec-num">04</span><h2>停顿与丢失工作量的账本：间隔越短，写放大越贵</h2></div>
+  <p class="sec-sub">读完这节你应该知道：把 MTBF、checkpoint 间隔、单次停顿和总时长放在一起，怎么算预期故障数、平均丢失工作和有效训练时间。</p>
+  <p>把故障看成随机到达，并假设 checkpoint 间隔固定为 <code>I</code> 小时、每次 checkpoint 让训练停顿 <code>C</code> 小时、集群平均无故障时间为 <code>MTBF</code> 小时。故障落在两次 checkpoint 之间时，平均要丢掉半个间隔的工作量；checkpoint 本身也要占时间。于是有效训练时间比例可以写成：</p>
+  <div class="eq">
+    T<sub>eff</sub> = 1 − <span class="hl-a">I / (2 × MTBF)</span> − <span class="hl-b">C / I</span>
+  </div>
+  <p class="eq-cap">第一项是平均丢失工作量，第二项是 checkpoint 停顿；推导假设故障均匀落在间隔内，忽略恢复时间与故障间的相关性。</p>
+  <p>对 <code>I</code> 求导，最优间隔满足 <code>I* = √(2 × C × MTBF)</code>。这个式子说明：checkpoint 越便宜（<code>C</code> 越小），最优间隔越短；MTBF 越长，间隔也可以放长。但两边都是“按本页模型”的结论，不是论文的实测参数。</p>
+  <p>下面的计算器把四个输入放在一起。MTBF 和总时长的默认值来自 §3.3.4 的 419 次/54 天折算；checkpoint 间隔和停顿是可调假设，不是论文报告值。</p>
+
+  <div class="sim">
+    <div class="sim-top">
+      <button type="button" class="rule-btn active" data-preset="sync">同步 · 1 h / 3 min<span class="r-sub">I=1.00 h, C=0.05 h</span></button>
+      <button type="button" class="rule-btn" data-preset="coarse">粗粒度 · 2 h / 6 min<span class="r-sub">I=2.00 h, C=0.10 h</span></button>
+      <button type="button" class="rule-btn" data-preset="async">异步 · 0.28 h / 45 s<span class="r-sub">I=0.28 h, C=0.0125 h</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl"><label for="in-mtbf">MTBF <span class="v" id="v-mtbf">3.09 h</span></label><input id="in-mtbf" type="range" min="0.5" max="12" step="0.01" value="3.09"></div>
+      <div class="ctrl"><label for="in-interval">checkpoint 间隔 I <span class="v" id="v-interval">1.00 h</span></label><input id="in-interval" type="range" min="0.05" max="6" step="0.01" value="1.00"></div>
+      <div class="ctrl"><label for="in-pause">单次停顿 C <span class="v" id="v-pause">0.05 h</span></label><input id="in-pause" type="range" min="0.005" max="0.5" step="0.0025" value="0.05"></div>
+      <div class="ctrl"><label for="in-total">训练总时长 T <span class="v" id="v-total">1296 h</span></label><input id="in-total" type="range" min="168" max="4320" step="24" value="1296"></div>
+    </div>
+    <div class="slots">
+      <div class="slot"><div class="slot-name">预期故障数</div><div class="slot-val" id="out-failures">419.42</div></div>
+      <div class="slot"><div class="slot-name">平均丢失/次</div><div class="slot-val" id="out-lost-per">0.50 h</div></div>
+      <div class="slot"><div class="slot-name">checkpoint 总开销</div><div class="slot-val" id="out-ckpt">64.80 h</div></div>
+      <div class="slot"><div class="slot-name">有效训练时间</div><div class="slot-val" id="out-eff">78.82%</div></div>
+    </div>
+    <div class="bar" aria-hidden="true"><i class="b1" id="bar-useful" style="width:78.82%"></i><i class="b2" id="bar-lost" style="width:16.18%"></i><i class="b3" id="bar-ckpt" style="width:5.00%"></i></div>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>有效训练</span>
+      <span><i style="background:var(--c1)"></i>丢失工作量</span>
+      <span><i style="background:var(--c2)"></i>checkpoint 停顿</span>
+    </div>
+    <div class="readout" data-src="§3.3.4">
+      <div class="r-head">本页简化账本 · 非论文实测</div>
+      总丢失工作量 <strong id="out-lost-total">209.71 h</strong>；checkpoint 总开销 <strong id="out-ckpt-total">64.80 h</strong>；有效训练时间 <strong id="out-eff2">78.82%</strong>。按该模型，故障数 = T / MTBF，平均丢失 = I / 2，checkpoint 开销 = (T / I) × C。忽略恢复时间、排队时间和相关性故障。
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 A：同步 1 h / 3 min <span class="sum-sub">MTBF=3.09 h, T=1296 h</span></summary>
+    <div class="details-body">
+      <p>预期故障数 = 1296 / 3.09 = <strong>419.4175</strong> → 显示 419.42。</p>
+      <p>平均丢失/次 = 1.00 / 2 = <strong>0.50 h</strong>；总丢失 = 419.4175 × 0.50 = <strong>209.7087 h</strong> → 209.71 h。</p>
+      <p>checkpoint 次数 = 1296 / 1.00 = 1296；总开销 = 1296 × 0.05 = <strong>64.80 h</strong>。</p>
+      <p>有效比例 = (1296 − 209.7087 − 64.80) / 1296 × 100 = <strong>78.8188%</strong> → 78.82%。</p>
+      <p>JS 在相同输入下显示：419.42 / 0.50 h / 64.80 h / 78.82%。</p>
+    </div>
+  </details>
+  <details class="handcalc">
+    <summary>手算 B：异步 0.28 h / 45 s <span class="sum-sub">MTBF=3.09 h, T=1296 h</span></summary>
+    <div class="details-body">
+      <p>预期故障数 = 1296 / 3.09 = <strong>419.4175</strong> → 419.42。</p>
+      <p>平均丢失/次 = 0.28 / 2 = <strong>0.14 h</strong>；总丢失 = 419.4175 × 0.14 = <strong>58.7184 h</strong> → 58.72 h。</p>
+      <p>checkpoint 次数 = 1296 / 0.28 = <strong>4628.5714</strong>（连续近似，实际次数取整）；总开销 = 4628.5714 × 0.0125 = <strong>57.8571 h</strong> → 57.86 h。</p>
+      <p>有效比例 = (1296 − 58.7184 − 57.8571) / 1296 × 100 = <strong>91.0050%</strong> → 91.00%。</p>
+      <p>JS 在相同输入下显示：419.42 / 0.14 h / 57.86 h / 91.00%。</p>
+    </div>
+  </details>
+  <p>注意这不是对 Llama 3 的复算：论文没有报告 <code>I</code> 和 <code>C</code>，也没有把 419 次中断逐次对应到丢失的 step。这个账本只回答“如果 MTBF 是 3.09 小时，间隔和停顿取这些值，损失大概是多少”。</p>
+</section>
+
+<section class="block" id="recovery">
+  <div class="sec-head"><span class="sec-num">05</span><h2>恢复流程：检测、重启、加载、回滚，每一步都要能自动完成</h2></div>
+  <p class="sec-sub">读完这节你应该知道：一次故障从被检测到训练恢复，中间经过哪些步骤，每一步依赖什么状态。</p>
+
+  <figure>
+    <svg viewBox="0 0 800 260" role="img" aria-label="checkpoint 与故障回滚时间线：C0 到 C4 周期写 checkpoint，故障落在 C3 与 C4 之间，恢复时回滚到 C3，丢失 C3 之后的工作量">
+      <defs>
+        <marker id="tl-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0 0 L8 4 L0 8 Z" fill="var(--accent)"/>
+        </marker>
+      </defs>
+      <text x="40" y="26" class="tl-small">训练时间 →</text>
+      <line x1="40" y1="150" x2="770" y2="150" class="tl-axis"/>
+      <g>
+        <line x1="90" y1="136" x2="90" y2="164" class="tl-cp-line"/>
+        <circle cx="90" cy="150" r="5" class="tl-cp"/>
+        <text x="90" y="184" text-anchor="middle" class="tl-label">C0</text>
+        <line x1="250" y1="136" x2="250" y2="164" class="tl-cp-line"/>
+        <circle cx="250" cy="150" r="5" class="tl-cp"/>
+        <text x="250" y="184" text-anchor="middle" class="tl-label">C1</text>
+        <line x1="410" y1="136" x2="410" y2="164" class="tl-cp-line"/>
+        <circle cx="410" cy="150" r="5" class="tl-cp"/>
+        <text x="410" y="184" text-anchor="middle" class="tl-label">C2</text>
+        <line x1="560" y1="136" x2="560" y2="164" class="tl-cp-line"/>
+        <circle cx="560" cy="150" r="5" class="tl-cp"/>
+        <text x="560" y="184" text-anchor="middle" class="tl-label">C3</text>
+        <line x1="720" y1="136" x2="720" y2="164" class="tl-cp-line"/>
+        <circle cx="720" cy="150" r="5" class="tl-cp"/>
+        <text x="720" y="184" text-anchor="middle" class="tl-label">C4</text>
+      </g>
+      <line x1="640" y1="62" x2="640" y2="150" class="tl-fail-line"/>
+      <circle cx="640" cy="150" r="6" class="tl-fail"/>
+      <text x="640" y="50" text-anchor="middle" class="tl-label-hot">故障</text>
+      <rect x="560" y="156" width="80" height="20" class="tl-lost"/>
+      <text x="600" y="170" text-anchor="middle" class="tl-small">丢失工作量</text>
+      <text x="600" y="198" text-anchor="middle" class="tl-small">平均 ≈ I / 2</text>
+      <path d="M 632 112 C 612 84, 588 84, 568 112" class="tl-arrow" marker-end="url(#tl-arrow)"/>
+      <text x="600" y="78" text-anchor="middle" class="tl-label-hot">回滚到 C3</text>
+      <line x1="560" y1="218" x2="720" y2="218" class="tl-axis"/>
+      <line x1="560" y1="212" x2="560" y2="224" class="tl-axis"/>
+      <line x1="720" y1="212" x2="720" y2="224" class="tl-axis"/>
+      <text x="640" y="240" text-anchor="middle" class="tl-small">checkpoint 间隔 I</text>
+    </svg>
+    <figcaption>checkpoint 每隔 I 小时写一次；故障落在 C3 与 C4 之间，恢复时回滚到 C3，C3 之后、故障之前的 step 需要重跑。示意图不按真实时间比例。</figcaption>
+  </figure>
+
+  <p>把 Llama 3 的描述和三个框架的接口放在一起，恢复可以拆成六步：</p>
+  <ol>
+    <li><strong>检测。</strong>NCCL watchdog/heartbeat 超时、通信卡死、进程退出。Llama 3 使用 PyTorch 内置的 NCCL flight recorder，把 collective metadata 和 stack trace 写进 ring buffer，并在 watchdog/heartbeat 超时时自动 dump（§3.3.4）。</li>
+    <li><strong>定位与隔离。</strong>判断是单卡、节点、网络还是软件；把坏节点从调度池里摘掉，避免重启后再次撞上。Llama 3 还提到 straggler 排查：单张慢卡可能表现为“通信正常但很慢”（§3.3.4）。</li>
+    <li><strong>重启作业。</strong>同步训练的恢复粒度是整个 job；调度器重新分配节点，所有 rank 重新初始化进程组和并行组（§3.3.4）。</li>
+    <li><strong>加载 checkpoint。</strong>DeepSpeed 先读 <code>latest</code> 拿 tag（<code>deepspeed/runtime/engine.py:4426</code>）；Megatron 用当前模型的 sharded state dict 作为加载指南（<code>megatron/core/dist_checkpointing/serialization.py:78</code>）；DCP 用元数据里的 chunk offsets/sizes 把保存时的 shard 映射到当前切分（<code>torch/distributed/checkpoint/metadata.py:24</code>）。</li>
+    <li><strong>回滚到最近完整 checkpoint。</strong>恢复 iteration、优化器状态、LR scheduler、RNG 和数据读取位置；没有 checkpoint 的 step 重跑。丢失的工作量就是“故障时刻 − 最近 checkpoint 时刻”。</li>
+    <li><strong>健康检查后再放回集群。</strong>确认 checkpoint 完整、节点通过诊断、通信库没有残留错误；否则下一次故障可能更早到来。</li>
+  </ol>
+  <p>这条链路里，最容易被低估的是第 4 步和第 6 步：加载不是“读一个文件”，而是按当前拓扑重组 shard；健康检查不是“能启动就行”，而是要把静默错误和慢节点挡在训练之外。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>Llama 3 的 54 天：419 次意外中断下仍高于 90% 有效训练</h2></div>
+  <p class="sec-sub">读完这节你应该知道：论文在什么规模、什么时间窗口、用什么口径报告了容错效果，以及哪些参数它没有报告。</p>
+  <p>规模与配置：Llama 3 405B，最多 16,384 张 H100（Table 4）。Table 4 同时给出 MFU：8,192 卡、DP=64 时 43%；16,384 卡、DP=128 时 41%；16,384 卡、CP=16、序列 131,072 时 38%。卡数翻倍后 MFU 从 43% 到 41%，差 2 个百分点（43 − 41）；16,384 卡的长序列配置比 8,192 卡的 43% 低 5 个百分点（43 − 38）。论文把 16K 卡上 MFU 的小幅下降归因于保持全局 tokens/batch 不变时每 DP 组的 batch 变小（§3.3.2）。</p>
+
+  <p class="table-cap"><strong>Table 4</strong> · Llama 3 405B 预训练的并行配置与 BF16 MFU（照录原表）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>GPUs</th><th>TP</th><th>CP</th><th>PP</th><th>DP</th><th>Seq. Len.</th><th>Batch/DP</th><th>Tokens/Batch</th><th>TFLOPs/GPU</th><th>BF16 MFU</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">8,192</td><td class="num">8</td><td class="num">1</td><td class="num">16</td><td class="num">64</td><td class="num">8,192</td><td class="num">32</td><td class="num">16M</td><td class="num">430</td><td class="num">43%</td></tr>
+        <tr><td class="num">16,384</td><td class="num">8</td><td class="num">1</td><td class="num">16</td><td class="num">128</td><td class="num">8,192</td><td class="num">16</td><td class="num">16M</td><td class="num">400</td><td class="num">41%</td></tr>
+        <tr><td class="num">16,384</td><td class="num">8</td><td class="num">16</td><td class="num">16</td><td class="num">8</td><td class="num">131,072</td><td class="num">16</td><td class="num">16M</td><td class="num">380</td><td class="num">38%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>容错结果：在 54 天的预训练快照里，466 次作业中断，47 次计划中断，419 次意外中断；有效训练时间高于 90%；约 78% 的意外中断归因于已确认或疑似的硬件问题；GPU 问题占 58.7%；只有 3 次需要重大人工干预（§3.3.4）。论文把有效训练时间定义为“有用训练时间 / 总耗时”，并说明自动化维护（固件、Linux 内核升级）至少每天造成一次中断（§3.3.4）。</p>
+
+  <p class="table-cap"><strong>Table 5</strong> · 54 天内意外中断的根因分类（照录原表；Faulty GPU 行的 148 与 30.1% 存在算术对账问题，见下方折叠块）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Component</th><th>Category</th><th>Interruption Count</th><th>% of Interruptions</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Faulty GPU</td><td>GPU</td><td class="num">148</td><td class="num">30.1%</td></tr>
+        <tr><td>GPU HBM3 Memory</td><td>GPU</td><td class="num">72</td><td class="num">17.2%</td></tr>
+        <tr><td>Software Bug</td><td>Dependency</td><td class="num">54</td><td class="num">12.9%</td></tr>
+        <tr><td>Network Switch/Cable</td><td>Network</td><td class="num">35</td><td class="num">8.4%</td></tr>
+        <tr><td>Host Maintenance</td><td>Unplanned Maintenance</td><td class="num">32</td><td class="num">7.6%</td></tr>
+        <tr><td>GPU SRAM Memory</td><td>GPU</td><td class="num">19</td><td class="num">4.5%</td></tr>
+        <tr><td>GPU System Processor</td><td>GPU</td><td class="num">17</td><td class="num">4.1%</td></tr>
+        <tr><td>NIC</td><td>Host</td><td class="num">7</td><td class="num">1.7%</td></tr>
+        <tr><td>NCCL Watchdog Timeouts</td><td>Unknown</td><td class="num">7</td><td class="num">1.7%</td></tr>
+        <tr><td>Silent Data Corruption</td><td>GPU</td><td class="num">6</td><td class="num">1.4%</td></tr>
+        <tr><td>GPU Thermal Interface + Sensor</td><td>GPU</td><td class="num">6</td><td class="num">1.4%</td></tr>
+        <tr><td>SSD</td><td>Host</td><td class="num">3</td><td class="num">0.7%</td></tr>
+        <tr><td>Power Supply</td><td>Host</td><td class="num">3</td><td class="num">0.7%</td></tr>
+        <tr><td>Server Chassis</td><td>Host</td><td class="num">2</td><td class="num">0.5%</td></tr>
+        <tr><td>IO Expansion Board</td><td>Host</td><td class="num">2</td><td class="num">0.5%</td></tr>
+        <tr><td>Dependency</td><td>Dependency</td><td class="num">2</td><td class="num">0.5%</td></tr>
+        <tr><td>CPU</td><td>Host</td><td class="num">2</td><td class="num">0.5%</td></tr>
+        <tr><td>System Memory</td><td>Host</td><td class="num">2</td><td class="num">0.5%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">Table 5 的 18 行按原文转录；原表中 Faulty GPU 的计数与百分比不能同时成立，下方折叠块给出算术对账。本页不替原文改数。</p>
+
+  <details>
+    <summary>Table 5 对账：148 与 30.1% 不能同时成立 <span class="sum-sub">按 419 次意外中断</span></summary>
+    <div class="details-body">
+      <p>原表 Faulty GPU 行：148 次，30.1%。按 419 次意外中断计算，30.1% × 419 ≈ 126 次；148 / 419 = 35.3%。两个数不能同时成立。</p>
+      <p>论文正文写 GPU 问题占 58.7%。把 Table 5 的 GPU 类别相加：</p>
+      <ul>
+        <li>用 126 计：126 + 72 + 19 + 17 + 6 + 6 = 246；246 / 419 = 58.71%，与 58.7% 对齐。</li>
+        <li>用 148 计：148 + 72 + 19 + 17 + 6 + 6 = 268；268 / 419 = 63.96%，与 58.7% 对不上。</li>
+      </ul>
+      <p>本页照录原表的 148 和 30.1%，不替原文改数；上面两组数只是把原表内部的算术关系摆出来。</p>
+    </div>
+  </details>
+
+  <p>三个反直觉点：</p>
+  <ul>
+    <li>中断次数多，不等于有效时间低。419 次意外中断摊到 54 天是 3.09 小时/次，但论文仍报告高于 90% 的有效时间；按 419 与 90% 的关系看，单次中断的平均损失必须很小，自动化恢复是关键 <span class="infer">推断</span>。论文没有给出单次中断的平均停机时长，所以不能从 419 和 90% 反推出 checkpoint 间隔。</li>
+    <li>最大故障源是 GPU，但软件、网络、主机维护合计也不少。Table 5 中 Software Bug 54 次、Network Switch/Cable 35 次、Host Maintenance 32 次；容错不能只盯 GPU 健康检查。</li>
+    <li>MFU 随规模下降。16,384 卡、长序列配置的 MFU 是 38%，比 8,192 卡的 43% 低 5 个百分点（43 − 38）；论文未逐项归因；从配置看，可能来自并行配置和序列长度 <span class="infer">推断</span>，不是 checkpoint 的成本。</li>
+  </ul>
+  <p>论文正文与 Table 5 未报告 checkpoint 间隔、单次 checkpoint 停顿和 checkpoint 总写入量；这些是本页账本的输入假设，不是论文实测值。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：写带宽、存储、一致性、弹性，一个都不能省</h2></div>
+  <p class="sec-sub">读完这节你应该知道：checkpoint 能解决什么、不能解决什么，以及在哪些条件下账本会失效。</p>
+
+  <h3>写带宽与存储</h3>
+  <p>Llama 3 的存储 fabric 是 240 PB、持续 2 TB/s、峰值 7 TB/s；checkpoint 写入高度突发，会在短时间打满 fabric（§3.3.1）。这意味着 checkpoint 频率不能只看“我想丢多少工作”，还要看“存储能不能在窗口内写完”。模型越大、优化器状态越多，单次 checkpoint 越大；保留多个历史 checkpoint 还会成倍占用容量。</p>
+  <p>写放大是结构性的：每次 checkpoint 都重写完整状态，即使大部分参数在两次 checkpoint 之间只变了一点点。分片并行写把带宽摊到多个 rank，但不减少总字节数；异步写把写入移出关键路径，也不减少总字节数，只是把压力挪到后台。</p>
+
+  <h3>一致性</h3>
+  <p>异步 checkpoint 的核心难点是“训练继续跑，但写出的必须是同一时刻的快照”。DCP 的做法是先 staging 到 CPU 内存，形成一个 training-safe 的副本，再在后台序列化（<code>torch/distributed/checkpoint/staging.py:40</code>）。如果直接在训练更新中的 tensor 上写，checkpoint 可能包含不同 step 的混合状态。写 checkpoint 期间发生故障，还可能留下不完整的目录；DeepSpeed 用 <code>latest</code> 文件指向完整 tag（<code>deepspeed/runtime/engine.py:4426</code>），Megatron/DCP 也各自有元数据和完整性校验。</p>
+
+  <h3>弹性与拓扑变化</h3>
+  <p>弹性训练允许作业在节点故障后缩容/扩容，但 checkpoint 的切分方式会变。Nanotron 文档明确说 checkpoint 不是 topology-agnostic，因为 random states 和 sharded tensors 都与 TP/DP/PP 切分绑定（nanotron <code>docs/docs.md</code>）；换卡数需要 reshard 或 <code>checkpoint_reshape</code>。DCP 的元数据（chunk offsets/sizes）和 resharding 模块为换切分提供了基础（<code>torch/distributed/checkpoint/resharding.py:1</code>），Megatron 的 <code>FullyParallelLoadStrategyWrapper</code> 也支持按新切分加载（<code>megatron/core/dist_checkpointing/strategies/fully_parallel.py:163</code>）；但“换拓扑”不是免费的，恢复时间会变长。</p>
+
+  <h3>静默错误与慢节点</h3>
+  <p>不是所有故障都会让作业崩掉。Llama 3 的 Table 5 里 Silent Data Corruption 6 次（1.4%）；论文还提到“仍然工作但变慢”的 straggler，单张慢卡可以拖慢数千张卡（§3.3.4）。这类问题不会触发重启，却会悄悄拉低有效训练时间，甚至把错误写进 checkpoint。节点健康检查、NCCL flight recorder、通信超时和 straggler 排查是 checkpoint 之外的补丁。</p>
+  <p>最后，checkpoint 不能解决模型发散、数据管道 bug、相关性故障（例如网络设备同时影响多个 rank）和 checkpoint 文件本身的损坏。它把“故障后能否继续”变成工程问题，不把“故障不会发生”变成事实。</p>
+</section>
+
+<footer>
+  <div>The Llama 3 Herd of Models · §3.3.4 Reliability and Operational Challenges · Table 4 / Table 5</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2407.21783v3">arXiv:2407.21783v3</a><br>
+    工程资料：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a> · <a href="https://github.com/huggingface/nanotron/blob/main/docs/docs.md">nanotron checkpoint docs</a><br>
+    笔记：<a href="/ultrascale-playbook-笔记/">The Ultra-Scale Playbook 学习笔记</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var els = {
+    mtbf: document.getElementById('in-mtbf'),
+    interval: document.getElementById('in-interval'),
+    pause: document.getElementById('in-pause'),
+    total: document.getElementById('in-total')
+  };
+  var out = {
+    mtbf: document.getElementById('v-mtbf'),
+    interval: document.getElementById('v-interval'),
+    pause: document.getElementById('v-pause'),
+    total: document.getElementById('v-total'),
+    failures: document.getElementById('out-failures'),
+    lostPer: document.getElementById('out-lost-per'),
+    ckpt: document.getElementById('out-ckpt'),
+    eff: document.getElementById('out-eff'),
+    lostTotal: document.getElementById('out-lost-total'),
+    ckptTotal: document.getElementById('out-ckpt-total'),
+    eff2: document.getElementById('out-eff2')
+  };
+  var bars = {
+    useful: document.getElementById('bar-useful'),
+    lost: document.getElementById('bar-lost'),
+    ckpt: document.getElementById('bar-ckpt')
+  };
+  var presetBtns = document.querySelectorAll('.rule-btn');
+  if (!els.mtbf || !els.interval || !els.pause || !els.total) return;
+  if (!out.failures || !out.lostPer || !out.ckpt || !out.eff) return;
+  if (!bars.useful || !bars.lost || !bars.ckpt) return;
+
+  var presets = {
+    sync: {mtbf: 3.09, interval: 1.00, pause: 0.05, total: 1296},
+    coarse: {mtbf: 3.09, interval: 2.00, pause: 0.10, total: 1296},
+    async: {mtbf: 3.09, interval: 0.28, pause: 0.0125, total: 1296}
+  };
+
+  function setActive(btn) {
+    for (var i = 0; i < presetBtns.length; i++) {
+      presetBtns[i].classList.toggle('active', presetBtns[i] === btn);
+    }
+  }
+
+  function fmtTrim(x, digits) {
+    var s = x.toFixed(digits);
+    if (s.indexOf('.') >= 0) {
+      s = s.replace(/0+$/, '').replace(/\.$/, '');
+    }
+    return s;
+  }
+
+  function render() {
+    var mtbf = parseFloat(els.mtbf.value);
+    var interval = parseFloat(els.interval.value);
+    var pause = parseFloat(els.pause.value);
+    var total = parseFloat(els.total.value);
+    if (!isFinite(mtbf) || mtbf <= 0 || !isFinite(interval) || interval <= 0 ||
+        !isFinite(pause) || pause < 0 || !isFinite(total) || total <= 0) {
+      return;
+    }
+    var failures = total / mtbf;
+    var lostPer = interval / 2;
+    var lostTotal = failures * lostPer;
+    var ckptCount = total / interval;
+    var ckptTotal = ckptCount * pause;
+    var eff = (total - lostTotal - ckptTotal) / total * 100;
+    if (eff < 0) eff = 0;
+    if (eff > 100) eff = 100;
+
+    out.mtbf.textContent = mtbf.toFixed(2) + ' h';
+    out.interval.textContent = interval.toFixed(2) + ' h';
+    out.pause.textContent = fmtTrim(pause, 4) + ' h';
+    out.total.textContent = total.toFixed(0) + ' h';
+    out.failures.textContent = failures.toFixed(2);
+    out.lostPer.textContent = lostPer.toFixed(2) + ' h';
+    out.ckpt.textContent = ckptTotal.toFixed(2) + ' h';
+    out.eff.textContent = eff.toFixed(2) + '%';
+    if (out.lostTotal) out.lostTotal.textContent = lostTotal.toFixed(2) + ' h';
+    if (out.ckptTotal) out.ckptTotal.textContent = ckptTotal.toFixed(2) + ' h';
+    if (out.eff2) out.eff2.textContent = eff.toFixed(2) + '%';
+
+    var lostPct = lostTotal / total * 100;
+    var ckptPct = ckptTotal / total * 100;
+    var usefulPct = 100 - lostPct - ckptPct;
+    if (usefulPct < 0) usefulPct = 0;
+    bars.useful.style.width = usefulPct.toFixed(2) + '%';
+    bars.lost.style.width = lostPct.toFixed(2) + '%';
+    bars.ckpt.style.width = ckptPct.toFixed(2) + '%';
+  }
+
+  for (var i = 0; i < presetBtns.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-preset');
+        var p = presets[key];
+        if (!p) return;
+        els.mtbf.value = String(p.mtbf);
+        els.interval.value = String(p.interval);
+        els.pause.value = String(p.pause);
+        els.total.value = String(p.total);
+        setActive(btn);
+        render();
+      });
+    })(presetBtns[i]);
+  }
+
+  function onInput() {
+    setActive(null);
+    render();
+  }
+  els.mtbf.addEventListener('input', onInput);
+  els.interval.addEventListener('input', onInput);
+  els.pause.addEventListener('input', onInput);
+  els.total.addEventListener('input', onInput);
+  render();
+})();
+</script>
+</body>
+</html>

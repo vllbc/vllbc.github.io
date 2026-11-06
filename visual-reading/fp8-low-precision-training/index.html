@@ -1,0 +1,1045 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 16 | Eq. 7 | 4+4+4+4 |
+| 2800 | Eq. 7 | 175*16 |
+| 6 | Eq. 8 | 2+1+1+2 |
+| 128 | Table 1 | 57344/448 |
+| 18 | §3.1 | 17+1 |
+| 16777216 | §04 | 4096*4096 |
+| 33554432 | §04 | 4096*4096*2 |
+| 16777220 | §04 | 4096*4096+4 |
+| 16384 | §04 | 4096*4 |
+| 4096 | Table 1b | 16384/4 |
+| 16793600 | §04 | 4096*4096+4096*4 |
+| 524288 | §04 | 4096*4096/32 |
+| 17301504 | §04 | 4096*4096+4096*4096/32 |
+| 3.125 | §04 | 524288/16777216*100 |
+| 50.000 | §04 | 16777216/33554432*100 |
+| 50.000 | §04 | (33554432-16777220)/33554432*100 |
+| 49.951 | §04 | (33554432-16793600)/33554432*100 |
+| 48.438 | §04 | (33554432-17301504)/33554432*100 |
+| 39.0 | Table 5 | (66.1-40.3)/66.1*100 |
+| 29.0 | Table 5 | (69.6-49.4)/69.6*100 |
+| 28.3 | Table 5 | (68.2-48.9)/68.2*100 |
+| 21.0 | Table 5 | (27.1-22.4)/22.4*100 |
+| 75.4 | Table 5 | (39.3-22.4)/22.4*100 |
+| 38.1 | Table 5 | (219.8-159.2)/159.2*100 |
+| 38.1 | Table 5 | (109.5-79.3)/79.3*100 |
+| 65.0 | Table 5 | (23.4-8.2)/23.4*100 |
+| 4.8 | Table 5 | 39.0-34.2 |
+| 36.9 | Table 5 | (39.3-28.7)/28.7*100 |
+| 5.6 | Table 5 | (28.7-27.1)/28.7*100 |
+| 33.9 | Table 7 | (5.9-3.9)/5.9*100 |
+| 2.80 | §03 | 448/160 |
+| 0.70 | §03 | 448/640 |
+| 5.60 | §03 | 448/80 |
+| 1792.0 | §03 | 640*2.8 |
+| 224.0 | §03 | 80*2.8 |
+| 448.0 | §03 | 80*5.6 |
+| 537.6 | §03 | 96*5.6 |
+| 0.00279 | §03 | 0.001953125/0.7 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FP8 训练 · 8 bit 的 GEMM，32 bit 的账本</title>
+<meta name="description" content="FP8 训练精读：E4M3/E5M2 的 448 与 57,344、per-tensor/per-channel/block scale、delayed scaling 与 amax 历史、FP32 累加、梯度与 optimizer 精度、分布式 scale 一致性和 FP8-LM 实测。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.svg-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.svg-c3{fill:var(--c3-soft);stroke:var(--c3);stroke-width:1.2}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.svg-ln-hot{stroke:var(--accent);stroke-width:1.5;fill:none;stroke-dasharray:5 4}
+.arrow{fill:var(--text-soft)}
+.arrow-hot{fill:var(--accent)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.tbl-wide table{min-width:1040px}
+.handcalc summary{font-weight:600}
+.handcalc .details-body strong{color:var(--text)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">FP8 训练</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#ledger">显存账本</a>
+      <a href="#flow">训练步</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Training · 2022–2023 · arXiv</span>
+  <h1>FP8 训练：<br>把 GEMM 压到 8 bit，把 scale 留给系统</h1>
+  <p class="hero-sub">
+    FP8 不是把整个训练步改成 8 bit。它先把权重、激活和梯度搬进 E4M3/E5M2 的可表示窗口，
+    让 GEMM 用 8 bit 输入、FP32 累加；softmax、LayerNorm、loss 等非 GEMM 算子仍留在高精度，optimizer 状态按 recipe 分层（FP8-LM 一阶矩 FP8、二阶矩 FP16）。
+    真正难的是 scale：同一个张量在不同 rank、不同 step、不同 checkpoint 上必须对得上。
+  </p>
+  <div class="meta">
+    <span>Micikevicius et al. · Peng et al.</span>
+    <a href="https://arxiv.org/abs/2209.05433" target="_blank" rel="noopener">FP8 Formats ↗</a>
+    <a href="https://arxiv.org/abs/2310.18313" target="_blank" rel="noopener">FP8-LM ↗</a>
+    <a href="https://github.com/NVIDIA/TransformerEngine" target="_blank" rel="noopener">Transformer Engine ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    BF16 把计算压到 16 bit，却没有把训练状态压下去：FP32 master、FP32 梯度、FP32 Adam m/v
+    仍是 <strong data-src="Eq. 7">16 B/参数</strong>（FP8-LM Eq.7）；BF16 训练的 all-reduce 也常用 32 bit（§3.2.2）。
+    所以显存和带宽先撞墙，算力反而不是唯一瓶颈。
+  </p>
+  <p>
+    FP8 把 GEMM 输入压到 <strong>1 B/值</strong>。E4M3 范围窄但尾数多，适合权重/激活；E5M2 范围宽但尾数少，适合梯度。
+    scale 把张量搬进 <span data-src="Table 1">448 或 57,344</span> 的窗口；GEMM 内部仍用 <strong>FP32 累加</strong>，非 GEMM 算子留在高精度。
+  </p>
+  <p>
+    delayed scaling 用 amax 历史预测下一步 scale；per-tensor 最省，block-wise 更能隔离离群值。
+    Megatron 默认 <code>history_len=1, most_recent</code>，TE 默认 <code>1024, max</code>——两套默认值不同，调参前先确认。
+  </p>
+  <p>
+    FP8-LM 把梯度、通信和 optimizer 也压到 8 bit。GPT-175B 在 H100 上显存 <span data-src="Table 5">66.1→40.3 GB</span>，
+    同 micro BS 吞吐 <span data-src="Table 5">+21.0%</span>；论文 headline 的 <span data-src="Table 5">+75.4%</span> 对应 micro BS 1→4，<em>不是同 batch 对照</em>。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">448 / 57,344</div>
+      <div class="k">E4M3 / E5M2 最大 normal 值<br>E5M2 上限高 128×，尾数少 1 位</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 5">27.1</div>
+      <div class="k">GPT-175B FP8-LM，H100，TP8/PP4/DP4，micro BS 1 的 samples/s<br>BF16 同配置 22.4；+75% 那行是 micro BS 4</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§2.2">6<small>B/参数</small></div>
+      <div class="k">FP8-LM 的 optimizer 记账：master 2 + grad 1 + Adam 1+2<br>FP32 基线是 16 B</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>BF16 省了计算，没省下 master、梯度和 Adam</h2></div>
+  <p class="sec-sub">训练状态按参数计账；先算清 16 B/参数，才知道 FP8 该省哪一块。</p>
+
+  <p>
+    BF16 训练的常见配置是：计算用 BF16，但 master weights、梯度和 Adam 的一阶/二阶矩仍用 FP32。
+    按 FP8-LM 的记账，每个参数在训练状态上要占：
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">4 B</span> master + <span class="hl-a">4 B</span> grad + <span class="hl-b">4 B</span> Adam m + <span class="hl-b">4 B</span> Adam v = <span class="hl-c">16 B/参数</span>
+  </div>
+  <div class="eq-cap">FP8-LM Eq.7 的 FP32 基线：master weights、gradients、Adam states 各 4 B</div>
+
+  <p>
+    把 175B 粗算成 <code>175×10<sup>9</sup></code> 个参数，这四项就是 <span data-src="Eq. 7">2,800 GB</span>（175×16），
+    还没算激活、通信缓冲和临时 workspace。模型越大，optimizer 状态越先成为容量瓶颈。
+  </p>
+
+  <p>
+    带宽是第二条线。FP8-LM §3.2.2 指出：BF16 混合精度虽然用 16 bit 算梯度，
+    all-reduce 仍常走 <strong>32 bit</strong>；也就是说，计算位宽减半并没有自动让通信位宽减半。
+    激活在 TP/SP 之间的 all-gather / reduce-scatter 同样按高精度搬。
+  </p>
+
+  <p>
+    算力是第三条线，但收益面最窄。FP8 Tensor Core 的乘加吞吐高于 BF16，可这份收益只落在 GEMM 上；
+    softmax、LayerNorm、loss、residual add 和 optimizer update 仍按 BF16/FP32 走，而且大多是 memory-bound。
+    把这三条线混在一起，就会得到“FP8 一定省一半”的错误预期。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>三个瓶颈不是同一个：算力、带宽、容量</h4></div>
+    <p>
+      GEMM 适合 FP8，因为它有大量乘加，scale 的额外算术可以被摊销；softmax/LN 没有这个结构，
+      把它们压到 FP8 往往只增加量化误差，不增加吞吐。显存则要看<strong>哪些张量真的以 FP8 存储</strong>：
+      只在 GEMM 内部 cast、算完就回高精度，省的是临时带宽，不是 optimizer 的 16 B/参数。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>FP16 怕溢出，BF16 怕精度，INT8 怕校准</h2></div>
+  <p class="sec-sub">三套方案各自把问题推给了另一处：范围、精度或校准；FP8 想把两者拆开。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Table 9（FP8-LM Appendix A.1）：各格式的 normal 范围；INT8 是定点格式，没有指数，范围由 scale 决定。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>方案</th><th>每值字节</th><th>最大 normal</th><th>最小 normal</th><th>训练中的主要问题</th></tr></thead>
+    <tbody>
+      <tr><td>FP16</td><td class="num">2</td><td class="num">65,504</td><td class="num">6.10e-5</td><td>范围窄，需要 loss scaling；大模型易溢出/下溢</td></tr>
+      <tr><td>BF16</td><td class="num">2</td><td class="num">3.39e38</td><td class="num">1.18e-38</td><td>范围同 FP32，但尾数只有 7 bit；存储不比 FP16 小</td></tr>
+      <tr><td>INT8</td><td class="num">1</td><td class="num">定点</td><td class="num">定点</td><td>需要校准；per-channel 权重 + per-tensor 激活；PTQ 精度损失</td></tr>
+      <tr><td>FP8 E4M3</td><td class="num">1</td><td class="num">448</td><td class="num">1.56e-2</td><td>范围窄；需要 per-tensor/block scale</td></tr>
+      <tr><td>FP8 E5M2</td><td class="num">1</td><td class="num">57,344</td><td class="num">6.10e-5</td><td>范围宽；尾数只有 2 bit，精度低</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    FP16-FP32 在大模型上出过稳定性问题：范围窄，梯度容易溢出或下溢，需要 loss scaling 和跳过更新。
+    BF16 把指数位做到 8 bit，范围与 FP32 相同，成为 LLM 训练的默认选择；但它的尾数只有 7 bit，
+    而且每个值仍占 2 B。FP8-LM §2 对这段历史的总结是：社区从 FP16-FP32 转向 BF16-FP32，
+    是因为 BF16 的范围足够宽，同时比 FP32 省一半字节。
+  </p>
+
+  <p>
+    INT8 的麻烦在校准。FP8 Formats 的 Table 5 给了一组推理 PTQ 的对照：BERT Base 的 SQuAD v1.1 F1
+    从 16-bit 的 88.19 掉到 int8 的 76.89；GPT3 126M 在 wikitext103 上的 perplexity 从 19.01 升到 28.37。
+    同一张表里 E4M3 的 PTQ 是 88.09 和 19.43，接近 16-bit。
+    这组数字是<strong>推理后量化</strong>，不是训练；它说明定点 INT8 对离群值敏感，不能直接拿来当“训练也能用”的证据。
+  </p>
+
+  <p>
+    还有一层现实限制：FP8-LM §2 指出，当时的 NVIDIA Transformer Engine 只对 Transformer 的 linear 层做 FP8 compute，
+    weight update 和 gradient synchronization 仍走高精度。也就是说，“FP8 矩阵乘”与“FP8 训练”是两件事：
+    前者省 GEMM 的输入带宽，后者还要处理梯度、通信和 optimizer 状态。本页后面把这两层分开写。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">compute-only</span><h4>只压 GEMM</h4></div>
+      <p>权重/激活进 FP8，GEMM 后回高精度；optimizer、梯度 all-reduce、checkpoint 仍是高精度。实现简单，但显存和通信的收益有限。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">full-FP8</span><h4>连状态一起压</h4></div>
+      <p>梯度、通信、optimizer 状态也进低精度；需要额外的 scale 对齐、梯度精度取舍和 checkpoint 支持。FP8-LM 走的是这条。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>E4M3 管前向，E5M2 管梯度；scale 把张量搬进 448 的窗口</h2></div>
+  <p class="sec-sub">格式决定范围和分辨率，scale 决定这一步的张量落在窗口的哪里；GEMM 内部仍是 FP32 累加。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Table 1（FP8 Formats for Deep Learning）：E4M3/E5M2 的位宽、bias、特殊值和 normal/subnormal 边界。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>属性</th><th>E4M3</th><th>E5M2</th></tr></thead>
+    <tbody>
+      <tr><td>位宽（sign / exponent / mantissa）</td><td class="num">1 / 4 / 3</td><td class="num">1 / 5 / 2</td></tr>
+      <tr><td>exponent bias</td><td class="num">7</td><td class="num">15</td></tr>
+      <tr><td>Infinities</td><td>无</td><td>S.11111.00<sub>2</sub></td></tr>
+      <tr><td>NaN</td><td>S.1111.111<sub>2</sub></td><td>S.11111.{01,10,11}<sub>2</sub></td></tr>
+      <tr><td>最大 normal</td><td class="num">448</td><td class="num">57,344</td></tr>
+      <tr><td>最小 normal</td><td class="num">2<sup>−6</sup></td><td class="num">2<sup>−14</sup></td></tr>
+      <tr><td>最小 subnormal</td><td class="num">2<sup>−9</sup></td><td class="num">2<sup>−16</sup></td></tr>
+      <tr><td>binade 数</td><td class="num">18</td><td class="num">32</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    E4M3 把 4 bit 给 exponent、3 bit 给 mantissa；E5M2 是 5+2。E4M3 的 bias 是 7，最大 normal 是 448；
+    E5M2 的 bias 是 15，最大 normal 是 57,344。E5M2 的上限是 E4M3 的 <span data-src="Table 1">128 倍</span>，
+    但每个 binade 只有 4 个格点，E4M3 有 8 个——这就是范围换分辨率。
+  </p>
+
+  <p>
+    E4M3 没有 Inf，只留一个 NaN 编码；它靠回收特殊值把范围从 17 个 binade 扩到 18 个，
+    最大 normal 从 240 提到 448。E5M2 保持 IEEE 的 Inf/NaN 约定。
+    论文 §3 推荐的映射是：<strong>权重和激活用 E4M3，梯度用 E5M2</strong>。
+    Megatron 的 <code>'hybrid'</code> 就是这个映射；<code>'e4m3'</code> 则把所有权重、激活和输出梯度都放在 E4M3
+    （<code>transformer_config.py:749-754</code>）。
+  </p>
+
+  <div class="eq">
+    x<sub>q</sub> = clamp(round(x · s), −MAX, +MAX) &nbsp;&nbsp;&nbsp; s = MAX / amax
+  </div>
+  <div class="eq-cap">TE 的 DelayedScaling / CurrentScaling 都用 s = FP8_MAX / amax；溢出值饱和到 ±MAX，不跳过更新（FP8 Formats §2）</div>
+
+  <p>
+    GEMM 的反缩放可以合并成一个式子。设激活和权重的 scale 分别是 <code>s<sub>x</sub></code>、<code>s<sub>w</sub></code>：
+  </p>
+
+  <div class="eq">
+    y = (x<sub>q</sub> · w<sub>q</sub>) / (<span class="hl-a">s<sub>x</sub></span> · <span class="hl-b">s<sub>w</sub></span>)
+  </div>
+  <div class="eq-cap">GEMM 先以 FP32 累加 x<sub>q</sub>·w<sub>q</sub>，再乘 1/(s<sub>x</sub>·s<sub>w</sub>)；per-channel/block 时 s 是向量或块，反缩放按对应维度广播</div>
+
+  <p>
+    FP8 Formats §2 的表述是：matrix-multiply 或 dot-product 指令产生 single-precision 输出；
+    TE 文档也写明，Hopper Tensor Core 可以直接把矩阵乘积累加到 FP32。换句话说，FP8 改的是输入存储和乘法，
+    不是累加精度。没有这一步，长 K 的 GEMM 会在低精度累加里迅速丢有效位。
+  </p>
+
+  <h3>scale 的三种粒度：一个张量、一个通道、一个块</h3>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">per-tensor</span><h4>一个张量一个 FP32 scale</h4></div>
+      <p>TE 的 DelayedScaling / CurrentScaling 都是这个粒度。开销最小；一个离群值会把 amax 顶高，导致其余值分辨率下降。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">per-channel</span><h4>每个输出通道一个 scale</h4></div>
+      <p>FP8 Formats §4.2 的 PTQ 约定是权重 per-channel、激活 per-tensor。它不在 Megatron 的四个内置 recipe 里；需要时走 <code>custom</code>。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">block-wise</span><h4>每 32 值或一个块一个 scale</h4></div>
+      <p>TE 的 MXFP8BlockScaling 用 1 个 E8M0 scale / 32 值（Blackwell）；Float8BlockScaling 按 DeepSeek-V3 的块（arXiv 2412.19437 §3.3）。块越细，离群值越难污染邻居，scale 开销也越大。</p>
+    </div>
+  </div>
+
+  <h3>delayed scaling：用上一步的 amax 历史，省掉这一步的第二次读</h3>
+
+  <p>
+    <code>amax</code> 是张量的最大绝对值。当前 scaling 在每次量化时现算 amax，需要先读一遍张量求最大值、
+    再读一遍做缩放和 cast；TE 文档把这两次读称为“significant overhead”。
+    delayed scaling 则用历史窗口里的 amax 预测这一步的 scale：量化时只读一次张量，
+    cast 完再把本次观测到的 amax 写回历史，供下一步使用。
+  </p>
+
+  <p>
+    <code>amax_eff</code> 有两种取法：窗口内最大（<code>max</code>）或最近一次（<code>most_recent</code>）。
+    然后 <code>s = MAX / amax_eff</code>。TE 的 <code>DelayedScaling</code> 默认窗口 1024、取 <code>max</code>；
+    Megatron-Core 的默认值是窗口 1、取 <code>most_recent</code>（<code>transformer_config.py:783-790</code>），
+    并在构造 <code>TEDelayedScaling</code> 时把自己的配置传进去（<code>transformer_engine.py:3809-3816</code>）。
+    两套默认值不同：前者更平滑，后者对最近一步更敏感。
+  </p>
+
+  <p>
+    历史窗口的更新顺序是：先用量化前的 scale 做 cast，再把本次 amax 写入 slot 0；
+    退出 autocast 时先按含本次 amax 的 history 计算下一步 scale，再旋转窗口。TE 文档给出的顺序是
+    <code>[amax_N, amax_1, …, amax_N−1] → [0, amax_2, …, amax_N]</code>。
+    本页的交互是简化模型：用上一步结束时的 history 算本步 scale，本步观测只写回 history 供下一步用。
+  </p>
+
+  <div class="sim" id="fp8-amax-sim">
+    <div class="sim-top" id="fp8-amax-modes">
+      <button class="rule-btn active" data-algo="max">max<span class="r-sub">窗口内最大 amax</span></button>
+      <button class="rule-btn" data-algo="recent">most_recent<span class="r-sub">只看最近一次</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">amax_eff</div><div class="slot-val" id="fp8-amax-eff">160</div></div>
+      <div class="slot"><div class="slot-name">本步 scale</div><div class="slot-val" id="fp8-amax-scale">2.80</div></div>
+      <div class="slot"><div class="slot-name">scaled amax</div><div class="slot-val" id="fp8-amax-scaled">1792.0</div></div>
+      <div class="slot"><div class="slot-name">状态</div><div class="slot-val" id="fp8-amax-status">饱和</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>history 长度 <span class="v" id="fp8-hist-lenv">3</span></label>
+        <input type="range" id="fp8-hist-len" min="1" max="6" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label>本步观测 amax <span class="v" id="fp8-obs-v">640</span></label>
+        <input type="range" id="fp8-obs" min="16" max="1024" step="8" value="640">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="fp8-push">记录本步 amax</button>
+      <button class="act ghost" id="fp8-reset">重置</button>
+    </div>
+
+    <div class="readout" id="fp8-amax-readout" data-src="Table 1">
+      <div class="r-head">当前读数</div>
+      <div id="fp8-amax-msg">history=[120,96,160]，max→amax_eff=160；scale=448/160=2.80；本步 640×2.80=1792.0 &gt; 448，cast 后饱和到 448。记录后 history=[96,160,640]，下一步 scale=0.70。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 B：amax 历史、scale 与溢出边界 <span class="sum-sub">与上面的交互逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1（默认）：history=[120,96,160]，algo=max，本步观测 amax=640。</strong></p>
+      <ul>
+        <li><code>amax_eff = max(120,96,160) = 160</code>；<code>scale = 448/160 = 2.80</code>。</li>
+        <li><code>scaled amax = 640×2.80 = 1792.0</code>；<code>1792.0 &gt; 448</code>，cast 后饱和到 448，状态为“饱和”。</li>
+        <li>记录后 <code>history=[96,160,640]</code>；下一步 <code>amax_eff = 640</code>，<code>scale = 448/640 = 0.70</code>。</li>
+      </ul>
+      <p><strong>组 2：history=[120,96,160]，algo=most_recent，本步观测 amax=80。</strong></p>
+      <ul>
+        <li><code>amax_eff = 160</code>（最近一次）；<code>scale = 2.80</code>；<code>scaled amax = 80×2.80 = 224.0</code>，正常。</li>
+        <li>记录 80 后 <code>history=[96,160,80]</code>；<code>amax_eff = 80</code>，<code>scale = 448/80 = 5.60</code>。</li>
+        <li>再以 80 量化：<code>80×5.60 = 448.0</code>，正好在边界；若本步 amax 改为 96，<code>96×5.60 = 537.6 &gt; 448</code>，饱和。</li>
+      </ul>
+      <p><strong>这个模型简化了什么：</strong>它只模拟 per-tensor、E4M3、无 margin 的 delayed scaling；history 里存的是历史观测 amax，不模拟 TE 的 slot 0 写入与窗口旋转的精确时序，也不模拟 RTNE 的逐值舍入。溢出判断用 <code>&gt; 448.0001</code> 避开浮点尾差；真实实现按 cast 后的结果饱和。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="ledger">
+  <div class="sec-head"><span class="sec-num">04</span><h2>省的是字节：payload 减半，scale 开销从 4 B 到 3.125%</h2></div>
+  <p class="sec-sub">同样一个 4096×4096 权重，FP8 payload 是 BF16 的一半；scale 粒度越细，省得越少。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Table 1a（本页推导，数据取自 FP8-LM Eq.7/8）：每参数训练状态的字节数。FP8-LM 的默认配置是 master FP16+tensor scaling、梯度 FP8、Adam 一阶矩 FP8、二阶矩 FP16。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>项目</th><th>FP32 / FP32 基线（Eq.7）</th><th>FP8-LM（Eq.8）</th></tr></thead>
+    <tbody>
+      <tr><td>master weights</td><td class="num">4 B</td><td class="num">2 B</td></tr>
+      <tr><td>gradients</td><td class="num">4 B</td><td class="num">1 B</td></tr>
+      <tr><td>Adam 一阶矩 m</td><td class="num">4 B</td><td class="num">1 B</td></tr>
+      <tr><td>Adam 二阶矩 v</td><td class="num">4 B</td><td class="num">2 B</td></tr>
+      <tr class="best"><td>合计</td><td class="num">16 B</td><td class="num">6 B</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    这张表是 FP8-LM 自己的 recipe，不是 Megatron 默认。Megatron 的 <code>fp8_param=False</code> 默认只把 GEMM 的输入 cast 到 FP8，
+    参数、梯度、optimizer 状态仍按高精度存；它的 <code>fp8_param_gather</code> 还要求 distributed optimizer、torch FSDP2 / Megatron FSDP 或推理模式
+    （<code>arguments.py:978-980</code>）。所以“6 B/参数”不能直接套到所有 FP8 训练配置上。
+  </p>
+
+  <h3>自己动手：改形状与 scale 粒度，看省下的字节</h3>
+  <p>
+    下面只算权重 payload + scale 存储，不含梯度、optimizer、激活和临时 buffer。
+    per-channel 按“一个输出通道一个 FP32 scale”计；1×32 block 按 TE MXFP8 的 1 个 E8M0 scale / 32 值计。
+  </p>
+
+  <div class="sim" id="fp8-mem-sim">
+    <div class="sim-top" id="fp8-mem-modes">
+      <button class="rule-btn active" data-mode="tensor">per-tensor<span class="r-sub">1 个 FP32 scale</span></button>
+      <button class="rule-btn" data-mode="channel">per-channel<span class="r-sub">每输出通道 1 个 FP32</span></button>
+      <button class="rule-btn" data-mode="block">1×32 block<span class="r-sub">每 32 值 1 个 E8M0</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">FP8 payload</div><div class="slot-val" id="fp8-mem-payload">16,777,216 B</div></div>
+      <div class="slot"><div class="slot-name">scale 开销</div><div class="slot-val" id="fp8-mem-scale">4 B</div></div>
+      <div class="slot"><div class="slot-name">总计</div><div class="slot-val" id="fp8-mem-total">16,777,220 B</div></div>
+      <div class="slot"><div class="slot-name">相对 BF16</div><div class="slot-val" id="fp8-mem-save">50.000%</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>M 行 / 输出通道 <span class="v" id="fp8-m-v">4096</span></label>
+        <input type="range" id="fp8-m" min="1024" max="8192" step="1024" value="4096">
+      </div>
+      <div class="ctrl">
+        <label>K 列 / 输入通道 <span class="v" id="fp8-k-v">4096</span></label>
+        <input type="range" id="fp8-k" min="1024" max="8192" step="1024" value="4096">
+      </div>
+    </div>
+
+    <div class="readout" id="fp8-mem-readout" data-src="Table 1b">
+      <div class="r-head">当前读数</div>
+      <div id="fp8-mem-msg">4096×4096=16,777,216 个值；BF16 33,554,432 B；FP8 payload 16,777,216 B；scale 4 B；总计 16,777,220 B；相对 BF16 节省 50.000%。（本页推导，见 Table 1b）</div>
+    </div>
+  </div>
+
+  <p class="eq-cap" style="text-align:left">
+    Table 1b（本页推导，输入 4096×4096）：BF16 每值 2 B；FP8 每值 1 B；per-tensor 1 个 FP32；per-channel 4096 个 FP32；1×32 block 524,288 个 E8M0（1 B）。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>精度 / 粒度</th><th>payload B</th><th>scale B</th><th>总计 B</th><th>相对 BF16</th></tr></thead>
+    <tbody>
+      <tr><td>BF16</td><td class="num">33,554,432</td><td class="num">0</td><td class="num">33,554,432</td><td class="num">—</td></tr>
+      <tr class="best"><td>FP8 per-tensor</td><td class="num">16,777,216</td><td class="num">4</td><td class="num">16,777,220</td><td class="num">50.000%</td></tr>
+      <tr><td>FP8 per-channel</td><td class="num">16,777,216</td><td class="num">16,384</td><td class="num">16,793,600</td><td class="num">49.951%</td></tr>
+      <tr><td>FP8 1×32 block</td><td class="num">16,777,216</td><td class="num">524,288</td><td class="num">17,301,504</td><td class="num">48.438%</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    payload 正好是一半（<span data-src="Table 1b">50.000%</span>）。scale 开销在 per-tensor 下只有 4 B，可以忽略；
+    per-channel 是 16,384 B，per-tensor 的 4096 倍；1×32 block 是 524,288 B，相当于 payload 的
+    3.125%（<code>524,288/16,777,216</code>）。粒度越细，抗离群值越好，但省下的比例从 50.000% 降到 48.438%。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算 A：4096×4096 权重的三种 scale 粒度 <span class="sum-sub">与上面的交互逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：M=K=4096，per-tensor。</strong></p>
+      <ul>
+        <li><code>N = 4096×4096 = 16,777,216</code> 个值；FP8 payload <code>N×1 = 16,777,216 B</code>；BF16 <code>N×2 = 33,554,432 B</code>。</li>
+        <li>scale 是 1 个 FP32：<code>4 B</code>；总计 <code>16,777,216+4 = 16,777,220 B</code>。</li>
+        <li>相对 BF16：<code>(33,554,432−16,777,220)/33,554,432×100 = 50.000%</code>。</li>
+      </ul>
+      <p><strong>组 2：同一张量，per-channel 与 1×32 block。</strong></p>
+      <ul>
+        <li><strong>per-channel：</strong>4096 个输出通道 × 4 B = <code>16,384 B</code>；总计 <code>16,777,216+16,384 = 16,793,600 B</code>；相对 BF16 <code>(33,554,432−16,793,600)/33,554,432×100 = 49.951%</code>。</li>
+        <li><strong>1×32 block：</strong><code>16,777,216/32 = 524,288</code> 个 E8M0，每个 1 B = <code>524,288 B</code>；总计 <code>16,777,216+524,288 = 17,301,504 B</code>；相对 BF16 <code>(33,554,432−17,301,504)/33,554,432×100 = 48.438%</code>。</li>
+        <li>block 的 scale 开销占 payload：<code>524,288/16,777,216×100 = 3.125%</code>。</li>
+      </ul>
+      <p><strong>这个模型简化了什么：</strong>只算权重 payload 和 scale 存储，不含对齐/padding、metadata、梯度、optimizer、激活、通信 buffer 和 cast 临时张量；假设 FP8 每值 1 B、E8M0 每 scale 1 B。per-channel 假设按输出行量化；若按列量化，scale 数会变成 K。Float8BlockScaling 的块大小 TE 文档未列出；按所引 DeepSeek-V3 §3.3，激活为 1×128、权重为 128×128，本页只实现 1×32 MXFP8 模式，不计入该模式。</p>
+    </div>
+  </details>
+
+  <p>
+    系统级显存没有 50% 这么整齐。FP8-LM Table 5 的 GPT 模型在相同 batch 下，FP8 相对 BF16 的显存降幅是 28–39%；
+    因为权重只是其中一块，梯度、optimizer、激活和通信缓冲各有自己的精度策略。
+    更反直觉的是 FP8 (TE) 这一行：GPT-175B 的 TE 显存是 69.6 GB，比 BF16 的 66.1 GB 还高；
+    FP8-LM 的 40.3 GB 来自 FP8 梯度、FP8 通信和 FP8 optimizer，而不是单纯把 GEMM 换成 FP8。
+  </p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一个训练步：cast → GEMM → FP32 累加 → 反缩放 → 高精度更新</h2></div>
+  <p class="sec-sub">compute-only 路径里 FP8 只出现在 GEMM 输入；full-FP8 还把梯度通信和 optimizer 状态按精度分层。amax 归约与 scale 更新在高精度，optimizer 更新按 recipe 执行。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 410" role="img" aria-label="FP8 训练数据流：高精度张量经 amax 历史得到 scale，cast 到 FP8，GEMM 以 FP32 累加后反缩放；非 GEMM 算子保持高精度，反向用 E5M2 梯度，amax 更新后进入 optimizer 和 checkpoint。">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow"/>
+        </marker>
+        <marker id="arrhot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-hot"/>
+        </marker>
+      </defs>
+
+      <!-- row 1: forward -->
+      <rect x="20" y="20" width="180" height="76" rx="10" class="svg-box"/>
+      <text x="110" y="50" text-anchor="middle" class="svg-t">高精度张量</text>
+      <text x="110" y="70" text-anchor="middle" class="svg-s">BF16 / FP32</text>
+
+      <rect x="240" y="20" width="180" height="76" rx="10" class="svg-c1"/>
+      <text x="330" y="50" text-anchor="middle" class="svg-t">amax 历史</text>
+      <text x="330" y="70" text-anchor="middle" class="svg-s">s = 448 / amax</text>
+
+      <rect x="460" y="20" width="180" height="76" rx="10" class="svg-hot"/>
+      <text x="550" y="50" text-anchor="middle" class="svg-t">cast 到 FP8</text>
+      <text x="550" y="70" text-anchor="middle" class="svg-s">E4M3 权重/激活</text>
+
+      <rect x="680" y="20" width="180" height="76" rx="10" class="svg-hot"/>
+      <text x="770" y="50" text-anchor="middle" class="svg-t">FP8 GEMM</text>
+      <text x="770" y="70" text-anchor="middle" class="svg-s">FP32 累加</text>
+
+      <!-- row 2: backward / high precision -->
+      <rect x="680" y="150" width="180" height="76" rx="10" class="svg-hot"/>
+      <text x="770" y="180" text-anchor="middle" class="svg-t">反缩放</text>
+      <text x="770" y="200" text-anchor="middle" class="svg-s">÷ (s_x·s_w)</text>
+
+      <rect x="460" y="150" width="180" height="76" rx="10" class="svg-c2"/>
+      <text x="550" y="180" text-anchor="middle" class="svg-t">非 GEMM</text>
+      <text x="550" y="200" text-anchor="middle" class="svg-s">softmax/LN/loss</text>
+
+      <rect x="240" y="150" width="180" height="76" rx="10" class="svg-c2"/>
+      <text x="330" y="180" text-anchor="middle" class="svg-t">反向</text>
+      <text x="330" y="200" text-anchor="middle" class="svg-s">E5M2 梯度 → GEMM</text>
+
+      <rect x="20" y="150" width="180" height="76" rx="10" class="svg-c1"/>
+      <text x="110" y="180" text-anchor="middle" class="svg-t">amax 更新</text>
+      <text x="110" y="200" text-anchor="middle" class="svg-s">history 轮转</text>
+
+      <!-- row 3 -->
+      <rect x="20" y="280" width="180" height="76" rx="10" class="svg-c3"/>
+      <text x="110" y="310" text-anchor="middle" class="svg-t">optimizer</text>
+      <text x="110" y="330" text-anchor="middle" class="svg-s">FP32/FP16 master</text>
+
+      <rect x="240" y="280" width="180" height="76" rx="10" class="svg-c1"/>
+      <text x="330" y="310" text-anchor="middle" class="svg-t">checkpoint</text>
+      <text x="330" y="330" text-anchor="middle" class="svg-s">amax + scale</text>
+
+      <rect x="460" y="280" width="180" height="76" rx="10" class="svg-c3"/>
+      <text x="550" y="310" text-anchor="middle" class="svg-t">all-reduce</text>
+      <text x="550" y="330" text-anchor="middle" class="svg-s">TP·DP·CP 归约</text>
+
+      <!-- arrows row 1 -->
+      <line x1="200" y1="58" x2="232" y2="58" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="420" y1="58" x2="452" y2="58" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="640" y1="58" x2="672" y2="58" class="svg-ln-hot" marker-end="url(#arrhot)"/>
+
+      <!-- down from GEMM to unscale -->
+      <line x1="770" y1="96" x2="770" y2="142" class="svg-ln-hot" marker-end="url(#arrhot)"/>
+
+      <!-- row 2 right-to-left -->
+      <line x1="680" y1="188" x2="648" y2="188" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="460" y1="188" x2="428" y2="188" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="240" y1="188" x2="208" y2="188" class="svg-ln" marker-end="url(#arr)"/>
+
+      <!-- down from amax update to optimizer -->
+      <line x1="110" y1="226" x2="110" y2="272" class="svg-ln" marker-end="url(#arr)"/>
+      <!-- down from backward to checkpoint -->
+      <line x1="330" y1="226" x2="330" y2="272" class="svg-ln" marker-end="url(#arr)"/>
+      <!-- down from non-GEMM to all-reduce -->
+      <line x1="550" y1="226" x2="550" y2="272" class="svg-ln" marker-end="url(#arr)"/>
+    </svg>
+    <figcaption>
+      前向（上排）：高精度张量按 amax 历史得到 scale，cast 到 FP8，GEMM 以 FP32 累加后反缩放；
+      非 GEMM 算子（softmax/LN/loss）留在高精度。反向（中排）：梯度按 E5M2 cast，dgrad/wgrad 仍用 FP8 GEMM；
+      本步结束后归约 amax、轮转 history，再进入 optimizer 和 checkpoint。虚线箭头表示 FP8 计算路径。
+    </figcaption>
+  </figure>
+
+  <h3>逐步拆开：哪些张量进 FP8，哪些不进</h3>
+
+  <p class="eq-cap" style="text-align:left">
+    Table 1c（本页归纳）：一个训练步里的精度分配；Megatron 默认值见 <code>transformer_config.py:749-808</code>，FP8-LM 的 optimizer 取舍见 §2.2 与 Table 6。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>阶段</th><th>张量</th><th>精度</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>forward GEMM</td><td>激活 / 权重</td><td>FP8 E4M3</td><td>GEMM 内部 FP32 累加，输出反缩放</td></tr>
+      <tr><td>backward dgrad</td><td>grad_output</td><td>E5M2（hybrid）</td><td>范围换精度，适合梯度</td></tr>
+      <tr><td>backward wgrad</td><td>grad_weight</td><td>FP8（<code>fp8_wgrad=True</code>）</td><td>FP32 累加；设为 False 可让 wgrad 走更高精度</td></tr>
+      <tr><td>非 GEMM</td><td>softmax / LN / loss</td><td>BF16 / FP32</td><td>没有大量乘加，量化收益小</td></tr>
+      <tr><td>optimizer</td><td>master / m / v</td><td>FP32，或 FP16/FP8 recipe</td><td>FP8-LM 的 6 B/参数见 Eq.8；二阶矩仍用 16 bit</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <ol>
+    <li><strong>读 scale。</strong>delayed scaling 直接从 amax 历史算本步 scale，不需要先读张量；current scaling 则要先读一遍求 amax。TE 在 <code>fp8_autocast</code> 里完成 cast、amax 更新和下一步 scale 的计算。</li>
+    <li><strong>cast 并做 GEMM。</strong>激活和权重按各自 scale cast 到 FP8；GEMM 以 FP32 累加；输出乘 <code>1/(s<sub>x</sub>·s<sub>w</sub>)</code> 回到高精度。per-channel 时按输出通道广播，block-wise 时按块广播。</li>
+    <li><strong>非 GEMM 留在高精度。</strong>softmax、LayerNorm/RMSNorm、loss、residual add 和 optimizer update 不做 FP8 cast。FP8 Formats §4.1 的训练实验也只把 GEMM 输入 clip 到 FP8，输出保持高精度。</li>
+    <li><strong>反向。</strong>输出梯度按 E5M2 cast（<code>hybrid</code>），dgrad 和 wgrad 仍走 FP8 GEMM；wgrad 在 FP32 累加。Megatron 的 <code>fp8_wgrad=True</code> 是默认，关掉它会让 wgrad 走更高精度（<code>transformer_config.py:791-795</code>）。</li>
+    <li><strong>归约 amax。</strong>一个 step 结束时，把各 rank 的 amax 归约到同一个值，再轮转 history、算下一步 scale。Megatron 用 <code>get_amax_reduction_group(with_context_parallel=True, tp_only_amax_red=...)</code>（<code>fp8_utils.py:881-890</code>）；<code>tp_only_amax_red=True</code> 时只归约 TP/CP，不跨 DP（<code>parallel_state.py:2078-2101</code>）。</li>
+    <li><strong>更新 optimizer。</strong>master weights 和 Adam 状态按 recipe 走。FP8-LM 的选择是 master FP16+tensor scaling、一阶矩 FP8、二阶矩 FP16；它明确说二阶矩用 FP8 会发散（Table 6 #4、Fig.8）。</li>
+  </ol>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">分布式</span><h4>amax 先在 TP/DP/CP 内归约，scale 才能一致</h4></div>
+    <p>
+      如果每个 rank 用自己的 amax 算 scale，同一个权重在不同 rank 上会被编码成不同 scale 的 FP8 值；
+      all-reduce 或 all-gather 把这些值直接相加，等于把不同单位的数据混在一起。所以 TE 的 <code>fp8_autocast</code>
+      接收一个 <code>fp8_group</code>，在 autocast 退出时统一归约 amax。Megatron 把这个组设成 TP+DP+CP（或仅 TP/CP），
+      对应 <code>fp8_utils.py:881-890</code> 和 <code>parallel_state.py:2078-2101</code>。
+    </p>
+    <p>
+      FP8-LM 的梯度 all-reduce 是另一套：先在各 rank 取全局最小 scale <code>s'_g = min(s'_1,…,s'_N)</code>，
+      把每个 rank 的 FP8 梯度重标到同一个 scale，再走标准 NCCL all-reduce；聚合后 <code>s = N·s'_g</code>（Eq.4-6）。
+      它的 auto-scaling 用 0.001% 的溢出阈值调 <code>μ</code>：超过阈值下一步 <code>μ=1/2</code>，
+      比例持续不超过阈值则在 1,000 步内指数升到 2（§2.1）。
+    </p>
+    <p>
+      两者不要混：Megatron 的 amax 归约是给 TE 的 per-tensor scale 用的；FP8-LM 的 <code>s'_g</code> 是给 FP8 梯度通信用的。
+      一个是量化窗口，一个是 all-reduce 的单位。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">checkpoint</span><h4>scale 和 amax history 必须跟权重一起存</h4></div>
+    <p>
+      TE 的 extra state 里存 <code>scale_fwd</code>/<code>scale_bwd</code> 和
+      <code>amax_history_fwd</code>/<code>amax_history_bwd</code>，再序列化成 <code>_extra_state</code>
+      （<code>transformer_engine.py:2942-2975</code>、<code>:3097-3122</code>）。恢复时如果只加载权重、
+      不加载这些状态，第一步的 scale 就是错的。
+    </p>
+    <p>
+      Megatron 的 <code>--stream-ckpt-dequant</code> 明确不支持 <code>--fp8-recipe delayed</code>：
+      delayed 的 scale 只在 <code>load_state_dict</code> 里恢复（<code>arguments.py:1728-1730</code>）。
+      换并行度、换 recipe 或换 checkpoint 格式时，先确认 scale 和 amax history 的来源。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>175B 上 +21% 是同 micro batch，+75% 把 micro batch 从 1 提到 4</h2></div>
+  <p class="sec-sub">先看条件再看数字：模型、硬件、并行度、micro batch 和精度方案都写在同一行。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Table 5（FP8-LM）：Azure NDv5 H100 80GB；TP/PP/DP 与 micro BS 见行；Weight-related Comm. 含 weight all-gather 与 weight-grad reduce-scatter。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>模型</th><th>TP</th><th>PP</th><th>DP</th><th>Micro BS</th><th>精度</th><th>GPU Mem. (GB)</th><th>Throughput (samples/s)</th><th>TFLOPS</th><th>MFU (%)</th><th>权重通信占比 (%)</th><th>权重通信量 (GB)</th></tr></thead>
+    <tbody>
+      <tr><td>GPT-7B</td><td class="num">1</td><td class="num">1</td><td class="num">32</td><td class="num">2</td><td>BF16</td><td class="num">69.6</td><td class="num">159.2</td><td class="num">445</td><td class="num">45.0</td><td class="num">10.1</td><td class="num">37.2</td></tr>
+      <tr><td>GPT-7B</td><td class="num">1</td><td class="num">1</td><td class="num">32</td><td class="num">2</td><td>FP8 (TE)</td><td class="num">77.3</td><td class="num">224.5</td><td class="num">627</td><td class="num">31.7</td><td class="num">9.7</td><td class="num">37.2</td></tr>
+      <tr><td>GPT-7B</td><td class="num">1</td><td class="num">1</td><td class="num">32</td><td class="num">2</td><td>FP8 (Ours)</td><td class="num">49.4</td><td class="num">219.8</td><td class="num">615</td><td class="num">31.1</td><td class="num">7.9</td><td class="num">13.9</td></tr>
+      <tr><td>GPT-7B</td><td class="num">1</td><td class="num">1</td><td class="num">32</td><td class="num">4</td><td>FP8 (Ours)</td><td class="num">69.3</td><td class="num">230.5</td><td class="num">645</td><td class="num">32.6</td><td class="num">10.4</td><td class="num">13.9</td></tr>
+      <tr><td>GPT-13B</td><td class="num">2</td><td class="num">1</td><td class="num">16</td><td class="num">2</td><td>BF16</td><td class="num">68.2</td><td class="num">79.3</td><td class="num">420</td><td class="num">42.5</td><td class="num">11.1</td><td class="num">34.3</td></tr>
+      <tr><td>GPT-13B</td><td class="num">2</td><td class="num">1</td><td class="num">16</td><td class="num">2</td><td>FP8 (TE)</td><td class="num">76.4</td><td class="num">111.7</td><td class="num">592</td><td class="num">29.9</td><td class="num">7.1</td><td class="num">34.3</td></tr>
+      <tr><td>GPT-13B</td><td class="num">2</td><td class="num">1</td><td class="num">16</td><td class="num">2</td><td>FP8 (Ours)</td><td class="num">48.9</td><td class="num">109.5</td><td class="num">575</td><td class="num">29.1</td><td class="num">3.9</td><td class="num">12.4</td></tr>
+      <tr><td>GPT-13B</td><td class="num">2</td><td class="num">1</td><td class="num">16</td><td class="num">4</td><td>FP8 (Ours)</td><td class="num">67.8</td><td class="num">121.5</td><td class="num">644</td><td class="num">32.5</td><td class="num">9.3</td><td class="num">12.4</td></tr>
+      <tr><td>GPT-175B</td><td class="num">8</td><td class="num">4</td><td class="num">4</td><td class="num">1</td><td>BF16</td><td class="num">66.1</td><td class="num">22.4</td><td class="num">386</td><td class="num">39.0</td><td class="num">8.8</td><td class="num">23.4</td></tr>
+      <tr><td>GPT-175B</td><td class="num">8</td><td class="num">4</td><td class="num">4</td><td class="num">1</td><td>FP8 (TE)</td><td class="num">69.6</td><td class="num">28.7</td><td class="num">493</td><td class="num">24.9</td><td class="num">3.9</td><td class="num">23.4</td></tr>
+      <tr><td>GPT-175B</td><td class="num">8</td><td class="num">4</td><td class="num">4</td><td class="num">1</td><td>FP8 (Ours)</td><td class="num">40.3</td><td class="num">27.1</td><td class="num">473</td><td class="num">23.9</td><td class="num">2.5</td><td class="num">8.2</td></tr>
+      <tr><td>GPT-175B</td><td class="num">8</td><td class="num">4</td><td class="num">4</td><td class="num">4</td><td>FP8 (Ours)</td><td class="num">57.7</td><td class="num">39.3</td><td class="num">677</td><td class="num">34.2</td><td class="num">10.9</td><td class="num">8.2</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    先看 7B 和 13B：7B 的显存 69.6→49.4 GB，相对 BF16 降 <span data-src="Table 5">29.0%</span>；
+    吞吐 159.2→219.8 samples/s，相对提升 <span data-src="Table 5">38.1%</span>；权重通信量 37.2→13.9 GB。
+    13B 的显存 68.2→48.9 GB（<span data-src="Table 5">28.3%</span>），吞吐 79.3→109.5（<span data-src="Table 5">38.1%</span>），
+    通信 34.3→12.4 GB。这两组是同一 micro BS=2 的对照。
+  </p>
+
+  <p>
+    175B 要分两行看。micro BS=1 时，BF16 66.1 GB / 22.4 samples/s，FP8-LM 40.3 GB / 27.1 samples/s：
+    显存相对降 <span data-src="Table 5">39.0%</span>，吞吐相对升 <span data-src="Table 5">21.0%</span>，这是同 micro BS 的对照。
+    micro BS=4 时，FP8-LM 是 57.7 GB / 39.3 samples/s；相对 BF16 的 22.4 是
+    <span data-src="Table 5">75.4%</span>，但 micro BS 已经从小 1 提到 4，<strong>不是同 batch 对照</strong>。
+    论文 headline 的 75% 对应后者。
+  </p>
+
+  <p>
+    同一张表里，FP8 (TE) 的 175B 是 69.6 GB / 28.7 samples/s。它的显存比 BF16 的 66.1 GB 还高，
+    因为 TE 只把 GEMM 压到 FP8，optimizer 和梯度仍高精度；FP8-LM §3.2.2 也是这么解释的。
+    这也是为什么本页把 FP8-LM 的 40.3 GB 和 8.2 GB 通信量单独标出来——它们来自 FP8 梯度、FP8 通信和 FP8 optimizer，
+    不是 GEMM 一项的功劳。
+  </p>
+
+  <p>
+    MFU 也不是单调上升：175B 的 BF16 是 39.0%，FP8 micro BS=4 是 34.2%，低
+    <span data-src="Table 5">4.8 个百分点</span>；micro BS=1 时 FP8 只有 23.9%。
+    吞吐是 samples/s，MFU 是模型 FLOPs 利用率，两者口径不同；表里的 +75.4% 同时换了 micro batch，
+    不能当作同 batch 的算法加速。
+  </p>
+
+  <p>
+    论文 headline 还说“比 TE 快 37%”。按 Table 5 复算，39.3 vs 28.7 是
+    <span data-src="Table 5">36.9%</span>，但这也是 micro BS=4 对 TE micro BS=1；
+    micro BS=1 时 FP8-LM 的 27.1 反而比 TE 的 28.7 低 <span data-src="Table 5">5.6%</span>。
+    这组对照说明：headline 的加速比不是单纯由精度方案决定的，batch 和并行配置也在里面。
+  </p>
+
+  <p>
+    模型质量方面，Table 2 的 zero-shot 平均分是：GPT-7B 的 BF16 58.4、FP8 58.0；GPT-13B 的 BF16 61.0、FP8 60.4。
+    SFT（Table 3，LLaMA-7B，Vicuna-v1.1 设置）的 GPU 显存 51.1→44.0 GB、吞吐 103→131，
+    AlpacaEval FP8 67.20 vs BF16 66.15、MT-Bench FP8 5.70 vs BF16 5.75。
+    RLHF（Table 4，AlpacaFarm）的 weights 15,082→10,292 MB、optimizer states 15,116→5,669 MB，
+    AlpacaEval FP8 72.42 vs BF16 72.05、MT-Bench FP8 6.04 vs BF16 6.16。
+    这些是报告值，不是统计显著性检验。
+  </p>
+
+  <p class="eq-cap" style="text-align:left">
+    Table 4（FP8 Formats for Deep Learning）：模拟 FP8 的 GPT perplexity；175B 的 6.65/6.68 是 75% 训练时的值，BF16 baseline 未跑完（§4.1）。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>模型</th><th>Baseline perplexity</th><th>FP8 perplexity</th></tr></thead>
+    <tbody>
+      <tr><td>GPT 126M</td><td class="num">19.14</td><td class="num">19.24</td></tr>
+      <tr><td>GPT 1.3B</td><td class="num">10.62</td><td class="num">10.66</td></tr>
+      <tr><td>GPT 5B</td><td class="num">8.94</td><td class="num">8.98</td></tr>
+      <tr><td>GPT 22B</td><td class="num">7.21</td><td class="num">7.24</td></tr>
+      <tr><td>GPT 175B</td><td class="num">6.65</td><td class="num">6.68</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    这张表来自 FP8 Formats 的<strong>模拟 FP8</strong>实验：先把输入 clip 到 FP8 可表示值，再回到 FP16/BF16 做算术。
+    它验证的是数值可行性，不是 H100 上的速度；本页的吞吐数字来自 FP8-LM Table 5，两者不要混。
+    论文对 175B 的措辞是“在报告的任务上与 16-bit 训练相当”，不是“无损”；175B 的 baseline 只跑到 75%，
+    长期收敛也没有覆盖。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">不要混用</span><h4>FP8-LM 的数字与 Megatron 默认配置是两套东西</h4></div>
+    <p>
+      <strong>FP8-LM：</strong>FP8 梯度、FP8 all-reduce、FP8 optimizer（一阶矩 FP8、二阶矩 FP16）、FP16+tensor scaling 的 master weights；
+      6 B/参数（Eq.8）。Table 5 的 40.3 GB / 8.2 GB / 39.3 samples/s 都属于这套。
+    </p>
+    <p>
+      <strong>Megatron-Core 默认：</strong><code>fp8=None</code>，开启后 <code>fp8_recipe='delayed'</code>、
+      <code>fp8_amax_history_len=1</code>、<code>fp8_amax_compute_algo='most_recent'</code>、<code>fp8_param=False</code>、
+      <code>fp8_wgrad=True</code>；optimizer 状态不变，梯度 all-reduce 也不是 FP8。
+      本页没有给这套配置对应的吞吐数字，也不把它和 Table 5 直接比较。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：离群值、scale 溢出、梯度精度和集群一致性</h2></div>
+  <p class="sec-sub">FP8 的失败模式往往不是算错，而是 scale 选错；分布式下还会变成 rank 之间不一致。</p>
+
+  <h3>离群值：per-tensor 的 amax 会被一个值带走</h3>
+  <p>
+    FP8 Formats §4.3 给了一组推理 PTQ 的证据：GPT3 1.3B 在 wikitext103 上的 BF16 baseline perplexity 是 10.19。
+    只量化 GEMM 输入、用固定 exponent bias 7 时，若干 bias 取值可以匹配 baseline；
+    但如果连 residual connection 也量化，bias 7 的 perplexity 变成 12.59。
+    改成 per-tensor scaling 后，GEMM-only 是 10.29，GEMM+residuals 是 10.44。
+    这说明 per-tensor scale 对 residual/离群值是必要的；但这是<strong>推理 PTQ</strong>，不能直接外推成“训练一定没问题”。
+  </p>
+
+  <h3>scale 溢出与下溢：一个 640 的 spike 会把下一步 scale 压到 0.70</h3>
+  <p>
+    E4M3 的最大 normal 是 448，最小 subnormal 是 2<sup>−9</sup> = 0.001953125。
+    如果某一步的 amax 是 640，delayed scaling 下一步的 scale 是 <code>448/640 = 0.70</code>；
+    此时低于 <code>0.001953125/0.70 = 0.00279</code> 的值已低于最小 subnormal；按 RTNE，只有低于其一半（约 <code>0.00140</code>）的值才舍入为 0，介于两者之间的值量化为最小 subnormal。
+    反过来说，如果 scale 太大（amax 被低估），超过 448 的值会饱和到 448。
+    delayed scaling 的 history 长度和 <code>max/most_recent</code> 就是在这两个失败模式之间取平衡：
+    Megatron 默认窗口 1、most_recent，对最近一步最敏感；TE 默认窗口 1024、max，更平滑。
+  </p>
+
+  <h3>梯度与 optimizer：不是所有状态都能压到 8 bit</h3>
+  <p>
+    FP8 Formats 推荐梯度用 E5M2，因为它的范围比 E4M3 宽；代价是只有 2 个 mantissa 位。
+    FP8-LM 的消融进一步说明：FP8 master weight 会掉点；FP16 master weight 加 tensor scaling 可以匹配 FP32；
+    BF16 master 比 FP16+scaling 略差；二阶矩用 FP8 会发散（Table 6 #4、Fig.8）。
+    所以 FP8-LM 的 6 B/参数不是“所有状态都 8 bit”：master 是 2 B（FP16+scaling），二阶矩是 2 B（FP16），
+    只有梯度和一阶矩是 1 B。
+  </p>
+
+  <h3>分布式：scale 不一致，all-reduce 就是在加不同单位的数据</h3>
+  <p>
+    TE 的 amax 必须在 TP/DP/CP 范围内归约；Megatron 的 <code>tp_only_amax_red</code> 可以把范围缩到 TP/CP，
+    但这时跨 DP 的 scale 是否一致要由调用方保证。FP8-LM 则用全局最小 scale <code>s'_g</code> 统一梯度通信，
+    聚合后 <code>s=N·s'_g</code>；N 是 all-reduce 的 rank 数，换 DP 规模时这个乘积会变，
+    恢复训练时要确认实现是否重新对齐（论文未展开，<span class="infer">推断</span>）。
+    checkpoint 侧，TE 把 amax history 和 scale 放进 extra state；Megatron 的 <code>--stream-ckpt-dequant</code>
+    不支持 delayed，因为 delayed 的 scale 只在 <code>load_state_dict</code> 里恢复（<code>arguments.py:1728-1730</code>）。
+  </p>
+
+  <h3>硬件与收敛：FP8 不是所有卡、所有训练长度都覆盖</h3>
+  <p>
+    TE 文档要求 Ada 或更新架构（SM 8.9+）；block scaling（Float8BlockScaling）需要 Hopper（SM 9.0+）或 Blackwell；MXFP8 的 1 E8M0 / 32 值是 Blackwell 的能力。
+    H100 是 FP8-LM 的实验平台；A100 是 SM 8.0，不在 TE 的 FP8 支持范围内。
+    收敛方面，FP8 Formats 的 175B baseline 只跑到 75%，FP8-LM 的 175B 只训练 40B tokens（Table 1）；
+    两者都说明“报告的任务上相当”，不等于“任意长度、任意模型都稳定”。
+  </p>
+
+  <p class="eq-cap" style="text-align:left">
+    Table 1d（本页归纳）：训练 FP8 与推理 FP8 的区别；推理侧数字来自 FP8 Formats §4.2/Table 5，训练侧来自 FP8-LM Table 5。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>维度</th><th>训练 FP8</th><th>推理 FP8</th></tr></thead>
+    <tbody>
+      <tr><td>目标</td><td>省显存/带宽/算力，同时保持收敛</td><td>省显存/带宽，保持精度</td></tr>
+      <tr><td>量化张量</td><td>权重、激活、梯度（可选）</td><td>权重、激活</td></tr>
+      <tr><td>scaling</td><td>delayed/current/block，带 amax history</td><td>静态或动态 per-tensor/per-channel，常用校准</td></tr>
+      <tr><td>反向</td><td>E5M2 梯度、FP8 GEMM、FP32 wgrad 累加</td><td>无</td></tr>
+      <tr><td>训练状态</td><td>master weights、Adam m/v、amax history、scale</td><td>无 optimizer 状态</td></tr>
+      <tr><td>典型失败</td><td>梯度下溢、scale 不一致、二阶矩发散</td><td>校准误差、离群值饱和</td></tr>
+      <tr><td>本页证据</td><td>FP8-LM Table 5、Table 6</td><td>FP8 Formats Table 5（PTQ）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>什么时候别用</h3>
+  <ul>
+    <li><strong>只做 GEMM、却指望显存减半。</strong>如果 <code>fp8_param=False</code>、optimizer 和梯度仍是高精度，省下的主要是 GEMM 输入带宽，不是 16 B/参数。TE 的 175B 行就是例子：69.6 GB 比 BF16 的 66.1 GB 还高。</li>
+    <li><strong>张量离群值很重，又没有 block/per-channel scale。</strong>per-tensor 的 amax 会被一个最大值顶高，其余值分辨率下降；FP8 Formats §4.3 的 residual 实验就是这种情况。</li>
+    <li><strong>硬件不在 SM 8.9+，或者框架只支持 compute-only FP8。</strong>前者没有 FP8 Tensor Core；后者省不到梯度、通信和 optimizer。</li>
+    <li><strong>需要严格的逐位复现。</strong>delayed scaling 的 scale 依赖历史、rank 归约顺序和 checkpoint 恢复；换并行度或换 recipe 后，逐位复现要比 BF16 难得多。</li>
+    <li><strong>训练长度和模型规模没有覆盖。</strong>FP8-LM 的 175B 只跑 40B tokens；FP8 Formats 的 175B baseline 只到 75%。上线前要在自己的模型和 token 预算上复测收敛。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>FP8 是“GEMM 8 bit + 状态分层”，不是“整个训练步 8 bit”</h4></div>
+    <p>
+      先把 GEMM 输入压到 FP8、用 FP32 累加，再把梯度通信和 optimizer 状态按精度敏感度分层；
+      scale 的粒度、history 和分布式归约决定它稳不稳。算清楚 payload、scale 开销和同 batch 条件，
+      再决定要不要把 40.3 GB 当成自己的目标。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>FP8 Formats for Deep Learning · FP8-LM: Training FP8 Large Language Models</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2209.05433">arXiv 2209.05433</a> ·
+    <a href="https://arxiv.org/abs/2310.18313">arXiv 2310.18313</a><br>
+    文档：<a href="https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/fp8_delayed_scaling/fp8_delayed_scaling.html">TE · FP8 delayed scaling</a> ·
+    <a href="https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/fp8_current_scaling/fp8_current_scaling.html">TE · FP8 current scaling</a> ·
+    <a href="https://docs.nvidia.com/deeplearning/transformer-engine/examples/fp8_primer.html">TE · FP8 primer</a> ·
+    <a href="https://docs.nvidia.com/deeplearning/transformer-engine/api/c/gemm.html">TE · GEMM API</a><br>
+    源码：<a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a269ddf45b6f5b237aff6668fd1ddd79ef2d">Megatron-LM @70f7a26</a> ·
+    <a href="https://github.com/NVIDIA/TransformerEngine">NVIDIA/TransformerEngine</a><br>
+    笔记：无对应笔记；本页以两篇原文、TE 文档和 Megatron 源码为准。
+  </div>
+  <p class="errata" style="margin-top:16px">
+    <strong>版本与口径：</strong>FP8-LM 以 arXiv 2310.18313v2 为准；FP8 Formats 以 arXiv 2209.05433 当前版本为准。
+    FP8-LM 预训练部分的吞吐/显存/通信数字来自 Table 5，且带有 micro BS 与并行度条件；SFT/RLHF 的系统数字来自 Table 3/4，条件不同；
+    FP8 Formats 的 Table 4 是模拟 FP8，不是硬件实测；FP8 Formats 的 Table 5 是推理 PTQ，不是训练。
+    Megatron 默认值对应 commit 70f7a26，和 FP8-LM 的 full-FP8 recipe 分开看。
+  </p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var FP8_MAX = 448;
+
+  /* ---------------- amax / delayed scaling simulator ---------------- */
+  var sim = document.getElementById('fp8-amax-sim');
+  if (sim) {
+    var modes = document.getElementById('fp8-amax-modes');
+    var lenRange = document.getElementById('fp8-hist-len');
+    var obsRange = document.getElementById('fp8-obs');
+    var lenVal = document.getElementById('fp8-hist-lenv');
+    var obsVal = document.getElementById('fp8-obs-v');
+    var effEl = document.getElementById('fp8-amax-eff');
+    var scaleEl = document.getElementById('fp8-amax-scale');
+    var scaledEl = document.getElementById('fp8-amax-scaled');
+    var statusEl = document.getElementById('fp8-amax-status');
+    var msgEl = document.getElementById('fp8-amax-msg');
+    var pushBtn = document.getElementById('fp8-push');
+    var resetBtn = document.getElementById('fp8-reset');
+
+    if (modes && lenRange && obsRange && lenVal && obsVal && effEl && scaleEl && scaledEl && statusEl && msgEl && pushBtn && resetBtn) {
+      var hist = [120, 96, 160];
+      var algo = 'max';
+
+      function amaxEff(h, a) {
+        if (a === 'max') {
+          var m = h[0];
+          for (var i = 1; i < h.length; i++) if (h[i] > m) m = h[i];
+          return m;
+        }
+        return h[h.length - 1];
+      }
+
+      function render() {
+        var len = parseInt(lenRange.value, 10);
+        var obs = parseInt(obsRange.value, 10);
+        while (hist.length > len) hist.shift();
+        if (hist.length === 0) hist = [obs];
+        lenVal.textContent = String(len);
+        obsVal.textContent = String(obs);
+
+        var eff = amaxEff(hist, algo);
+        var scale = FP8_MAX / eff;
+        var scaled = obs * scale;
+        var saturated = scaled > 448.0001;
+
+        effEl.textContent = String(eff);
+        scaleEl.textContent = scale.toFixed(2);
+        scaledEl.textContent = scaled.toFixed(1);
+        statusEl.textContent = saturated ? '饱和' : '正常';
+
+        var nextHist = hist.concat([obs]);
+        while (nextHist.length > len) nextHist.shift();
+        var nextEff = amaxEff(nextHist, algo);
+        var nextScale = FP8_MAX / nextEff;
+        var algoTxt = algo === 'max' ? 'max' : 'most_recent';
+
+        msgEl.textContent = 'history=[' + hist.join(',') + ']，' + algoTxt + '→amax_eff=' + eff +
+          '；scale=448/' + eff + '=' + scale.toFixed(2) +
+          '；本步 ' + obs + '×' + scale.toFixed(2) + '=' + scaled.toFixed(1) +
+          (saturated ? ' > 448，cast 后饱和到 448。' : '，在范围内。') +
+          '记录后 history=[' + nextHist.join(',') + ']，下一步 scale=' + nextScale.toFixed(2) + '。';
+      }
+
+      var btns = modes.querySelectorAll('.rule-btn');
+      for (var i = 0; i < btns.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            algo = btn.getAttribute('data-algo');
+            for (var j = 0; j < btns.length; j++) {
+              btns[j].classList.toggle('active', btns[j] === btn);
+            }
+            render();
+          });
+        })(btns[i]);
+      }
+
+      lenRange.addEventListener('input', render);
+      obsRange.addEventListener('input', render);
+      pushBtn.addEventListener('click', function () {
+        var len = parseInt(lenRange.value, 10);
+        hist = hist.concat([parseInt(obsRange.value, 10)]);
+        while (hist.length > len) hist.shift();
+        render();
+      });
+      resetBtn.addEventListener('click', function () {
+        hist = [120, 96, 160];
+        algo = 'max';
+        lenRange.value = '3';
+        obsRange.value = '640';
+        for (var k = 0; k < btns.length; k++) {
+          btns[k].classList.toggle('active', btns[k].getAttribute('data-algo') === 'max');
+        }
+        render();
+      });
+
+      render();
+    }
+  }
+
+  /* ---------------- byte accounting simulator ---------------- */
+  var memSim = document.getElementById('fp8-mem-sim');
+  if (memSim) {
+    var memModes = document.getElementById('fp8-mem-modes');
+    var mRange = document.getElementById('fp8-m');
+    var kRange = document.getElementById('fp8-k');
+    var mV = document.getElementById('fp8-m-v');
+    var kV = document.getElementById('fp8-k-v');
+    var payloadEl = document.getElementById('fp8-mem-payload');
+    var scaleEl2 = document.getElementById('fp8-mem-scale');
+    var totalEl = document.getElementById('fp8-mem-total');
+    var saveEl = document.getElementById('fp8-mem-save');
+    var memMsg = document.getElementById('fp8-mem-msg');
+
+    if (memModes && mRange && kRange && mV && kV && payloadEl && scaleEl2 && totalEl && saveEl && memMsg) {
+      var mode = 'tensor';
+
+      function fmt(n) {
+        return n.toLocaleString('en-US');
+      }
+
+      function renderMem() {
+        var M = parseInt(mRange.value, 10);
+        var K = parseInt(kRange.value, 10);
+        var N = M * K;
+        var payload = N;
+        var bf16 = 2 * N;
+        var scaleBytes;
+        var scaleDesc;
+        if (mode === 'tensor') {
+          scaleBytes = 4;
+          scaleDesc = '1 个 FP32 scale';
+        } else if (mode === 'channel') {
+          scaleBytes = M * 4;
+          scaleDesc = M + ' 个 FP32 scale（每输出通道 1 个）';
+        } else {
+          scaleBytes = Math.ceil(N / 32);
+          scaleDesc = fmt(Math.ceil(N / 32)) + ' 个 E8M0 scale（每 32 值 1 个）';
+        }
+        var total = payload + scaleBytes;
+        var save = (bf16 - total) / bf16 * 100;
+        mV.textContent = String(M);
+        kV.textContent = String(K);
+        payloadEl.textContent = fmt(payload) + ' B';
+        scaleEl2.textContent = fmt(scaleBytes) + ' B';
+        totalEl.textContent = fmt(total) + ' B';
+        saveEl.textContent = save.toFixed(3) + '%';
+        memMsg.textContent = M + '×' + K + '=' + fmt(N) + ' 个值；BF16 ' + fmt(bf16) +
+          ' B；FP8 payload ' + fmt(payload) + ' B；' + scaleDesc + '，' + fmt(scaleBytes) +
+          ' B；总计 ' + fmt(total) + ' B；相对 BF16 节省 ' + save.toFixed(3) + '%。';
+      }
+
+      var mbtns = memModes.querySelectorAll('.rule-btn');
+      for (var j = 0; j < mbtns.length; j++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            mode = btn.getAttribute('data-mode');
+            for (var k = 0; k < mbtns.length; k++) {
+              mbtns[k].classList.toggle('active', mbtns[k] === btn);
+            }
+            renderMem();
+          });
+        })(mbtns[j]);
+      }
+      mRange.addEventListener('input', renderMem);
+      kRange.addEventListener('input', renderMem);
+      renderMem();
+    }
+  }
+})();
+</script>
+</body>
+</html>

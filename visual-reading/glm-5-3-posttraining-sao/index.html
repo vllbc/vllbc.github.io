@@ -1,0 +1,978 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 13.1 | SAO Table 1 | 97.3-84.2 |
+| 20.0 | SAO Table 1 | 74.8-54.8 |
+| 12.3 | SAO Table 1 | 88.3-76.0 |
+| 18.2 | SAO Table 1 | 74.0-55.8 |
+| 3.8 | SAO Table 1 | 97.3-93.5 |
+| 6.8 | SAO Table 2 | 29.8-23.0 |
+| 2.8 | SAO Table 2 | 29.8-27.0 |
+| 3.1 | SAO Table 1 | 97.3-94.2 |
+| 2.3 | SAO Table 4 | 97.3-95.0 |
+| 5.0 | SAO Table 4 | 74.8-69.8 |
+| 6.7 | SAO Table 4 | 97.3-90.6 |
+| 0.3 | SAO Table 4 | 74.8-74.5 |
+| 17.5 | SAO Table 4 | 97.3-79.8 |
+| 19.5 | SAO Table 4 | 74.8-55.3 |
+| 23.7 | GLM-5.3 Blog §Stronger Coding | 28.3-4.6 |
+| 20.7 | GLM-5.3 Blog §Stronger Coding | 66.9-46.2 |
+| 4.7 | GLM-5.3 Blog §Stronger Coding | 28.5-23.8 |
+| 11.1 | GLM-5.3 Blog §Stronger Coding | 34.5-23.4 |
+| 1.9 | GLM-5.3 Blog §Stronger Coding | 31.4-29.5 |
+| 7.3 | GLM-5.3 Blog §Emergent Cyber Capability | 84.5-77.2 |
+| 30.0 | GLM-5.3 Blog §Emergent Cyber Capability | 54.4-24.4 |
+| 2.23 | GLM-5.3 Blog §Emergent Cyber Capability | 54.4/24.4 |
+| 0.70 | SAO §4.1 | 1-0.3 |
+| 6.00 | SAO §4.1 | 1+5.0 |
+| 0.20 | SAO §4.1 | 1-0.8 |
+| 4.00 | SAO §4.1 | 1+3.0 |
+| 128 | SAO §4.1 | 16*8 |
+| 128 | SAO §4.1 | 128/1 |
+| 16 | SAO §4.1 | 128/8 |
+| 0 | SAO §4.1 | 1-1 |
+| 7 | SAO §4.1 | 8-1 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GLM-5.3 后训练 · 不换基座，用 SAO 把长程 RL 跑稳</title>
+<meta name="description" content="GLM-5.3 后训练精读：官方博客称复用 GLM-5.2 基座、全部增益来自 post-training，并沿用 SAO with compaction；SAO 论文（arXiv 2607.07508v1）用单轨迹异步 RL、DIS 双侧 mask、K=2 critic、frozen attention 与 skip-observation GAE，把 Qwen3-30B-A3B 的 AIME2025 从 84.2 拉到 97.3，并稳定训练到 1000 步。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.svg-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.svg-c3{fill:var(--c3-soft);stroke:var(--c3);stroke-width:1.2}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.svg-ln-hot{stroke:var(--accent);stroke-width:1.5;fill:none;stroke-dasharray:5 4}
+.arrow{fill:var(--text-soft)}
+.arrow-hot{fill:var(--accent)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.tbl-wide table{min-width:720px}
+.handcalc summary{font-weight:600}
+.handcalc .details-body strong{color:var(--text)}
+.pipeline-svg{width:100%;height:auto;display:block}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GLM-5.3 · SAO</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Post-training · GLM-5.3 / SAO · 2026</span>
+  <h1>GLM-5.3：基座不动，<br>把后训练 stack 再放大一轮</h1>
+  <p class="hero-sub">
+    官方博客的原话是「Scaling post-training is all we did for GLM-5.3」：GLM-5.3 与 GLM-5.2 同基座，增益来自后训练；
+    算法侧沿用 <strong>SAO with compaction</strong>。SAO 的原始论文（arXiv 2607.07508v1）给出单轨迹异步 RL、DIS 与更强 value model 的完整设计，
+    但论文的部署对象是 <strong>GLM-5.2 750B-A40B</strong>，不是 GLM-5.3。这两条来源必须分开读。
+  </p>
+  <div class="meta">
+    <span>Z.ai 官方博客 · SAO 论文</span>
+    <a href="https://z.ai/blog/glm-5.3" target="_blank" rel="noopener">GLM-5.3 Blog ↗</a>
+    <a href="https://arxiv.org/abs/2607.07508" target="_blank" rel="noopener">SAO arXiv ↗</a>
+    <a href="https://huggingface.co/zai-org/GLM-5.3" target="_blank" rel="noopener">HF Model Card ↗</a>
+    <a href="https://github.com/THUDM/slime" target="_blank" rel="noopener">slime ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    GLM-5.3 的官方材料是一篇 <strong>2026-08-14 的博客</strong>和 HF 模型卡；未找到 GLM-5.3 专门技术报告。博客明确写
+    <em>same base model as GLM-5.2</em>、<em>every gain comes from post-training</em>；SAO 是另一条线：
+    它解决异步长程 RL 的稳定性，训练对象是 <strong>Qwen3-30B-A3B</strong>，部署对象是 <strong>GLM-5.2</strong>。
+  </p>
+  <p>
+    SAO 把 GRPO 的 group-wise sampling 换成每个 prompt 一条轨迹。DIS 直接用 rollout logprob 算
+    <code>r<sub>t</sub> = π<sub>θ</sub> / π<sub>rollout</sub></code>，落在
+    <code>[1−ε<sub>l</sub>, 1+ε<sub>h</sub>]</code> 之外的 token 整个从梯度中置零；critic 每次策略更新配 K=2 次更新，
+    冻结 attention、只训 MoE 投影，并用 skip-observation GAE 跳过环境观测。
+  </p>
+  <p>
+    结果分两套：SAO 在 Qwen3-30B-A3B 上把 AIME2025 从 GRPO 的 <span data-src="SAO Table 1">84.2</span>
+    拉到 <span data-src="SAO Table 1">97.3</span>，SWE-Bench Verified 从 <span data-src="SAO Table 2">23.0</span>
+    拉到 <span data-src="SAO Table 2">29.8</span>，稳定训练到 <span data-src="SAO Abstract">1000 步</span>；
+    GLM-5.3 博客报告 Terminal-Bench 3.0 从 <span data-src="GLM-5.3 Blog §Stronger Coding">4.6</span>
+    到 <span data-src="GLM-5.3 Blog §Stronger Coding">28.3</span>，DeepSWE v1.1 从
+    <span data-src="GLM-5.3 Blog §Stronger Coding">46.2</span> 到
+    <span data-src="GLM-5.3 Blog §Stronger Coding">66.9</span>。两套数字不能相加。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="GLM-5.3 Blog §Stronger Coding">4.6 → 28.3</div>
+      <div class="k">Terminal-Bench 3.0，GLM-5.2 → GLM-5.3<br>官方博客报告值；模型与 harness 见该节</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="SAO Table 1">97.3</div>
+      <div class="k">AIME2025，Qwen3-30B-A3B，reasoning-with-Python，Pass@1<br>同表 GRPO 为 <span data-src="SAO Table 1">84.2</span></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="SAO Abstract">1000</div>
+      <div class="k">SAO 稳定训练步数<br>标准 GRPO 约 <span data-src="SAO §4.2">160</span> 步崩溃</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>长程 Agent RL 的浪费，来自等最慢的一条轨迹</h2></div>
+  <p class="sec-sub">先看同步 batch 的三个成本：长尾等待、跨版本 off-policy、以及和线上单轨迹反馈不兼容。</p>
+
+  <p>
+    同步 RL 的流程是「采一整批 rollout，等齐，再优化」。长程 Agent 任务的轨迹长度差异很大：
+    短轨迹很快结束，长轨迹变成 straggler，GPU 集群在等最慢那条时大面积空转（SAO §1）。
+    这不是某个实现细节，而是 batch 语义本身决定的。
+  </p>
+
+  <p>
+    GRPO 把这个问题放大了一层。它对每个 prompt 采一组 G 条轨迹，用组均值做 baseline，因此必须等组内所有轨迹完成才能算 advantage；
+    等待时间由最慢的一条决定。论文把这种延迟称为 latency-driven off-policy：等得越久，用于更新的数据离当前策略越远（SAO §1）。
+    在线上或复杂 Agent 环境里，环境常常只返回单条轨迹反馈，group-wise sampling 还会直接和反馈形态冲突（SAO §1）。
+  </p>
+
+  <p>
+    异步训练能拆掉这个等待，但会引入 policy lag。一条轨迹的生成可能横跨多次模型更新，
+    精确追踪行为策略 π<sub>old</sub> 需要保存一串 checkpoint 历史；论文认为这在实践中不可行（SAO §3.1）。
+    如果直接用当前策略去更新很旧的数据，off-policy 偏差会变成训练震荡。
+  </p>
+
+  <p>
+    另一条路是单轨迹：每个 prompt 只采一条，完成即训练。它拆掉了组屏障，但也拆掉了 group baseline；
+    梯度估计退化成 REINFORCE 式的高方差（SAO §3.2）。所以问题不是「异步还是同步」，
+    而是「拆掉 group 之后，用什么补方差、用什么挡 off-policy token」。
+  </p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">利用率</span><h4>等最慢的一条</h4></div>
+      <p>同步 batch 必须等组内最长轨迹；长尾越重，空转越多。异步消费轨迹能缓解，但不自动解决稳定性。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">稳定性</span><h4>group baseline 会放大延迟</h4></div>
+      <p>组均值减方差，但组必须等齐；等齐的过程本身制造 off-policy。单轨迹去掉等待，方差又升上来。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">线上兼容</span><h4>环境只回一条轨迹</h4></div>
+      <p>真实沙箱与在线业务往往一次只给一条反馈；group-wise 采样和这种反馈形态不匹配。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>GRPO 省了 critic，却把同步屏障留在组里</h2></div>
+  <p class="sec-sub">前人方案分别在「省显存」和「提吞吐」上用力；SAO 要同时处理稳定性和单轨迹反馈。</p>
+
+  <p>
+    PPO 的 actor-critic 用独立 value model 估 advantage。论文 §2 指出，这相当于为 value function 再维护一份模型参数，
+    训练显存 footprint 近似翻倍；换来的是一定程度上的方差控制。GRPO 把这份成本省掉：它不训 critic，
+    用同一 prompt 的组内归一化奖励做 baseline（SAO §2）。
+  </p>
+
+  <p>
+    GRPO 的代价是组屏障。标准 GRPO 在这套 agentic RL 设置里约 <span data-src="SAO §4.2">160 步</span>崩溃
+    （SAO §4.2）；它的分数是崩溃前的最后有效值。VAPO 换成长度自适应 GAE 与 value-based RL，
+    但没有 DIS 时 token-level clip ratio 接近 0，约 <span data-src="SAO §4.4">90 步</span>崩溃（SAO §4.4、Figure 4c）。
+    也就是说，「看起来没在裁剪」不等于稳定。
+  </p>
+
+  <p>
+    异步系统走的是另一条路。AReaL、ROLL Flash、asynchronous RLHF 等工作把 rollout 与训练解耦，重点在吞吐与墙钟效率；
+    论文的判断是，这些工作对训练稳定性和任务效果的覆盖不足（SAO Abstract、§5.2）。
+    Decoupled PPO 进一步保留 π<sub>θ</sub>、π<sub>θ<sub>old</sub></sub>、π<sub>rollout</sub> 三个策略做重要性采样，
+    但当一条轨迹横跨多次更新时，π<sub>θ<sub>old</sub></sub> 的精确行为概率很难追（SAO §3.1）。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    SAO §1–§3 的方案对照；「约 160 步」与「约 90 步」是论文报告的训练崩溃位置，条件为 Qwen3-30B-A3B 的 agentic RL 设置。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>方案</th><th>机制</th><th>在本实验里的卡点</th></tr></thead>
+    <tbody>
+      <tr><td>PPO</td><td>actor-critic + GAE，critic 与策略同时训</td><td>critic 让训练显存 footprint 近似翻倍（§2）</td></tr>
+      <tr><td>GRPO</td><td>同一 prompt 采 G 条，组均值做 baseline，无 critic</td><td>组必须等最慢一条；标准 GRPO 约 160 步崩溃（§4.2）</td></tr>
+      <tr><td>VAPO</td><td>length-adaptive GAE + value-based RL</td><td>没有 DIS 时 clip ratio 接近 0，约 90 步崩溃（§4.4、Figure 4c）</td></tr>
+      <tr><td>AReaL / ROLL Flash / async RLHF</td><td>rollout 与训练解耦，主打吞吐</td><td>论文称其重点在效率，稳定性与任务效果覆盖不足（§1、§5.2）</td></tr>
+      <tr><td>Decoupled PPO</td><td>π<sub>θ</sub> / π<sub>θ<sub>old</sub></sub> / π<sub>rollout</sub> 三策略重要性采样</td><td>轨迹跨多次更新时，精确追踪 π<sub>θ<sub>old</sub></sub> 需要 checkpoint 历史，实践不可行（§3.1）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">SAO 的赌注</span><h4>用 critic 换掉 group，再把 critic 训好</h4></div>
+    <p>
+      单轨迹拆掉了组屏障，但把方差控制的担子全压到 value model。SAO 围绕 value model 的四个设计——K=2 的更快 value 更新、
+      冻结 attention、skip-observation GAE、扩大 value pretraining——都是围绕这一件事。
+      所以它不是「GRPO 加一个 mask」，而是把 baseline 从组均值换成了 critic。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>单轨迹 + DIS：把 trust region 做成硬 mask，再用 critic 补方差</h2></div>
+  <p class="sec-sub">SAO 的关键不是「异步」本身，而是异步之后仍能把极端 off-policy token 挡在梯度外。</p>
+
+  <p>
+    单轨迹的设置很直接：每个 prompt 只采一条 rollout，轨迹完成就送入训练缓冲区，不等待同组其他样本（SAO §3.2）。
+    这让训练节奏和线上单条反馈对齐，但也让 advantage 估计失去 group baseline。SAO 的选择是把 baseline 交给 critic，
+    并用 DIS 处理异步带来的 policy lag。
+  </p>
+
+  <div class="eq">
+    r<sub>t</sub>(θ) = exp( log π<sub>θ</sub>(a<sub>t</sub>|s<sub>t</sub>) − log π<sub>rollout</sub>(a<sub>t</sub>|s<sub>t</sub>) )
+  </div>
+  <div class="eq-cap">SAO Eq.2：直接用 rollout 阶段记录的 logprob；不再维护 π<sub>θ<sub>old</sub></sub>（§3.1）</div>
+
+  <p>
+    DIS 的核心是「直接」：行为策略用 π<sub>rollout</sub> 代替，ratio 只算当前策略与采样策略的差。
+    论文的理由是，异步 rollout 可能横跨多次模型更新，精确的 π<sub>θ<sub>old</sub></sub> 既贵又容易错；
+    直接用 rollout logprob 可以省掉一次独立的 old-policy 推理（SAO §3.1）。
+  </p>
+
+  <div class="eq">
+    f(x) = x，若 1−ε<sub>l</sub> &lt; x &lt; 1+ε<sub>h</sub>；&nbsp;&nbsp; f(x) = 0，其他
+  </div>
+  <div class="eq-cap">SAO Eq.3：区间外的 token 不是被 clip，而是整个 token 从梯度中置零（§3.1）</div>
+
+  <div class="eq">
+    L(θ) = E<sub>t</sub>[ f(r<sub>t</sub>(θ), ε<sub>l</sub>, ε<sub>h</sub>) · Â<sub>t</sub> · log π<sub>θ</sub>(a<sub>t</sub>|s<sub>t</sub>) ]
+  </div>
+  <div class="eq-cap">SAO Eq.1：token-level 目标；f 为 0 的 token 对梯度没有贡献</div>
+
+  <p>
+    这和 PPO 的 clip 不是一回事。PPO 的 min/clip 会保留一个被裁剪后的项；DIS 直接把区间外的 token 置零。
+    论文的措辞是「masked from gradient computation entirely」，并说这让更激进的裁剪成为可能（SAO §3.1）。
+    区间也不对称：推理任务用 ε<sub>l</sub>=0.3、ε<sub>h</sub>=5.0；coding 任务用 0.8/3.0（SAO §4.1）。
+    上限比下限宽得多；论文没有解释这组取值的来源。
+  </p>
+
+  <div class="sim" id="dis-sim">
+    <div class="sim-top" id="dis-presets">
+      <button class="rule-btn active" data-elo="0.30" data-ehi="5.00">reasoning<span class="r-sub">ε_l=0.30 · ε_h=5.00</span></button>
+      <button class="rule-btn" data-elo="0.80" data-ehi="3.00">coding<span class="r-sub">ε_l=0.80 · ε_h=3.00</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">trust region</div><div class="slot-val" id="dis-interval">[0.70, 6.00]</div></div>
+      <div class="slot"><div class="slot-name">r_t</div><div class="slot-val" id="dis-r-out">2.40</div></div>
+      <div class="slot"><div class="slot-name">f(r_t)</div><div class="slot-val" id="dis-f">2.40</div></div>
+      <div class="slot"><div class="slot-name">状态</div><div class="slot-val" id="dis-status">保留</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>r_t = πθ / πrollout <span class="v" id="dis-r-v">2.40</span></label>
+        <input type="range" id="dis-r" min="0" max="6" step="0.05" value="2.4">
+      </div>
+      <div class="ctrl">
+        <label>ε_l <span class="v" id="dis-elo-v">0.30</span></label>
+        <input type="range" id="dis-elo" min="0" max="1" step="0.05" value="0.3">
+      </div>
+      <div class="ctrl">
+        <label>ε_h <span class="v" id="dis-ehi-v">5.00</span></label>
+        <input type="range" id="dis-ehi" min="0" max="6" step="0.1" value="5">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="dis-reset">重置到 reasoning</button>
+    </div>
+
+    <div class="readout" data-src="SAO §4.1">
+      <div class="r-head">当前读数</div>
+      <div id="dis-msg">1−0.30=0.70，1+5.00=6.00；r=2.40 在区间内，f=2.40，保留。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 A：DIS 的保留 / mask 边界 <span class="sum-sub">与交互输出逐位对上</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：reasoning 预设，ε_l=0.30，ε_h=5.00，r=2.40。</strong></p>
+      <ul>
+        <li>下界 <code>1−0.30=0.70</code>，上界 <code>1+5.00=6.00</code>；<code>0.70 &lt; 2.40 &lt; 6.00</code>，所以 <code>f=2.40</code>，状态「保留」。</li>
+        <li>把 r 推到边界 <code>6.00</code>：<code>6.00 &lt; 6.00</code> 不成立，所以 <code>f=0</code>，状态「mask」。区间是开区间，边界值也被挡掉。</li>
+      </ul>
+      <p><strong>组 2：coding 预设，ε_l=0.80，ε_h=3.00，r=0.75。</strong></p>
+      <ul>
+        <li>下界 <code>1−0.80=0.20</code>，上界 <code>1+3.00=4.00</code>；<code>0.20 &lt; 0.75 &lt; 4.00</code>，所以 <code>f=0.75</code>，状态「保留」。</li>
+        <li>把 r 推到边界 <code>0.20</code>：<code>0.20 &gt; 0.20</code> 不成立，所以 <code>f=0</code>，状态「mask」。</li>
+      </ul>
+      <p><strong>这个模拟覆盖了什么：</strong>只实现 Eq.3 的 mask 函数，覆盖「区间内保留」与「区间外置零」两个分支；预设的 0.3/5.0/0.8/3.0 来自 §4.1。比较前把 r 与区间端点按页面显示的 2 位小数取整，避免 <code>1−0.80</code> 的二进制尾差把边界值 0.20 误判成区间内。它不实现 Eq.1 的 logπ<sub>θ</sub> 项、Eq.2 的 logprob 计算、优势符号、PPO 的 min/clip，也不模拟 token 级批量与数值误差。</p>
+    </div>
+  </details>
+
+  <h3>Value model：单轨迹的方差要用 critic 补</h3>
+
+  <p>
+    单轨迹没有组内对比，方差比 GRPO 高。SAO 的做法不是再加一个 group，而是把 value model 训好：
+    每次策略更新配 <strong>K=2</strong> 次 value 更新（§3.2）；冻结 value model 的 attention，只优化 MoE 投影（§3.2）；
+    用 skip-observation GAE 处理「模型动作 → 环境观测 → 模型动作」的轨迹；并扩大 value model 的预训练语料（§3.2）。
+  </p>
+
+  <div class="eq">
+    Â(a<sub>i,N</sub>) = δ + γλ Â(a<sub>i+1,0</sub>) &nbsp;&nbsp;&nbsp;&nbsp;
+    δ = r<sub>t</sub> + γ V(a<sub>i+1,0</sub>) − V(a<sub>i,N</sub>)
+  </div>
+  <div class="eq-cap">SAO Eq.4–5：跳过 a<sub>i,N</sub> 与 a<sub>i+1,0</sub> 之间的环境观测 token，把动作价值直接接到下一个动作（§3.2）</div>
+
+  <p>
+    环境观测 o<sub>i</sub> 不是模型生成的，标准 GAE 跨过 o<sub>i</sub> 去算 V(o<sub>i,start</sub>)，
+    等于让 value model 预测一个外部环境状态的价值；论文认为这会引入噪声（§3.2）。
+    skip-observation 的改法是把 Bellman target 从「动作 → 观测 → 动作」改成「动作 → 下一个动作」，
+    advantage 只在模型自己生成的 token 上传播。论文在 Appendix A.1/Table 5 还比较了 step-level 与 token-level：
+    同样训练 400 步时，<span data-src="SAO Table 5">step-level average 是 85.8 / 60.5、last-token 是 87.3 / 62.8、token-level 是 89.8 / 66.8</span>
+    （AIME2025 / BeyondAIME，Accuracy %）。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    SAO §3.1–§3.2 的方法组件；本表是归纳，不是原文表格。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>组件</th><th>做法</th><th>解决什么</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td>单轨迹采样</td><td>每个 prompt 1 条 rollout，完成即入训练</td><td>去掉组同步屏障</td><td>§3.2</td></tr>
+      <tr><td>DIS</td><td>r<sub>t</sub>=π<sub>θ</sub>/π<sub>rollout</sub>；区间外 token mask</td><td>异步 policy lag 与极端 off-policy token</td><td>§3.1、Eq.1–3</td></tr>
+      <tr><td>Faster value</td><td>每次策略更新配 K=2 次 critic 更新</td><td>critic 跟上快速漂移的策略</td><td>§3.2</td></tr>
+      <tr><td>Frozen attention</td><td>冻结 attention，只训 MoE 投影</td><td>critic 梯度范数过大</td><td>§3.2、Figure 4b</td></tr>
+      <tr><td>Skip-observation GAE</td><td>跨过环境观测 token，action-to-action</td><td>环境噪声污染 advantage</td><td>§3.2、Eq.4–5</td></tr>
+      <tr><td>Value pretraining</td><td>扩大 value model 预训练语料</td><td>critic 冷启动</td><td>§3.2</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">拆开看</span><h4>DIS 不是全部：完整 SAO 还高 3.1 个百分点</h4></div>
+    <p>
+      Table 1 里「SAO (w/ DIS only)」的 AIME2025 是 <span data-src="SAO Table 1">94.2</span>，
+      完整 SAO 是 <span data-src="SAO Table 1">97.3</span>，差
+      <span data-src="SAO Table 1">3.1 个百分点（97.3 − 94.2）</span>；「GRPO (+ DIS)」是
+      <span data-src="SAO Table 1">93.5</span>。DIS 能把训练稳住，但完整方法还包含单轨迹 value model 的一整套训练设计。
+      把 SAO 简化成「一个 mask」会漏掉这部分。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>G=1、batch 128；一次策略更新配两次 critic 更新</h2></div>
+  <p class="sec-sub">把论文的实验配置拆成可复算的 batch 与更新次数，先看清 SAO 的成本落在哪里。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    SAO §4.1 的实验配置；GRPO 变体为 16 prompts × 8 rollouts = 128。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>项</th><th>值</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td>Backbone</td><td>Qwen3-30B-A3B-Thinking-2507；TIR SFT 3 epochs，数据由 GPT-OSS-120B 生成</td><td>§4.1</td></tr>
+      <tr><td>Batch / group</td><td>128 条轨迹 / G=1</td><td>§4.1</td></tr>
+      <tr><td>Max length</td><td>128k tokens</td><td>§4.1</td></tr>
+      <tr><td>Policy LR</td><td>1×10<sup>−6</sup></td><td>§4.1</td></tr>
+      <tr><td>ε_l / ε_h（reasoning）</td><td>0.3 / 5.0</td><td>§4.1</td></tr>
+      <tr><td>ε_l / ε_h（coding）</td><td>0.8 / 3.0</td><td>§4.1</td></tr>
+      <tr><td>Value LR / λ_critic / warmup</td><td>5×10<sup>−6</sup> / 1 / 10 steps</td><td>§4.1</td></tr>
+      <tr><td>K（critic 更新频次）</td><td>2</td><td>§4.1</td></tr>
+      <tr><td>Coding scaffold</td><td>OpenHands，最多 300 轮，128k context</td><td>§4.1</td></tr>
+      <tr><td>Eval</td><td>Pass@1；temp 1.0，top-p 1.0，max 128k；math 最多 50 轮；AIME/HMMT/IMO 16 次、BeyondAIME 4 次</td><td>§4.1</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    这套配置里，batch 固定为 <span data-src="SAO §4.1">128 条轨迹</span>。SAO 的 G=1 意味着
+    <span data-src="SAO §4.1">128 个 prompt</span>、每个 prompt 1 条轨迹；GRPO 变体则是
+    <span data-src="SAO §4.1">16 个 prompt、每个 prompt 8 条轨迹</span>，乘积仍是
+    <span data-src="SAO §4.1">128</span>（§4.1）。同样的 batch 大小，组内等待的轨迹数从
+    <span data-src="SAO §4.1">0</span> 变成最多 <span data-src="SAO §4.1">7</span> 条。
+    下面这个拆分器只做算术，不模拟墙钟时间。
+  </p>
+
+  <div class="sim" id="batch-sim">
+    <div class="sim-top" id="batch-modes">
+      <button class="rule-btn active" data-g="1">G=1 · SAO<span class="r-sub">128 prompts × 1</span></button>
+      <button class="rule-btn" data-g="8">G=8 · GRPO<span class="r-sub">16 prompts × 8</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">batch 轨迹</div><div class="slot-val" id="batch-total">128</div></div>
+      <div class="slot"><div class="slot-name">prompts</div><div class="slot-val" id="batch-prompts">128</div></div>
+      <div class="slot"><div class="slot-name">每 prompt 轨迹</div><div class="slot-val" id="batch-g">1</div></div>
+      <div class="slot"><div class="slot-name">组内最多等待</div><div class="slot-val" id="batch-wait">0</div></div>
+    </div>
+
+    <div class="readout" data-src="SAO §4.1">
+      <div class="r-head">当前读数</div>
+      <div id="batch-msg">batch=128 条轨迹；G=1 → 128 个 prompt，每个 prompt 1 条；组内等待 0 条。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 B：G=1 与 G=8 的 batch 拆分 <span class="sum-sub">与交互输出逐位对上</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：G=1（SAO）。</strong></p>
+      <ul>
+        <li><code>batch=128</code> 条轨迹；<code>128/1=128</code> 个 prompt，每个 prompt <code>1</code> 条轨迹。</li>
+        <li>组内最多等待 <code>1−1=0</code> 条其他轨迹。这就是「单轨迹、完成即训练」的配置。</li>
+      </ul>
+      <p><strong>组 2：G=8（GRPO 变体）。</strong></p>
+      <ul>
+        <li><code>batch=128</code> 条轨迹；<code>128/8=16</code> 个 prompt，每个 prompt <code>8</code> 条轨迹；<code>16×8=128</code>。</li>
+        <li>组内最多等待 <code>8−1=7</code> 条其他轨迹。这是结构计数，不是墙钟时间；论文没有给出等待时间或 GPU 利用率数字。</li>
+      </ul>
+      <p><strong>这个模拟覆盖了什么：</strong>只做 batch 的算术拆分，覆盖 G=1 与 G=8 两种论文设置；不模拟 rollout 长度分布、调度策略、吞吐或 GPU 空转比例。</p>
+    </div>
+  </details>
+
+  <p>
+    更新次数上，论文 §3.2 把 K 的单位写成「每次策略梯度更新」，§4.1 与 §4.3 的实验描述写成「每 batch」。
+    两处单位不同，本页只按原样并列，不把 2 次/更新换算成 2 次/batch。
+    能确定的是：K=2 是实验设置，目的是让 value 估计在策略漂移之前跟上（§3.2）。
+  </p>
+
+  <p>
+    成本也在这里。PPO 式 critic 让训练显存 footprint 近似翻倍（§2）；SAO 仍然需要 critic，
+    冻结 attention 只是减少可训练参数，论文没有给出显存账本。所以「省掉组等待」不等于「省掉 critic 的显存与训练时间」。
+  </p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>采样、缓冲、训练解耦；轨迹完成即入队</h2></div>
+  <p class="sec-sub">算法上是一条轨迹立即训练；工程上要靠 rollout、training、buffer 同一条 dataflow 才能不重建训练栈。</p>
+
+  <figure>
+    <svg class="pipeline-svg" viewBox="0 0 900 480" role="img" aria-label="GRPO 与 SAO 的流程对比：上排 GRPO 需要等组内所有轨迹完成；下排 SAO 的轨迹完成即进入 buffer，经 DIS mask、policy update 与 weight sync 回到 rollout，critic 以 K=2 更新并配合 skip-observation GAE。">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow"/>
+        </marker>
+        <marker id="arrhot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-hot"/>
+        </marker>
+      </defs>
+
+      <text x="20" y="40" class="svg-t">GRPO · 同步组</text>
+      <rect x="20" y="56" width="110" height="58" rx="9" class="svg-box"/>
+      <text x="75" y="80" text-anchor="middle" class="svg-t">轨迹 1</text>
+      <text x="75" y="98" text-anchor="middle" class="svg-s">先完成</text>
+
+      <rect x="150" y="56" width="110" height="58" rx="9" class="svg-box"/>
+      <text x="205" y="80" text-anchor="middle" class="svg-t">轨迹 2</text>
+      <text x="205" y="98" text-anchor="middle" class="svg-s">中等</text>
+
+      <rect x="280" y="56" width="110" height="58" rx="9" class="svg-box"/>
+      <text x="335" y="80" text-anchor="middle" class="svg-t">轨迹 3</text>
+      <text x="335" y="98" text-anchor="middle" class="svg-s">短</text>
+
+      <rect x="410" y="56" width="110" height="58" rx="9" class="svg-box"/>
+      <text x="465" y="80" text-anchor="middle" class="svg-t">轨迹 4</text>
+      <text x="465" y="98" text-anchor="middle" class="svg-s">最慢</text>
+
+      <line x1="545" y1="48" x2="545" y2="124" class="svg-ln-hot"/>
+      <text x="545" y="40" text-anchor="middle" class="svg-s">组屏障</text>
+
+      <line x1="75" y1="114" x2="75" y2="130" class="svg-ln"/>
+      <line x1="205" y1="114" x2="205" y2="130" class="svg-ln"/>
+      <line x1="335" y1="114" x2="335" y2="130" class="svg-ln"/>
+      <line x1="465" y1="114" x2="465" y2="130" class="svg-ln"/>
+      <line x1="75" y1="130" x2="535" y2="130" class="svg-ln"/>
+      <line x1="535" y1="130" x2="535" y2="85" class="svg-ln"/>
+      <line x1="535" y1="85" x2="562" y2="85" class="svg-ln" marker-end="url(#arr)"/>
+
+      <rect x="570" y="56" width="120" height="58" rx="9" class="svg-c1"/>
+      <text x="630" y="80" text-anchor="middle" class="svg-t">等最慢</text>
+      <text x="630" y="98" text-anchor="middle" class="svg-s">整组齐了才更新</text>
+
+      <line x1="690" y1="85" x2="714" y2="85" class="svg-ln" marker-end="url(#arr)"/>
+      <rect x="720" y="56" width="150" height="58" rx="9" class="svg-hot"/>
+      <text x="795" y="80" text-anchor="middle" class="svg-t">一次更新</text>
+      <text x="795" y="98" text-anchor="middle" class="svg-s">batch 内同步</text>
+
+      <text x="20" y="190" class="svg-t">SAO · 单轨迹异步</text>
+      <rect x="20" y="206" width="155" height="68" rx="9" class="svg-hot"/>
+      <text x="97" y="232" text-anchor="middle" class="svg-t">Rollout</text>
+      <text x="97" y="251" text-anchor="middle" class="svg-s">1 prompt = 1 条</text>
+
+      <rect x="195" y="206" width="155" height="68" rx="9" class="svg-c1"/>
+      <text x="272" y="232" text-anchor="middle" class="svg-t">Buffer</text>
+      <text x="272" y="251" text-anchor="middle" class="svg-s">完成即入队</text>
+
+      <rect x="370" y="206" width="155" height="68" rx="9" class="svg-hot"/>
+      <text x="447" y="232" text-anchor="middle" class="svg-t">DIS</text>
+      <text x="447" y="251" text-anchor="middle" class="svg-s">r_t + mask</text>
+
+      <rect x="545" y="206" width="155" height="68" rx="9" class="svg-hot"/>
+      <text x="622" y="232" text-anchor="middle" class="svg-t">Policy update</text>
+      <text x="622" y="251" text-anchor="middle" class="svg-s">Eq.1</text>
+
+      <rect x="720" y="206" width="155" height="68" rx="9" class="svg-c1"/>
+      <text x="797" y="232" text-anchor="middle" class="svg-t">Weight sync</text>
+      <text x="797" y="251" text-anchor="middle" class="svg-s">回 rollout</text>
+
+      <line x1="175" y1="240" x2="187" y2="240" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="350" y1="240" x2="362" y2="240" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="525" y1="240" x2="537" y2="240" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="700" y1="240" x2="712" y2="240" class="svg-ln" marker-end="url(#arr)"/>
+
+      <rect x="195" y="330" width="155" height="64" rx="9" class="svg-c3"/>
+      <text x="272" y="355" text-anchor="middle" class="svg-t">Sandbox</text>
+      <text x="272" y="373" text-anchor="middle" class="svg-s">环境观测</text>
+
+      <rect x="370" y="330" width="155" height="64" rx="9" class="svg-c2"/>
+      <text x="447" y="355" text-anchor="middle" class="svg-t">Critic</text>
+      <text x="447" y="373" text-anchor="middle" class="svg-s">K=2 · frozen attn</text>
+
+      <rect x="545" y="330" width="155" height="64" rx="9" class="svg-c3"/>
+      <text x="622" y="355" text-anchor="middle" class="svg-t">Skip-Obs GAE</text>
+      <text x="622" y="373" text-anchor="middle" class="svg-s">Eq.4–5</text>
+
+      <line x1="447" y1="274" x2="447" y2="322" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="525" y1="362" x2="537" y2="362" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="622" y1="330" x2="622" y2="282" class="svg-ln" marker-end="url(#arr)"/>
+      <line x1="272" y1="330" x2="272" y2="282" class="svg-ln" marker-end="url(#arr)"/>
+
+      <path d="M 797 274 C 797 452, 97 452, 97 282" class="svg-ln-hot" marker-end="url(#arrhot)"/>
+      <text x="447" y="466" text-anchor="middle" class="svg-s">参数更新回采样侧</text>
+    </svg>
+    <figcaption>
+      上排是 GRPO 的组同步：同一 prompt 的多条轨迹必须等最慢一条；下排是 SAO：轨迹完成即入 buffer，
+      DIS 先 mask 再更新策略，critic 以 K=2 更新并提供 skip-observation GAE 的 value。
+      算法结构据 SAO §3 与 Figure 2 重绘；Megatron/SGLang/slime 的工程分工据 GLM-5.3 博客 §slime，论文本身没有描述 slime 内部实现。
+    </figcaption>
+  </figure>
+
+  <h3>逐步拆开：一条轨迹从生成到更新</h3>
+  <ol>
+    <li><strong>生成。</strong>Rollout 引擎对每个 prompt 生成一条轨迹，记录 token-level logprob。SAO 的 batch 是 G=1，所以不需要等同一 prompt 的其他样本（§3.2、§4.1）。</li>
+    <li><strong>入队。</strong>轨迹完成即进入训练缓冲区；这是「单轨迹异步」和「分组同步」的分界点（§3.2、Figure 2）。</li>
+    <li><strong>算 ratio。</strong>训练侧用当前策略与 rollout logprob 算 <code>r<sub>t</sub></code>；不维护 π<sub>θ<sub>old</sub></sub>（Eq.2）。</li>
+    <li><strong>mask。</strong>落在 <code>[1−ε<sub>l</sub>, 1+ε<sub>h</sub>]</code> 外的 token 置零；区间内的 token 保留原 ratio（Eq.3）。</li>
+    <li><strong>估 value。</strong>critic 以 K=2 更新，冻结 attention、只训 MoE 投影；skip-observation GAE 跨过环境观测，算动作到动作的 advantage（§3.2、Eq.4–5）。</li>
+    <li><strong>更新与同步。</strong>策略按 Eq.1 更新，更新后的权重回到 rollout 侧。GLM-5.3 博客称 slime 把训练、rollout、buffer 放在同一条 dataflow 上，训练侧 Megatron、采样侧 SGLang（§slime）。</li>
+  </ol>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">来源边界</span><h4>论文没写 slime，博客没写算法细节</h4></div>
+    <p>
+      SAO 论文描述的是算法与 Qwen3-30B-A3B 实验，没有展开 slime 的内部实现；GLM-5.3 博客描述的是工程栈与 GLM-5.3 的 benchmark，
+      没有给出 SAO 的完整消融。把「Megatron + SGLang + 单 dataflow」当成 SAO 论文的结论，会混淆来源。
+      本页把算法图归到 SAO §3/Figure 2，把工程分工归到博客 §slime，并在图注里分开标注。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>AIME +13.1，SWE-Bench +6.8；稳定步数从 160 拉到 1000</h2></div>
+  <p class="sec-sub">先看 SAO 在 Qwen3-30B-A3B 上的对照，再看 GLM-5.3 官方博客的报告值；两套实验不要混。</p>
+
+  <h3>SAO：Qwen3-30B-A3B，reasoning-with-Python</h3>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    SAO Table 1（节选）：Qwen3-30B-A3B-Thinking-2507，reasoning-with-Python，Pass@1 %；
+    AIME2025/HMMT/IMOAnswerBench 为 16 次评测均值，BeyondAIME 为 4 次；temp 1.0，top-p 1.0，max 128k，math 最多 50 轮。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>Model</th><th>AIME2025</th><th>BeyondAIME</th><th>HMMT Nov 2025</th><th>IMOAnswerBench</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen3-30B-A3B w/ python</td><td class="num">14.6</td><td class="num">10.5</td><td class="num">17.3</td><td class="num">7.8</td></tr>
+      <tr><td>Qwen3-30B-A3B w/o python</td><td class="num">85.0</td><td class="num">63.0</td><td class="num">76.7</td><td class="num">55.3</td></tr>
+      <tr><td>SFT w/ python</td><td class="num">80.4</td><td class="num">53.3</td><td class="num">75.2</td><td class="num">53.3</td></tr>
+      <tr><td>GRPO w/ python</td><td class="num">84.2</td><td class="num">54.8</td><td class="num">76.0</td><td class="num">55.8</td></tr>
+      <tr><td>GRPO (+ DIS)</td><td class="num">93.5</td><td class="num">70.8</td><td class="num">84.0</td><td class="num">70.0</td></tr>
+      <tr><td>SAO (DIS only)</td><td class="num">94.2</td><td class="num">71.5</td><td class="num">86.7</td><td class="num">71.3</td></tr>
+      <tr class="best"><td>SAO</td><td class="num">97.3</td><td class="num">74.8</td><td class="num">88.3</td><td class="num">74.0</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    在 Qwen3-30B-A3B、reasoning-with-Python、Pass@1 的条件下，SAO 的 AIME2025 是
+    <span data-src="SAO Table 1">97.3</span>，GRPO 是 <span data-src="SAO Table 1">84.2</span>，
+    差 <span data-src="SAO Table 1">+13.1 个百分点（97.3 − 84.2）</span>；BeyondAIME 是 74.8 vs 54.8，
+    差 <span data-src="SAO Table 1">+20.0 个百分点（74.8 − 54.8）</span>；HMMT 是 88.3 vs 76.0，
+    差 <span data-src="SAO Table 1">+12.3 个百分点（88.3 − 76.0）</span>；IMOAnswerBench 是 74.0 vs 55.8，
+    差 <span data-src="SAO Table 1">+18.2 个百分点（74.0 − 55.8）</span>。
+    对 GRPO (+ DIS) 的 AIME 93.5，SAO 还高 <span data-src="SAO Table 1">3.8 个百分点（97.3 − 93.5）</span>。
+  </p>
+
+  <p class="eq-cap" style="text-align:left">
+    SAO Table 2：Qwen3-30B-A3B，SWE-Bench Verified，OpenHands，最多 300 轮，128k context，Pass@1 %。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Model</th><th>SWE-Bench Verified</th></tr></thead>
+    <tbody>
+      <tr><td>Qwen3-30B-A3B</td><td class="num">23.0</td></tr>
+      <tr><td>+ GRPO (w/ DIS)</td><td class="num">27.0</td></tr>
+      <tr class="best"><td>+ SAO</td><td class="num">29.8</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    SWE-Bench Verified 上，SAO 是 <span data-src="SAO Table 2">29.8</span>，base 是
+    <span data-src="SAO Table 2">23.0</span>，差 <span data-src="SAO Table 2">+6.8 个百分点（29.8 − 23.0）</span>；
+    对 GRPO (+ DIS) 的 <span data-src="SAO Table 2">27.0</span>，差
+    <span data-src="SAO Table 2">+2.8 个百分点（29.8 − 27.0）</span>。
+  </p>
+
+  <h3>消融：三个改动各自值多少</h3>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    SAO Table 4：AIME2025 / BeyondAIME，Accuracy %；SAO 与各消融变体，同为 Qwen3-30B-A3B 设置。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Variant</th><th>AIME2025</th><th>BeyondAIME</th></tr></thead>
+    <tbody>
+      <tr class="best"><td>SAO</td><td class="num">97.3</td><td class="num">74.8</td></tr>
+      <tr><td>SAO w/o Faster value</td><td class="num">95.0</td><td class="num">69.8</td></tr>
+      <tr><td>SAO w/o Frozen attention</td><td class="num">90.6</td><td class="num">74.5</td></tr>
+      <tr><td>Vanilla VAPO (w/o DIS)</td><td class="num">91.3</td><td class="num">69.0</td></tr>
+      <tr><td>Running mean baseline</td><td class="num">79.8</td><td class="num">55.3</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    去掉 faster value：AIME2025 <span data-src="SAO Table 4">95.0</span>，比 SAO 低
+    <span data-src="SAO Table 4">2.3 个百分点（97.3 − 95.0）</span>；BeyondAIME
+    <span data-src="SAO Table 4">69.8</span>，低 <span data-src="SAO Table 4">5.0 个百分点（74.8 − 69.8）</span>。
+    去掉 frozen attention：AIME <span data-src="SAO Table 4">90.6</span>，低
+    <span data-src="SAO Table 4">6.7 个百分点（97.3 − 90.6）</span>；BeyondAIME
+    <span data-src="SAO Table 4">74.5</span>，只低 <span data-src="SAO Table 4">0.3 个百分点（74.8 − 74.5）</span>。
+    Running mean baseline 是 <span data-src="SAO Table 4">79.8 / 55.3</span>，分别低
+    <span data-src="SAO Table 4">17.5 个百分点（97.3 − 79.8）</span> 与
+    <span data-src="SAO Table 4">19.5 个百分点（74.8 − 55.3）</span>。
+  </p>
+
+  <p>
+    稳定性方面，标准 GRPO 约 <span data-src="SAO §4.2">160 步</span>崩溃；SAO 训练到
+    <span data-src="SAO Abstract">1000 步</span>（Abstract）；SAO 与 GRPO (+ DIS) 在约
+    <span data-src="SAO §4.2">400 步</span>后才出现明显分化（§4.2）。VAPO 在约
+    <span data-src="SAO §4.4">90 步</span>崩溃（§4.4）。这些是论文报告的训练动态，不是收敛性证明。
+  </p>
+
+  <p>
+    一个反直觉的数字在 Table 1：未做 TIR SFT 的 Qwen3-30B-A3B，AIME2025 在 w/ python 时是
+    <span data-src="SAO Table 1">14.6</span>，w/o python 时是 <span data-src="SAO Table 1">85.0</span>；
+    SFT w/ python 才回到 <span data-src="SAO Table 1">80.4</span>。
+    <span class="infer">推断</span>（由 Table 1 反推）：工具本身不是增益，模型要先学会在推理里调用工具；
+    未对齐的基座把 python 当成额外噪声。
+  </p>
+
+  <p>
+    frozen attention 的代价也不均匀：AIME 掉 <span data-src="SAO Table 4">6.7 个百分点</span>，
+    BeyondAIME 只掉 <span data-src="SAO Table 4">0.3 个百分点</span>（Table 4）。
+    同一个改动在不同 benchmark 上的代价差了一个数量级，不能用一个平均分概括。
+  </p>
+
+  <h3>GLM-5.3：官方博客的报告值</h3>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    GLM-5.3 Blog §Stronger Coding（前 3 行）与 §Emergent Cyber Capability（后 2 行）：GLM-5.3 vs GLM-5.2，官方博客报告值；
+    不同 benchmark 的 harness 与预算不同，差值只在行内成立。Terminal-Bench 3.0 为 avg@3，口径为 Claude Code 2.1.207 harness、400K context、128K max output。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>Benchmark</th><th>GLM-5.2</th><th>GLM-5.3</th><th>差值（百分点）</th></tr></thead>
+    <tbody>
+      <tr><td>Terminal-Bench 3.0</td><td class="num">4.6</td><td class="num">28.3</td><td class="num">+23.7</td></tr>
+      <tr><td>DeepSWE v1.1</td><td class="num">46.2</td><td class="num">66.9</td><td class="num">+20.7</td></tr>
+      <tr><td>Agents' Last Exam</td><td class="num">23.8</td><td class="num">28.5</td><td class="num">+4.7</td></tr>
+      <tr><td>CyberGym</td><td class="num">77.2</td><td class="num">84.5</td><td class="num">+7.3</td></tr>
+      <tr><td>ExploitBench</td><td class="num">24.4</td><td class="num">54.4</td><td class="num">+30.0</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    在 GLM-5.3 vs GLM-5.2、官方博客报告值下，Terminal-Bench 3.0 从
+    <span data-src="GLM-5.3 Blog §Stronger Coding">4.6</span> 到
+    <span data-src="GLM-5.3 Blog §Stronger Coding">28.3</span>（avg@3），差
+    <span data-src="GLM-5.3 Blog §Stronger Coding">+23.7 个百分点（28.3 − 4.6）</span>；
+    DeepSWE v1.1 从 <span data-src="GLM-5.3 Blog §Stronger Coding">46.2</span> 到
+    <span data-src="GLM-5.3 Blog §Stronger Coding">66.9</span>，差
+    <span data-src="GLM-5.3 Blog §Stronger Coding">+20.7 个百分点（66.9 − 46.2）</span>；
+    Agents' Last Exam 从 <span data-src="GLM-5.3 Blog §Stronger Coding">23.8</span> 到
+    <span data-src="GLM-5.3 Blog §Stronger Coding">28.5</span>，差
+    <span data-src="GLM-5.3 Blog §Stronger Coding">+4.7 个百分点（28.5 − 23.8）</span>。
+  </p>
+
+  <p>
+    Cyber 侧：CyberGym 从 <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">77.2</span> 到
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">84.5</span>，差
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">+7.3 个百分点（84.5 − 77.2）</span>；
+    ExploitBench 从 <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">24.4</span> 到
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">54.4</span>，差
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">+30.0 个百分点（54.4 − 24.4）</span>，
+    即 <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">2.23 倍（54.4 / 24.4）</span>。
+    ExploitGym 是任务计数：2 小时内从 <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">29</span> 到
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">105</span> 个任务，6 小时内从
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">39</span> 到
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">130</span> 个任务；预算是按每模型 TPS 归一化的。
+  </p>
+
+  <p>
+    Z.ai Code Bench 上，Max effort 是 <span data-src="GLM-5.3 Blog §Stronger Coding">34.5% at ~75K output tokens</span>，
+    GLM-5.2 是 <span data-src="GLM-5.3 Blog §Stronger Coding">23.4% at 96K</span>，差
+    <span data-src="GLM-5.3 Blog §Stronger Coding">+11.1 个百分点（34.5 − 23.4）</span>；
+    High effort 是 <span data-src="GLM-5.3 Blog §Stronger Coding">31.4% at ~50K</span>，
+    Claude Opus 4.8 是 <span data-src="GLM-5.3 Blog §Stronger Coding">29.5% at 120K</span>，差
+    <span data-src="GLM-5.3 Blog §Stronger Coding">+1.9 个百分点（31.4 − 29.5）</span>。
+    官方博客还写「50% improvement」over GLM-5.2 on Z.ai Code Bench；同一节给出 GLM-5.2 在 Max effort 的 <span data-src="GLM-5.3 Blog §Stronger Coding">23.4%（96K）</span>，但未说明 50% 与这组 Max effort 数值的换算口径，本页不替它换算。
+    官方博客同时写 Claude Fable 5 在 Max effort 达到 <span data-src="GLM-5.3 Blog §Stronger Coding">39.5%</span>，GLM-5.3 仍在其后。
+  </p>
+
+  <p>
+    安全侧，博客说自 GLM-5.2 以来与安全团队合作，在 <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">269 个项目</span>里
+    确认了 <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">2,436 个漏洞</span>，其中
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">1,097 个中高危</span>；最早的漏洞可追溯到约
+    <span data-src="GLM-5.3 Blog §Emergent Cyber Capability">40 年前</span>。
+    博客未说明这些数字是否经过独立审计。
+  </p>
+
+  <p>
+    slime 侧，博客说新增 top-p mask、top-k 与 full-vocabulary OPD；训练与 rollout 的 logprob 平均差控制在
+    <span data-src="GLM-5.3 Blog §slime: Built for Long-Horizon RL Scaling">1e-7</span> 量级，
+    相对此前设置降低 <span data-src="GLM-5.3 Blog §slime: Built for Long-Horizon RL Scaling">99.99% 以上</span>；
+    长时序 coding RL 的端到端吞吐提升 <span data-src="GLM-5.3 Blog §slime: Built for Long-Horizon RL Scaling">2.3 倍以上</span>。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">不要相加</span><h4>SAO 的 +13.1 和 GLM-5.3 的 +23.7 不是同一把尺</h4></div>
+    <p>
+      SAO 的 AIME/BeyondAIME/HMMT/IMO 数字来自 Qwen3-30B-A3B、reasoning-with-Python、Pass@1；SWE-Bench Verified 来自 OpenHands、Pass@1；GLM-5.3 的数字来自官方博客、开放权重模型（博客称 open-weights）与各 benchmark 自己的 harness。
+      模型、数据、评测协议都不同。本页把它们并排，是为了看清「后训练 scaling」的两层证据，而不是做加法。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>省掉的是等待，不是 critic 的成本</h2></div>
+  <p class="sec-sub">SAO 的适用边界由 value model、logprob 基础设施和实验覆盖决定；GLM-5.3 的证据强度则由官方博客决定。</p>
+
+  <h3>方法边界</h3>
+  <ul>
+    <li><strong>critic 是方法的一部分。</strong>PPO 式 critic 让训练显存 footprint 近似翻倍（§2）；SAO 冻结 attention、只训 MoE 投影，但论文没有给出显存账本。省掉的是组等待，不是 critic 的显存与训练时间。</li>
+    <li><strong>依赖 token-level rollout logprob。</strong>DIS 的 <code>r<sub>t</sub></code> 直接来自 rollout 阶段记录的 logprob；Appendix B 明确说部署需要能可靠保留行为概率的基础设施。</li>
+    <li><strong>单轨迹的方差更高。</strong>没有 group baseline，梯度估计接近 REINFORCE；SAO 用 critic 补，但 critic 冷启动需要扩大的 value pretraining 语料（§3.2）。</li>
+    <li><strong>frozen attention 不是无损正则。</strong>AIME 掉 <span data-src="SAO Table 4">6.7 个百分点</span>，BeyondAIME 只掉 <span data-src="SAO Table 4">0.3 个百分点</span>（Table 4）；代价依 benchmark 而变。</li>
+  </ul>
+
+  <h3>实验边界</h3>
+  <ul>
+    <li><strong>只测 Qwen3-30B-A3B。</strong>Appendix B 说结论不一定迁移到更小模型、非 agentic RLHF、dense reward 或更短 rollout。</li>
+    <li><strong>online learning 是模拟。</strong>§4.5 用写作风格切换（cute → chuunibyou → classical）和 GLM-4.7 judge 做在线学习仿真；不是真实线上部署。</li>
+    <li><strong>稳定步数不等于收敛证明。</strong><span data-src="SAO Abstract">1000 步</span>是论文报告的训练长度；论文没有给出长期收敛或跨规模外推的证明。</li>
+  </ul>
+
+  <h3>来源边界</h3>
+  <ul>
+    <li><strong>GLM-5.3 的证据是博客；未找到专门技术报告。</strong>已核实的官方材料是 2026-08-14 的博客与 HF 模型卡；HF 模型卡引用 GLM-5 技术报告（arXiv 2602.15763v2，2026-02-24），其中未提 GLM-5.3；未找到 GLM-5.3 专门技术报告（检索日 2026-11-06）。</li>
+    <li><strong>参数量口径存在差异。</strong>博客与 SAO 论文未给 GLM-5.3 参数量；HF 模型页元数据显示 753B 总参数（753,329,940,480），未给激活参数。笔记的 743B/40B 中，743B 与 HF 的 753B 不符；40B 未作为 GLM-5.3 的激活参数出现；SAO 论文中的 40B 属于 GLM-5.2（750B-A40B）。</li>
+    <li><strong>「50% improvement」与 Max effort 绝对值的关系未说明。</strong>博客给出 GLM-5.2 <span data-src="GLM-5.3 Blog §Stronger Coding">23.4%（96K）</span>与 GLM-5.3 <span data-src="GLM-5.3 Blog §Stronger Coding">34.5%（~75K）</span>；50% 的具体口径未说明，本页不替它换算。</li>
+    <li><strong>SAO 只到 v1。</strong>本页以 arXiv 2607.07508v1（2026-07-08）为准；论文部署的是 GLM-5.2，不是 GLM-5.3。</li>
+  </ul>
+
+  <h3>什么时候别用</h3>
+  <ul>
+    <li><strong>短 rollout、同步 batch 已经够用。</strong>GRPO 更简单，不需要 critic；SAO 的目标场景是长程、长尾、单轨迹反馈。</li>
+    <li><strong>没有 critic 的显存/训练预算。</strong>SAO 把成本从组等待转移到 value model；论文没有给出 critic 训不起来时的降级方案。</li>
+    <li><strong>rollout 引擎不能保留 token-level logprob。</strong>DIS 的 ratio 没有可靠输入，方法的核心假设不成立。</li>
+    <li><strong>需要同行评审级别的 GLM-5.3 证据。</strong>目前只有官方博客与模型卡；benchmark 数字是官方报告值，不是独立复现。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>SAO 用 critic 换掉 group 屏障；GLM-5.3 用后训练换掉新基座</h4></div>
+    <p>
+      两者都是 scaling 的账本：SAO 把成本记在 critic 和 logprob 基础设施上，GLM-5.3 把成本记在环境、数据与 RL 系统上。
+      看清账本，再决定要不要把这套 stack 搬到自己的模型和任务上。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>GLM-5.3: Frontier Coding with Emergent Cyber Capabilities · Single-Rollout Asynchronous Optimization for Agentic Reinforcement Learning</div>
+  <div class="src">
+    官方博客：<a href="https://z.ai/blog/glm-5.3">z.ai/blog/glm-5.3</a>（2026-08-14） ·
+    模型卡：<a href="https://huggingface.co/zai-org/GLM-5.3">zai-org/GLM-5.3</a><br>
+    论文：<a href="https://arxiv.org/abs/2607.07508">arXiv 2607.07508</a>（v1，2026-07-08） ·
+    框架：<a href="https://github.com/THUDM/slime">THUDM/slime</a><br>
+    笔记：<a href="/glm-5.3-%E5%90%8E%E8%AE%AD%E7%BB%83scaling%E4%B8%8Esao%E7%AE%97%E6%B3%95/">GLM-5.3 阅读笔记 — 后训练 scaling、SAO 算法与 Slime 框架</a>
+  </div>
+  <p class="errata" style="margin-top:16px">
+    <strong>版本与口径：</strong>SAO 以 arXiv 2607.07508v1 为准；GLM-5.3 以 2026-08-14 官方博客与 HF 模型卡为准。
+    SAO 的实验是 Qwen3-30B-A3B；GLM-5.3 的数字来自官方博客，两者不可相加。
+  </p>
+  <p class="errata" style="margin-top:10px">
+    <strong>笔记勘误（只记在这里，不改原笔记）：</strong>① 笔记写「743B MoE 基座 / 40B 激活」；HF 模型页显示 753B 总参数（753,329,940,480），未给激活参数；博客未给参数量；SAO 论文只写 GLM-5.2 为 750B-A40B。
+    ② 笔记的对照表写 Claude Opus 4.8「≈33%」，官方博客写 29.5%（120K output tokens）。
+    ③ 笔记写 GLM-5.3 在 50K 输出 token 时「≈32%」，官方博客写 31.4%。
+    ④ 笔记写「百万级可执行 sandbox」，官方博客只写环境扩展与合成 pipeline，未给出百万级这个数量。
+    ⑤ 笔记把 SAO 的部署对象写成 GLM-5.3 pipeline；SAO 论文摘要写的是 GLM-5.2 (750B-A40B)，GLM-5.3 博客只说沿用 SAO with compaction。
+  </p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ---------------- DIS mask simulator ---------------- */
+  var disSim = document.getElementById('dis-sim');
+  if (disSim) {
+    var disPresets = document.getElementById('dis-presets');
+    var disR = document.getElementById('dis-r');
+    var disRValue = document.getElementById('dis-r-v');
+    var disElo = document.getElementById('dis-elo');
+    var disEloValue = document.getElementById('dis-elo-v');
+    var disEhi = document.getElementById('dis-ehi');
+    var disEhiValue = document.getElementById('dis-ehi-v');
+    var disInterval = document.getElementById('dis-interval');
+    var disROut = document.getElementById('dis-r-out');
+    var disF = document.getElementById('dis-f');
+    var disStatus = document.getElementById('dis-status');
+    var disMsg = document.getElementById('dis-msg');
+    var disReset = document.getElementById('dis-reset');
+
+    if (disPresets && disR && disRValue && disElo && disEloValue && disEhi && disEhiValue &&
+        disInterval && disROut && disF && disStatus && disMsg && disReset) {
+      var disButtons = disPresets.querySelectorAll('.rule-btn');
+
+      function clearDisActive() {
+        for (var i = 0; i < disButtons.length; i++) {
+          disButtons[i].classList.remove('active');
+        }
+      }
+
+      function renderDis() {
+        var r = Math.round(parseFloat(disR.value) * 100) / 100;
+        var elo = Math.round(parseFloat(disElo.value) * 100) / 100;
+        var ehi = Math.round(parseFloat(disEhi.value) * 100) / 100;
+        var low = Math.round((1 - elo) * 100) / 100;
+        var high = Math.round((1 + ehi) * 100) / 100;
+        var kept = r > low && r < high;
+        var f = kept ? r : 0;
+
+        disRValue.textContent = r.toFixed(2);
+        disEloValue.textContent = elo.toFixed(2);
+        disEhiValue.textContent = ehi.toFixed(2);
+        disInterval.textContent = '[' + low.toFixed(2) + ', ' + high.toFixed(2) + ']';
+        disROut.textContent = r.toFixed(2);
+        disF.textContent = f.toFixed(2);
+        disStatus.textContent = kept ? '保留' : 'mask';
+        disMsg.textContent = '1−' + elo.toFixed(2) + '=' + low.toFixed(2) +
+          '，1+' + ehi.toFixed(2) + '=' + high.toFixed(2) +
+          '；r=' + r.toFixed(2) +
+          (kept ? ' 在区间内，f=' + f.toFixed(2) + '，保留。' : ' 不在区间内，f=0，mask。');
+      }
+
+      for (var i = 0; i < disButtons.length; i++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            disElo.value = btn.getAttribute('data-elo');
+            disEhi.value = btn.getAttribute('data-ehi');
+            for (var j = 0; j < disButtons.length; j++) {
+              disButtons[j].classList.toggle('active', disButtons[j] === btn);
+            }
+            renderDis();
+          });
+        })(disButtons[i]);
+      }
+
+      disR.addEventListener('input', function () {
+        clearDisActive();
+        renderDis();
+      });
+      disElo.addEventListener('input', function () {
+        clearDisActive();
+        renderDis();
+      });
+      disEhi.addEventListener('input', function () {
+        clearDisActive();
+        renderDis();
+      });
+      disReset.addEventListener('click', function () {
+        disR.value = '2.4';
+        disElo.value = '0.3';
+        disEhi.value = '5';
+        for (var k = 0; k < disButtons.length; k++) {
+          disButtons[k].classList.toggle('active', k === 0);
+        }
+        renderDis();
+      });
+
+      renderDis();
+    }
+  }
+
+  /* ---------------- batch split simulator ---------------- */
+  var batchSim = document.getElementById('batch-sim');
+  if (batchSim) {
+    var batchModes = document.getElementById('batch-modes');
+    var batchTotal = document.getElementById('batch-total');
+    var batchPrompts = document.getElementById('batch-prompts');
+    var batchG = document.getElementById('batch-g');
+    var batchWait = document.getElementById('batch-wait');
+    var batchMsg = document.getElementById('batch-msg');
+
+    if (batchModes && batchTotal && batchPrompts && batchG && batchWait && batchMsg) {
+      var batchButtons = batchModes.querySelectorAll('.rule-btn');
+
+      function renderBatch(g) {
+        var total = 128;
+        var prompts = total / g;
+        var wait = g - 1;
+        batchTotal.textContent = String(total);
+        batchPrompts.textContent = String(prompts);
+        batchG.textContent = String(g);
+        batchWait.textContent = String(wait);
+        batchMsg.textContent = 'batch=128 条轨迹；G=' + g + ' → ' + prompts +
+          ' 个 prompt，每个 prompt ' + g + ' 条轨迹；组内最多等待 ' + wait + ' 条。' +
+          (g === 1 ? ' 这就是 SAO 的设置，不存在组内等待。' : ' 这是 GRPO 变体的 16×8=128 设置。');
+      }
+
+      for (var m = 0; m < batchButtons.length; m++) {
+        (function (btn) {
+          btn.addEventListener('click', function () {
+            var g = parseInt(btn.getAttribute('data-g'), 10);
+            for (var n = 0; n < batchButtons.length; n++) {
+              batchButtons[n].classList.toggle('active', batchButtons[n] === btn);
+            }
+            renderBatch(g);
+          });
+        })(batchButtons[m]);
+      }
+
+      renderBatch(1);
+    }
+  }
+})();
+</script>
+</body>
+</html>

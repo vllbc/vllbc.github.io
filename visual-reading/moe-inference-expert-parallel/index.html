@@ -1,0 +1,533 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 27.7 | §3 | 13/47*100 |
+| 16 | §5.5.1 | 128/8 |
+| 3.6 | §3 | 47/13 |
+| 45.1 | Table 1 | 4096*14336*3*8*32/1000000000 |
+| 12.75 | Table 1 | 12748587008/1000000000 |
+| 84.0 | Table 1 | 4096*14336*3*8*32*2/1073741824 |
+| 10.5 | Table 1 | 4096*14336*3*8*32*2/8/1073741824 |
+| 2.75 | Table 1 | 1474297856*2/1073741824 |
+| 13.25 | Table 1 | 4096*14336*3*8*32*2/8/1073741824+1474297856*2/1073741824 |
+| 5.25 | Table 1 | 4096*14336*3*8*32*2/16/1073741824 |
+| 8.00 | Table 1 | 4096*14336*3*8*32*2/16/1073741824+1474297856*2/1073741824 |
+| 7.0 | Table 1 | 512*2*4096*2*(7/8)/1048576 |
+| 14.0 | Table 1 | 512*2*4096*2*(7/8)/1048576*2 |
+| 448.0 | Table 1 | 512*2*4096*2*(7/8)/1048576*2*32 |
+| 28.0 | Table 1 | 2048*2*4096*2*(7/8)/1048576 |
+| 56.0 | Table 1 | 2048*2*4096*2*(7/8)/1048576*2 |
+| 1792.0 | Table 1 | 2048*2*4096*2*(7/8)/1048576*2*32 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="vLLM-e740bad">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoE 推理与 Expert Parallelism · 专家分开放，通信摆到明面上</title>
+<meta name="description" content="从 Mixtral 8x7B 的 47B/13B 参数、vLLM 的 fused MoE 与 EP 配置出发，算清 expert_map、all-to-all 体积与每卡专家显存；对比 TP-only 与 EP，并区分论文架构数字与 vLLM 实现行为。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+details.handcalc{margin-top:12px}
+.table-cap{font-size:13px;color:var(--text-soft);margin:18px 0 6px;line-height:1.7}
+p code,li code,td code{overflow-wrap:anywhere}
+footer .src,footer .src a{overflow-wrap:anywhere}
+.figure-svg .box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.figure-svg .hot-box{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.figure-svg .cold-box{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.figure-svg .dash-box{fill:none;stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:6 5}
+.figure-svg .line{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.figure-svg .line-hot{stroke:var(--accent);stroke-width:1.8;fill:none}
+.figure-svg .arrowhead{fill:var(--text-soft)}
+.figure-svg .arrowhead-hot{fill:var(--accent)}
+.figure-svg .svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.figure-svg .svg-s{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.figure-svg .svg-l{font-family:"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-soft)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MoE · EP</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#comm">通信与显存</a>
+      <a href="#flow">数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>MoE 推理 · 专家并行 · vLLM</span>
+  <h1>MoE 推理与 Expert Parallelism：专家分开放，通信摆到明面上</h1>
+  <p class="hero-sub">MoE 用多个专家替换 FFN，每个 token 只走 top-k 个，计算量按激活参数算；但所有专家的权重仍要放进显存。推理 decode 的 batch 通常很小，瓶颈在权重读取而不是 FLOPs，EP 于是把整组专家分到不同 rank，用 dispatch/combine 的 all-to-all 换每卡显存。代价是通信字节数随 top-k 与 EP 增长（每 rank 的 dispatch 体积按 <code>(EP−1)/EP</code> 随 EP 单调增、趋近 1 倍），负载不均和小 batch 会把收益吃掉。</p>
+  <div class="meta">
+    <span>Mixtral 8x7B · GShard · DeepSpeed-MoE · DeepSeek-V3 · vLLM e740bad</span>
+    <a href="https://arxiv.org/abs/2401.04088" target="_blank" rel="noopener">Mixtral v1 ↗</a>
+    <a href="https://github.com/vllm-project/vllm/commit/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">vLLM e740bad ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>MoE 的稀疏性只减少激活计算，不减少总权重的常驻显存；它减少每 token 的权重读取，但所有专家仍须驻留。Mixtral 8x7B 有 <strong>47B</strong> 总参数，每 token 只激活 <strong>13B</strong>，占 <strong>27.7%</strong>；这 47B 权重都必须驻留在某处。推理 decode 的 batch 通常很小，DeepSpeed-MoE §5 把这一点说得很直接：延迟主要花在从主存加载模型参数，而不是 FLOPs。</p>
+  <p><strong>EP 按专家切，不按张量切。</strong>一个 rank 拥有若干完整专家，token 被送到专家所在 rank。vLLM 里 <code>ep_size = TP × DP</code>（源码还含 PCP），开启 <code>enable_expert_parallel</code> 后 MoE 层不再做 TP；attention 在 TP=1 时复制、TP&gt;1 时按 TP 切（<span class="mono" data-src="docs/serving/expert_parallel_deployment.md:51-80">docs/serving/expert_parallel_deployment.md:51-80</span>）。</p>
+  <p><strong>纯 TP+EP（DP=1、PCP=1、未开 sequence parallel）不需要 all-to-all。</strong>每个 rank 已有全部 token，只算本地专家、把非本地专家的输出置零，最后 all-reduce 求和（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/config.py:1066-1070">config.py:1066-1070</span>、<span class="mono" data-src="vllm/model_executor/layers/fused_moe/fused_moe.py:1951-1952">fused_moe.py:1951-1952</span>、<span class="mono" data-src="vllm/model_executor/layers/fused_moe/runner/moe_runner.py:513-519">moe_runner.py:513-519</span>）。只有各 rank 的 token 不同（<code>DP&gt;1</code>，或 <code>PCP&gt;1</code>/sequence parallel）时，才需要跨 rank 的 all-to-all dispatch/combine；否则各 rank 本地算完再 all-reduce 即可（<span class="mono" data-src="docs/design/fused_moe_modular_kernel.md:57-58">fused_moe_modular_kernel.md:57-58</span>）。</p>
+  <p><strong>代价是 all-to-all。</strong>每 rank 每层的 dispatch 体积约为 <code>B · K · H · s · (EP−1)/EP</code>，combine 再来一遍；其中 <code>(EP−1)/EP</code> 随 EP 单调增、趋近 1 倍，不是线性增长。DeepSpeed-MoE 把 52B（128 个专家）模型的每卡专家从 16 降到 2（8→64 张 GPU，§5.5.1），并在 107B–2T 规模报告最高 7.3× 延迟下降（含系统优化，§5.5.2）；GShard 的 dispatch+combine 占 MoE+Transformer 时间从 16% 涨到 36%（128→2048 experts，§5.2）。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="§3">27.7<small>%</small></div><div class="k">Mixtral 8x7B 每 token 激活参数占比：13B / 47B。总参数是激活参数的约 3.6 倍。</div></div>
+    <div class="metric"><div class="v" data-src="§5.5.1">16</div><div class="k">1.3B+MoE-128（52B，128 个专家）放在 8 张 GPU 上，每卡 16 个专家；扩到 64 张 GPU 后降到每卡 2 个。</div></div>
+    <div class="metric"><div class="v" data-src="§5.5.2">7.3<small>×</small></div><div class="k">DeepSpeed-MoE 报告的最高推理延迟下降（vs PyTorch 基线，107B–2T 参数、Table 6 的 EP degree=128、最多 256 张 A100；含通信与 kernel 优化，不是纯 EP 消融）。</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>稀疏激活省的是算力，不是显存</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 MoE 推理的瓶颈常常是权重读取和 token 搬运，而不是矩阵乘的 FLOPs。</p>
+  <p>把 Transformer 的 FFN 换成 <code>E</code> 个专家，router 为每个 token 选 <code>K</code> 个。总参数是 <code>P<sub>attn</sub> + E · P<sub>expert</sub></code>，每 token 的激活参数只有 <code>P<sub>attn</sub> + K · P<sub>expert</sub></code>；这里 <code>P<sub>expert</sub></code> 是<strong>单个专家（跨所有层）</strong>的参数，全部专家参数为 <code>E · P<sub>expert</sub></code>。Mixtral 8x7B 取 <code>E=8</code>、<code>K=2</code>，§3 给出 <span class="mono" data-src="§3">47B</span> 总参数、<span class="mono" data-src="§3">13B</span> 激活参数；架构表 Table 1 则给出 <code>dim=4096</code>、<code>hidden_dim=14336</code>、<code>n_layers=32</code> 等配置。这些数字都不是本页估算。</p>
+  <div class="eq">
+    P<sub>total</sub> = P<sub>attn</sub> + E · P<sub>expert</sub><br>
+    P<sub>active</sub> = P<sub>attn</sub> + K · P<sub>expert</sub><br>
+    M<sub>weights</sub> = P<sub>total</sub> · s
+  </div>
+  <div class="eq-cap">s 为每参数字节数（BF16 为 2），<code>P<sub>expert</sub></code> 为单个专家参数。公式只拆参数，不含 KV cache、激活与通信缓冲。</div>
+  <p>这三条式子给出三个不同的成本方向：显存看总参数，计算看激活参数，通信看每个 token 要被复制到几个专家。MoE 让第二项变小，却不会自动让第一项变小。</p>
+  <div class="three-col">
+    <div class="card"><span class="pill p1">显存</span><h4>所有权重都要有地方放</h4><p>专家再多，未被选中的专家也要常驻。EP/TP 降低的是每卡专家权重，不是总权重；attention 与 KV cache 另算。</p></div>
+    <div class="card"><span class="pill p2">计算</span><h4>每 token 只算 K 个专家</h4><p>激活 FLOPs 约为 dense FFN 的 <code>K/E</code>。但 decode 时 batch 小，矩阵乘的算术强度低，省下的 FLOPs 不一定换成等比例的延迟下降。</p></div>
+    <div class="card"><span class="pill p3">通信</span><h4>token 要去找专家</h4><p>每个 token 产生 <code>K</code> 份专家输入。专家不在本 rank 时，这份输入要跨卡；EP 的 all-to-all 体积正比于 <code>K · B · H</code>。</p></div>
+  </div>
+  <p>DeepSpeed-MoE §5 的观察是：<em>“During inference, the batch size is generally small, so the inference latency of an MoE model depends primarily on the time it takes to load the model parameters from the main memory.”</em> 这句话把讨论从「MoE 计算少所以快」拉到「每卡要读多少权重、读完之后还要搬多少 token」。后面的显存与通信估算都围绕这两件事。</p>
+  <p>Mixtral 论文在 §3 也提醒了同一件事：13B 激活参数只决定推理计算成本，<strong>服务 Mixtral 的显存成本按 47B 稀疏参数计</strong>；SMoE 的额外开销来自 routing 与「一张卡上放多个专家」时的内存读取，更适合有 batch 的工作负载。<span class="mono" data-src="§3">§3</span></p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>TP 切每个专家，EP 切整组专家</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两种并行在显存、计算和通信上的差别，以及 vLLM 如何把 attention TP 与 MoE EP 组合起来。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">TP-only</span><h4>每个专家都被切片</h4></div>
+      <p>MoE 层沿用 dense 的 TP：每个专家的 W1/W2/W3（gate/up/down）张量按 TP 切分，每张卡存每个专家的 <code>1/TP</code>。一个 token 的 top-k 专家计算被拆到 TP 个 rank 上，down_proj 之后做 all-reduce 把部分和加起来。</p>
+      <p>纯 TP（DP=1）下每卡专家权重约为 <code>E · P<sub>expert</sub>/TP</code>（每个专家都被切，但每卡仍要存所有专家的切片）；层内通信是 <code>[B, H]</code> 的 all-reduce。没有路由相关的 all-to-all，但每个 rank 都要参与每个 token 的计算。若 <code>DP&gt;1</code> 且未开 EP，vLLM 会把 MoE 的 TP 组展平成 <code>TP×DP</code>，每卡专家权重约为 <code>E · P<sub>expert</sub>/(TP×DP)</code>；attention 仍在每个 DP 组内按 TP 切。</p>
+      <p class="sub">vLLM 未开启 EP 时，MoE 层用 <code>TP × DP</code>（源码还含 PCP）的扁平 TP 组（<span class="mono" data-src="docs/serving/expert_parallel_deployment.md:82-83">expert_parallel_deployment.md:82-83</span>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">EP</span><h4>每个 rank 拥有整组专家</h4></div>
+      <p>专家按 rank 切开：一个 rank 拥有若干完整专家，token 只被送到被选中专家所在的 rank。每卡专家权重约为 <code>E · P<sub>expert</sub>/EP</code>；DP+EP 时换来 dispatch/combine 的 all-to-all，DP=1 时只在本 rank 算完再做 all-reduce。</p>
+      <p>attention 不受 EP 影响：<code>TP=1</code> 时 attention 权重在每个 DP rank 复制；<code>TP&gt;1</code> 时在每个 DP 组内按 TP 切。EP size 取 <code>TP × DP</code>（源码还含 PCP）。</p>
+      <p class="sub">vLLM 的 EP 组覆盖 TP×DP（源码还含 PCP）个 rank；MoE 层内 <code>tp_size</code> 置 1（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/config.py:1142-1151,1264-1272">config.py:1142-1151,1264-1272</span>）。</p>
+    </div>
+  </div>
+  <p class="table-cap">表 2-1：TP-only 与 EP 的对照。TP 列按 vLLM 的 MoE TP 行为（纯 TP 与未开 EP 的 DP 组合分开写）；EP 列按 <span class="mono" data-src="docs/serving/expert_parallel_deployment.md:63-83">expert_parallel_deployment.md:63-83</span> 与 <span class="mono" data-src="vllm/model_executor/layers/fused_moe/config.py:1142-1151,1264-1272">config.py:1142-1151,1264-1272</span>。两列都假设专家权重为 BF16，忽略 KV cache、激活和通信缓冲。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>维度</th><th>TP-only（MoE 层）</th><th>EP（MoE 层）</th></tr></thead>
+      <tbody>
+        <tr><td>切分对象</td><td>每个专家的张量</td><td>整组专家</td></tr>
+        <tr><td>每卡专家权重</td><td><code>E · P<sub>expert</sub> / TP</code>（纯 TP）；未开 EP 的 DP 组合为 <code>E · P<sub>expert</sub> / (TP×DP)</code></td><td><code>E · P<sub>expert</sub> / EP</code></td></tr>
+        <tr><td>每卡 attention</td><td><code>1/TP</code>（attention 也做 TP）</td><td>TP=1 时复制；TP&gt;1 时 <code>1/TP</code></td></tr>
+        <tr><td>层内通信</td><td><code>[B, H]</code> all-reduce</td><td><code>DP&gt;1</code>：<code>K · B · H</code> 量级 all-to-all；<code>DP=1</code>：all-reduce</td></tr>
+        <tr><td>是否依赖路由</td><td>不依赖；所有 rank 算所有 token 的切片</td><td>依赖；token 只去被选中专家所在的 rank</td></tr>
+        <tr><td>典型组合</td><td>dense 模型或未开 EP 的 MoE</td><td>attention TP + MoE EP；或 MoE 层单独用 EP（TP=1）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>GShard 把「专家分片、attention 复制」写进 SPMD 切分：MoE 层把专家 shard 到很多设备上，非 MoE 层走另一套切分（<span class="mono" data-src="§3.1–§3.2">§3.1–§3.2</span>）；MoE 层的 dispatch 与 combine 用 AllToAll 完成（<span class="mono" data-src="§5.2">§5.2</span>）。DeepSpeed-MoE 在推理侧把 tensor-slicing 与 expert-slicing 组合：Table 6 的 52B 模型用 MP=1、EP degree=128，349B 模型用 MP=4、EP degree=128，1T 级模型用 MP=8、EP degree=128（<span class="mono" data-src="Table 6">Table 6</span>）。注意 Table 6 是模型配置的 EP degree；同一篇 §5.5.1 的扩展实验实际把 128 个专家放到 8 张 GPU（每卡 16 个）再到 64 张（每卡 2 个），两者不要混成同一个部署规模（<span class="mono" data-src="§5.5.1">§5.5.1</span>）。</p>
+  <p>两种并行不是替代关系。EP 把「专家权重」这一项除以 EP，但 attention/KV cache 在 TP=1 时没有变小；TP 把 attention 和专家都切细，但每个 token 的每次 FFN 都要 all-reduce。vLLM 开启 EP 后的组合是：<strong>attention 继续用 TP，MoE 层用 EP</strong>，EP size 取 TP×DP（源码还含 PCP）；注意 EP 默认关闭（<code>enable_expert_parallel=False</code>），不是不配置就自动启用。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>一次 MoE 层：router 选人，dispatch 送 token，combine 加权求和</h2></div>
+  <p class="sec-sub">读完这节你应该知道：top-k 路由、专家 FFN 与 EP 布局各自做什么，以及 vLLM 的 fused MoE 把哪些步骤合在一起。</p>
+
+  <h3>3.1 Router：先算 affinity，再取 top-k</h3>
+  <p>Mixtral 的 MoE 输出可以写成两项：router 对每个 token 算 8 个 logits，取 top-2 后做 softmax，得到两个权重；两个 SwiGLU 专家的输出按权重相加（<span class="mono" data-src="§2.1">§2.1</span>）。</p>
+  <div class="eq">
+    g = Softmax(TopK(x · W<sub>g</sub>))<br>
+    y = Σ<sub>i</sub> g<sub>i</sub> · E<sub>i</sub>(x)
+  </div>
+  <div class="eq-cap">Mixtral §2.1 的写法；K=2、E=8。TopK 只保留最大的 K 个 logits，其余置 −∞。</div>
+  <p>vLLM 的 <code>fused_topk</code> 支持 <code>softmax</code> 与 <code>sigmoid</code> 两种评分，并可选择 renormalize；Mixtral 在 vLLM 里固定 <code>renormalize=True</code>（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/router/fused_topk_router.py:160-205">fused_topk_router.py:160-205</span>、<span class="mono" data-src="vllm/model_executor/models/mixtral.py:124">mixtral.py:124</span>）。DeepSeek 系列走 <code>grouped_topk</code>：先按 group 选 top-k 组，再在组内选 expert；带 <code>e_score_correction_bias</code> 时，bias 只参与「选哪些专家」，权重仍取无偏分数（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/router/grouped_topk_router.py:92-178">grouped_topk_router.py:92-178</span>）。</p>
+  <p class="table-cap">表 3-1：两种路由配置。Mixtral 数字来自 Mixtral §2.1/Table 1 与 vLLM <span class="mono" data-src="vllm/model_executor/models/mixtral.py:124">mixtral.py:124</span>；DeepSeek-V3 数字来自 DeepSeek-V3 §2.1.2 Eq.12–16 与 §4.2 Hyper-Parameters。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th>评分</th><th>每 token 选择</th><th>专家数</th><th>特殊处理</th></tr></thead>
+      <tbody>
+        <tr><td>Mixtral 8x7B</td><td>softmax</td><td>top-2</td><td>8</td><td>vLLM 中 renormalize=True；两个 SwiGLU 输出按权重相加</td></tr>
+        <tr><td>DeepSeek-V3</td><td>sigmoid + bias</td><td>8 个 routed（另加 1 个 shared）</td><td>256 routed + 1 shared</td><td>bias 只用于选择；权重用无偏 sigmoid 分数；shared expert 恒开</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>3.2 Dispatch：token 复制到专家所在 rank</h3>
+  <p>EP 下每个全局专家 id 需要映射到本 rank 的本地 id。vLLM 用 <code>expert_map</code>：本地专家的位置写 <code>0..local_num_experts−1</code>，不在本 rank 的专家写 <code>−1</code>（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/expert_map_manager.py:66-87">expert_map_manager.py:66-87</span>）。这个 <code>−1</code> 不是「丢弃 token」，而是告诉 kernel「这个专家不归我算」；该 token 在这一份专家上的本地贡献为 0，由真正拥有专家的 rank 计算。</p>
+  <p>布局有两种。默认 <code>linear</code> 是连续切：4 个专家、2 个 rank 时，rank 0 拿 <code>[0,1]</code>、rank 1 拿 <code>[2,3]</code>；<code>round_robin</code> 是交错切：rank 0 拿 <code>[0,2]</code>、rank 1 拿 <code>[1,3]</code>（<span class="mono" data-src="vllm/config/parallel.py:219-228">parallel.py:219-228</span>）。<code>round_robin</code> 只对多 expert group、且无冗余专家/EPLB 的模型生效；在走 all-to-all kernel 的配置里，还要求后端为 DeepEP low-latency 或 NIXL EP，否则回退 <code>linear</code>（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/expert_map_manager.py:116-149">expert_map_manager.py:116-149</span>）。除不尽时，前 <code>remainder</code> 个 rank 各多拿一个专家（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/expert_map_manager.py:66-76">expert_map_manager.py:66-76</span>）；EPLB 则要求加上冗余专家后的总数能被 EP size 整除，否则启动报错（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/layer.py:278-283">layer.py:278-283</span>）。</p>
+  <p>真正走不走网络，取决于 DP（以及 PCP/sequence parallel）。纯 TP+EP（DP=1、PCP=1、未开 sequence parallel）时每个 rank 已经有全部 token，不需要 dispatch：各 rank 只算本地专家，非本地输出置零，最后 all-reduce 求和。DP+EP 时每个 rank 的 token 不同，才需要 prepare 阶段的 all-to-all 把 token 送到专家所在 rank，finalize 阶段再把结果 combine 回来。</p>
+
+  <h3>3.3 Expert FFN 与 combine：K 份输出按 g 加权</h3>
+  <p>每个被选中的专家是一组 SwiGLU FFN：W1/W3 做 gate/up，激活后 W2 做 down。Mixtral 的两个专家输出按 router 权重相加；DeepSeek-V3 在此基础上多一个恒开的 shared expert，输出是 <code>u<sub>t</sub> + Σ shared + Σ routed</code>（<span class="mono" data-src="§2.1.2 Eq.12">§2.1.2 Eq.12</span>）。架构上 shared expert 不进 router 的 top-k（Eq.12）；DeepSeek-V3 在 decode 部署中把它当作 routed one（<span class="mono" data-src="§3.4.2">§3.4.2</span>），每 token 9 个，shared 必选。在 vLLM 里它可能是独立 MLP，也可能通过 <code>fuse_shared_experts</code> 并进 FusedMoE（<code>n_shared_experts</code>），具体放置与切分取决于实现（<span class="mono" data-src="vllm/model_executor/models/deepseek_v2.py:345-399">deepseek_v2.py:345-399</span>）。</p>
+  <p>combine 要做两件事：按 <code>g<sub>i</sub></code> 加权，再把 K 份结果求和。vLLM 的 <code>moe_sum</code> 负责求和；权重可以在专家 kernel 内乘，也可以在 combine 前用 <code>TopKWeightAndReduce</code> 乘，取决于 experts 实现是否已经做了 weight+reduce（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py:59-120">topk_weight_and_reduce.py:59-120</span>）。</p>
+  <p>「fused MoE」指的是把 routing、token 排序/填充、grouped GEMM、激活与 top-k reduction 尽量合进少量 kernel，<strong>不是</strong>说 EP 的通信被省掉了。EP 的通信（DP+EP 的 all-to-all，或 DP=1 时的 all-reduce）仍发生在 MoE 层的边界上。</p>
+</section>
+
+<section class="block" id="comm">
+  <div class="sec-head"><span class="sec-num">04</span><h2>EP 的账单：显存除以 EP，通信乘上 top-k</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每卡专家显存和 all-to-all 字节数怎么估，以及 EP 与 TP 组合时谁负责哪一层。</p>
+  <div class="eq">
+    M<sub>expert/rank</sub> ≈ E · P<sub>expert</sub> · s / EP<br>
+    V<sub>dispatch/rank</sub> ≈ B · K · H · s · (EP−1)/EP<br>
+    V<sub>total/rank</sub> ≈ 2 · V<sub>dispatch</sub>
+  </div>
+  <div class="eq-cap"><strong>后两条式子（V<sub>dispatch</sub>、V<sub>total</sub>）算的是直接 all-to-all（点对点发送）的逻辑/发送体积，也是物理字节数的下界</strong>，不能直接套到所有后端。E 为专家总数，P<sub>expert</sub> 为单个专家参数；假设路由均匀、每个 token 的 K 个专家落在不同 rank、BF16 时 s=2、B 为每 rank 的 token 数；不计 metadata、量化 scale 与 padding。combine 的体积按与 dispatch 相同估算。后端（如默认的 allgather_reducescatter）会放大物理传输量，见 §4.4。</div>
+  <p>第一条是显存账：专家权重按 EP 均分，但 attention、router、embedding 不按 EP 分（TP=1 时复制）。第二条是通信账（直接 all-to-all）：一个 token 有 K 份专家输入，其中约 <code>(EP−1)/EP</code> 要离开本 rank；H 是 hidden size。第三条把 dispatch 与 combine 都算上。三个式子都只给数量级，真实实现还受路由倾斜、padding、量化与后端影响；默认后端的物理字节数会高于这里的下界（§4.4）。</p>
+
+  <div class="sim" id="sim-comm">
+    <div class="sim-top">
+      <button type="button" class="rule-btn active">all-to-all 体积<span class="r-sub">dispatch + combine / rank / layer</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="comm-b">每 rank token 数 B <span class="v" id="comm-b-val">512</span></label>
+        <input id="comm-b" type="range" min="128" max="4096" step="128" value="512">
+      </div>
+      <div class="ctrl">
+        <label for="comm-ep">EP size <span class="v" id="comm-ep-val">8</span></label>
+        <input id="comm-ep" type="range" min="1" max="5" step="1" value="3">
+      </div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">dispatch / rank / layer</div><div class="slot-val" id="comm-d">7.0 MiB</div></div>
+      <div class="slot"><div class="slot-name">dispatch + combine</div><div class="slot-val" id="comm-t">14.0 MiB</div></div>
+      <div class="slot hit"><div class="slot-name">32 层一次前向</div><div class="slot-val" id="comm-f">448.0 MiB</div></div>
+    </div>
+    <div class="readout" data-src="Table 1">
+      <div class="r-head">读数</div>
+      <div id="comm-readout">每 rank 每层：dispatch 7.0 MiB，dispatch+combine 14.0 MiB；按 Mixtral 的 32 层累加，一次前向 448.0 MiB。</div>
+    </div>
+    <p class="sub">常量：H=4096、K=2、32 层来自 Mixtral Table 1；BF16（2 B）为本页假设。EP size 取 2 的幂；B 是每 rank 的 token 数。读数按直接 all-to-all 的发送体积（下界）计算，未含后端复制放大（尤其 allgather_reducescatter）。Mixtral 只有 8 个专家，EP&gt;8 时部分 rank 没有专家，滑块仍按均匀公式展示，仅作数量级示意。</p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 1 <span class="sum-sub">all-to-all 体积：B=512 与 B=2048，EP=8</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：B=512、EP=8。</strong>每 token 的 K=2 份专家输入，每份 H=4096 个 BF16 元素。每 rank 的 dispatch 体积：<br>
+      <code>512 × 2 × 4096 × 2 × (7/8) = 7,340,032 B = 7.0 MiB</code>。<br>
+      dispatch+combine：<code>7.0 × 2 = 14.0 MiB</code>。32 层一次前向：<code>14.0 × 32 = 448.0 MiB</code>。</p>
+      <p><strong>组 2：B=2048、EP=8。</strong><code>2048 × 2 × 4096 × 2 × (7/8) = 29,360,128 B = 28.0 MiB</code>；dispatch+combine <code>28.0 × 2 = 56.0 MiB</code>；32 层 <code>56.0 × 32 = 1792.0 MiB</code>。JS 在 B=512/EP=8 与 B=2048/EP=8 下分别输出 7.0/14.0/448.0 与 28.0/56.0/1792.0，口径按 MiB（÷2<sup>20</sup>）。</p>
+      <p><strong>简化与未覆盖。</strong>假设每个 token 的 K 个专家均匀落在不同 rank、每个 rank 的 token 数相同；没有计 all-to-all 的 metadata、量化 scale、padding 与重排缓冲，也没有计后端复制放大（尤其 allgather_reducescatter 会把每个 rank 的 token 复制到所有 rank）。没有覆盖 Switch 式 capacity factor 与 drop/overflow、冗余专家/EPLB、shared expert，也没有覆盖 TP 的 all-reduce 与 attention 的通信；也没有覆盖 EP&gt;E（部分 rank 没有专家）的情况；这些都会改变实际字节数。</p>
+    </div>
+  </details>
+
+  <div class="sim" id="sim-mem">
+    <div class="sim-top">
+      <button type="button" class="rule-btn active">每卡权重显存<span class="r-sub">Mixtral 8x7B · BF16 · TP=1</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="mem-ep">EP size <span class="v" id="mem-ep-val">8</span></label>
+        <input id="mem-ep" type="range" min="0" max="5" step="1" value="3">
+      </div>
+      <div class="ctrl">
+        <label>模型 <span class="v" data-src="Table 1">Mixtral 8x7B</span></label>
+        <input type="range" min="0" max="0" step="1" value="0" disabled aria-label="模型固定为 Mixtral 8x7B">
+      </div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">专家权重 / GPU</div><div class="slot-val" id="mem-e">10.50 GiB</div></div>
+      <div class="slot"><div class="slot-name">复制部分 / GPU</div><div class="slot-val" id="mem-r">2.75 GiB</div></div>
+      <div class="slot hit"><div class="slot-name">权重合计 / GPU</div><div class="slot-val" id="mem-t">13.25 GiB</div></div>
+    </div>
+    <div class="bar" aria-hidden="true"><i class="b1" id="mem-bar-e" style="width:79.3%"></i><i class="b2" id="mem-bar-r" style="width:20.7%"></i></div>
+    <p class="sub">条形：专家权重（陶土红）/ 复制的 attention+router+embedding（青灰）。不含 KV cache、激活、通信缓冲、冗余专家与 LM head（若未与 embedding tie）。EP&gt;8 时部分 rank 没有专家，滑块仍按均分公式展示，仅作数量级示意。</p>
+    <div class="readout" data-src="Table 1">
+      <div class="r-head">读数</div>
+      <div id="mem-readout">EP=8：每卡专家权重 10.50 GiB，复制的 attention/router/embedding 2.75 GiB，合计 13.25 GiB。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 2 <span class="sum-sub">Mixtral 每卡专家权重：EP=8 与 EP=16</span></summary>
+    <div class="details-body">
+      <p><strong>先拆参数。</strong>Mixtral Table 1 给 <code>dim=4096</code>、<code>hidden_dim=14336</code>、<code>n_layers=32</code>、<code>num_experts=8</code>、<code>n_kv_heads=8</code>、<code>head_dim=128</code>、<code>vocab_size=32000</code>。每个 SwiGLU 专家有 3 个矩阵（gate、up、down）；全部专家参数（<code>E · P<sub>expert</sub></code>，E=8）：<code>4096 × 14336 × 3 × 8 × 32 = 45,097,156,608 ≈ 45.10B</code>。</p>
+      <p>复制部分：attention 每层是 Q/O 两个 <code>4096×4096</code> 加 K/V 两个 <code>4096×1024</code>，32 层为 <code>(2×4096×4096 + 2×4096×1024) × 32 = 1,342,177,280</code>；router 为 <code>4096×8×32 = 1,048,576</code>；embedding 为 <code>32000×4096 = 131,072,000</code>；合计 <code>1,474,297,856 ≈ 1.474B</code>。每 token 激活参数约为 <code>2×4096×14336×3×32 + 1.474B = 12.75B</code>，与论文四舍五入的 13B 对得上。总参数 <code>45.10B + 1.474B = 46.57B</code>，加上可能的独立 LM head（未计）与取整，约等于论文的 47B。</p>
+      <p><strong>组 1：EP=8。</strong>专家权重 BF16：<code>45,097,156,608 × 2 / 8 / 2<sup>30</sup> = 10.50 GiB</code>；复制部分 <code>1,474,297,856 × 2 / 2<sup>30</sup> = 2.746 GiB ≈ 2.75 GiB</code>；合计 <code>10.50 + 2.75 = 13.25 GiB</code>。</p>
+      <p><strong>组 2：EP=16。</strong>专家权重 <code>45,097,156,608 × 2 / 16 / 2<sup>30</sup> = 5.25 GiB</code>；加同样的 2.75 GiB 复制部分，合计 <code>8.00 GiB</code>。JS 在 EP=8 输出 10.50/2.75/13.25，在 EP=16 输出 5.25/2.75/8.00，单位 GiB（÷2<sup>30</sup>）。</p>
+      <p><strong>简化与未覆盖。</strong>按 BF16 与 TP=1 估算，所以 attention/router/embedding 视为每卡复制；TP&gt;1 时这部分会按 TP 切小。未计 KV cache、激活、all-to-all 缓冲、量化 scale、冗余专家/EPLB 与 shared expert，也未计 LM head（若未与 embedding tie）；也未计 checkpoint 的 padding 与未使用参数，以及 EP&gt;8 时部分 rank 没有专家的情况。Mixtral 论文只给 47B/13B 的整数，45.10B/12.75B 是由 Table 1 配置推算的值。</p>
+    </div>
+  </details>
+
+  <h3>4.3 EP 与 TP 怎么组合</h3>
+  <p>vLLM 文档把 EP size 定义成 <code>TP_SIZE × DP_SIZE</code>，并给出 attention 的两种行为：<code>TP=1</code> 时 attention 权重在所有 DP rank 上复制；<code>TP&gt;1</code> 时在每个 DP 组内按 TP 切（<span class="mono" data-src="docs/serving/expert_parallel_deployment.md:51-80">expert_parallel_deployment.md:51-80</span>）。源码里对应的动作是：<code>ep_size = flatten_tp_size = DP × PCP × TP</code>，MoE 层内的 <code>tp_size</code> 置 1（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/config.py:1142-1151,1264-1272">config.py:1142-1151,1264-1272</span>）。</p>
+  <p class="table-cap">表 4-1：EP 与 TP/DP 的组合。前两行有 DP&gt;1，MoE 层需要 dispatch/combine；第三行 DP=1、PCP=1 且未开 sequence parallel，按源码 <code>use_all2all_kernels=False</code>，不需要 all-to-all。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>TP</th><th>DP</th><th>EP</th><th>attention</th><th>MoE 专家</th><th>MoE all-to-all</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="num">8</td><td class="num">8</td><td>每个 DP rank 复制一份</td><td>8 个 rank 各持有 1/8 专家</td><td>需要（DP&gt;1）</td></tr>
+        <tr><td class="num">2</td><td class="num">4</td><td class="num">8</td><td>每个 DP 组内 TP=2</td><td>8 个 rank 各持有 1/8 专家</td><td>需要（DP&gt;1）</td></tr>
+        <tr><td class="num">8</td><td class="num">1</td><td class="num">8</td><td>TP=8</td><td>8 个 rank 各持有 1/8 专家</td><td>不需要（DP=1、未开 SP）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>第三行容易被忽略：EP 已经把专家分开，但每个 rank 仍拿到全部 token，于是每个 rank 只算自己那 1/8 专家，其余专家的输出置零，最后用 all-reduce 把 8 份部分和加起来。vLLM 的判断条件是 <code>use_ep and (dp_size &gt; 1 or pcp_size &gt; 1 or is_sequence_parallel)</code>（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/config.py:1066-1070">config.py:1066-1070</span>）；不满足时不会走 all-to-all kernel：默认 <code>allow_new_interface=False</code> 返回 <code>None</code>；其他分支分别走本地重排（XPU/NoDPEP）或 allgather+reduce-scatter 的 DP 回退（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/all2all_utils.py:204-232">all2all_utils.py:204-232</span>）。</p>
+
+  <h3>4.4 all-to-all 后端</h3>
+  <p>vLLM 的默认后端是 <code>allgather_reducescatter</code>：用 allgather + reduce-scatter 实现 all-to-all，适用于一般 EP+DP 配置。多节点 prefill 常用 <code>deepep_high_throughput</code>，decode 常用 <code>deepep_low_latency</code>；<code>passthrough</code> 则是 MoE 后端自己 dispatch/combine，框架层不再执行 all-to-all（<span class="mono" data-src="docs/serving/expert_parallel_deployment.md:35-45">expert_parallel_deployment.md:35-45</span>）。</p>
+  <p class="table-cap">表 4-2：常用 all2all 后端。表内“适用”列来自 vLLM 文档，不含延迟/吞吐实测。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>后端</th><th>适用场景</th><th>要点</th></tr></thead>
+      <tbody>
+        <tr><td><code>allgather_reducescatter</code></td><td>通用 EP+DP</td><td>默认后端；用 allgather/reduce-scatter 原语实现 all-to-all</td></tr>
+        <tr><td><code>deepep_high_throughput</code></td><td>多节点 prefill</td><td>grouped GEMM + continuous layout，偏吞吐</td></tr>
+        <tr><td><code>deepep_low_latency</code></td><td>多节点 decode</td><td>CUDA graph、masked layout，偏低延迟</td></tr>
+        <tr><td><code>passthrough</code></td><td>MoE 后端自带 dispatch/combine</td><td>框架层不跑 all-to-all；CLI 不可直接选</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>后端会改变物理字节数，不能直接套用上面的直接 all-to-all 公式。vLLM 的默认后端是 <code>allgather_reducescatter</code>（<span class="mono" data-src="vllm/config/parallel.py:229">parallel.py:229</span>）：dispatch 用 <code>all_gatherv</code>、combine 用 <code>reduce_scatterv</code>（<span class="mono" data-src="vllm/distributed/device_communicators/all2all.py:138,162">all2all.py:138,162</span>）。它先把每个 rank 的 token 收集到所有 rank——allgather 后每 rank 持有全部 token 的副本——再由 reduce-scatter 把各 rank 的部分输出求和并按 rank 切回。按均匀路由估算，每 rank 每层的物理 dispatch 体积约为 <code>(EP−1) · B · H · s</code>，是直接 all-to-all 发送体积 <code>B · K · H · s · (EP−1)/EP</code> 的 <code>EP/K</code> 倍；Mixtral 的 EP=8、K=2 就是 4 倍。以 B=512、H=4096、BF16 为例，每 rank 每层约 28.0 MiB（<code>(8−1) × 512 × 4096 × 2</code>），dispatch+combine 56.0 MiB，32 层一次前向 1792.0 MiB；B=2048 时分别为 112.0/224.0/7168.0 MiB。直接 all-to-all 只发目标 rank；DeepEP 一类实现还会做量化、异步与 layout 变换。比较不同后端的延迟时，必须同时看 batch、序列长度、EP size 与网络（NVLink/IB），不能只拿一个倍率横比。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>执行数据流：expert_map 归并，kernel 计算，最后 reduce</h2></div>
+  <p class="sec-sub">读完这节你应该知道：vLLM 一次 MoE 前向在纯 TP+EP 与 DP+EP 下分别走哪条路径，以及 all-reduce 与 all-to-all 的分界。</p>
+
+  <figure>
+    <svg class="figure-svg" viewBox="0 0 640 480" role="img" aria-labelledby="moe-flow-title moe-flow-desc">
+      <title id="moe-flow-title">MoE 层数据流</title>
+      <desc id="moe-flow-desc">token 先经过 router 选择 top-k 专家，再通过 dispatch 送到专家所在 rank，专家计算后在 combine 中按权重求和，最后输出。</desc>
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="arrowhead"/>
+        </marker>
+        <marker id="arr-hot" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="arrowhead-hot"/>
+        </marker>
+      </defs>
+      <rect x="30" y="28" width="120" height="58" rx="8" class="box"/>
+      <text x="90" y="52" text-anchor="middle" class="svg-t">tokens x</text>
+      <text x="90" y="72" text-anchor="middle" class="svg-s">B × H · BF16</text>
+      <path d="M150 57 H320 V98" class="line" marker-end="url(#arr)"/>
+
+      <rect x="220" y="98" width="200" height="62" rx="8" class="hot-box"/>
+      <text x="320" y="124" text-anchor="middle" class="svg-t">Router x · W_g</text>
+      <text x="320" y="144" text-anchor="middle" class="svg-s">top-k → ids, weights</text>
+
+      <rect x="22" y="196" width="596" height="126" rx="10" class="dash-box"/>
+      <text x="34" y="214" class="svg-l">EP ranks · 专家按 rank 切开（示意 4 experts / 4 ranks）</text>
+      <text x="95" y="234" text-anchor="middle" class="svg-s">rank 0</text>
+      <text x="225" y="234" text-anchor="middle" class="svg-s">rank 1</text>
+      <text x="355" y="234" text-anchor="middle" class="svg-s">rank 2</text>
+      <text x="485" y="234" text-anchor="middle" class="svg-s">rank 3</text>
+
+      <rect x="40" y="242" width="110" height="58" rx="8" class="hot-box"/>
+      <text x="95" y="266" text-anchor="middle" class="svg-t">E0</text>
+      <text x="95" y="284" text-anchor="middle" class="svg-s">SwiGLU</text>
+      <rect x="170" y="242" width="110" height="58" rx="8" class="cold-box"/>
+      <text x="225" y="266" text-anchor="middle" class="svg-t">E1</text>
+      <text x="225" y="284" text-anchor="middle" class="svg-s">SwiGLU</text>
+      <rect x="300" y="242" width="110" height="58" rx="8" class="hot-box"/>
+      <text x="355" y="266" text-anchor="middle" class="svg-t">E2</text>
+      <text x="355" y="284" text-anchor="middle" class="svg-s">SwiGLU</text>
+      <rect x="430" y="242" width="110" height="58" rx="8" class="cold-box"/>
+      <text x="485" y="266" text-anchor="middle" class="svg-t">E3</text>
+      <text x="485" y="284" text-anchor="middle" class="svg-s">SwiGLU</text>
+
+      <path d="M290 160 C290 205 95 200 95 242" class="line-hot" marker-end="url(#arr-hot)"/>
+      <path d="M350 160 C350 205 355 200 355 242" class="line-hot" marker-end="url(#arr-hot)"/>
+      <text x="360" y="184" class="svg-l">dispatch：只去被选中的 2 个专家</text>
+
+      <rect x="220" y="368" width="200" height="60" rx="8" class="box"/>
+      <text x="320" y="394" text-anchor="middle" class="svg-t">Σ g_i · E_i(x)</text>
+      <text x="320" y="414" text-anchor="middle" class="svg-s">top-k weighted sum</text>
+      <path d="M95 300 C95 340 320 330 320 368" class="line-hot" marker-end="url(#arr-hot)"/>
+      <path d="M225 300 C225 340 320 335 320 368" class="line" marker-end="url(#arr)"/>
+      <path d="M355 300 C355 340 320 335 320 368" class="line-hot" marker-end="url(#arr-hot)"/>
+      <path d="M485 300 C485 340 320 330 320 368" class="line" marker-end="url(#arr)"/>
+      <text x="505" y="342" class="svg-l">combine</text>
+
+      <path d="M320 428 V450" class="line" marker-end="url(#arr)"/>
+      <text x="320" y="468" text-anchor="middle" class="svg-t">y（B × H）</text>
+    </svg>
+    <figcaption>图 5-1：MoE 层的数据流（示意）。token 先过 router 选 top-k；dispatch 把 token 副本送到专家所在 rank；combine 按 <code>g_i</code> 加权求和。实线强调示意 token 选中的 E0/E2，虚线框是 EP 的 rank 边界；纯 TP+EP 且 DP=1、未开 SP/PCP 时，dispatch 退化为本地 <code>expert_map</code>，没有跨卡 all-to-all。</figcaption>
+  </figure>
+
+  <p>把这张图落到 vLLM 的代码路径，一次 MoE 前向分五步：</p>
+  <ol>
+    <li><strong>Router + top-k。</strong>gate GEMM 得到 logits，<code>fused_topk</code> 或 <code>grouped_topk</code> 输出 <code>topk_weights</code> 与 <code>topk_ids</code>（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/router/fused_topk_router.py:160-205">fused_topk_router.py:160-205</span>）。</li>
+    <li><strong>全局 id → 本地 id。</strong><code>expert_map</code> 把本 rank 的专家映射到 <code>0..local_num_experts−1</code>，其余写 <code>−1</code>（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/expert_map_manager.py:66-87">expert_map_manager.py:66-87</span>）。</li>
+    <li><strong>排序 + 分组 GEMM。</strong><code>moe_align_block_size</code> 按专家把 token-expert 对排序、按 block 对齐并填充；随后是第一组 GEMM（W1/W3）、激活、第二组 GEMM（W2）（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/fused_moe.py:1708-1714,1888-1954">fused_moe.py:1708-1714,1888-1954</span>）。</li>
+    <li><strong>非本地贡献置零。</strong>有 <code>expert_map</code> 时先把输出 buffer 清零，kernel 跳过 <code>−1</code> 的专家；这样本地只留下「本 rank 拥有的专家」的贡献（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/fused_moe.py:1951-1952">fused_moe.py:1951-1952</span>）。</li>
+    <li><strong>加权求和 + reduce。</strong><code>moe_sum</code> 把 top-k 输出加起来；之后按路径分叉：纯 TP+EP（DP=1、PCP=1、未开 SP）不做 all-to-all，最后在 <code>tp_size&gt;1 或 ep_size&gt;1</code> 时做 all-reduce（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/runner/moe_runner.py:513-519">moe_runner.py:513-519</span>）；DP+EP 则由 <code>prepare</code> 做 dispatch、<code>finalize</code> 做 combine（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/modular_kernel.py:331-451">modular_kernel.py:331-451</span>）。</li>
+  </ol>
+  <p><strong>两条路径的分界是 DP（以及 PCP/SP），不是 EP。</strong>EP 只说明「专家被分到不同 rank」；如果 DP=1 且没有 PCP/sequence parallel，每个 rank 仍拿到同一批 token，本地算完再 all-reduce 即可，不需要把 token 发来发去。只有每个 rank 的 token 不同（DP&gt;1，或 PCP&gt;1/sequence parallel）时，才必须用 dispatch/combine 把 token 送到专家所在 rank。这个区别在 vLLM 里由 <code>use_all2all_kernels</code> 判断（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/config.py:1066-1070">config.py:1066-1070</span>）。</p>
+  <p>shared expert 是另一条支路：DeepSeek-V3 的 shared expert 恒开，输出直接加到 routed 输出上（<span class="mono" data-src="§2.1.2 Eq.12">§2.1.2 Eq.12</span>）；vLLM 的 async all2all 后端可以在 combine 期间 overlap shared expert 计算（<span class="mono" data-src="docs/design/moe_kernel_features.md:15">moe_kernel_features.md:15</span>）。这条支路在架构上不进 router 的 top-k（Eq.12）；DeepSeek-V3 在 decode 部署中把它当作 routed one（<span class="mono" data-src="§3.4.2">§3.4.2</span>），每 token 9 个，shared 必选。它在 EP 部署里也可以被放到不同 GPU（DeepSeek-V3 decode 就用 64 张 GPU 承载冗余与 shared），不能简单把它当作每卡复制的 dense FFN。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>实测：EP 的收益来自少读权重，不是少算 FLOPs</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些数字是端到端实测、哪些只是部署配置，以及它们各自的模型与并行设置。</p>
+  <p class="table-cap">表 6-1：论文/文档中的 EP 相关实测与部署配置。每行都注明模型、并行配置与指标口径；不同来源的硬件、batch、baseline 不同，不能直接横向比较。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>来源</th><th>模型 / 规模</th><th>并行配置</th><th>结果</th><th>口径与限制</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>DeepSpeed-MoE §5.5.1/Table 6</td>
+          <td>1.3B+MoE-128（52B）</td>
+          <td>Table 6：EP degree=128、MP=1；扩展实验：8→64 张 A100</td>
+          <td>每卡专家 16→2；总吞吐随 GPU 数增加，单卡吞吐也上升（super-linear）</td>
+          <td>与 PyTorch 基线比；不是单独拆出 EP 的消融，含通信与 kernel 优化</td>
+        </tr>
+        <tr>
+          <td>DeepSpeed-MoE §5.5.2/Table 6</td>
+          <td>107B–2T MoE</td>
+          <td>Table 6 的 EP degree=128；最多 256 张 A100</td>
+          <td>延迟最高降 7.3×、吞吐最高升 7.3×；万亿参数模型延迟 &lt;25 ms</td>
+          <td>vs PyTorch 基线；含系统优化，不能当作纯 EP 的加速比</td>
+        </tr>
+        <tr>
+          <td>GShard Table 1/§5.2/§5.3</td>
+          <td>600B MoE（2048E, 36L）</td>
+          <td>2048 个 TPU v3 core</td>
+          <td>专家从 128 扩到 2048（16×）时设备时间 ×1.7；dispatch+combine 占 MoE+Transformer 时间 16%→36%；AllToAll 约 O(√D)</td>
+          <td>训练侧微基准，不是推理结论；硬件为 TPU</td>
+        </tr>
+        <tr>
+          <td>DeepSeek-V3 §3.4（部署）/§4.2（模型参数）</td>
+          <td>671B 总 / 37B 激活；256 routed + 1 shared</td>
+          <td>prefill：32 GPU，TP4+SP、DP8、EP32；decode：320 GPU，TP4+SP、DP80、EP320</td>
+          <td>prefill 每卡 8 个 routed + 1 个冗余；decode 每卡 1 个专家，64 张 GPU 承载冗余与 shared；decode 每专家 batch 通常 ≤256 token</td>
+          <td>部署配置；论文未给端到端延迟/吞吐数字</td>
+        </tr>
+        <tr>
+          <td>Mixtral Table 1/§3</td>
+          <td>47B 总 / 13B 激活；8 experts、top-2</td>
+          <td>架构数字，未绑定并行配置</td>
+          <td>激活参数占 27.7%；显存成本按 47B 稀疏参数计</td>
+          <td>论文没有给 EP 下的推理实测；不能把架构比例当加速比</td>
+        </tr>
+        <tr>
+          <td>vLLM 文档</td>
+          <td>DeepSeek-V3-0324</td>
+          <td>TP=1、DP=8、EP=8；8 张 H200/H20</td>
+          <td>EP size = TP×DP = 8；attention 复制、专家分片</td>
+          <td>只给配置，不给延迟/吞吐数字</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>最反直觉的是吞吐可以超线性。</strong>DeepSpeed-MoE 把 52B、128 专家的模型从 8 张 GPU 扩到 64 张：每卡专家从 16 降到 2，单卡要读的专家权重变少，于是单卡吞吐上升，总吞吐超线性（<span class="mono" data-src="§5.5.1">§5.5.1</span>）。这不是「更多 GPU 一定更快」；论文同时指出 GPU 变多会增加专家间的 all-to-all，只有通信优化跟得上，数据局部性的收益才会兑现。</p>
+  <p><strong>GShard 给出的是通信占比，不是端到端加速。</strong>专家从 128 扩到 2048，dispatch+combine 的执行时间约涨 3.75×，占 MoE+Transformer 的比例从 16% 升到 36%（<span class="mono" data-src="§5.2">§5.2</span>）；AllToAll 在 2D TPU 网络上约为 O(√D)，2048 个分区相对 16 个分区，D 涨 128×，执行时间只涨约 9×（<span class="mono" data-src="§5.3">§5.3</span>）。这些是训练微基准，不应直接当作推理延迟。</p>
+  <p><strong>DeepSeek-V3 的推理部署是「小 batch、按专家拆」的极端案例。</strong>decode 阶段用 320 张 GPU 做 EP320，每卡只放 1 个专家，64 张 GPU 专门承载冗余专家与 shared expert；每专家 batch 通常不超过 256 token，瓶颈是内存访问而不是计算（<span class="mono" data-src="§3.4.2">§3.4.2</span>）。论文给的是部署结构与 batch 规模，没有给端到端延迟。</p>
+  <p><strong>不要把 7.3×、1.7×、27.7% 放在一起比。</strong>7.3× 是 DeepSpeed-MoE 整套系统相对 PyTorch 的延迟/吞吐，1.7× 是 GShard 训练侧设备时间，27.7% 是 Mixtral 的激活参数占比；三者的分母、硬件与 baseline 都不同。页面把它们并列，是为了说明不同层面的成本，而不是排一个加速榜。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：负载、all-to-all、小 batch 与并行度</h2></div>
+  <p class="sec-sub">读完这节你应该知道：EP 在哪些条件下会把收益吐回去，以及哪些数字不能从训练直接搬到推理。</p>
+  <div class="three-col">
+    <div class="card"><span class="pill p1">负载不均</span><h4>热专家会拖慢整个 EP 组</h4><p>router 若把大量 token 送给少数专家，这些 rank 的 GEMM 与显存带宽先饱和，其他 rank 等 all-to-all。EPLB 用冗余专家复制热专家，并按窗口统计重排；vLLM 的 EPLB 要求加上冗余专家后的总数能被 EP size 整除（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/layer.py:278-283">layer.py:278-283</span>）。</p></div>
+    <div class="card"><span class="pill p2">all-to-all</span><h4>通信占比随专家数上升</h4><p>GShard 在 2048 experts 时 dispatch+combine 占 MoE+Transformer 时间 36%，128 experts 时为 16%（<span class="mono" data-src="§5.2">§5.2</span>）。DeepSeek-V3 训练时计算/通信比约 1:1，才需要 DualPipe 重叠，并把每个 token 限制在最多 4 个节点（<span class="mono" data-src="§3.2.1-§3.2.2">§3.2.1-§3.2.2</span>）。</p></div>
+    <div class="card"><span class="pill p3">小 batch</span><h4>decode 的算术强度低</h4><p>decode 每 token 只读少量权重，batch 小，延迟由权重读取与 all-to-all 固定开销主导。Mixtral §3 也指出 SMoE 更适合有 batch 的工作负载；batch 太小时，多个专家/卡的读取与路由开销会吃掉稀疏计算的收益。</p></div>
+  </div>
+  <p><strong>并行度约束。</strong>EP size 由 <code>TP × DP</code>（源码还含 PCP）决定，专家数除以 EP 得到每卡专家数；EP 大于专家数时，部分 rank 的 <code>local_num_experts</code> 会变成 0（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/expert_map_manager.py:66-76">expert_map_manager.py:66-76</span>），这些 rank 对 MoE 专家分片没有收益（仍可能承载 attention/其他层）。TP=1 时 attention 在每个 DP rank 复制，EP 不降低 attention/KV cache 的显存；所以「每卡能放下」要同时看专家权重、attention 与 KV cache，不能只算专家。</p>
+  <p><strong>capacity factor 与 drop 是训练侧机制。</strong>Switch 用静态 shape 的 expert capacity：<code>capacity = (tokens per batch / number of experts) × capacity factor</code>，超过容量的 token 走残差、不经过专家；在带辅助负载均衡损失的训练里，drop 通常低于 1%（<span class="mono" data-src="§2.2 Eq.3">§2.2 Eq.3</span>）。DeepSeek-V3 明确写了训练与推理都不 drop token（<span class="mono" data-src="§2.1.2 No Token-Dropping">§2.1.2</span>）。本页核对的 vLLM Triton fused MoE 路径没有 capacity factor 参数：token-expert 对按专家排序、按 block 对齐并填充，没有 Switch 式的按容量丢弃；不同 all2all 后端可能有自己的缓冲上限，本页未逐一验证。把 Switch 的训练 drop 率直接搬到 vLLM 推理，是不成立的。</p>
+  <p><strong>冗余专家不是免费的。</strong>EPLB 复制热专家会增加每卡权重与显存占用；vLLM 的 <code>num_redundant_experts</code> 只在 EPLB 开启时允许非零（<span class="mono" data-src="vllm/model_executor/layers/fused_moe/layer.py:285-288">layer.py:285-288</span>），未显式指定时默认取最小的冗余数，使「逻辑专家数 + 冗余数」能被 EP size 整除（<span class="mono" data-src="vllm/config/parallel.py:652-676">parallel.py:652-676</span>）。DeepSeek-V3 在 prefill 用 32 个冗余专家、每卡 8+1 个（<span class="mono" data-src="§3.4.1">§3.4.1</span>），decode 用 64 张 GPU 承载冗余与 shared（<span class="mono" data-src="§3.4.2">§3.4.2</span>）；这些都是模型侧部署选择，不是 vLLM 的默认行为。</p>
+  <p><strong>最后，EP 只解决 MoE 层的专家权重。</strong>attention、dense 层、embedding 与 KV cache 不因 EP 变小；网络拓扑也会改变结论：DeepSeek-V3 的集群里 NVLink 约 160 GB/s，IB 约 50 GB/s，相差约 3.2×，所以它把 token 限制在最多 4 个节点，跨节点走 IB、节点内走 NVLink（<span class="mono" data-src="§3.2.2">§3.2.2</span>）。换成跨节点只能走 IB、没有 NVLink 的集群，同样的 EP size 可能得到完全不同的结果。</p>
+</section>
+
+<footer>
+  <div>MoE 推理与 Expert Parallelism · 链接不带版本号；本页按以下版本核对：Switch v3、GShard v1、DeepSpeed-MoE v2、Mixtral v1、DeepSeek-V3 v2；代码：vLLM e740bad。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2401.04088">Mixtral of Experts（v1）</a> · <a href="https://arxiv.org/abs/2101.03961">Switch Transformers（v3）</a> · <a href="https://arxiv.org/abs/2006.16668">GShard（v1）</a> · <a href="https://arxiv.org/abs/2201.05596">DeepSpeed-MoE（v2）</a> · <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3（v2）</a><br>
+    代码：<a href="https://github.com/vllm-project/vllm/commit/e740badc2e3df13a5c2abfca04ed0ac917985c5f">vLLM e740bad</a> · <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/serving/expert_parallel_deployment.md">docs/serving/expert_parallel_deployment.md</a> · <a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f/vllm/model_executor/layers/fused_moe">vllm/model_executor/layers/fused_moe</a><br>
+    笔记：<a href="/moe/">MoE</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  function byId(id) { return document.getElementById(id); }
+  function setText(id, txt) {
+    var el = byId(id);
+    if (el) el.textContent = txt;
+  }
+
+  var b = byId('comm-b');
+  var ep = byId('comm-ep');
+  if (b && ep) {
+    var H = 4096;
+    var K = 2;
+    var BYTES = 2;
+    var LAYERS = 32;
+    var MIB = 1048576;
+    function updateComm() {
+      var tokens = parseInt(b.value, 10);
+      var epSize = 1 << parseInt(ep.value, 10);
+      var dispatch = tokens * K * H * BYTES * (epSize - 1) / epSize / MIB;
+      var combined = dispatch * 2;
+      var forward = combined * LAYERS;
+      setText('comm-b-val', tokens);
+      setText('comm-ep-val', epSize);
+      setText('comm-d', dispatch.toFixed(1) + ' MiB');
+      setText('comm-t', combined.toFixed(1) + ' MiB');
+      setText('comm-f', forward.toFixed(1) + ' MiB');
+      var ro = byId('comm-readout');
+      if (ro) {
+        ro.innerHTML = '每 rank 每层：dispatch <strong>' + dispatch.toFixed(1) +
+          ' MiB</strong>，dispatch+combine <strong>' + combined.toFixed(1) +
+          ' MiB</strong>；按 Mixtral 的 32 层累加，一次前向 <strong>' +
+          forward.toFixed(1) + ' MiB</strong>。';
+      }
+    }
+    b.addEventListener('input', updateComm);
+    ep.addEventListener('input', updateComm);
+    updateComm();
+  }
+
+  var memEp = byId('mem-ep');
+  if (memEp) {
+    var EXPERT_PARAMS = 45097156608;
+    var REPLICATED_PARAMS = 1474297856;
+    var GIB = 1073741824;
+    function updateMem() {
+      var epSize = 1 << parseInt(memEp.value, 10);
+      var expert = EXPERT_PARAMS * 2 / epSize / GIB;
+      var replicated = REPLICATED_PARAMS * 2 / GIB;
+      var total = expert + replicated;
+      setText('mem-ep-val', epSize);
+      setText('mem-e', expert.toFixed(2) + ' GiB');
+      setText('mem-r', replicated.toFixed(2) + ' GiB');
+      setText('mem-t', total.toFixed(2) + ' GiB');
+      var barE = byId('mem-bar-e');
+      var barR = byId('mem-bar-r');
+      if (barE) barE.style.width = (expert / total * 100).toFixed(1) + '%';
+      if (barR) barR.style.width = (replicated / total * 100).toFixed(1) + '%';
+      var ro = byId('mem-readout');
+      if (ro) {
+        ro.innerHTML = 'EP=' + epSize + '：每卡专家权重 <strong>' + expert.toFixed(2) +
+          ' GiB</strong>，复制的 attention/router/embedding <strong>' +
+          replicated.toFixed(2) + ' GiB</strong>，合计 <strong>' + total.toFixed(2) +
+          ' GiB</strong>。';
+      }
+    }
+    memEp.addEventListener('input', updateMem);
+    updateMem();
+  }
+})();
+</script>
+</body>
+</html>

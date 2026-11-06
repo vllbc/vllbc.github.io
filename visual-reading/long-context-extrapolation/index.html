@@ -1,0 +1,954 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 8.63 | LongRoPE2 Table 2 | 82.03-73.40 |
+| 0.02 | DCA Table 1 | 7.89-7.87 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="PI v2 · YaRN v3 · LongRoPE v1 · DCA v2 · LongRoPE2 v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>长上下文外推 · 从 PI 到 YaRN / LongRoPE2 / DCA</title>
+<meta name="description" content="长上下文外推与插值的区别：PI 统一缩放、NTK-aware 改 base、YaRN 温度、LongRoPE/2 逐维搜索与渐进扩展、DCA 分块注意力；标称 2048k 与有效上下文的差距。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.slot-val{overflow-wrap:anywhere}
+.infer{font-size:11px;font-family:"JetBrains Mono",monospace;color:var(--text-soft);border:1px solid var(--border-strong);border-radius:4px;padding:0 4px;white-space:nowrap}
+.probe-chart{margin:18px 0 6px}
+.probe-chart svg{width:100%;height:auto;display:block;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)}
+@media (max-width:560px){.sim{padding:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Long-Context Extrapolation</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">开销</a>
+      <a href="#flow">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 位置编码 · 上下文扩展</span>
+  <h1>长上下文外推：不是把位置调大，而是决定每个频率压多少</h1>
+  <p class="hero-sub">
+    RoPE 的注意力只看到相对角度 <code>(m−n)θ<sub>j</sub></code>。序列超过训练长度后，直接外推会把角度推到训练分布之外；
+    Position Interpolation 把位置压回原区间，代价是所有频率一起被压扁。YaRN、LongRoPE 和 DCA 分别从频率分组、逐维搜索和注意力矩阵三条路修正这一点。
+    页面把「标称长度」和「有效长度」分开看。
+  </p>
+  <div class="meta">
+    <span>PI · YaRN · LongRoPE · DCA · LongRoPE2</span>
+    <a href="https://arxiv.org/abs/2306.15595" target="_blank" rel="noopener">Position Interpolation ↗</a>
+    <a href="https://arxiv.org/abs/2309.00071" target="_blank" rel="noopener">YaRN ↗</a>
+    <a href="https://arxiv.org/abs/2402.13753" target="_blank" rel="noopener">LongRoPE ↗</a>
+    <a href="https://arxiv.org/abs/2402.17463" target="_blank" rel="noopener">Dual Chunk Attention ↗</a>
+    <a href="https://arxiv.org/abs/2502.20082" target="_blank" rel="noopener">LongRoPE2 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    RoPE 的 attention score 只依赖相对距离 <code>(m−n)θ<sub>j</sub></code>。训练长度 <code>L</code> 之外的角度没有在预训练中出现，
+    直接外推的 PPL 可以超过 <span data-src="PI §2.2">10<sup>3</sup></span>（PI §2.2）。PI 的做法是把位置 <code>m</code> 压成 <code>mL/L′</code>，
+    让最大角度回到训练区间；论文给出的插值误差上界至少比外推上界小 <span data-src="PI §2.3">600×</span>（PI §2.3，LLaMA 7B 设定）。
+  </p>
+  <p>
+    统一缩放的问题是所有频率一起被压。NTK-aware 改 base，让高频维度少压、低频维度多压；YaRN 用波长比 <code>r=L/λ</code> 做分段 ramp，
+    再给 attention logits 加一个温度 <code>1/t</code>；LongRoPE 把每个维度的缩放因子 <code>λ<sub>i</sub></code> 和起始 token 数 <code>n̂</code> 变成搜索变量，
+    再用渐进式扩展把 256k 推到 2048k。DCA 不走频率缩放，它把相对位置矩阵按 chunk 重写。
+  </p>
+  <p>
+    标称长度不等于有效长度。LongRoPE 报告 2048k 的目标窗口，但 passkey 在 2048k 处并非所有模型都能保持；
+    LongRoPE2 用 RULER 把「有效」单独量出来：LLaMA3-8B 在 128k 处平均分 <span data-src="LongRoPE2 Table 2">82.03</span>，同一张 LongRoPE2 Table 2 里 LongRoPE 为 <span data-src="LongRoPE2 Table 2">73.40</span>。
+    短上下文保持是第二条轴：扩得越远，越需要单独回收 4k/8k 的能力。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="PI §2.3">600<small>×</small></div>
+      <div class="k">PI 的插值误差上界至少比外推上界小 <span data-src="PI §2.3">600×</span><br>LLaMA 设定，理论比较，不是实验提升</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="YaRN §4.1">400<small> steps</small></div>
+      <div class="k">YaRN s=<span data-src="YaRN §4.1">16</span> 的微调步数<br>PG19 <span data-src="YaRN §4.1">64k</span> 段，占预训练语料不到约 <span data-src="YaRN §1">0.1%</span></div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="LongRoPE2 Table 2">82.03</div>
+      <div class="k">LongRoPE2 在 RULER <span data-src="LongRoPE2 Table 2">128k</span> 的平均分<br>LLaMA3-8B；同表 LongRoPE 为 <span data-src="LongRoPE2 Table 2">73.40</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>外推失败的根因：没见过的旋转角，加上被压扁的局部距离</h2></div>
+  <p class="sec-sub">读完这节应知道：RoPE 的注意力只看相对角度；训练长度之外，角度分布变了；把所有位置压回原区间能稳住数值，但会让相邻 token 的差异变小。</p>
+
+  <p>
+    RoPE 对 query 和 key 做旋转。取位置索引 <code>m</code>、<code>n</code>，第 <code>j</code> 个频率对的角度是
+    <code>(m−n)θ<sub>j</sub></code>，其中 <code>θ<sub>j</sub>=b<sup>−2j/D</sup></code>、<code>b=10000</code>
+    （YaRN §2.1）。这也意味着 attention score 只看相对距离 <code>s=m−n</code>，与绝对位置无关。
+    预训练时 <code>s≤L</code>；推理超过 <code>L</code> 后，<code>sθ<sub>j</sub></code> 落到了训练时没覆盖的相位上。
+  </p>
+
+  <div class="eq">
+    a(s) = Σ<sub>j</sub> [ (q<sub>2j</sub>k<sub>2j</sub> + q<sub>2j+1</sub>k<sub>2j+1</sub>) cos(sθ<sub>j</sub>)
+    + (q<sub>2j</sub>k<sub>2j+1</sub> − q<sub>2j+1</sub>k<sub>2j</sub>) sin(sθ<sub>j</sub>) ]
+  </div>
+  <div class="eq-cap">PI §2.1 Eq.2：a(s) 只依赖相对距离 s=m−n；θ<sub>j</sub>=10000<sup>−2j/d</sup></div>
+
+  <p>
+    PI §2.2 把直接外推的失败写得很直白：模型在比训练长度更长的序列上，PPL 可以冲到
+    <span data-src="PI §2.2">10<sup>3</sup></span> 以上，接近未训练模型。论文的解释是三角基函数可以拟合
+    <code>[0,L]</code> 内的任意形状，但外推区间没有约束，RoPE 原始上界可能非常松。
+    PI §2.3 于是改看插值误差：把位置压回 <code>[0,L]</code> 后，误差上界至少比外推上界小
+    <span data-src="PI §2.3">600×</span>（PI §2.3，LLaMA 7B 设定）。
+  </p>
+
+  <p>
+    第二个问题不是数值爆炸，而是分辨率。PI 把所有位置除以 <code>s</code>，相对距离从 <code>s</code> 变成
+    <code>s/s′</code>；高频维度本来负责区分邻近 token，压缩后相邻 token 的旋转角差变小。YaRN §3.1 把这个现象描述为
+    high frequency information 的损失；YaRN §3.2 进一步把它归因于局部相对距离被压扁。
+  </p>
+
+  <p>
+    还有第三个不对称：不同维度的波长不同。低维（高频）在训练长度内转很多圈；高维（低频）可能连一个完整周期都没走完。
+    LongRoPE2 §2.1 举了 Phi3-mini 的例子：训练长度 <span data-src="LongRoPE2 §2.1">2048</span>，
+    最高维的周期是 <span data-src="LongRoPE2 §2.1">51861</span>，在训练长度内覆盖不到 <span data-src="LongRoPE2 §2.1">4%</span> 的完整周期。
+    LongRoPE2 §2.2 把这类维度称为 OOD 维度。因此「哪些维度该压、压多少」不能用一个统一的 <code>s</code> 回答<span class="infer">推断</span>（由 LongRoPE2 §2.1 的周期覆盖与 LongRoPE2 §2.2 的 OOD 维度定义推得）。
+  </p>
+
+  <p>
+    把这三个问题放在一起，就能理解后面的方法为什么都在改写同一个映射：位置怎么缩放，以及每个频率缩放多少。
+    标称长度只是目标；能不能在目标距离上检索到信息，是另一个指标。PI §3.3 把 effective context window 定义为
+    token 能有效 attend 的最大距离，这一定义在后面被 passkey 和 RULER 反复使用。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>直接外推和直接长训都走不通；统一插值把角度压回训练区间，但压扁了所有频率</h2></div>
+  <p class="sec-sub">两条前路：一条是在长序列上直接继续训练，另一条是把位置统一缩回原区间。前者学得慢，后者有效但牺牲高频分辨率。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">直接外推 / 直接长训</span><h4>模型不会因为多训几步就学会新位置</h4></div>
+      <p>
+        PI §1 报告：直接微调超过 <span data-src="PI §1">10000</span> 个 batch，有效窗口只从
+        <span data-src="PI Table 4">2048</span> 移到 <span data-src="PI Table 4">2560</span>。
+        PI §2.2 的直接外推 PPL 可以超过 <span data-src="PI §2.2">10<sup>3</sup></span>。
+      </p>
+      <p>
+        原因不是训练不够，而是新位置的角度不在预训练分布里；继续用 next-token loss 去学，收敛很慢<span class="infer">推断</span>（由 PI §1 的 10000 个 batch 实验与 PI §2.2 的外推讨论推得；原文没有把「训练不够」单独列为原因）。
+        论文把这一现象归因于直接外推没有把角度约束回训练区间（PI §2.2）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PI · 统一插值</span><h4>把 m 映射成 mL/L′，所有维度同除 s</h4></div>
+      <p>
+        PI §2.3 定义 <code>f′(x,m)=f(x,mL/L′)</code>。位置区间从 <code>[0,L′)</code> 压回 <code>[0,L)</code>，
+        相对距离也按同比例缩小。论文给出插值误差上界，并称它至少比外推上界小
+        <span data-src="PI §2.3">600×</span>（PI §2.3）。
+      </p>
+      <p>
+        代价是高频维度被一起压缩：短上下文 PPL 退化 <span data-src="PI §3.2">0.01–0.05</span>（PI §3.2）；
+        扩到 8192 的 7B/33B 模型在原上下文基准上最多退化 <span data-src="PI §3.4">2%</span>，
+        32768 等更长窗口退化更多（PI §3.4；数字见 PI Table 5）。PI Table 5 未转录，本页只引用 §3.4 的 2% 结论。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    PI 在工程上很轻：不改架构，<span data-src="PI §3.1">1000</span> 步微调就能把 LLaMA 从
+    <span data-src="PI §1">2048</span> 扩到 <span data-src="PI §3.1">32768</span>（PI §3.1）。
+    但它留下两个问题：所有维度同一个 <code>s</code>，不合理；位置压缩后，局部顺序信息变弱。
+    NTK-aware 先改了第一个问题。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p3">NTK-aware · 社区方法</span><h4>不改位置，改 base：高频少压，低频多压</h4></div>
+    <p>
+      NTK-aware 最早在社区提出（YaRN 引用 bloc97 的 Reddit 帖），YaRN §3.1 给了方法定义，
+      形式化版本在 YaRN Appendix A.2 Def.3：把 base 从 <code>b</code> 改成 <code>b′=b·s<sup>D/(D−2)</sup></code>，等价于每个维度乘上不同的缩放。
+      高频维度几乎不动，低频维度压得更多。
+    </p>
+    <p>
+      YaRN Appendix A.2 也指出它的缺点：部分维度会被推到 out-of-bound，微调效果可能不如 PI；
+      因此它更适合不微调的场景，而不是作为最终方案。下面的 YaRN 把「分段」和「温度」补上。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>先决定每个频率压多少，再决定位置怎么缩放</h2></div>
+  <p class="sec-sub">所有方法都能写成 f′(x,m,θ)=f(x,g(m),h(θ))：PI 只改 g，NTK-aware 只改 h，YaRN 同时改 h 和 attention 温度，LongRoPE 把 h 变成逐维搜索，DCA 则绕开 h 去改相对位置矩阵。</p>
+
+  <div class="eq">
+    f′<sub>W</sub>(x<sub>m</sub>, m, θ<sub>d</sub>) = f<sub>W</sub>(x<sub>m</sub>,
+    <span class="hl-a">g(m)</span>, <span class="hl-b">h(θ<sub>d</sub>)</span>)
+  </div>
+  <div class="eq-cap">YaRN §2.2 Eq.7：g 控制位置缩放，h 控制每个频率的缩放；PI 在本页记作 g(m)=m/s、h(θ)=θ（PI §2.3）</div>
+
+  <p class="eq-cap">表 1 · 统一形式下各方法的 g 与 h（据 YaRN §3.1–§3.3、LongRoPE §3.1、DCA §3 整理）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>g(m)</th><th>h(θ<sub>j</sub>)</th><th>是否训练</th><th>备注</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>PI</td>
+          <td><code>m/s</code></td>
+          <td><code>θ<sub>j</sub></code></td>
+          <td>需要（短步数）</td>
+          <td>所有维度同比例压缩（PI §2.3）</td>
+        </tr>
+        <tr>
+          <td>NTK-aware</td>
+          <td><code>m</code></td>
+          <td><code>θ<sub>j</sub>·s<sup>−2j/(D−2)</sup></code></td>
+          <td>可不训练</td>
+          <td>等价于改 base；部分维度 out-of-bound（YaRN Appendix A.2；形式化定义见 YaRN Appendix A.2 Def.3）</td>
+        </tr>
+        <tr>
+          <td>NTK-by-parts</td>
+          <td><code>m</code></td>
+          <td><code>(1−γ)θ<sub>j</sub>/s + γθ<sub>j</sub></code></td>
+          <td>需要</td>
+          <td>γ 由 <code>r=L/λ</code> 决定；α=1、β=32（YaRN §3.2 Def.1）</td>
+        </tr>
+        <tr>
+          <td>YaRN</td>
+          <td><code>m</code></td>
+          <td>同 NTK-by-parts，另加温度 <code>1/t</code></td>
+          <td>需要</td>
+          <td><code>√(1/t)=0.1ln(s)+1</code>（YaRN §3.3 Def.2）</td>
+        </tr>
+        <tr>
+          <td>LongRoPE</td>
+          <td><code>m</code>（<code>n&lt;n̂</code> 的位置不缩放）</td>
+          <td><code>θ<sub>j</sub>/λ<sub>j</sub></code>，λ<sub>j</sub> 逐维搜索</td>
+          <td>需要 / 渐进</td>
+          <td>λ<sub>j</sub>≤λ<sub>j+1</sub>；n̂ 也搜索（LongRoPE §3.1 Eq.3；搜索空间见 LongRoPE Table 4）</td>
+        </tr>
+        <tr>
+          <td>DCA</td>
+          <td>分块位置矩阵（非单一 g）</td>
+          <td>不缩放 θ</td>
+          <td>不需要</td>
+          <td>intra / inter / successive 三种相对位置（DCA §3.1–§3.3）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>PI：把整段位置轴均匀压短</h3>
+  <p>
+    PI 的 <code>g(m)=m/s</code>，<code>h(θ)=θ</code>。位置 <code>m</code> 变成 <code>m/s</code>，
+    所有维度的有效波长都乘以 <code>s</code>。它不引入新参数，也不改模型结构；代价是高频维度也一起被拉长，
+    相邻 token 的旋转角差变小。PI §2.3 的定理 2.1 给的是插值误差上界：在已知网格点之间做线性插值，
+    误差由 <code>(s−s<sub>1</sub>)(s<sub>2</sub>−s)</code> 控制；外推没有这个夹逼区间，上界只能靠三角和估计。
+  </p>
+
+  <h3>NTK-aware：用 base 把缩放压力分散到各维度</h3>
+  <p>
+    NTK-aware 不动位置，只改频率。YaRN §3.1 的定义是
+    <code>g(m)=m</code>、<code>h(θ<sub>j</sub>)=b′<sup>−2j/D</sup></code>，其中
+    <code>b′=b·s<sup>D/(D−2)</sup></code>。把 <code>b′</code> 代回去，等效于
+    <code>θ<sub>j</sub>·s<sup>−2j/(D−2)</sup></code>：<code>j</code> 越大（频率越低），缩放越重；
+    <code>j</code> 越小（频率越高），几乎不缩放。这样高频分辨率保住了一部分，
+    但 YaRN Appendix A.2 指出部分维度会被推到 out-of-bound；微调时这些维度可能反而拖后腿。
+  </p>
+
+  <h3>NTK-by-parts：按波长分段，不再对中间维度做线性缩放</h3>
+  <p>
+    NTK-by-parts 先算每个维度的波长 <code>λ<sub>j</sub>=2π/θ<sub>j</sub></code>，再算比值
+    <code>r<sub>j</sub>=L/λ<sub>j</sub></code>。YaRN §3.2 用两个阈值 <code>α</code>、<code>β</code> 把维度分成三段：
+    <code>r&lt;α</code> 的维度做完整线性插值（<code>θ<sub>j</sub>/s</code>）；
+    <code>r&gt;β</code> 的维度完全不插值（保留 <code>θ<sub>j</sub></code>）；
+    中间的维度用 ramp <code>γ(r)=(r−α)/(β−α)</code> 做线性混合：
+    <code>h(θ<sub>j</sub>)=(1−γ)θ<sub>j</sub>/s+γθ<sub>j</sub></code>。
+    对 Llama 系列，YaRN §3.2 给的取值是 <code>α=1</code>、<code>β=32</code>。
+  </p>
+  <p>
+    把 <code>r=L/λ</code> 代进去：低维（高频）的波长短，<code>r</code> 大，落在 <code>r&gt;β</code> 一侧，
+    不插值；高维（低频）的波长长，<code>r</code> 小，落在 <code>r&lt;α</code> 一侧，完整插值。
+    这正好对应「高频保留局部顺序、低频把远端压回训练区间」的分工<span class="infer">推断</span>（由 YaRN §3.2 的 <code>r&lt;α</code> / <code>r&gt;β</code> 分段定义与 YaRN §3.1 的高频损失讨论推得）。
+  </p>
+
+  <h3>YaRN：在 NTK-by-parts 上加一个 attention 温度</h3>
+  <p>
+    YaRN 的定义 2 是 NTK-by-parts 加一个温度：把 softmax 前的 logits 改成
+    <code>q<sup>T</sup>k/(t√D)</code>（YaRN §3.3 Eq.14）。实现上不需要改 attention 代码：
+    把 query 和 key 都乘上 <code>√(1/t)</code>，等价于把 RoPE 的复数嵌入整体缩放，RoPE 又是预计算复用的，
+    因此论文称零额外推理开销（YaRN §3.3）。
+  </p>
+  <div class="eq">
+    √(1/t) = 0.1 ln(s) + 1
+  </div>
+  <div class="eq-cap">YaRN §3.3 Eq.15：温度系数按缩放因子 s 拟合；该式在 LLaMA 7B/13B/33B/65B 上拟合（无微调），论文称同一组值也适用于 Llama 2 7B/13B/70B</div>
+  <p>
+    温度不是一个从第一性原理推出来的常数，而是用「最低 PPL」拟合出来的经验式（YaRN §3.3）。
+    它的作用是把长上下文下的 attention 分布整体压平或锐化；论文报告它在不同数据样本和 token 位置上有一致的 PPL 影响（YaRN §3.3；实验见 YaRN Appendix A.3）。
+  </p>
+
+  <h3>交互：单频探针下的频率与 score</h3>
+  <p>
+    下面的探针只取一个频率维度 <code>j</code>，令 <code>q=k=(1,0)</code>，于是该维的 score 就是
+    <code>cos(d·θ<sub>eff</sub>)</code>；YaRN 再乘以 <code>1/t</code>（即除以 <code>t</code>）。切换 PI / NTK-aware / YaRN，
+    拖动缩放因子 <code>S</code>、维度 <code>j</code> 和相对距离 <code>d</code>，可以看到同一距离下
+    不同策略把有效频率压到了多少。图上的曲线是 <code>score</code> 随 <code>d</code> 的变化；
+    高频维度在图上会很密，读数以探针值为准。
+  </p>
+
+  <div class="sim" id="probe-sim">
+    <div class="sim-top" id="probe-modes">
+      <button type="button" class="rule-btn active" data-mode="pi">PI<span class="r-sub">g=m/s，h=θ</span></button>
+      <button type="button" class="rule-btn" data-mode="ntk">NTK-aware<span class="r-sub">改 base</span></button>
+      <button type="button" class="rule-btn" data-mode="yarn">YaRN<span class="r-sub">ramp + 温度</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>缩放因子 S <span class="v" id="probe-s-val">16</span></label>
+        <input id="probe-s" type="range" min="4" max="64" step="4" value="16">
+      </div>
+      <div class="ctrl">
+        <label>频率维度 j <span class="v" id="probe-j-val">32</span></label>
+        <input id="probe-j" type="range" min="0" max="63" step="1" value="32">
+      </div>
+      <div class="ctrl">
+        <label>相对距离 d <span class="v" id="probe-d-val">2048</span></label>
+        <input id="probe-d" type="range" min="64" max="4096" step="64" value="2048">
+      </div>
+    </div>
+
+    <div class="slots" id="probe-slots">
+      <div class="slot">
+        <div class="slot-name">θ_eff (rad/token)</div>
+        <div class="slot-val" id="probe-theta">0.000625</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">r = L/λ</div>
+        <div class="slot-val" id="probe-r">6.5190</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">γ (YaRN ramp)</div>
+        <div class="slot-val" id="probe-gamma">—</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">angle = d·θ_eff</div>
+        <div class="slot-val" id="probe-angle">1.280000</div>
+      </div>
+    </div>
+
+    <div class="probe-chart">
+      <svg id="probe-svg" viewBox="0 0 640 230" role="img" aria-label="单频注意力分数随相对距离变化">
+        <rect x="0" y="0" width="640" height="230" fill="var(--bg)"></rect>
+        <line x1="60" y1="20" x2="60" y2="190" stroke="var(--border-strong)" stroke-width="1"></line>
+        <line x1="60" y1="105" x2="620" y2="105" stroke="var(--border)" stroke-width="1"></line>
+        <line x1="60" y1="190" x2="620" y2="190" stroke="var(--border-strong)" stroke-width="1"></line>
+        <text x="50" y="24" text-anchor="end" fill="var(--text-soft)" font-size="10">2</text>
+        <text x="50" y="109" text-anchor="end" fill="var(--text-soft)" font-size="10">0</text>
+        <text x="50" y="186" text-anchor="end" fill="var(--text-soft)" font-size="10">−2</text>
+        <text x="60" y="208" text-anchor="middle" fill="var(--text-soft)" font-size="10">0</text>
+        <text x="340" y="208" text-anchor="middle" fill="var(--text-soft)" font-size="10">2048</text>
+        <text x="620" y="208" text-anchor="end" fill="var(--text-soft)" font-size="10">4096</text>
+        <text x="340" y="226" text-anchor="middle" fill="var(--text-muted)" font-size="10">相对距离 d（token）</text>
+        <text x="16" y="105" text-anchor="middle" fill="var(--text-muted)" font-size="10" transform="rotate(-90 16 105)">score</text>
+        <polyline id="probe-curve" fill="none" stroke="var(--accent)" stroke-width="2" points=""></polyline>
+        <line id="probe-marker" x1="340" y1="20" x2="340" y2="190" stroke="var(--c2)" stroke-width="1.2" stroke-dasharray="4 4"></line>
+        <circle id="probe-dot" cx="340" cy="105" r="4" fill="var(--accent)"></circle>
+      </svg>
+    </div>
+    <div class="eq-cap">图 1（页面模拟）· 固定 S、j，改变 d；曲线为单频 score=cos(d·θ_eff)，YaRN 再乘以 1/t（即除以 t）；纵轴范围 ±2.1（刻度标注 ±2；S=64 时 1/t≈2.005，不裁切）。不是论文图。</div>
+
+    <div class="readout" id="probe-readout" data-src="页面模拟（公式来源见下方静态参数）">
+      <div class="r-head">单频探针读数</div>
+      <div id="probe-msg">PI：θ_eff = 0.000625 rad/token，angle = 1.280000 rad，score = 0.2867。所有维度统一除以 S。</div>
+    </div>
+  </div>
+
+  <p class="eq-cap">
+    探针参数：<code>L=4096</code>、<code>D=128</code>、<code>b=10000</code>、<code>α=1</code>、<code>β=32</code>；
+    θ<sub>j</sub>=10000<sup>−2j/128</sup>。L=4096 与 D=128 是页面为 LLaMA 2 风格探针选定的设定，不参与论文结论。
+    静态公式与参数来源：PI 的 <code>g(m)=m/s</code> 见 PI §2.3；NTK-aware 的 base 替换见 YaRN §3.1；
+    YaRN 的 <code>r</code>、γ ramp 与 <code>α=1</code>、<code>β=32</code> 见 YaRN §3.2；
+    温度 <code>1/t</code> 见 YaRN §3.3。探针是<strong>简化模拟，不是源码还原</strong>；覆盖与未覆盖的分支见下面的折叠块。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：PI 与 YaRN 各一组，按显示精度逐位对齐<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A：PI，S=16，j=32，d=2048</strong></p>
+      <ol>
+        <li><code>θ<sub>32</sub> = 10000<sup>−64/128</sup> = 0.01</code> rad/token。</li>
+        <li>PI：<code>θ<sub>eff</sub> = 0.01/16 = 0.000625</code>。</li>
+        <li><code>angle = 2048 × 0.000625 = 1.280000</code> rad。</li>
+        <li><code>score = cos(1.280000) = 0.286715</code>，按 4 位小数显示为 <code>0.2867</code>。</li>
+      </ol>
+      <p><strong>组 B：YaRN，S=16，j=32，d=2048</strong></p>
+      <ol>
+        <li><code>r = L/λ = 4096 × 0.01 / (2π) = 6.518986</code>；<code>γ = (6.518986 − 1)/(32 − 1) = 0.178032</code>。</li>
+        <li><code>θ<sub>eff</sub> = 0.01 × ((1 − 0.178032)/16 + 0.178032) = 0.002294048</code>，按 6 位小数显示为 <code>0.002294</code>。</li>
+        <li><code>angle = 2048 × 0.002294048 = 4.698211</code> rad。</li>
+        <li><code>1/t = (0.1 ln 16 + 1)<sup>2</sup> = 1.631390227</code>；<code>cos(4.698211) = −0.014177531</code>；<code>score = −0.014177531 × 1.631390227 = −0.023129086</code>，按 4 位小数显示为 <code>−0.0231</code>。</li>
+      </ol>
+      <p>
+        两组都只做乘法、除法、cos 和 ln；JS 用同一公式。显示位数：θ<sub>eff</sub>、angle 与 γ 6 位小数，score 4 位小数。
+        手算中间值保留更多位，最后按同一精度四舍五入。NTK-aware 走同一段乘除，没有单独列第三组。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个探针覆盖了什么、没覆盖什么<span class="sum-sub">简化模拟，不是源码还原</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>PI 的 <code>g(m)=m/s</code>；NTK-aware 的 base 替换
+        <code>b′=b·s<sup>D/(D−2)</sup></code>；YaRN 的 <code>r</code>、<code>γ</code> ramp、<code>h(θ)</code>
+        和温度 <code>1/t</code>；单个频率对 <code>j</code> 的相对距离 <code>d</code>；
+        分数按 <code>cos(d·θ<sub>eff</sub>)</code> 计算，YaRN 再乘以 <code>1/t</code>（即除以 <code>t</code>）。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>64 个频率的求和、q/k 的具体内容、softmax 分母、<code>√D</code> 归一化、多头、
+        KV cache、Dynamic Scaling、LongRoPE 的逐维搜索、DCA 的分块注意力、微调过程。
+        探针把 <code>q=k=(1,0)</code>，所以分数只是单频余弦，不是完整 attention。
+      </p>
+      <p>
+        因此它是<strong>简化模拟，不是源码还原</strong>。手算覆盖 PI 与 YaRN 两组；NTK-aware 用同一段乘除。
+      </p>
+    </div>
+  </details>
+
+  <h3>LongRoPE：把逐维缩放因子和起始 token 变成搜索变量</h3>
+  <p>
+    LongRoPE 把 PI/NTK/YaRN 里的「人手规则」换成搜索。它给每个 RoPE 维度一个独立的缩放因子
+    <code>λ<sub>i</sub></code>，再加一个 token 位置阈值 <code>n̂</code>：<code>n&lt;n̂</code> 的位置保持不变，
+    从 <code>n̂</code> 开始除以 <code>λ<sub>i</sub></code>（LongRoPE §3.1 Eq.3）。
+    论文正文写的是「initial <code>n̂−1</code> token positions」，而 Eq.3 的条件是 <code>n&lt;n̂</code>；
+    两者相差一个边界 token，页面按公式写 <code>n&lt;n̂</code>。
+    这样同时利用两种非均匀性：不同维度压不同倍数，序列开头的 token 少压。
+  </p>
+  <p>
+    搜索空间在 LongRoPE Table 4（LongRoPE §3.2）：<code>λ<sub>i</sub></code> 从 1.0 到 <code>s×1.25</code>、
+    步长 0.01；<code>n̂</code> 从 {0, 1, 2, 4, 8, 12, 16, 20, 24, 28, 32, 64, 128, 256} 里选。
+    搜索用 evolution search，并强制 <code>λ<sub>i</sub>≤λ<sub>i+1</sub></code>，让低维（高频）少压、高维（低频）多压。
+    论文报告 s=4× 时搜索空间有 <span data-src="LongRoPE §3.2">4×10<sup>167</sup></span> 种组合（LongRoPE §3.2）；
+    在 LLaMA2 上，这种非均匀插值可以做到 <span data-src="LongRoPE §1">8×</span> 的无微调扩展（LongRoPE §1），这也是渐进式扩展把 256k 推到 2048k 的基础。
+  </p>
+  <p>
+    结果分两段。先在预训练模型上搜 128k/256k 的因子：128k 训
+    <span data-src="LongRoPE §3.3">400</span> 步，换 256k 因子再训 <span data-src="LongRoPE §3.3">600</span> 步；
+    然后在 256k checkpoint 上做第二次搜索，把窗口推到 2048k，最后扩展比是
+    <span data-src="LongRoPE §3.3">512×</span>（LongRoPE §3.3）。渐进式扩展的关键是：第二次搜索用已经适应过长上下文的模型，
+    不需要在 2048k 长度的文本上直接微调。
+  </p>
+  <p>
+    LongRoPE 还做了一次短上下文回收：在扩展后的模型上再搜 4k/8k 的因子，推理时按序列长度切换。
+    没有回收时，Proof-pile 4k PPL 是 <span data-src="LongRoPE Table 10">4.16</span>，回收后是
+    <span data-src="LongRoPE Table 10">3.71</span>；平均基准分从 <span data-src="LongRoPE Table 10">49.3</span> 到
+    <span data-src="LongRoPE Table 10">52.9</span>（LLaMA2-7B-2048k，ft=128k；LongRoPE Table 10）。
+  </p>
+
+  <h3>DCA：不改频率，改相对位置矩阵</h3>
+  <p>
+    Dual Chunk Attention 走的是另一条路：不缩放位置，也不改 <code>θ</code>，而是把长序列切成小于预训练长度的 chunk，
+    重写 query/key 的相对位置矩阵（DCA §3）。它有三个部分：intra-chunk、inter-chunk、successive-chunk。
+  </p>
+  <ul>
+    <li><strong>Intra-chunk：</strong>同一 chunk 内，key 的位置按 <code>0..s−1</code> 循环，query 用同一套位置；
+      这相当于把每个 chunk 当成一个短序列，PPL 低，但看不到其他 chunk（DCA §3.1）。</li>
+    <li><strong>Inter-chunk：</strong>跨 chunk 时，key 位置仍然循环，query 位置设成预训练长度
+      <code>c−1</code>，保证 query 的位置大于所有 key（DCA §3.2）。这样能聚合远处信息，但相邻 chunk 的相对距离会失真。</li>
+    <li><strong>Successive-chunk：</strong>对相邻 chunk，保留一个局部窗口 <code>w=c−s</code>，把 query 的前
+      <code>w</code> 个位置设成 <code>c−w..c−1</code>，其余仍是 <code>c−1</code>（DCA §3.3）。
+      这样相邻 token 的距离不会被 inter-chunk 的常量位置拉平。</li>
+  </ul>
+  <p>
+    以 DCA §3.3 的例子：<code>c=10</code>、<code>s=6</code>、<code>w=4</code>，inter-chunk 的 query 位置是全 9，
+    successive-chunk 的前四个位置改成 <code>6,7,8,9</code>。DCA 不训练，但改的是 attention 的计算方式；
+    它不是 <code>h(θ)</code> 轴上的方法，表 1 单列一行只是为了对照。
+  </p>
+</section>
+
+<!-- ================= 04. 计算与开销 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>成本落在微调步数和数据长度，不在推理：多数方法只改 RoPE</h2></div>
+  <p class="sec-sub">PI、YaRN、LongRoPE 都不改模型结构；训练步数从千步降到几百步，LongRoPE 用两段微调把 256k 推到 2048k。DCA 走另一条路：不训练，但要改 attention 的分块计算。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">训练账本</span><h4>从千步到几百步</h4></div>
+    <ul>
+      <li>
+        <strong>PI：</strong>默认 <span data-src="PI §3.1">1000</span> 步；7B/13B/33B 扩到 8192 用
+        <span data-src="PI §3.1">32</span> 张 A100、global batch <span data-src="PI §3.1">64</span>；
+        其他设置用 <span data-src="PI §3.1">128</span> 张 A100、batch <span data-src="PI §3.1">128</span>（PI §3.1）。
+      </li>
+      <li>
+        <strong>YaRN：</strong>模型是 Llama 2 7B/13B；s=16 用 <span data-src="YaRN §4.1">400</span> 步、64k 段、global batch
+        <span data-src="YaRN §4.1">64</span>；s=32 在 s=16 checkpoint 上再加 <span data-src="YaRN §4.1">200</span> 步。
+        论文称占预训练语料不到约 <span data-src="YaRN §1">0.1%</span>（YaRN §1）。
+      </li>
+      <li>
+        <strong>LongRoPE：</strong>LLaMA2-7B 的 128k 先训 <span data-src="LongRoPE §3.3">400</span> 步，换 256k 因子再训
+        <span data-src="LongRoPE §3.3">600</span> 步；128k 用 <span data-src="LongRoPE §4.1">8</span> 张 A100，
+        256k 用 <span data-src="LongRoPE §4.1">16</span> 张，global batch <span data-src="LongRoPE §4.1">32</span>。
+        Mistral-7B 的 128k/256k 用 16k 训练长度、<span data-src="LongRoPE §4.1">4</span> 张 A100、global batch
+        <span data-src="LongRoPE §4.1">64</span>（训练配置见 LongRoPE §4.1；4 卡见 LongRoPE §4.1）。
+        §4.1 不同实验分别用了不同卡数（上列 8、16、4 张）。LongRoPE Appendix A.1 称所有实验用 16 张 A100，
+        与 §4.1 的 4 张不一致；本页只把 4 张用于 Mistral 训练这一句，不消解两处差异。
+      </li>
+      <li>
+        <strong>DCA：</strong>不训练；chunk size 取训练长度的 <span data-src="DCA §4.1">3/4</span>，
+        Llama2 为 <span data-src="DCA §4.1">3072</span>；7B/13B 单卡 A100-80G 可推理，70B 在 16k 内需
+        <span data-src="DCA §4.1">2</span> 张（DCA §4.1）。
+      </li>
+    </ul>
+  </div>
+
+  <p>
+    推理侧的共同点是「只改位置」：PI 不改架构（PI §2.3）；YaRN 的温度在 RoPE 生成时预先算好，
+    论文称零额外推理开销（YaRN §3.3）；LongRoPE 只改 RoPE 因子（LongRoPE §1）。DCA 是例外：它改 attention，
+    需要 Python 层的 monkey patch，但论文报告显存和速度与 FlashAttention 接近（DCA §4.4）。
+  </p>
+
+  <p>
+    搜索本身也有成本。LongRoPE 的搜索空间在 s=4× 时有 <span data-src="LongRoPE §3.2">4×10<sup>167</sup></span> 种组合（LongRoPE §3.2），
+    因此用 evolution search：种群 <span data-src="LongRoPE §4.1">64</span>、mutation/crossover 各
+    <span data-src="LongRoPE §4.1">16</span>、迭代 <span data-src="LongRoPE §4.1">40</span> 次、每轮 top-
+    <span data-src="LongRoPE §4.1">32</span>。LongRoPE2 把搜索目标换成 needle-driven PPL（LongRoPE2 §3.2）。
+    这些是离线成本，不进入推理路径。
+  </p>
+</section>
+
+<!-- ================= 05. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>扩展流程不是一路放大：先定频率映射，再用短于目标的数据微调，最后回收短上下文</h2></div>
+  <p class="sec-sub">LongRoPE 的渐进式扩展和 YaRN 的短数据训练说明训练长度不必等于目标长度；但最后一步必须是有效长度验收，而不是看标称值。</p>
+
+  <ol>
+    <li>
+      <strong>定目标与频率映射。</strong>先确定目标缩放 <code>s=L′/L</code>，再选择 <code>g(m)</code> 和
+      <code>h(θ)</code>：PI 全压、NTK-aware 改 base、YaRN 分段加温度、LongRoPE 逐维搜索。
+      这一步决定后面微调能不能收敛（YaRN §2.2、LongRoPE §3.1）。
+    </li>
+    <li>
+      <strong>在目标长度上搜索或验证因子。</strong>LongRoPE 用 5 个 PG19 验证样本、以 PPL 为目标跑 evolution search；
+      超过 512k 的阶段把种群、mutation、crossover 减半，改用 3 个 Pile-Books3 样本（LongRoPE §4.1）。
+      LongRoPE2 把目标换成 needle-driven PPL，只算 needle token 的 PPL（LongRoPE2 §3.2）。
+    </li>
+    <li>
+      <strong>用短于目标的数据微调。</strong>YaRN 训练用 64k 段（YaRN §4.1），评估到 128k（YaRN Table 1）；
+      LongRoPE 在 128k/256k 上训练，目标是 2048k（LongRoPE §3.3）。训练长度和目标长度脱钩，
+      但频率映射必须先把目标区间的角度约束住。
+    </li>
+    <li>
+      <strong>用有效上下文验收。</strong>passkey 看的是检索距离（PI §3.3、LongRoPE §4.2、YaRN §4.3）；
+      RULER 看多任务平均（LongRoPE2 Table 2）；PPL 只能说明语言建模，不直接等于可用长度
+      （YaRN §B.5 原文称 PPL 不能完整刻画 effective context；LongRoPE2 §3.2 也改用 needle-driven PPL，避免普通 PPL 被无关 token 稀释）。
+    </li>
+    <li>
+      <strong>回收短上下文。</strong>LongRoPE 在扩展后的模型上重搜 4k/8k 因子，推理时按长度切换（LongRoPE §3.3）；
+      LongRoPE2 用 mixed context window training，短序列继续用原始 RoPE，长序列用缩放后的 RoPE（LongRoPE2 §3.3）。
+    </li>
+  </ol>
+
+  <p>
+    这五步的顺序不是固定的：DCA 跳过第 3 步，直接在推理时改相对位置矩阵；PI 则可以把第 2 步省掉，
+    因为它不需要搜索，只需要一个固定的 <code>s</code>。共同点是第 4 步不能省：标称窗口是目标，
+    不是可用性的证明。
+  </p>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>标称长度只是上限：PPL、passkey 和 RULER 才能说明模型真的用上了多远</h2></div>
+  <p class="sec-sub">同一张表里既有训练-free 的 PPL，也有微调后的 passkey 和 RULER；条件和分母都跟着数字写，不能把 2048k 的标称值当成每个任务都能用满。</p>
+
+  <p class="eq-cap">表 2 · 各论文报告的代表性结果；每行的数据集、模型和出处不同，不能横向相减</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>模型 / 设定</th><th>训练</th><th>目标</th><th>报告数字</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Direct FT</td>
+          <td>LLaMA-7B</td>
+          <td>10000 batches</td>
+          <td>8192</td>
+          <td>有效窗口 k_max 2560</td>
+          <td>PI Table 4</td>
+        </tr>
+        <tr>
+          <td>PI</td>
+          <td>LLaMA-7B</td>
+          <td>1000 steps</td>
+          <td>32768</td>
+          <td>200 步时 k_max 32768</td>
+          <td>PI Table 4</td>
+        </tr>
+        <tr>
+          <td>YaRN s=32</td>
+          <td>Llama-2-7B</td>
+          <td>400+200 steps，64k 段</td>
+          <td>128k</td>
+          <td>Proof-pile PPL 2.37 at 131072</td>
+          <td>YaRN Table 1（PPL）；训练步数见 YaRN §4.1</td>
+        </tr>
+        <tr>
+          <td>LongRoPE ft=256k</td>
+          <td>LLaMA2-7B</td>
+          <td>400+600 steps</td>
+          <td>2048k</td>
+          <td>passkey ≥90% 到 2048k</td>
+          <td>LongRoPE §4.2（passkey）；训练步数见 LongRoPE §3.3</td>
+        </tr>
+        <tr>
+          <td>DCA</td>
+          <td>Llama2-70B</td>
+          <td>0 steps</td>
+          <td>192k</td>
+          <td>PPL 5.59 at 64k</td>
+          <td>DCA Table 1（PPL）；目标 192k 见 DCA Table 2</td>
+        </tr>
+        <tr>
+          <td>LongRoPE2</td>
+          <td>LLaMA3-8B</td>
+          <td>10B tokens</td>
+          <td>128k</td>
+          <td>RULER 平均 82.03 at 128k</td>
+          <td>LongRoPE2 Table 2（RULER）；训练 10B tokens 见 LongRoPE2 §1</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>PI：有效窗口先到，短上下文后掉</h3>
+  <p>
+    PI 的 passkey 结果很直接：LLaMA-7B 目标 32768，200 步时 <code>k_max</code> 就到
+    <span data-src="PI Table 4">32768</span>（PI Table 4）。同一张表里，7B/8192 的直接长训 10000 个 batch 只到
+    <span data-src="PI Table 4">2560</span>。但 PI Table 4 的 7B/32768 行在 600 步一格是
+    <span data-src="PI Table 4">18432</span>，其余步数是 32768；论文正文没有解释这一格，页面照表并列。
+  </p>
+  <p>
+    长序列语言建模也随窗口变长而改善：PG19 上 7B/32768 模型在 32768 处的 PPL 是
+    <span data-src="PI Table 1">6.77</span>（PI Table 1）。代价在短上下文：Proof-pile 上 PI 模型在 2048 处
+    PPL 退化 <span data-src="PI §3.2">0.01–0.05</span>（PI §3.2）；扩到 8192 的 7B/33B 模型在原上下文基准上
+    最多退化 <span data-src="PI §3.4">2%</span>，32768 等更长窗口退化更多（PI §3.4；数字见 PI Table 5，该表未转录）。
+    两个窗口大小都出现在 PI §1，32768 的训练设定见 PI §3.1；页面不把它们的比值当作实验提升。
+  </p>
+
+  <h3>YaRN：训练 64k，评估到 128k</h3>
+  <p>
+    YaRN 的 <span data-src="YaRN §4.2">s=32</span> 模型在 <span data-src="YaRN §4.2">64k</span> 段上微调，却在 131072 处得到
+    <span data-src="YaRN Table 1">2.37</span> 的 Proof-pile PPL；同一列里 65536 处是
+    <span data-src="YaRN Table 7">2.45</span>、98304 处是 <span data-src="YaRN Table 7">2.36</span>
+    （YaRN Table 7；131072 处的 2.37 亦见 YaRN Table 1）。passkey 在 8k 到 128k 的整个窗口内准确率在
+    <span data-src="YaRN §B.5">99%</span> 以上（YaRN §B.5）。YaRN §4.2 的设定是：模型只用
+    <span data-src="YaRN §4.2">64k</span> 训练数据，<span data-src="YaRN §4.2">128k</span>
+    上下文仍能外推；短上下文基准另有小幅波动（YaRN Table 3）。
+  </p>
+
+  <h3>LongRoPE：2048k 的目标与 2048k 的 passkey 不是同一件事</h3>
+  <p>
+    LongRoPE 报告的目标窗口是 <span data-src="LongRoPE §1">2048k</span>（LongRoPE §1），微调总步数约
+    <span data-src="LongRoPE §3.3">1k</span>，训练长度在 256k 以内（LongRoPE §3.3）。在 Proof-pile 上，
+    LLaMA2-7B ft=128k 在 262144 处的 PPL 是 <span data-src="LongRoPE Table 5">1.88</span>（LongRoPE Table 5）；
+    在 Books3 上，2048k 处的 PPL 是 <span data-src="LongRoPE Table 6">7.80</span>（ft=128k）与
+    <span data-src="LongRoPE Table 6">7.08</span>（ft=256k；LongRoPE Table 6）。
+  </p>
+  <p>
+    passkey 更接近「有效」：LLaMA2-2048k（ft=256k）在 4k 到 2048k 维持
+    <span data-src="LongRoPE §4.2">≥90%</span> 的检索准确率；Mistral-2048k（ft=128k）在 1800k 之前是
+    <span data-src="LongRoPE §4.2">100%</span>，到 2048k 降到 <span data-src="LongRoPE §4.2">60%</span>（LongRoPE §4.2）。
+    同一篇论文还报告：LLaMA2 在 256k 微调更好，Mistral 在 128k 微调更好（LongRoPE §4.2）。
+    两个结论针对不同模型，页面并列保留，不合并成一个最优设置。
+  </p>
+  <p>
+    短上下文回收的收益可以直接看 LongRoPE Table 10：4k PPL 从 <span data-src="LongRoPE Table 10">4.16</span> 降到
+    <span data-src="LongRoPE Table 10">3.71</span>，平均基准从 <span data-src="LongRoPE Table 10">49.3</span> 到
+    <span data-src="LongRoPE Table 10">52.9</span>（LLaMA2-7B-2048k，ft=128k）。LongRoPE Table 10 的 recovery
+    消融把这两件事分开测量。
+  </p>
+
+  <h3>DCA：不训练的分块注意力</h3>
+  <p>
+    DCA 的 ChunkLlama2-70B 在 4k 处 PPL 是 <span data-src="DCA Table 1">5.24</span>，64k 处是
+    <span data-src="DCA Table 1">5.59</span>（DCA Table 1），96k 处是 <span data-src="DCA Table 2">5.80</span>，
+    192k 处是 <span data-src="DCA Table 2">7.05</span>（DCA Table 2）。7B 版本在 32k 处
+    PPL 是 <span data-src="DCA Table 1">7.89</span>，比 4k 的 <span data-src="DCA Table 1">7.87</span> 高
+    <span data-src="DCA Table 1">0.02</span>；到 64k 就升到 <span data-src="DCA Table 1">15.87</span>。
+    这里 0.02 是 7.89 − 7.87 的差值，口径是 PG19 PPL 的绝对差。
+    两个模型规模的 PPL 曲线不同（DCA Table 1、DCA Table 2）。
+  </p>
+  <p>
+    实际任务上，ChunkLlama2-70B 的 few-shot 平均分是 <span data-src="DCA Table 3">37.8</span>
+    （DCA Table 3：✗、4k 训练上下文、0 步训练）；LongLoRA-70B 是
+    <span data-src="DCA Table 3">37.2</span>（DCA Table 3：✓、32k）。DCA §4.3 注明 LongLoRA 用
+    LoRA 在 RedPajama 上训练 1000 步以支持 32k；两者条件不同，不能当作同条件对比。
+  </p>
+
+  <h3>LongRoPE2：把「有效」单独量出来</h3>
+  <p>
+    LongRoPE2 在 LLaMA3-8B 上把 RULER 128k 平均分做到 <span data-src="LongRoPE2 Table 2">82.03</span>，
+    同一张 LongRoPE2 Table 2 里 LongRoPE 是 <span data-src="LongRoPE2 Table 2">73.40</span>；两者相差
+    <span data-src="LongRoPE2 Table 2">8.63</span> 个百分点（82.03 − 73.40，绝对差）。短上下文侧，
+    LLaMA3-8B 保留 <span data-src="LongRoPE2 §4.2">98.6%</span> 的原始性能，Phi3-mini 保留
+    <span data-src="LongRoPE2 §4.2">97.6%</span>（LongRoPE2 §4.2）。这组结果把「长上下文变好」和
+    「短上下文不掉」分开报告。
+  </p>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：有效上下文短于标称、短上下文会退化、搜索和分块都依赖模型与目标长度</h2></div>
+  <p class="sec-sub">把适用边界写清楚：标称窗口是训练目标，不是每个任务都能用满；频率映射和搜索因子都不是模型无关的常数。</p>
+
+  <ul>
+    <li>
+      <strong>有效上下文短于标称：</strong>LongRoPE2 §1 指出 LLaMA3.1 用 YaRN 扩到 128k，
+      但在 RULER 上超过 <span data-src="LongRoPE2 §1">64k</span> 就明显退化；
+      LongRoPE 的 Mistral-2048k 在 2048k 处 passkey 只有 <span data-src="LongRoPE §4.2">60%</span>（LongRoPE §4.2）。
+      DCA 的 7B 在 64k 处 PPL 已经升到 <span data-src="DCA Table 1">15.87</span>（DCA Table 1）。
+      标称值只能说明「训练目标」，不能说明「每个位置都能取到信息」。
+    </li>
+    <li>
+      <strong>短上下文退化要单独处理：</strong>PI 在 Proof-pile 上退化 <span data-src="PI §3.2">0.01–0.05</span> PPL（PI §3.2）；
+      扩到 8192 的 7B/33B 模型在原上下文基准上最多退化 <span data-src="PI §3.4">2%</span>，32768 等更长窗口退化更多（PI §3.4；数字见 PI Table 5，该表未转录）；
+      LongRoPE 需要额外的 4k/8k 回收，4k PPL 从 <span data-src="LongRoPE Table 10">4.16</span> 到
+      <span data-src="LongRoPE Table 10">3.71</span> 才补回来（LongRoPE Table 10）；
+      LongRoPE2 的 98.6% 保留率也是在这个轴上比较的（LongRoPE2 §4.2）。
+    </li>
+    <li>
+      <strong>训练长度不必等于目标长度，但不是无限制：</strong>YaRN 的 s=32 模型用 64k 数据训练、评估到 128k（YaRN §4.2）；
+      同文的 s=16 模型在 98k/128k 处 PPL 超过 10<sup>1</sup>（YaRN Table 7）。
+      LongRoPE 用 256k 训练推到 2048k，第二次扩展比是 <span data-src="LongRoPE §3.3">512×</span>（LongRoPE §3.3）。
+      这些结果依赖频率映射先把目标区间的角度约束住<span class="infer">推断</span>（由 PI §2.2 的外推上界与 YaRN §3.2 的分段插值讨论推得）；没有搜索或分段的直接外推仍会退化（PI §2.2）。
+    </li>
+    <li>
+      <strong>NTK-aware 的 out-of-bound：</strong>YaRN Appendix A.2 指出改 base 会让部分维度被推到训练区间之外，
+      微调效果可能不如 PI。YaRN Appendix A.2 的表述是：它更适合不微调的场景；需要微调时，
+      NTK-by-parts 或逐维搜索更合适（YaRN §3.2）。
+    </li>
+    <li>
+      <strong>搜索成本与模型依赖：</strong>LongRoPE 的搜索空间在 s=4× 时有
+      <span data-src="LongRoPE §3.2">4×10<sup>167</sup></span> 种组合，论文用 evolution search 来搜（LongRoPE §3.2）；
+      搜索目标、样本数和超参数都写在论文里（LongRoPE §4.1）。LongRoPE2 进一步指出，普通 PPL 会被无关 token 稀释，
+      改用 needle-driven PPL 才能把关键维度搜出来（LongRoPE2 §3.2）。论文的搜索按模型和目标长度分别进行（LongRoPE §4.1）。
+    </li>
+    <li>
+      <strong>DCA 的分块是近似：</strong>inter-chunk 把 query 位置固定成 <code>c−1</code>，
+      相邻 chunk 的相对距离会失真；successive-chunk 只用局部窗口 <code>w=c−s</code> 补回来（DCA §3.2、DCA §3.3）。
+      它不缩放 <code>θ</code>，也不训练。DCA Table 1 与 DCA Table 2 里，70B 在 192k 处 PPL
+      <span data-src="DCA Table 2">7.05</span>，7B 在 64k 处已经 <span data-src="DCA Table 1">15.87</span>。
+    </li>
+    <li>
+      <strong>原文表格里的异常值不替它修：</strong>PI Table 4 中，7B/32768 行在 600 步一格是
+      <span data-src="PI Table 4">18432</span>，其余步数是 32768；论文正文没有解释这一格。
+      页面照表并列，不把它平滑成 32768，也不把它当作方法失败的单独证据。
+    </li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>什么时候用哪条路</h4></div>
+    <p>
+      如果只需要把窗口扩大、能接受短步数微调，PI 是最小改动；如果高频局部顺序不能丢，优先考虑
+      NTK-by-parts 或 YaRN；如果目标远大于训练长度、又不想在目标长度上直接微调，
+      LongRoPE 的渐进式搜索更合适；如果完全不能训练，DCA 的分块注意力是一条可部署的路径，
+      但要注意 DCA Table 1 与 DCA Table 2 里 7B/70B 的 PPL 曲线并不相同。无论走哪条路，验收都要看有效上下文，而不是标称窗口。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>Long-Context Extrapolation · PI / YaRN / LongRoPE / DCA / LongRoPE2</div>
+  <div class="src">
+    论文：<a href="https://arxiv.org/abs/2306.15595" target="_blank" rel="noopener">Position Interpolation（arXiv 2306.15595）</a> ·
+    <a href="https://arxiv.org/abs/2309.00071" target="_blank" rel="noopener">YaRN（arXiv 2309.00071）</a> ·
+    <a href="https://arxiv.org/abs/2402.13753" target="_blank" rel="noopener">LongRoPE（arXiv 2402.13753）</a> ·
+    <a href="https://arxiv.org/abs/2402.17463" target="_blank" rel="noopener">Dual Chunk Attention · Training-Free Long-Context Scaling of Large Language Models（arXiv 2402.17463）</a> ·
+    <a href="https://arxiv.org/abs/2502.20082" target="_blank" rel="noopener">LongRoPE2（arXiv 2502.20082）</a><br>
+    代码：<a href="https://github.com/jquesnelle/yarn" target="_blank" rel="noopener">jquesnelle/yarn</a> ·
+    <a href="https://github.com/microsoft/LongRoPE" target="_blank" rel="noopener">microsoft/LongRoPE</a> ·
+    <a href="https://github.com/HKUNLP/ChunkLlama" target="_blank" rel="noopener">HKUNLP/ChunkLlama</a>
+  </div>
+  <div class="src" style="margin-top:12px">
+    版本说明：各论文按 arXiv abs 页当前版本阅读（PI 2306.15595 v2、YaRN 2309.00071 v3、LongRoPE 2402.13753 v1、DCA 2402.17463 v2、LongRoPE2 2502.20082 v1）。
+    YaRN v3（2026-02 修订）把温度一节编为 YaRN v3 §3.3（Eq.14–15）、Proof-pile 主表编为 YaRN v3 Table 1；
+    v2 及更早版本对应 YaRN v2 §3.4（Eq.21–22）与 YaRN v2 Table 2，本页按 v3 编号。
+    页面里的 Table/Figure 编号各自属于对应论文，不跨论文复用；同一页出现多个 Table N 时，正文会在数字前写明论文名。
+  </div>
+  <div class="src" style="margin-top:12px">
+    NTK-aware 最早来自社区（YaRN 引用 bloc97 的 Reddit 帖），本页引 YaRN §3.1 的定义，形式化版本在 YaRN Appendix A.2 Def.3；
+    out-of-bound 与微调对比讨论见 Appendix A.2，不把社区帖当作论文锚点。DCA 不是位置插值方法，表 1 单列一行只是为了和频率缩放路线对照。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('probe-sim');
+  if (!sim) return;
+
+  var sInput = document.getElementById('probe-s');
+  var jInput = document.getElementById('probe-j');
+  var dInput = document.getElementById('probe-d');
+  var sVal = document.getElementById('probe-s-val');
+  var jVal = document.getElementById('probe-j-val');
+  var dVal = document.getElementById('probe-d-val');
+  var thetaEl = document.getElementById('probe-theta');
+  var rEl = document.getElementById('probe-r');
+  var gammaEl = document.getElementById('probe-gamma');
+  var angleEl = document.getElementById('probe-angle');
+  var msgEl = document.getElementById('probe-msg');
+  var curve = document.getElementById('probe-curve');
+  var marker = document.getElementById('probe-marker');
+  var dot = document.getElementById('probe-dot');
+  if (!sInput || !jInput || !dInput || !sVal || !jVal || !dVal ||
+      !thetaEl || !rEl || !gammaEl || !angleEl || !msgEl ||
+      !curve || !marker || !dot) return;
+
+  var MODE = 'pi';
+  var L = 4096;
+  var D = 128;
+  var BASE = 10000;
+  var ALPHA = 1;
+  var BETA = 32;
+
+  function thetaBase(j) {
+    return Math.pow(BASE, -2 * j / D);
+  }
+
+  function gammaOf(r) {
+    if (r < ALPHA) return 0;
+    if (r > BETA) return 1;
+    return (r - ALPHA) / (BETA - ALPHA);
+  }
+
+  function effectiveTheta(mode, j, S) {
+    var t = thetaBase(j);
+    if (mode === 'pi') return t / S;
+    if (mode === 'ntk') {
+      var bp = BASE * Math.pow(S, D / (D - 2));
+      return Math.pow(bp, -2 * j / D);
+    }
+    var r = L * t / (2 * Math.PI);
+    var g = gammaOf(r);
+    return t * ((1 - g) / S + g);
+  }
+
+  function invTemp(mode, S) {
+    if (mode !== 'yarn') return 1;
+    var k = 0.1 * Math.log(S) + 1;
+    return k * k;
+  }
+
+  function fmt(x, n) {
+    var s = x.toFixed(n);
+    if (s === '-0.0000' || s === '-0.000000') s = s.slice(1);
+    return s;
+  }
+
+  function render() {
+    var S = parseFloat(sInput.value);
+    var j = parseInt(jInput.value, 10);
+    var d = parseFloat(dInput.value);
+    if (!isFinite(S) || S < 1) S = 4;
+    if (!isFinite(j) || j < 0) j = 0;
+    if (!isFinite(d) || d < 0) d = 0;
+    sVal.textContent = String(S);
+    jVal.textContent = String(j);
+    dVal.textContent = String(d);
+
+    var t = thetaBase(j);
+    var r = L * t / (2 * Math.PI);
+    var g = gammaOf(r);
+    var te = effectiveTheta(MODE, j, S);
+    var angle = d * te;
+    var score = Math.cos(angle) * invTemp(MODE, S);
+
+    thetaEl.textContent = fmt(te, 6);
+    rEl.textContent = fmt(r, 4);
+    gammaEl.textContent = (MODE === 'yarn') ? fmt(g, 6) : '—';
+    angleEl.textContent = fmt(angle, 6);
+
+    var modeName = MODE === 'pi' ? 'PI' : (MODE === 'ntk' ? 'NTK-aware' : 'YaRN');
+    var msg = modeName + '：θ_eff = ' + fmt(te, 6) + ' rad/token，angle = ' +
+              fmt(angle, 6) + ' rad，score = ' + fmt(score, 4) + '。';
+    if (MODE === 'yarn') {
+      msg += ' r = ' + fmt(r, 4) + '，γ = ' + fmt(g, 6) + '，1/t = ' +
+             fmt(invTemp(MODE, S), 4) + '。';
+    } else if (MODE === 'ntk') {
+      msg += ' base 改为 ' + fmt(BASE * Math.pow(S, D / (D - 2)), 0) + '。';
+    } else {
+      msg += ' 所有维度统一除以 S。';
+    }
+    msgEl.textContent = msg;
+
+    var dMax = 4096;
+    var teAbs = Math.abs(te);
+    var n = Math.min(8192, Math.max(256, Math.ceil(dMax * teAbs / 0.2)));
+    var yScale = 85 / 2.1;
+    var pts = [];
+    for (var i = 0; i <= n; i++) {
+      var dd = dMax * i / n;
+      var sc = Math.cos(dd * te) * invTemp(MODE, S);
+      var x = 60 + (dd / dMax) * 560;
+      var y = 105 - sc * yScale;
+      pts.push(x.toFixed(2) + ',' + y.toFixed(2));
+    }
+    curve.setAttribute('points', pts.join(' '));
+
+    var mx = 60 + (d / dMax) * 560;
+    marker.setAttribute('x1', mx.toFixed(2));
+    marker.setAttribute('x2', mx.toFixed(2));
+    dot.setAttribute('cx', mx.toFixed(2));
+    dot.setAttribute('cy', (105 - score * yScale).toFixed(2));
+  }
+
+  var buttons = sim.querySelectorAll('.rule-btn');
+  for (var i = 0; i < buttons.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var next = btn.getAttribute('data-mode');
+        if (next !== 'pi' && next !== 'ntk' && next !== 'yarn') return;
+        MODE = next;
+        for (var k = 0; k < buttons.length; k++) {
+          if (buttons[k] === btn) {
+            buttons[k].classList.add('active');
+          } else {
+            buttons[k].classList.remove('active');
+          }
+        }
+        render();
+      });
+    })(buttons[i]);
+  }
+
+  sInput.addEventListener('input', render);
+  jInput.addEventListener('input', render);
+  dInput.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

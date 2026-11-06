@@ -1,0 +1,878 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 8 | §06 表 3 | 8*1 |
+| 8 | §03 手算 | 24-16 |
+| 0 | §06 表 3 | 8-8 |
+| 0 | §03 手算 | 16-16 |
+| 24 | §06 表 3 | 24-0 |
+| 6 | §06 表 3 | 16-10 |
+| 18 | §06 表 3 | 24-6 |
+| 22 | §06 表 3 | 32-10 |
+| 2 | §06 表 3 | 24-22 |
+| 4 | §06 表 3 | 24/6 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="commit-e740bad">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Continuous Batching 与 vLLM 调度器 · 每生成一个 token 重新排一次班</title>
+<meta name="description" content="从 iteration-level scheduling 到 vLLM V1 的 token budget、chunked prefill 与 KV 抢占，拆开调度器每一步在做什么。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+blockquote{
+  border-left:3px solid var(--accent); background:var(--bg-surface);
+  border-radius:0 var(--radius) var(--radius) 0; padding:14px 18px;
+  margin:18px 0; color:var(--text-muted); font-size:14px;
+}
+blockquote p{margin:0 0 8px}
+.quote-en{font-size:13px;line-height:1.75}
+.quote-src{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft)}
+.knob-table td:first-child{font-family:"JetBrains Mono",monospace;white-space:nowrap}
+p code, li code{overflow-wrap:anywhere}
+.tl-cell{fill:var(--bg-soft);stroke:var(--border);stroke-width:1}
+.tl-p{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1}
+.tl-d{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1}
+.tl-name{font-family:"JetBrains Mono",monospace;font-size:12px;font-weight:600;fill:var(--text)}
+.tl-sub{font-family:"JetBrains Mono",monospace;font-size:8px;fill:var(--text-soft)}
+.tl-step{font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:600;fill:var(--text-muted)}
+.tl-seg{font-family:"JetBrains Mono",monospace;font-size:8.5px;font-weight:600;fill:var(--accent-deep)}
+.tl-segd{font-family:"JetBrains Mono",monospace;font-size:7.5px;font-weight:600;fill:var(--c1)}
+.tl-done{font-family:"JetBrains Mono",monospace;font-size:8px;fill:var(--c3)}
+.tl-axis{font-family:"JetBrains Mono",monospace;font-size:8.5px;fill:var(--text-soft)}
+@media (max-width:560px){
+  .sim{padding:16px}
+  blockquote{padding:12px 14px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">vLLM Scheduler</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#roads">两条路</a>
+      <a href="#budget">调度步</a>
+      <a href="#engine">工程</a>
+      <a href="#timeline">时间线</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>System · vLLM V1 · commit e740bad</span>
+  <h1>Continuous Batching：每生成一个 token，重新排一次班</h1>
+  <p class="hero-sub">
+    静态 batching 把一批请求绑成同生共死的一条船：短请求先完成，槽位也只能空等到整批结束。
+    Continuous batching 把调度粒度降到一次迭代；vLLM V1 又往前一步，<strong>取消独立的 prefill / decode 阶段</strong>，让所有请求共享一个 token 预算。
+    代价藏在预算、<code>max_num_seqs</code> 与 KV 块的三角关系里。
+  </p>
+  <div class="meta">
+    <span>vLLM V1 scheduler · commit e740bad</span>
+    <a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">源码 @ e740bad ↗</a>
+    <a href="https://docs.vllm.ai/en/latest/design/arch_overview.html#scheduler" target="_blank" rel="noopener">Scheduler 文档 ↗</a>
+    <a href="https://docs.vllm.ai/en/latest/configuration/optimization.html#chunked-prefill" target="_blank" rel="noopener">Chunked Prefill 文档 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    静态 batching 的浪费不是算错了，而是<strong>等</strong>：一条短请求生成完，它的槽位要等整批结束才释放。
+    Continuous batching 把「整批完成」改成「每生成一个 token 就重新组批」。
+  </p>
+  <p>
+    vLLM V1 的调度器没有独立的 prefill / decode 队列。每个请求只记 <code>num_computed_tokens</code> 和总 token 数，
+    调度器每步给它分配一段 token，把这个差补齐；<code>max_num_batched_tokens</code> 是全部请求共享的预算。
+  </p>
+  <p>
+    源码先跑 <strong>running</strong>，再跑 <strong>waiting</strong>：已经在跑的 decode 先拿 token，新来的 prefill 只能吃剩余预算。
+    chunked prefill 默认开启，长 prompt 被切片塞进空档；预算被 running 吃光时，prefill 可能一步都排不上。
+  </p>
+  <p>
+    KV 块不够时没有「阈值」可调：<code>allocate_slots</code> 返回 None 就触发抢占。
+    V1 默认把请求打回 waiting 并<strong>重算（RECOMPUTE）</strong>，不是换出到 CPU。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="vllm/config/scheduler.py:41">2048</div>
+      <div class="k">max_num_batched_tokens 的代码默认值<br>真实服务会按 GPU / UsageContext 覆写</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="vllm/config/scheduler.py:43">128</div>
+      <div class="k">max_num_seqs 的代码默认值<br>限制单步 running 请求数</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="vllm/config/scheduler.py:147">True</div>
+      <div class="k">enable_chunked_prefill 默认值<br>模型支持时默认开启</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>GPU 不是被算力闲置拖住的，是被「等最长请求」拖住的</h2></div>
+  <p class="sec-sub">先承认静态 batching 的浪费来自哪里：不是 kernel 慢，而是批次里先完成的序列不能释放槽位。</p>
+
+  <p>
+    自回归生成每次只产出一个 token，但一条请求要生成多少 token，在准入时并不知道。
+    静态 batching 把 N 条请求组成一批，整批一起跑前向；某条请求先遇到 EOS，它仍然占着批次里的位置，
+    直到最慢的那条也结束。对 GPU 来说，这些位置只会让矩阵乘法的行数变小，不会自动变成另一条请求的算力。
+  </p>
+
+  <div class="eq">
+    批次利用率 ≈ <span class="hl-a">仍在生成的序列数</span> / <span class="hl-b">批次槽位数</span>
+  </div>
+  <div class="eq-cap">短请求越早结束，分子越小；静态 batching 无法把空出来的槽位交给排队者</div>
+
+  <p>
+    这不是调度器「算得慢」，而是决策发生的<strong>时刻太晚</strong>：批次在准入时冻结，下一次重组要等整批结束。
+    Continuous batching 把决策点挪到每个 token 迭代之后：完成的请求离开，排队的请求在下一步就能进来。
+  </p>
+
+  <p class="eq-cap">表 1 · 三种批处理粒度（页面整理，用于概念对照，不是 vLLM 表格）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方案</th><th>何时补新请求</th><th>槽位何时释放</th><th>主要问题</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>静态 batching</td><td>整批结束后</td><td>整批结束后</td><td>短请求空等长请求</td></tr>
+        <tr><td>请求级动态 batching</td><td>当前批全部结束后</td><td>整批结束后</td><td>比静态好，但粒度仍粗</td></tr>
+        <tr><td>iteration-level 调度</td><td>每个 token 迭代后</td><td>请求完成即释放</td><td>调度与 KV 管理复杂</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    难点在于 LLM 的「槽位」不只是计算行，还挂着一条长度不断增长的 KV cache。多塞一条请求，就多一份显存压力；
+    调度器不能只看 token 数，还要在每一步为请求分配和回收 KV 块。continuous batching 的收益来自更细的调度粒度，
+    它的复杂度也来自这里。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="roads">
+  <div class="sec-head"><span class="sec-num">02</span><h2>从「整批同生共死」到「每 token 一次调度」</h2></div>
+  <p class="sec-sub">两代方案的差别不在批大小，而在调度决策发生的时刻；概念和 vLLM V1 的实现也要分开看。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">静态 / 请求级动态</span><h4>批次是容器，装进去就等它跑完</h4></div>
+      <p>
+        静态 batching 在准入时固定批次；请求级动态 batching 会等当前批全部完成后，再从队列里组下一批。
+        两者都没有改变「一条请求结束后，它的槽位要等到批次边界才能复用」这件事。
+      </p>
+      <p>序列长度越分散，尾部空转越明显。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">iteration-level</span><h4>批次是流水，每一步都可以换人</h4></div>
+      <p>
+        每生成一个 token，调度器重新看一遍 running 与 waiting：完成的请求退出，排队的请求进入，
+        新进入的请求从自己的 prefill 开始补进度。批次组成在每一步都可能不同。
+      </p>
+      <p>这就是 continuous batching 的核心；它描述的是<strong>调度粒度</strong>，不是某个固定算法。</p>
+    </div>
+  </div>
+
+  <p>
+    continuous batching 是概念，vLLM V1 的 token-budget scheduler 是它的一种具体实现。把两者画等号，
+    会漏掉 V1 真正的设计选择：没有 phase 字段、running 先于 waiting、chunked prefill 与 KV 抢占都在同一个循环里处理。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">概念</span><h4>continuous batching</h4></div>
+      <p>
+        调度发生在 iteration 边界：每步都可以让请求进出批次，而不是等整批完成。
+        它回答的是「什么时候允许换人」，不规定 token 预算怎么切、KV 不够时怎么办。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">实现</span><h4>vLLM V1 token-budget scheduler</h4></div>
+      <p>
+        用 <code>max_num_batched_tokens</code> 做共享预算，用 <code>max_num_seqs</code> 限制 running 数，
+        每个请求靠 <code>num_computed_tokens</code> 追赶总 token 数；KV 块不够时在同一循环里抢占并重算。
+      </p>
+      <p>这些是工程选择，不是 continuous batching 的定义本身。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="budget">
+  <div class="sec-head"><span class="sec-num">03</span><h2>一个预算，两个队列：V1 调度器每一步只做三件事</h2></div>
+  <p class="sec-sub">看懂 <code>num_computed_tokens</code> 如何追赶 <code>num_tokens</code>，就看懂了 V1 的 prefill / decode 混合。</p>
+
+  <p>
+    源码开头就把话说死了：调度器里没有 “decoding phase”，也没有 “prefill phase”。
+    每个请求只有两个关键计数：已经算过多少 token（<code>num_computed_tokens</code>），以及总共有多少 token 要算
+    （<code>num_tokens_with_spec</code>，含 prompt、已生成 token 和投机 token）。
+    调度器每一步做的事，就是给请求分配一段 token，让前者追上后者（<code>vllm/v1/core/sched/scheduler.py:721-732</code>）。
+  </p>
+
+  <div class="eq" style="text-align:left">
+    <span class="hl-a">num_new_tokens</span> = min(<br>
+    &nbsp;&nbsp;num_tokens_with_spec + num_output_placeholders − num_computed_tokens,<br>
+    &nbsp;&nbsp;token_budget,<br>
+    &nbsp;&nbsp;input_budget − draft_slots<br>
+    )
+  </div>
+  <div class="eq-cap">
+    这是 running 循环的式子（<code>scheduler.py:861-870</code>）；waiting 准入用
+    <code>num_tokens − num_computed_tokens</code>（<code>:1362</code>，少了在途 placeholder 项）。
+    <code>token_budget</code> 初值就是 <code>max_num_scheduled_tokens</code>，通常等于
+    <code>max_num_batched_tokens</code>（<code>:139-143</code>）
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">第 1 步</span><h4>先把 running 队列排满</h4></div>
+    <p>
+      循环从 <code>running</code> 开始（<code>scheduler.py:815</code>）。已经在跑的请求，无论它这一格是 decode 还是
+      prefill 的下一块，都先按上面的式子拿 token；每排一个，就从 <code>token_budget</code> 里扣掉相应的数量。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">第 2 步</span><h4>再用剩余预算准入 waiting</h4></div>
+    <p>
+      running 排完后，才轮到 <code>waiting</code>（<code>scheduler.py:1071</code>）。准入同时看两个上限：
+      <code>len(running) &gt;= max_num_active_reqs</code> 时不再准入（<code>:1100-1103</code>）；
+      有预算时，新请求从 <code>num_computed_tokens = 0</code> 开始补 prefill。
+    </p>
+    <p>
+      chunked prefill 开启时，prefill 被切到剩余预算大小；关闭时，如果整段 prompt 放不进剩余预算，
+      源码直接 <code>break</code>，这条请求本轮不排（<code>:1391-1400</code>）。这就是「长 prompt 被饿死」的代码入口之一。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">第 3 步</span><h4>KV 块不够，就在 running 里抢占</h4></div>
+    <p>
+      token 预算够，不代表显存够。每个请求在跑之前要先 <code>allocate_slots</code>（<code>scheduler.py:936</code>）。
+      KV 块池不足时，<code>allocate_slots</code> 返回 None（<code>vllm/v1/core/kv_cache_manager.py:607-609</code>），
+      调度器进入抢占循环：FCFS 选 <code>running[-1]</code>，Priority 选 <code>(priority, arrival_time)</code> 最大的请求
+      （<code>scheduler.py:953-960</code>）。
+    </p>
+    <p>
+      被抢占的请求释放 KV 块，<code>num_computed_tokens</code> 归零，插回 waiting：FCFS 到队首，
+      Priority 按 <code>(priority, arrival_time)</code> 重新插入（<code>:1894-1919</code>）。
+      这一轮也不会再准入新的 waiting 请求（<code>:1072</code>）——避免一边释放、一边继续往 running 里塞人。
+    </p>
+  </div>
+
+  <h3>模拟一个调度步：预算给谁，谁被饿死</h3>
+  <p>
+    下面把问题缩到最小：running 里全是 decode 请求（每个要 1 token），waiting 里只有一条 prefill。
+    拖动 D / P / B / M，切换策略与 chunked 开关，看这一轮的 batch 怎么组成。
+  </p>
+
+  <div class="sim" id="sched-sim">
+    <div class="sim-top" id="policy-btns">
+      <button class="rule-btn active" data-policy="decode">Decode 优先<span class="r-sub">running 先于 waiting（V1 语义）</span></button>
+      <button class="rule-btn" data-policy="prefill">Prefill 优先<span class="r-sub">页面自定的对照策略，不是 vLLM 选项</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>running decode 数 D <span class="v" id="sim-d-val">16</span></label>
+        <input id="sim-d" type="range" min="0" max="32" step="1" value="16">
+      </div>
+      <div class="ctrl">
+        <label>waiting prefill 长度 P <span class="v" id="sim-p-val">24</span></label>
+        <input id="sim-p" type="range" min="0" max="64" step="1" value="24">
+      </div>
+      <div class="ctrl">
+        <label>token budget B <span class="v" id="sim-b-val">16</span></label>
+        <input id="sim-b" type="range" min="8" max="64" step="8" value="16">
+      </div>
+      <div class="ctrl">
+        <label>max_num_seqs M <span class="v" id="sim-m-val">32</span></label>
+        <input id="sim-m" type="range" min="1" max="32" step="1" value="32">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="sim-chunk">chunked prefill：开</button>
+      <button class="act ghost" id="sim-reset">重置</button>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot">
+        <div class="slot-name">DECODE 排上</div>
+        <div class="slot-val" id="sim-dec">16 / 16</div>
+        <div class="bar"><i class="b2" id="sim-dec-bar" style="width:100%"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">PREFILL 排上</div>
+        <div class="slot-val" id="sim-pre">0 / 24</div>
+        <div class="bar"><i class="b1" id="sim-pre-bar" style="width:0%"></i></div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">预算剩余</div>
+        <div class="slot-val" id="sim-left">0 / 16</div>
+        <div class="bar"><i class="b3" id="sim-left-bar" style="width:0%"></i></div>
+      </div>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot">
+        <div class="slot-name">本轮后 PREFILL 剩余</div>
+        <div class="slot-val" id="sim-remain">24 token</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">按此速率完成</div>
+        <div class="slot-val" id="sim-steps">∞</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">本轮状态</div>
+        <div class="slot-val" id="sim-state">prefill 饿死</div>
+      </div>
+    </div>
+
+    <div class="readout" id="sim-readout" data-src="vllm/v1/core/sched/scheduler.py:815-870,1071-1103">
+      <div class="r-head">本轮调度结果</div>
+      <div id="sim-msg">decode 占满预算，prefill 拿到 0 token。</div>
+    </div>
+  </div>
+
+  <details>
+    <summary>手算对账：两组参数，JS 与手算同一套整数规则<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A（共享预算）</strong>：D=10、P=24、B=16、M=32，decode 优先，chunked 开。</p>
+      <ol>
+        <li>running 先排：10 个 decode 各 1 token，共 10；预算剩 16 − 10 = <code>6</code>。</li>
+        <li>waiting 的 prefill 拿 <code>min(24, 6) = 6</code>；本轮后剩 24 − 6 = <code>18</code>。</li>
+        <li>按每轮 6 token，完成需要 24 / 6 = <code>4</code> 步。</li>
+      </ol>
+      <p><strong>组 B（预算被 decode 吃光）</strong>：D=16、P=24、B=16、M=32，decode 优先，chunked 开。</p>
+      <ol>
+        <li>16 个 decode 各 1 token，共 16；预算剩 16 − 16 = <code>0</code>。</li>
+        <li>prefill 拿 <code>min(24, 0) = 0</code>；每轮 0 token，按同一策略<strong>永远不完成</strong>。</li>
+        <li>把策略切到「Prefill 优先」：prefill 先拿 16，decode 拿 <code>min(16, 0) = 0</code>；
+            下一步 prefill 拿剩下的 8，decode 才能拿 8（另外 8 个仍排不上）。prefill 两步完成，
+            但 decode 在这两步都没有被完整服务。</li>
+      </ol>
+      <p>
+        页面里的 JS 只做整数加减和 <code>Math.min / Math.ceil</code>，没有随机数；上面每个数都能在模拟里逐位复现。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟与 vLLM 源码的差距<span class="sum-sub">覆盖了什么，没覆盖什么</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>running 先于 waiting 的顺序；每个请求的 token 上限；<code>max_num_seqs</code> 的准入上限；
+        chunked prefill 开启时的预算切分；关闭时「整段放不下就不排」的 <code>break</code> 行为。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>每个请求的 KV 块分配与释放；抢占 victim 的选择与重算；prefix cache 命中；
+        speculative decoding；FCFS / priority 队列排序；async scheduling；encoder / multimodal 输入；
+        <code>long_prefill_token_threshold</code> 的截断。真实调度器还要处理这些分支。
+      </p>
+      <p>
+        因此它是<strong>简化模拟</strong>，不是源码还原。模拟里的 D 个 decode 被当作一个整体，真实代码里它们各自独立排队、
+        各自有 <code>num_computed_tokens</code>。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04. 工程 ================= -->
+<section class="block" id="engine">
+  <div class="sec-head"><span class="sec-num">04</span><h2>调度是 CPU 上的小循环，真正的代价在 KV 块和重算</h2></div>
+  <p class="sec-sub">每一步的调度决策很便宜；贵的是它触发的显存分配、释放，以及抢占后的重新 prefill。</p>
+
+  <p>
+    EngineCore 的一步是一个很短的流水线：调度器返回本步每请求要算多少 token，模型执行器跑前向，调度器再用输出更新请求状态。
+    <code>vllm/v1/engine/core.py:709-735</code> 的 <code>step()</code> 就是这三段：
+  </p>
+
+  <div class="eq" style="text-align:left">
+    scheduler_output = scheduler.schedule()<br>
+    model_output&nbsp;&nbsp;&nbsp;&nbsp; = model_executor.execute_model(scheduler_output)<br>
+    outputs&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = scheduler.update_from_output(scheduler_output, model_output)
+  </div>
+  <div class="eq-cap">调度、执行、状态更新各一次；下一步的 <code>num_computed_tokens</code> 在这一步末尾推进</div>
+
+  <p>
+    调度器交给模型执行器的核心之一，是一张 <code>num_scheduled_tokens</code> 表：
+    请求 ID 到本步 token 数的映射；<code>total_num_scheduled_tokens</code> 是它们的和
+    （<code>vllm/v1/core/sched/output.py:248-253</code>）。模型侧拿到的是拼好的输入，
+    不需要知道哪个位置属于哪个阶段。
+  </p>
+
+  <p class="eq-cap">表 2 · 调度相关默认值（页面整理，逐项来自源码）</p>
+  <div class="tbl-scroll">
+    <table class="knob-table">
+      <thead>
+        <tr><th>参数</th><th>源码默认</th><th>它约束什么</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>max_num_batched_tokens</td><td class="num">2048</td><td>单步全部请求共享的 token 预算</td><td><code>config/scheduler.py:41</code></td></tr>
+        <tr><td>max_num_seqs</td><td class="num">128</td><td>running 请求数上限，也是默认准入上限</td><td><code>config/scheduler.py:43</code>；<code>sched/scheduler.py:131</code></td></tr>
+        <tr><td>enable_chunked_prefill</td><td class="num">True</td><td>长 prompt 能否按剩余预算切片</td><td><code>config/scheduler.py:147</code></td></tr>
+        <tr><td>long_prefill_token_threshold</td><td class="num">0</td><td>0 = 不限制单请求的 prefill 块大小</td><td><code>config/scheduler.py:91</code></td></tr>
+        <tr><td>watermark</td><td class="num">0.0</td><td>准入时保留的空闲 KV 块比例；不是抢占阈值</td><td><code>config/scheduler.py:209</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    注意：<code>SchedulerConfig</code> 里的 2048 / 128 是「方便测试」的代码默认值；
+    真实服务在 <code>EngineArgs</code> 里按 GPU 和 UsageContext 覆写（<code>vllm/engine/arg_utils.py:3004-3037</code>）。
+    同一份代码在 H100 与 A100 上可能拿到不同的默认预算。
+  </p>
+
+  <h3>KV 块是另一种预算，块不够就抢占</h3>
+  <p>
+    token 预算按 token 计，KV cache 按块计。V1 的默认块大小是 64 token（<code>vllm/config/cache.py:185</code>），
+    每个请求每步都要为新 token 申请块；块池不足时 <code>allocate_slots</code> 返回 None，而不是返回一个「部分成功」。
+  </p>
+  <p>
+    抢占的代价是重算。被抢占请求的进度被清零（<code>scheduler.py:1899</code>），释放块后回到 waiting；
+    再次准入时要从头 prefill 整个序列（prompt + 已生成 token），除非 prefix cache 或 KV connector 能恢复一部分。
+    vLLM 文档明确说 preemption / recomputation 会伤害端到端延迟（<code>docs/configuration/optimization.md:37</code>），
+    并建议优先加 <code>gpu_memory_utilization</code>、降 <code>max_num_seqs</code> 或 <code>max_num_batched_tokens</code>。
+  </p>
+
+  <h3>chunked prefill 改的是分布，不是 token 总数</h3>
+  <p>
+    切片不会改变这个 prompt 要算的 token 总数；它改变的是这些 token 落在哪些 step，以及能否和 decode 同批。
+    小预算（文档例子 2048）让 decode 被更少的 prefill token 拖慢，ITL 更好；
+    大预算把更多 prefill token 塞进一批，TTFT 更好；文档建议追求吞吐时把 <code>max_num_batched_tokens</code> 设到大于 8192
+    （<code>docs/configuration/optimization.md:62-67</code>）。
+  </p>
+  <p>
+    文档把混合的收益归因于两类负载的硬件画像：prefill 偏 compute-bound，decode 偏 memory-bound；
+    同一批里同时有两者，算力和带宽都更不容易闲置（<code>docs/configuration/optimization.md:51-58</code>）。
+  </p>
+
+  <p>
+    调度循环本身的簿记量与每步排上的请求数成正比；真正的成本在抢占后的重算（一次与序列长度 L 成正比的前向）
+    和 KV 块的分配 / 释放。vLLM 还用 async scheduling 把 CPU 调度与 GPU 执行重叠：GPU 跑第 N 步时，
+    CPU 已经在排第 N+1 步（<code>docs/design/arch_overview.md:173-179</code>）。
+  </p>
+</section>
+
+<!-- ================= 05. 架构 / 流程 ================= -->
+<section class="block" id="timeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一条时间线：A 还没结束，C 已经挤进了它的批次</h2></div>
+  <p class="sec-sub">把 6 个调度步画出来，看 prefill 块和 decode token 如何共享同一个 8-token 预算。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 340" role="img" aria-label="请求 A、B、C 在六个调度步中的 prefill 与 decode 交错时间线">
+      <!-- 列头 -->
+      <text x="122" y="36" text-anchor="middle" class="tl-step">t0</text>
+      <text x="228" y="36" text-anchor="middle" class="tl-step">t1</text>
+      <text x="334" y="36" text-anchor="middle" class="tl-step">t2</text>
+      <text x="440" y="36" text-anchor="middle" class="tl-step">t3</text>
+      <text x="546" y="36" text-anchor="middle" class="tl-step">t4</text>
+      <text x="652" y="36" text-anchor="middle" class="tl-step">t5</text>
+
+      <!-- 行 A -->
+      <text x="8" y="86" class="tl-name">A</text>
+      <text x="8" y="99" class="tl-sub">p8 · o3</text>
+      <rect class="tl-cell" x="72" y="66" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="178" y="66" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="284" y="66" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="390" y="66" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="496" y="66" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="602" y="66" width="100" height="48" rx="5"/>
+      <rect class="tl-p" x="72" y="66" width="100" height="48" rx="5"/>
+      <text x="122" y="94" text-anchor="middle" class="tl-seg">P8</text>
+      <rect class="tl-d" x="178" y="66" width="12.5" height="48" rx="4"/>
+      <text x="184" y="94" text-anchor="middle" class="tl-segd">D</text>
+      <rect class="tl-d" x="284" y="66" width="12.5" height="48" rx="4"/>
+      <text x="290" y="94" text-anchor="middle" class="tl-segd">D</text>
+      <rect class="tl-d" x="390" y="66" width="12.5" height="48" rx="4"/>
+      <text x="396" y="94" text-anchor="middle" class="tl-segd">D</text>
+      <text x="410" y="94" class="tl-done">done</text>
+
+      <!-- 行 B -->
+      <text x="8" y="150" class="tl-name">B</text>
+      <text x="8" y="163" class="tl-sub">p12 · o3</text>
+      <rect class="tl-cell" x="72" y="130" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="178" y="130" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="284" y="130" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="390" y="130" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="496" y="130" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="602" y="130" width="100" height="48" rx="5"/>
+      <rect class="tl-p" x="178" y="130" width="87.5" height="48" rx="5"/>
+      <text x="221" y="158" text-anchor="middle" class="tl-seg">P7</text>
+      <rect class="tl-p" x="284" y="130" width="62.5" height="48" rx="5"/>
+      <text x="315" y="158" text-anchor="middle" class="tl-seg">P5</text>
+      <rect class="tl-d" x="390" y="130" width="12.5" height="48" rx="4"/>
+      <text x="396" y="158" text-anchor="middle" class="tl-segd">D</text>
+      <rect class="tl-d" x="496" y="130" width="12.5" height="48" rx="4"/>
+      <text x="502" y="158" text-anchor="middle" class="tl-segd">D</text>
+      <rect class="tl-d" x="602" y="130" width="12.5" height="48" rx="4"/>
+      <text x="608" y="158" text-anchor="middle" class="tl-segd">D</text>
+      <text x="622" y="158" class="tl-done">done</text>
+
+      <!-- 行 C -->
+      <text x="8" y="214" class="tl-name">C</text>
+      <text x="8" y="227" class="tl-sub">p8 · o2</text>
+      <rect class="tl-cell" x="72" y="194" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="178" y="194" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="284" y="194" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="390" y="194" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="496" y="194" width="100" height="48" rx="5"/>
+      <rect class="tl-cell" x="602" y="194" width="100" height="48" rx="5"/>
+      <rect class="tl-p" x="284" y="194" width="25" height="48" rx="5"/>
+      <text x="296" y="222" text-anchor="middle" class="tl-seg">P2</text>
+      <rect class="tl-p" x="390" y="194" width="75" height="48" rx="5"/>
+      <text x="427" y="222" text-anchor="middle" class="tl-seg">P6</text>
+      <rect class="tl-d" x="496" y="194" width="12.5" height="48" rx="4"/>
+      <text x="502" y="222" text-anchor="middle" class="tl-segd">D</text>
+      <rect class="tl-d" x="602" y="194" width="12.5" height="48" rx="4"/>
+      <text x="608" y="222" text-anchor="middle" class="tl-segd">D</text>
+      <text x="622" y="222" class="tl-done">done</text>
+
+      <!-- 图例 -->
+      <rect class="tl-p" x="72" y="272" width="14" height="14" rx="3"/>
+      <text x="92" y="283" class="tl-axis">prefill chunk（P8 = 8 token）</text>
+      <rect class="tl-d" x="292" y="272" width="14" height="14" rx="3"/>
+      <text x="312" y="283" class="tl-axis">decode token（D = 1 token）</text>
+      <text x="500" y="283" class="tl-done">done = 请求完成</text>
+      <text x="72" y="316" class="tl-axis">每列 1 个 scheduler step · 列宽 = 8 token 预算 · 1 token = 12.5px（示意）</text>
+    </svg>
+    <figcaption>
+      图 1 · iteration-level 调度时间线（按 vLLM V1 的 running→waiting 顺序构造的示意，不是线上 trace）。
+      行标签里的 p / o 表示 prompt / output token 数。A 在 t0 用整列做 prefill；t1 起 B 的 12-token prompt 被切成 7+5，
+      A 的 decode 与 B 的 prefill 同列；t2 C 到达并拿到 2 token；t3 A 完成，C 继续 6 token；
+      t4–t5 只剩 decode，列内出现空预算。
+    </figcaption>
+  </figure>
+
+  <p>
+    这张图里没有「prefill 阶段结束才能 decode」的屏障。t1 这一列同时有 A 的 decode 和 B 的 prefill；
+    t2 更是三个请求同列：A decode、B 补完 prefill、C 开始 prefill。每一步的列宽是 8 token 预算，
+    色块宽度就是分到的 token 数；空白不是没画满，而是本步没有更多请求可排。
+  </p>
+
+  <p>
+    调度器的输出也没有 phase 字段。它交给模型执行器的是
+    <code>scheduled_new_reqs</code>、<code>scheduled_cached_reqs</code>、<code>num_scheduled_tokens</code> 这些结构
+    （<code>vllm/v1/core/sched/output.py:238-253</code>）。请求处于 prefill 还是 decode 不是队列属性；
+    代码里用 <code>is_prefill_chunk</code> 这类派生标记在需要时判断（<code>scheduler.py:1940-1942</code>），
+    没有两个独立队列。
+  </p>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>预算调大，TTFT 变好但 ITL 变差；预算调小，prefill 可能一步都排不上</h2></div>
+  <p class="sec-sub">官方文档给出的是方向性权衡；下面的步数是按本页简化模型算的，不是实测吞吐。</p>
+
+  <blockquote>
+    <p class="quote-en">
+      "In V1, chunked prefill is enabled by default whenever possible. With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the max_num_batched_tokens budget, it schedules pending prefills."
+    </p>
+    <div class="quote-src">docs/configuration/optimization.md:53</div>
+  </blockquote>
+  <p>
+    文档把「优先 decode」写成了策略描述。源码里的机制更具体：先排 running（已经在跑的请求），再用剩余预算排 waiting（新请求）。
+    因为 running 里主要是 decode，效果上就是 decode 先拿 token；但代码里并没有一个独立的 decode 队列先出队。
+  </p>
+
+  <blockquote>
+    <p class="quote-en">
+      "Smaller values (e.g., 2048) achieve better ITL because there are fewer prefills slowing down decodes. Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch."
+    </p>
+    <div class="quote-src">docs/configuration/optimization.md:64-65</div>
+  </blockquote>
+  <p>
+    这两句话看起来像常识：预算小，decode 被 prefill 拖累得少；预算大，prefill 一次推进得多。
+    但把「running 先于 waiting」放进这个框架，会出现一个更硬的结果：预算小到被 running 的 decode 吃光时，waiting 的 prefill 不是变慢，而是<strong>本轮拿到 0 token</strong>。
+  </p>
+
+  <p class="eq-cap">表 3 · 简化模拟：D=10 个 decode、P=24 token prefill，只改预算 B（页面模拟，不是实测）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>预算 B</th><th>decode 排上</th><th>prefill 排上</th><th>本轮后 prefill 剩余</th><th>按此速率</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">8</td><td class="num">8</td><td class="num">0</td><td class="num">24</td><td>0 token/步，永远不完成</td></tr>
+        <tr><td class="num">16</td><td class="num">10</td><td class="num">6</td><td class="num">18</td><td>24/6 = 4 步</td></tr>
+        <tr><td class="num">32</td><td class="num">10</td><td class="num">22</td><td class="num">2</td><td>第一步 22，第二步 2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    表 3 的每一行都能在页面交互里复现：把 D 设为 10、P 设为 24，再把 B 依次拖到 8、16、32。
+    B=8 时 10 个 decode 里只有 8 个排上，prefill 还是 0；B=16 时 10 个 decode 全排上，prefill 还能拿 6；
+    B=32 时 prefill 拿 22，下一步只剩 2。预算不是越大越「浪费」，也不是越小越「温和」——它决定的是谁先被满足。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>「decode 优先」不是让 prefill 慢一点，而是可以让它停住</h4></div>
+    <p>
+      在没有投机解码、每个 decode 请求只排 1 token 的前提下，running 的 decode 请求数大于等于 token 预算时，
+      running 循环会把预算用尽；没有异步 KV load 时，waiting 循环看到
+      <code>token_budget &lt;= 0</code> 就直接退出（<code>scheduler.py:817</code>、<code>:1100-1103</code>）。
+      如果每一步都维持这个状态，新来的长 prompt 会一直停在 waiting。这不是 bug，是 running 优先策略的极端情形；
+      调大预算、降低 running 并发（例如收紧 <code>max_num_seqs</code>），都会改变这个极端情形出现的条件。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>抢占不是「内存用到 90% 就触发」</h4></div>
+    <p>
+      源码里没有 <code>preemption_threshold</code> 这个配置。触发条件是 <code>allocate_slots</code> 在分配这一批新 token 的 KV 块时
+      发现块池不够（<code>kv_cache_manager.py:607-609</code>），调度器才进入抢占。换句话说，
+      抢占是<strong>分配失败后的补救</strong>，不是一个可按百分比调节的阈值。
+    </p>
+    <p>
+      <code>watermark</code>（默认 0.0）是准入时保留的空闲块比例，用来减少频繁驱逐，不是抢占线
+      （<code>config/scheduler.py:209-214</code>）。
+    </p>
+  </div>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它保证吞吐，不保证公平；也不解决 KV 容量</h2></div>
+  <p class="sec-sub">把「continuous batching 能做什么」和「vLLM V1 调度器不做什么」分开看。</p>
+
+  <h3>不保证公平，也没有硬性的 prefill 截止时间</h3>
+  <p>
+    running 先于 waiting 是一个吞吐导向的选择：已在跑的请求先推进，新请求吃剩余预算。
+    <code>--scheduling-policy</code> 管的是 waiting 的排队顺序和抢占 victim，不改变「running 优先」；
+    Priority 让高优先级请求更早被服务，但也不承诺 waiting 的最大等待时间。长 prompt + 小预算 + 多 decode 时，
+    prefill 饿死是策略的直接后果，不是异常。
+  </p>
+
+  <h3>不解决 KV 容量，反而会把容量问题变成抢占</h3>
+  <p>
+    token 预算和 KV 块是两套资源。预算还有余量，块池可能已经空了；这时 <code>allocate_slots</code> 返回 None，
+    调度器抢占正在跑的请求。被抢占请求的进度清零，重算整个序列；文档明确说这会伤害端到端延迟。
+    <code>max_num_batched_tokens</code> 不会为请求预留 KV，<code>max_num_seqs</code> 也不会。
+  </p>
+
+  <h3>不是延迟 SLO 机制</h3>
+  <p>
+    continuous batching 提升的是<strong>聚合吞吐</strong>：让 GPU 在每个迭代都有活干。它不保证单请求的 ITL 或 TTFT；
+    相反，把更多 prefill 塞进同一批会让正在 decode 的请求多等一会儿。
+    需要严格延迟隔离时，工程上通常从并发上限、优先级、部署拆分（prefill / decode 分离）这些层面做，而不是只调 batch 参数。
+  </p>
+
+  <h3>什么时候别用 / 别只调它</h3>
+  <ul>
+    <li><strong>只有一两条请求：</strong>没有排队，continuous batching 的批次复用无从发挥，调度开销换不来额外的并发收益。</li>
+    <li><strong>KV 已经不够：</strong>先加显存或降并发；继续放大 batch 只会更频繁地触发抢占和重算。</li>
+    <li><strong>长 prompt + 小预算：</strong>prefill 可能拿不到 token；调大预算或限制 running 的 decode 数，比反复重试更直接。</li>
+    <li><strong>关闭 chunked prefill：</strong><code>max_num_batched_tokens</code> 必须大于 <code>max_model_len</code>，否则文档警告可能在启动时崩溃
+      （<code>docs/configuration/optimization.md:69-71</code>）；同时 <code>max_num_batched_tokens</code> 还必须不小于
+      <code>max_num_seqs</code>（<code>config/scheduler.py:367-371</code>）。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">模拟边界</span><h4>覆盖与未覆盖，再明确一次</h4></div>
+    <p>
+      <strong>覆盖：</strong>running→waiting 的顺序、每请求 token 上限、<code>max_num_seqs</code> 准入、
+      chunked 开 / 关时的单步预算分配。
+    </p>
+    <p>
+      <strong>未覆盖：</strong>KV 块分配与抢占、prefix cache、speculative decoding、priority / FCFS 队列、
+      async scheduling、encoder / multimodal 输入、<code>long_prefill_token_threshold</code>。
+      页面里的时间线和表 3 都是按规则构造的示意，不是源码 trace，也不是 benchmark。
+    </p>
+    <p>
+      vLLM V1 是持续演进的代码库；本页只锚定 <code>e740bad</code> 这一版。换 commit 后，默认值、分支和行号都可能变。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>vLLM V1 scheduler · commit e740badc2e3df13a5c2abfca04ed0ac917985c5f</div>
+  <div class="src">
+    源码：<a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/vllm/v1/core/sched/scheduler.py" target="_blank" rel="noopener">v1/core/sched/scheduler.py</a> ·
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/vllm/v1/core/sched/output.py" target="_blank" rel="noopener">output.py</a> ·
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/vllm/v1/core/kv_cache_manager.py" target="_blank" rel="noopener">kv_cache_manager.py</a> ·
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/vllm/v1/engine/core.py" target="_blank" rel="noopener">engine/core.py</a><br>
+    文档：<a href="https://docs.vllm.ai/en/latest/design/arch_overview.html#scheduler" target="_blank" rel="noopener">Scheduler overview</a> ·
+    <a href="https://docs.vllm.ai/en/latest/configuration/optimization.html#preemption" target="_blank" rel="noopener">Preemption</a> ·
+    <a href="https://docs.vllm.ai/en/latest/configuration/optimization.html#chunked-prefill" target="_blank" rel="noopener">Chunked Prefill</a><br>
+    笔记：<a href="/vllm高效推理全链路/">vllm 高效推理全链路</a> ·
+    <a href="/一些参数/">一些参数</a> ·
+    <a href="/nano-vllm阅读笔记/">nano-vllm 阅读笔记</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('sched-sim');
+  if (!root) return;
+
+  var dRange = document.getElementById('sim-d');
+  var pRange = document.getElementById('sim-p');
+  var bRange = document.getElementById('sim-b');
+  var mRange = document.getElementById('sim-m');
+  var dVal = document.getElementById('sim-d-val');
+  var pVal = document.getElementById('sim-p-val');
+  var bVal = document.getElementById('sim-b-val');
+  var mVal = document.getElementById('sim-m-val');
+  var decEl = document.getElementById('sim-dec');
+  var preEl = document.getElementById('sim-pre');
+  var leftEl = document.getElementById('sim-left');
+  var decBar = document.getElementById('sim-dec-bar');
+  var preBar = document.getElementById('sim-pre-bar');
+  var leftBar = document.getElementById('sim-left-bar');
+  var remainEl = document.getElementById('sim-remain');
+  var stepsEl = document.getElementById('sim-steps');
+  var stateEl = document.getElementById('sim-state');
+  var msgEl = document.getElementById('sim-msg');
+  var chunkBtn = document.getElementById('sim-chunk');
+  var resetBtn = document.getElementById('sim-reset');
+  var policyBtns = root.querySelectorAll('[data-policy]');
+
+  if (!dRange || !pRange || !bRange || !mRange || !dVal || !pVal || !bVal || !mVal ||
+      !decEl || !preEl || !leftEl || !decBar || !preBar || !leftBar || !remainEl ||
+      !stepsEl || !stateEl || !msgEl || !chunkBtn || !resetBtn) return;
+
+  var policy = 'decode';
+  var chunked = true;
+
+  function val(el) {
+    var n = parseInt(el.value, 10);
+    return isNaN(n) ? 0 : n;
+  }
+
+  function pct(part, whole) {
+    if (!whole) return 0;
+    return Math.max(0, Math.min(100, part / whole * 100));
+  }
+
+  function setPolicy(next) {
+    policy = next;
+    for (var i = 0; i < policyBtns.length; i++) {
+      var on = policyBtns[i].getAttribute('data-policy') === next;
+      policyBtns[i].classList.toggle('active', on);
+    }
+  }
+
+  function setChunked(next) {
+    chunked = next;
+    chunkBtn.textContent = 'chunked prefill：' + (chunked ? '开' : '关');
+    chunkBtn.classList.toggle('primary', chunked);
+  }
+
+  function render() {
+    var D = val(dRange);
+    var P = val(pRange);
+    var B = val(bRange);
+    var M = val(mRange);
+
+    dVal.textContent = String(D);
+    pVal.textContent = String(P);
+    bVal.textContent = String(B);
+    mVal.textContent = String(M);
+
+    var admitted = D < M;
+    var dec = 0;
+    var pre = 0;
+    var afterDec = B;
+
+    if (policy === 'prefill') {
+      if (admitted) pre = Math.min(P, B);
+      afterDec = B - pre;
+      dec = Math.min(D, afterDec);
+    } else {
+      dec = Math.min(D, B);
+      afterDec = B - dec;
+      if (admitted) {
+        if (chunked) pre = Math.min(P, afterDec);
+        else pre = (P > 0 && P <= afterDec) ? P : 0;
+      }
+    }
+
+    var left = B - dec - pre;
+    var remain = P - pre;
+    var steps = 0;
+    if (P > 0) steps = pre > 0 ? Math.ceil(P / pre) : Infinity;
+
+    decEl.textContent = dec + ' / ' + D;
+    preEl.textContent = pre + ' / ' + P;
+    leftEl.textContent = left + ' / ' + B;
+    remainEl.textContent = remain + ' token';
+    stepsEl.textContent = P === 0 ? '0' : (pre > 0 ? steps + ' 步' : '∞');
+    stateEl.textContent = P === 0 ? '无 prefill' : (pre === 0 ? 'prefill 饿死' : (dec < D ? 'decode 被挤' : '共享预算'));
+
+    decBar.style.width = pct(dec, B) + '%';
+    preBar.style.width = pct(pre, B) + '%';
+    leftBar.style.width = pct(left, B) + '%';
+
+    var parts = [];
+    if (P > 0 && D >= M) {
+      parts.push('D=' + D + ' ≥ M=' + M + '：waiting 中的 prefill 不能被准入。');
+    }
+    if (P > 0 && pre === 0) {
+      var why = '（预算被 decode 占满）';
+      if (D >= M) {
+        why = '（准入被挡）';
+      } else if (!chunked && afterDec > 0 && P > afterDec) {
+        why = '（chunked 关闭，整段 prompt ' + P + ' 放不进剩余预算 ' + afterDec + '）';
+      }
+      parts.push('本轮 prefill 拿到 0 token' + why + '，按同一策略重复不会前进。');
+    } else if (P > 0) {
+      parts.push('prefill 拿到 ' + pre + ' token，本轮后还剩 ' + remain + ' token；按此速率需要 ' + steps + ' 步。');
+    }
+    if (dec < D) {
+      parts.push('有 ' + (D - dec) + ' 个 decode 请求没排上。');
+    } else {
+      parts.push('decode 请求全部排上。');
+    }
+    if (P === 0) {
+      parts.push('把 P 拉大，才能看到 prefill 与 decode 争预算。');
+    }
+    msgEl.textContent = parts.join(' ');
+  }
+
+  dRange.addEventListener('input', render);
+  pRange.addEventListener('input', render);
+  bRange.addEventListener('input', render);
+  mRange.addEventListener('input', render);
+
+  for (var i = 0; i < policyBtns.length; i++) {
+    policyBtns[i].addEventListener('click', function () {
+      setPolicy(this.getAttribute('data-policy'));
+      render();
+    });
+  }
+
+  chunkBtn.addEventListener('click', function () {
+    setChunked(!chunked);
+    render();
+  });
+
+  resetBtn.addEventListener('click', function () {
+    dRange.value = '16';
+    pRange.value = '24';
+    bRange.value = '16';
+    mRange.value = '32';
+    setPolicy('decode');
+    setChunked(true);
+    render();
+  });
+
+  setPolicy('decode');
+  setChunked(true);
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,499 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.75000 | Baidu 博客 §Allreduce Communication Cost（N=8, S=1） | 2*(8-1)/8*1 |
+| 1.96875 | Baidu 博客 §Allreduce Communication Cost（N=64, S=1） | 2*(64-1)/64*1 |
+| 14 | Baidu 博客 §Allreduce Communication Cost（N=8） | 2*(8-1) |
+| 126 | Baidu 博客 §Allreduce Communication Cost（N=64） | 2*(64-1) |
+| 70.00000 | Baidu 博客 §Allreduce Communication Cost（V=1.75, B=25） | 1.75/25*1000 |
+| 78.75000 | Baidu 博客 §Allreduce Communication Cost（V=1.96875, B=25） | 1.96875/25*1000 |
+| 2.4 | Baidu 博客 §Applying the Allreduce to Deep Learning | 2*1.2 |
+| 400 | Baidu 博客 §Applying the Allreduce to Deep Learning | 2.4/6*1000 |
+| 12.5 | Baidu 博客 §Allreduce Communication Cost（N=8→64, S=1） | (1.96875-1.75)/1.75*100 |
+| 9 | Baidu 博客 §Allreduce Communication Cost（N=8→64 的步数比） | 126/14 |
+| 128 | §5.3 Figure 9 | 256*50/100 |
+| 2 | §5.3 Figure 9 | 1+100/100 |
+| 1.61 | §5.1 Figure 6 | 1/(1-38.0/100) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DDP 与 Ring All-Reduce · 2(N−1)/N 的带宽账</title>
+<meta name="description" content="从 DDP 源码与 PyTorch Distributed 论文拆开 ring all-reduce：reduce-scatter + all-gather 的 2(N-1)/N×S 带宽账、25 MiB bucket、反向重叠、NCCL 拓扑与 FSDP/ZeRO 边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.svg-title{font-family:"Inter","Noto Sans SC",sans-serif;font-size:16px;font-weight:700;fill:var(--text)}
+.svg-strong{font-family:"Inter","Noto Sans SC",sans-serif;font-size:15px;font-weight:600;fill:var(--text)}
+.svg-label{font-family:"JetBrains Mono",monospace;font-size:12.5px;fill:var(--text-muted)}
+.svg-note{font-family:"Noto Sans SC",sans-serif;font-size:12px;fill:var(--text-soft)}
+.sim-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:10px 0 0}
+.calc-detail{font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.9}
+details.handcalc{margin-top:12px}
+code{overflow-wrap:anywhere;word-break:break-word}
+footer .src a{overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">DDP · Ring All-Reduce</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">带宽账</a>
+      <a href="#flow">数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>分布式训练 · PyTorch · commit 2ee7a63</span>
+  <h1>DDP 与 Ring All-Reduce：梯度同步不是一次 AllReduce 就完事</h1>
+  <p class="hero-sub">
+    数据并行每步都要把 <code>N</code> 份梯度变成同一份。Ring all-reduce 用 reduce-scatter + all-gather 把通信摊到每张卡，每卡只搬 <code>2(N−1)/N × S</code>，代价是 <code>2(N−1)</code> 步。
+    DDP 再把梯度切成默认 <strong>25 MiB</strong> 的 bucket，让 AllReduce 在反向还没结束时就开始。
+    论文在 32 卡上测到 overlap 的 <strong>38.0%</strong>（ResNet50/NCCL）与 <strong>35.2%</strong>（BERT/NCCL）收益；按 Figure 6，这是每轮延迟相对下降（论文称 speedup），38.0% 约合 1.61× 吞吐。但 256 卡（ResNet50/NCCL，共享资源池）时每轮仍比单卡慢一倍。NCCL 官方文档说明它会按拓扑自动选算法，不保证走 ring。
+  </p>
+  <div class="meta">
+    <span>PyTorch Distributed · Shen Li et al. · VLDB 2020</span>
+    <a href="https://arxiv.org/abs/2006.15704v1" target="_blank" rel="noopener">原文 v1 ↗</a>
+    <a href="https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/" target="_blank" rel="noopener">Baidu ring 博客 ↗</a>
+    <a href="https://github.com/pytorch/pytorch/commit/2ee7a63cc8feb9171418ac602c0434dbb88348a1" target="_blank" rel="noopener">源码 commit ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>数据并行不是把模型切开，而是把 batch 切开。</strong>每张卡保留完整副本，反向后用 AllReduce 把 <code>N</code> 份梯度求平均；DDP 的注释明确说训练循环中参数不在进程间广播，广播的是 buffer，梯度才是每步同步的对象（<code>torch/nn/parallel/distributed.py:556-561</code>）；构造时 init_sync=True 会同步一次参数/buffer，见第 05 节。
+  </p>
+  <p>
+    <strong>Ring 把一次全量 AllReduce 拆成两个阶段。</strong>reduce-scatter 与 all-gather 各 <code>N−1</code> 步；每卡发送量（接收量相同）<code>2(N−1)/N × S</code>。N=8 时是 1.75S，N=64 时是 1.96875S，通信量几乎不随 N 增长，但步数从 14 涨到 126。
+  </p>
+  <p>
+    <strong>DDP 的工程重点是 bucket + overlap。</strong>默认常规 bucket 上限 25 MiB（首个 bucket 默认 1 MiB），按参数逆序装桶，桶内梯度到齐就异步 AllReduce，和更早层的反向重叠。25 MiB 是默认值，不是最优值；论文 §5.2 明确说没有单一 bucket 大小适合所有模型。
+  </p>
+  <p>
+    <strong>边界同样重要。</strong>小梯度时 <code>2(N−1)</code> 步的固定延迟占主导；NCCL 官方文档说明它会按拓扑自动选算法，多机下不保证走 ring；模型单卡放不下时 DDP 的完整副本不省显存，要换 FSDP/ZeRO 的分片。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="源码 torch/nn/parallel/distributed.py:31">25<small> MiB</small></div>
+      <div class="k">DDP 默认 bucket 上限<br>常规桶 25 MiB；bucket_cap_mb=None 时首个桶 1 MiB</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 6">38.0<small>%</small></div>
+      <div class="k">ResNet50 / NCCL 的每轮延迟降幅<br>论文称 speedup；32 卡、4 机、不开 overlap 作基线</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Figure 9">100<small>%</small></div>
+      <div class="k">256 卡每轮比单卡慢一倍<br>ResNet50 / NCCL，共享资源池；有效扩展 128 卡</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>每步都要把 N 份梯度变成同一份，而同步点正好压在反向传播上</h2></div>
+  <p class="sec-sub">读完这节你应该知道：DDP 每步真正同步的是什么，为什么这个同步点难以藏起来。</p>
+
+  <p>数据并行（data parallel）把全局 batch 切成 <code>N</code> 份，每张卡（rank）保留一份完整的模型副本，吃其中一份数据。设第 <code>i</code> 张卡上的局部梯度为 <code>g<sub>i</sub></code>，要让所有副本在每一步之后仍然完全相同，优化器就必须看到同一份全局梯度：</p>
+
+  <div class="eq">
+    g = (g<sub>0</sub> + g<sub>1</sub> + ... + g<sub>N−1</sub>) / N
+  </div>
+  <div class="eq-cap">DDP 的语义是梯度求平均；源码注释说明跨节点梯度会被平均（<code>torch/nn/parallel/distributed.py:545-554</code>）</div>
+
+  <p>没有这一步，各卡从第一次更新开始就会分叉：每张卡只见过自己那份数据，梯度不同，参数更新也不同。DDP 的选择是<strong>训练循环中只同步梯度，不同步参数</strong>。源码注释写得很直白：参数不在进程间广播；每个 iteration 广播的是 buffer（例如 BatchNorm 统计量），由 rank 0 发给其他副本（<code>torch/nn/parallel/distributed.py:556-561</code>）。初始化时 init_sync=True 仍会同步一次参数/buffer，见第 05 节。</p>
+
+  <p>这个同步是一个<strong>集合通信</strong>。论文 §2.3 把 AllReduce 定义为：每个参与的进程提供等长 tensor，集合应用 sum 等操作，然后把相同结果返回给每个参与者；在所有进程到齐之前，AllReduce 不能开始。这跟参数服务器的 P2P 通信是两种模型。也正因为要等所有 rank，AllReduce 天然是一个同步点。</p>
+
+  <p>同步点之所以难藏，是因为它落在反向传播的末端。论文 §5.1 的测量显示：反向传播本来就是一轮里最耗时的阶段，而其中的通信步骤占总延迟<strong>一半以上</strong>；模型越大越明显。更麻烦的是梯度不是一个大 tensor，而是许多层的小 tensor——论文 §3.2.2 指出，集合通信在大 tensor 上效率更高，逐个梯度立刻发 AllReduce 会拉高总通信时间。</p>
+
+  <p>于是问题拆成两半：<strong>拓扑</strong>上，怎样避免所有流量挤到一个根节点；<strong>时间</strong>上，怎样让通信在反向还没结束时就开工。前者是 ring all-reduce，后者是 DDP 的 bucket 与 overlap。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>参数服务器把 N 份梯度汇到一处，ring all-reduce 把它摊回每张卡</h2></div>
+  <p class="sec-sub">读完这节你应该知道：两种同步拓扑的成本差在哪，为什么根节点会先成为瓶颈。</p>
+
+  <p>最直觉的同步方式是参数服务器（parameter server）：每个 worker 把完整梯度 <code>S</code> 发给一个中心节点，中心节点求和（或平均），再把结果 <code>S</code> 发回每个 worker。每个 worker 的收发量是 <code>2S</code>，看起来不大；但中心节点的入口要收 <code>N × S</code>、出口要发 <code>N × S</code>。中心节点的网卡带宽是固定的，加 worker 只会让排队更长，不会让根节点的带宽变多。Baidu 的 ring all-reduce 文章在 §The Communication Problem 里正是用这个瓶颈来引出 ring。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">参数服务器</span><h4>成本压在一个根节点上</h4></div>
+      <p>每 worker 收发 <code>2S</code>；根节点单向 <code>N × S</code>。N 越大，根节点的入口/出口越先饱和。</p>
+      <p><strong>卡在哪：</strong>同步 PS 的聚合时间随 N 增长；异步 PS 可以绕开等待，但会改变梯度语义，本页只比较同步聚合与同步 AllReduce。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Ring all-reduce</span><h4>没有根节点，流量沿环摊开</h4></div>
+      <p>每张卡只和左右邻居说话；两个阶段各 <code>N−1</code> 步，每卡发送量（接收量相同）<code>2(N−1)/N × S</code>。</p>
+      <p><strong>代价：</strong>步数随 N 线性增长；所有 rank 必须同步进入集合通信，最慢的链路决定每一步的时间。</p>
+    </div>
+  </div>
+
+  <p>把两种拓扑的账并列写出来：</p>
+
+  <div class="eq">
+    PS：每 worker 2S；根节点收 N × S、发 N × S<br>
+    Ring：每卡 2 × (N − 1) / N × S；无根节点
+  </div>
+  <div class="eq-cap">PS 根节点的累计流量约是 ring 单链路累计流量的 N 倍；ring 的单卡流量随 N 增大趋近 2S</div>
+
+  <p>论文 §2.3 还提到另一类集合算法：tree-based AllReduce。它和 ring 是两种不同的集合算法，具体选谁取决于实现与拓扑。换句话说，ring 不是 AllReduce 的唯一实现，甚至不是 NCCL 的唯一选择——这一点在第 07 节会展开。</p>
+
+  <p>Baidu 博客的推导有一个明确前提：ring 的带宽最优性是<strong>假设每步延迟相对带宽可忽略</strong>。这个前提在梯度很大、N 不太大时成立；小梯度或超大 N 时，<code>2(N−1)</code> 步的固定延迟会把账翻过来。这也是为什么 DDP 不满足于「一次 AllReduce」，而要做 bucket 和 overlap。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Ring 把一次全量 AllReduce 拆成 2(N−1) 步，DDP 再把桶塞进反向传播</h2></div>
+  <p class="sec-sub">读完这节你应该知道：reduce-scatter 与 all-gather 各做什么，bucket 和 overlap 如何把通信藏进计算。</p>
+
+  <h3>两阶段：先规约，再扩散</h3>
+
+  <p>把要同步的梯度看成一块大小 <code>S</code> 的连续数据，切成 <code>N</code> 个 chunk，每块 <code>S/N</code>。所有 rank 在逻辑上排成一个环，每张卡只向右邻发送、从左邻接收。</p>
+
+  <ul>
+    <li><strong>Reduce-scatter：</strong>共 <code>N−1</code> 步。每步每张卡把一个 chunk 发给右邻，同时从左邻收到一个 chunk，并把收到的值累加到本地对应位置。走完 <code>N−1</code> 步后，每张卡持有<strong>一块</strong>已经被所有 rank 规约过的 chunk。</li>
+    <li><strong>All-gather：</strong>共 <code>N−1</code> 步。每步把手上已有的、已规约的 chunk 发给右邻，同时从左邻收到另一个已规约 chunk；这次不再相加，只覆盖。走完 <code>N−1</code> 步后，每张卡都拿到全部 <code>N</code> 块规约结果。</li>
+  </ul>
+
+  <p>具体哪一块最终落在哪张卡，取决于环的起点和 chunk 编号约定；所有约定只差一个整体平移，通信量不变。下面按「每步发一块、收一块」画出示意。</p>
+
+  <figure>
+    <svg viewBox="0 0 720 470" width="100%" role="img" aria-labelledby="ring-svg-title ring-svg-desc">
+      <title id="ring-svg-title">Ring all-reduce 的 reduce-scatter 与 all-gather</title>
+      <desc id="ring-svg-desc">四张 GPU 组成环。上图为 reduce-scatter 第一步：每张卡向右邻发送自己的 chunk，从左邻接收并累加。下图为 all-gather 第一步：每张卡向右邻发送已规约 chunk，从左邻接收并覆盖。每阶段共 N 减 1 步。</desc>
+      <defs>
+        <marker id="ring-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"></path>
+        </marker>
+        <marker id="ring-arrow-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--c1)"></path>
+        </marker>
+      </defs>
+
+      <text x="36" y="30" class="svg-title">A. reduce-scatter：第 1 步 / 共 N−1 步</text>
+
+      <rect x="90" y="60" width="130" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+      <text x="155" y="84" text-anchor="middle" class="svg-strong">GPU 0</text>
+      <text x="155" y="104" text-anchor="middle" class="svg-label">chunk 0</text>
+
+      <rect x="470" y="60" width="130" height="56" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="535" y="84" text-anchor="middle" class="svg-strong">GPU 1</text>
+      <text x="535" y="104" text-anchor="middle" class="svg-label">chunk 1</text>
+
+      <rect x="470" y="140" width="130" height="56" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="535" y="164" text-anchor="middle" class="svg-strong">GPU 2</text>
+      <text x="535" y="184" text-anchor="middle" class="svg-label">chunk 2</text>
+
+      <rect x="90" y="140" width="130" height="56" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="155" y="164" text-anchor="middle" class="svg-strong">GPU 3</text>
+      <text x="155" y="184" text-anchor="middle" class="svg-label">chunk 3</text>
+
+      <line x1="225" y1="88" x2="462" y2="88" stroke="var(--accent)" stroke-width="2" marker-end="url(#ring-arrow-a)"></line>
+      <text x="345" y="76" text-anchor="middle" class="svg-label">发 S/N</text>
+      <line x1="155" y1="140" x2="155" y2="122" stroke="var(--c1)" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ring-arrow-b)"></line>
+      <text x="170" y="134" class="svg-label">收 S/N</text>
+      <text x="360" y="160" text-anchor="middle" class="svg-note">收到后累加</text>
+
+      <text x="36" y="260" class="svg-title">B. all-gather：第 1 步 / 共 N−1 步</text>
+
+      <rect x="90" y="290" width="130" height="56" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"></rect>
+      <text x="155" y="314" text-anchor="middle" class="svg-strong">GPU 0</text>
+      <text x="155" y="334" text-anchor="middle" class="svg-label">已规约 chunk</text>
+
+      <rect x="470" y="290" width="130" height="56" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="535" y="314" text-anchor="middle" class="svg-strong">GPU 1</text>
+      <text x="535" y="334" text-anchor="middle" class="svg-label">已规约 chunk</text>
+
+      <rect x="470" y="370" width="130" height="56" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="535" y="394" text-anchor="middle" class="svg-strong">GPU 2</text>
+      <text x="535" y="414" text-anchor="middle" class="svg-label">已规约 chunk</text>
+
+      <rect x="90" y="370" width="130" height="56" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)" stroke-width="1.5"></rect>
+      <text x="155" y="394" text-anchor="middle" class="svg-strong">GPU 3</text>
+      <text x="155" y="414" text-anchor="middle" class="svg-label">已规约 chunk</text>
+
+      <line x1="225" y1="318" x2="462" y2="318" stroke="var(--accent)" stroke-width="2" marker-end="url(#ring-arrow-a)"></line>
+      <text x="345" y="306" text-anchor="middle" class="svg-label">发 S/N</text>
+      <line x1="155" y1="370" x2="155" y2="352" stroke="var(--c1)" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#ring-arrow-b)"></line>
+      <text x="170" y="364" class="svg-label">收 S/N</text>
+      <text x="360" y="390" text-anchor="middle" class="svg-note">只覆盖，不再累加</text>
+
+      <text x="36" y="458" class="svg-note">实线：发给右邻　虚线：从左邻收　两阶段各 N−1 步</text>
+    </svg>
+    <figcaption>图 1 · ring all-reduce 的两阶段（以 N=4 为例）。结构据 Baidu 博客 §The Scatter-Reduce 与 §The Allgather 重绘；节点下方的 chunk i 表示该卡在 reduce-scatter 后负责的块，初始时每张卡都持有完整本地梯度。具体编号随环的起点约定平移，不影响每步的 S/N 与总步数。</figcaption>
+  </figure>
+
+  <h3>Bucket：把许多小梯度拼成一次集合通信</h3>
+
+  <p>DDP 不会对每个梯度 tensor 立刻发一次 AllReduce。论文 §3.2.2 的测量说明，集合通信在大 tensor 上效率更高：Gloo 在约 500K 参数/次时达到平台，NCCL 在 NVLink 上到 20M 参数/次都没有明显饱和。所以 DDP 把多个梯度拼进一个 bucket，等桶里的梯度都到齐，再对整个桶做一次 AllReduce；但也不能把所有梯度塞进一个桶，否则反向结束前通信没法开始。</p>
+
+  <p>源码里的默认值很明确：<code>_DEFAULT_BUCKET_CAP_MB = 25</code>（<code>torch/nn/parallel/distributed.py:31</code>），单位换算 <code>_MB_TO_BYTES = 1024 * 1024</code>（同文件第 33 行）。构造参数 <code>bucket_cap_mb=None</code>（第 832 行）时，<code>_BucketCapacityConfig.create</code> 令常规桶取这个 25 MiB 默认值（第 86-89 行），再乘 1024×1024 得到字节数（第 104 行）；但首个 bucket 走 <code>dist._DEFAULT_FIRST_BUCKET_BYTES</code>（第 106-110 行），即 <code>kDefaultFirstBucketBytes = 1024 * 1024</code>（<code>torch/csrc/distributed/c10d/reducer.hpp:29</code>），默认只有 1 MiB。论文 §4.2 与 §5.2 把它写作 25MB；源码按 MiB 计算，本页以源码的 25 MiB 为准。</p>
+
+  <p>桶的大小是纯粹的取舍：桶越大，单次集合通信越大、系统开销越省，但第一个桶要等更久才能发；桶越小，通信能更早开始，但 AllReduce 次数变多。论文 §5.2 的结论是<strong>没有单一最优值</strong>：16 卡两机上，ResNet50 在 NCCL 下 10–25MB 最快，BERT 在 NCCL 下 50MB 最好，而 Gloo 后端 5MB 反而最好。25MB 是论文作者按经验给的默认值，不是普适最优。</p>
+
+  <p>首个 bucket 默认只有 1 MiB：它装的是反向最后才就绪的那批参数，小桶可以避免它们被并进大桶后拖到最后，让 AllReduce 更早开始（<code>torch/nn/parallel/distributed.py:1456-1460</code>）。</p>
+
+  <h3>Overlap：桶一满就发，不等整个反向结束</h3>
+
+  <p>DDP 为每个梯度累加器注册一个 autograd hook；hook 触发时检查所属 bucket，如果桶内所有梯度都齐了，<strong>最后一个 hook</strong> 就发起该桶的异步 AllReduce。这样通信可以和更早层的反向计算重叠。论文 §3.2.3 还提醒了一个约束：所有进程必须用同样的装桶顺序，且不能先发 bucket i+1 再发 bucket i；如果 bucket 0 恰好最后才就绪，那就没有任何重叠空间。</p>
+
+  <p>PyTorch v1.5 的做法是<strong>按 model.parameters() 的逆序装桶</strong>，假设参数注册顺序大致等于前向调用顺序，逆序就近似反向计算顺序。源码注释也写明 AllReduce 按注册参数的逆序进行（<code>torch/nn/parallel/distributed.py:634</code>）。这是一个工程近似，不是严格保证；论文自己也说它「not a perfect solution」。</p>
+
+  <p>另一个默认值容易忽略：<code>gradient_as_bucket_view=False</code>（<code>torch/nn/parallel/distributed.py:835</code>）。默认情况下，梯度要先复制进 bucket，规约结果再复制回各参数的 <code>.grad</code>；把它设为 <code>True</code> 后，<code>.grad</code> 直接是 bucket 的视图，文档说可省下与梯度总量相当的峰值显存，并避免梯度与 bucket 之间的复制，但代价是不能对梯度调用 <code>detach_()</code>（同文件第 730-741 行）。</p>
+
+  <p>做梯度累积时，用 <code>ddp.no_sync()</code> 包住前几个 micro-batch，让这些步只累加、不同步；退出上下文后的第一次 forward-backward 再统一同步（<code>torch/nn/parallel/distributed.py:1696-1722</code>）。这不是绕过同步，而是把多个 micro-batch 的同步合并成一次（每个 bucket 仍各做一次 AllReduce）。</p>
+</section>
+
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>每卡只搬 2(N−1)/N 份梯度，但步数随 N 线性增长</h2></div>
+  <p class="sec-sub">读完这节你应该知道：ring 的带宽账怎么算，为什么 N 从 8 到 64 通信量几乎不变，而延迟不是。</p>
+
+  <p>推导只需要数每一步搬了多少。梯度总量为 <code>S</code>，切成 <code>N</code> 块，每块 <code>S/N</code>。一个阶段有 <code>N−1</code> 步，每步每卡发送一块、接收一块，所以一个阶段的发送量是 <code>(N−1) × S/N</code>。两个阶段（reduce-scatter + all-gather）加起来：</p>
+
+  <div class="eq">
+    V(N, S) = 2 × (N − 1) / N × S<br>
+    steps = 2 × (N − 1)<br>
+    T<sub>bw</sub> = V / B
+  </div>
+  <div class="eq-cap">V 是每卡发送量（接收量与之相同）；B 是每卡单向有效带宽；T<sub>bw</sub> 假设收发全双工重叠，只算带宽，不含每步固定延迟</div>
+
+  <p>这个式子有两个关键性质。第一，<code>N</code> 越大，<code>(N−1)/N</code> 越接近 1，每卡通信量趋近 <code>2S</code>，而不是随 N 爆炸；这正是 ring 相对参数服务器的优势。第二，步数是 <code>2(N−1)</code>，随 N 线性增长；每步都有固定的启动/同步延迟，所以「带宽最优」不等于「小消息最快」。</p>
+
+  <p>Baidu 博客给了一个可对账的算例：300M 参数的模型，梯度约 1.2 GB；博客给出每卡约 2.4 GB（单向发送量；接收量与之相同）、6 GB/s 下约 400 ms（§Applying the Allreduce to Deep Learning）。2.4 GB 等于 <code>2 × 1.2 GB</code>；严格按 <code>2(N−1)/N × S</code>，有限 N 的每卡量会小于 <code>2S</code>，博客该处没有重述 N。</p>
+
+  <h3>自己算：N、S、B 三个旋钮</h3>
+  <p>拖动世界规模 <code>N</code>、梯度大小 <code>S</code>、每卡带宽 <code>B</code>，下面的读数按同一组公式实时重算。默认 <code>N=8</code>、<code>S=1 GiB</code>、<code>B=25 GiB/s</code>，对应手算组 A。</p>
+
+  <div class="sim" id="ring-sim">
+    <div class="controls">
+      <div class="ctrl">
+        <label>世界规模 N <span class="v" id="ring-n-val">8</span></label>
+        <input type="range" id="ring-n" min="2" max="128" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label>梯度大小 S <span class="v" id="ring-s-val">1.00 GiB</span></label>
+        <input type="range" id="ring-s" min="0.25" max="4" step="0.25" value="1">
+      </div>
+      <div class="ctrl">
+        <label>每卡带宽 B <span class="v" id="ring-b-val">25 GiB/s</span></label>
+        <input type="range" id="ring-b" min="5" max="100" step="5" value="25">
+      </div>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot">
+        <div class="slot-name">每卡发送量（接收同）</div>
+        <div class="slot-val" id="ring-vol">—</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">ring 步数</div>
+        <div class="slot-val" id="ring-steps">—</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">纯带宽时间</div>
+        <div class="slot-val" id="ring-time">—</div>
+      </div>
+    </div>
+
+    <div class="readout" data-src="§Allreduce Communication Cost">
+      <div class="r-head">这个参数下</div>
+      <div id="ring-msg">—</div>
+    </div>
+
+    <p class="sim-note">
+      口径：<code>V = 2 × (N − 1) / N × S</code>；<code>steps = 2 × (N − 1)</code>；<code>T = V / B</code>。
+      假设每个 bucket 是一个连续张量、所有 rank 同步进入集合通信、每步只传 <code>S/N</code>、收发全双工且各方向带宽为 <code>B</code>。
+      <strong>忽略每步固定延迟、拓扑差异、拥塞、协议头与 straggler</strong>；V 只计单向发送量（接收量与之相同）；T = V/B 假设收发全双工重叠；若收发共享同一份带宽，时间应按 2V/B 计，不代表端到端时间。
+      本交互只描述 ring 这一支，不模拟 NCCL 的 tree/collnet/NVLS 路径。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账：N=8 与 N=64 <span class="sum-sub">与滑块同口径，逐位可复算</span></summary>
+    <div class="details-body calc-detail">
+      <p><strong>组 A：</strong>N=8，S=1.00 GiB，B=25 GiB/s。</p>
+      <ul>
+        <li>每卡发送量（接收量相同） = 2 × (8 − 1) / 8 × 1 = 1.75000 GiB</li>
+        <li>步数 = 2 × (8 − 1) = 14</li>
+        <li>纯带宽时间 = 1.75000 / 25 × 1000 = 70.00000 ms</li>
+      </ul>
+      <p><strong>组 B：</strong>N=64，S=1.00 GiB，B=25 GiB/s。</p>
+      <ul>
+        <li>每卡发送量（接收量相同） = 2 × (64 − 1) / 64 × 1 = 1.96875 GiB</li>
+        <li>步数 = 2 × (64 − 1) = 126</li>
+        <li>纯带宽时间 = 1.96875 / 25 × 1000 = 78.75000 ms</li>
+      </ul>
+      <p>JS 用 <code>toFixed(5)</code> 显示同样的 5 位小数：组 A 是 <code>1.75000 GiB / 14 / 70.00000 ms</code>，组 B 是 <code>1.96875 GiB / 126 / 78.75000 ms</code>；把滑块拉到对应参数应与上面逐位一致。</p>
+      <p><strong>这组数说明什么：</strong>N 从 8 到 64，每卡通信量只增加 12.5%（相对 N=8），步数却从 14 增到 126（9 倍）。带宽账几乎不随 N 变，延迟账随 N 线性变——这就是 ring 在大消息上强、在小消息/大世界规模上需要别的算法或更大 bucket 的原因。</p>
+    </div>
+  </details>
+
+  <p>注意 <code>12.5%</code> 是<strong>相对 N=8 的通信量增幅</strong>，不是时间增幅；9 倍是步数比，不是端到端延迟比。时间还取决于每步延迟、链路是否全双工、是否拥塞，以及反向计算能不能真的和通信重叠。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一个训练步：前向各跑各的，反向边算边同步，优化器步在副本上相同</h2></div>
+  <p class="sec-sub">读完这节你应该知道：DDP 在什么时候同步、什么时候不同步，以及 no_sync 改变了什么。</p>
+
+  <ol>
+    <li><strong>前向：</strong>每个 rank 用自己的 mini-batch 跑完整前向。参数副本在初始化时已经同步（默认 <code>init_sync=True</code>，第 830 行；关掉则要自己保证）；如果启用了 buffer 同步，rank 0 会在 forward 前把 buffer（如 BatchNorm 统计量）广播给其他副本（<code>torch/nn/parallel/distributed.py:556-561</code>）。训练循环中 DDP 不广播参数。</li>
+    <li><strong>反向：</strong>autograd 按前向的逆序算梯度。每个梯度累加器的 hook 触发后检查所属 bucket；桶内最后一个梯度就绪时，发起该桶的异步 AllReduce（论文 §3.2.3）。桶按 <code>model.parameters()</code> 的逆序排列（<code>torch/nn/parallel/distributed.py:634</code>），目的是让反向早期就绪的层先发。</li>
+    <li><strong>AllReduce：</strong>集合通信内部走 ring（或 NCCL 选的其他算法）：先 reduce-scatter 把每块梯度规约到一张卡，再 all-gather 把规约结果扩散给所有卡。完成后，每张卡都拿到该桶的求和梯度；DDP 在 reducer 中按 world size 做除法（论文 §2.3 的 gradient summation 语义；join 路径的注释见第 2013-2015 行，那里还区分 <code>divide_by_initial_world_size</code> 与 joined 进程数）。</li>
+    <li><strong>优化器步：</strong>所有 rank 用相同的梯度、相同的优化器状态更新各自的副本。因为训练循环中没有参数广播，副本能保持一致的前提是：初始参数相同、每步梯度相同、优化器行为相同。</li>
+    <li><strong>下一步：</strong>在优化器读取梯度、下一次 forward 使用新参数之前，上一轮所有 bucket 的 AllReduce 必须完成；这是一个隐式同步点。做梯度累积时，<code>no_sync()</code> 里的 micro-batch 只累加不同步，退出后的第一次 forward-backward 再统一同步（第 1696-1722 行）。</li>
+  </ol>
+
+  <p>默认的 <code>gradient_as_bucket_view=False</code>（第 835 行）决定了第 2 步里有一次「梯度 → bucket」复制，以及第 3 步后有一次「bucket → .grad」复制。把开关设为 <code>True</code> 可以让 <code>.grad</code> 直接指向 bucket 的偏移，省掉梯度与 bucket 之间的复制和一份梯度大小的峰值显存；代价是不能再对梯度调用 <code>detach_()</code>（第 730-741 行）。</p>
+
+  <p>还有一个会影响流程的开关：<code>find_unused_parameters=False</code> 是默认值（第 833 行）。设为 <code>True</code> 后，DDP 会在 forward 后遍历 autograd graph，把没有参与 loss 的参数提前标记为 ready，避免它们所在的 bucket 永远等不到最后一个 hook（第 718-728 行）。这会改变哪些梯度被规约；不需要时不要打开。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>32 卡上 overlap 值 38.0%，256 卡仍比单卡慢一倍</h2></div>
+  <p class="sec-sub">读完这节你应该知道：这些数字是在什么集群、什么模型、什么后端上测的，不能直接搬到别的机器。</p>
+
+  <p>论文的独占集群是 4 台服务器、每台 8 张 NVIDIA Tesla V100，服务器之间用 Mellanox MT27700 ConnectX-4 100GB/s NIC，4 台机器在同一个机架内（§5）。32 卡实验全部在这个集群上；256 卡实验跑在共享资源池里，任务分到的硬件并不相同（§5.3）。模型是 ResNet50 与 BERT，输入和标签多为随机生成，目的是比较每轮延迟而不是精度（§5）。</p>
+
+  <p>先看 overlap 的收益。论文把不开 overlap 的总延迟归一化为 1，再比较开 overlap 后的每轮延迟；Figure 6 的读数是：</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 1 · 数值取自 §5.1 正文（Figure 6 为归一化延迟分解）：32 卡（4 机 × 8 V100，100 GB/s NIC），数值为相对不开 overlap 的每轮延迟降幅（论文称 speedup；38.0% 对应约 1.61× 吞吐）</caption>
+      <thead>
+        <tr><th>模型</th><th>后端</th><th class="num">overlap 延迟降幅</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>ResNet50</td><td>NCCL</td><td class="num">38.0%</td></tr>
+        <tr class="best"><td>BERT</td><td>NCCL</td><td class="num">35.2%</td></tr>
+        <tr><td>ResNet50</td><td>Gloo</td><td class="num">26.8%</td></tr>
+        <tr><td>BERT</td><td>Gloo</td><td class="num">21.5%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>NCCL 的加速比 Gloo 高，论文的解释是 Gloo 的通信本身更慢，反向传播里通信占比更大，能重叠的空间反而被通信主导。论文还指出，在反向传播内部，通信步骤占总延迟<strong>一半以上</strong>，模型越大越明显（§5.1）。这解释了为什么 38.0% / 35.2% 的延迟降幅不是「AllReduce 免费」，而是「把原本暴露的通信藏进计算」。</p>
+
+  <p>Bucket 大小没有单一最优。论文 §5.2 在 16 卡两机上扫了 0MB 到更大桶：ResNet50 在 NCCL 下 10–25MB 最快，BERT 在 NCCL 下 50MB 最好（BERT 的参数量约为 ResNet50 的 15 倍）；Gloo 后端则是 5MB 最好。到 32 卡时，只要桶大于 5MB，从 16 卡扩到 32 卡就没有明显回退；而 0MB（每个梯度单独发）在 32 卡上明显更慢。默认 25MB 是作者按经验给的起点，不是所有模型的终点。</p>
+
+  <p>再看规模。Figure 9 的 ResNet50/NCCL 在 256 卡上每轮比单卡慢 <strong>100%</strong>，论文据此换算「有效扩展因子 256 × 50% = 128」；Gloo 后端 256 卡时 ResNet 慢约 3 倍、BERT 慢约 6 倍，论文把原因归到网络瓶颈（§5.3）。同一篇论文的摘要写「attains near-linear scalability using 256 GPUs」。两处口径并列：摘要写 near-linear，§5.3 的 Figure 9 写 100% slowdown 与 128 卡有效扩展；页面不替原文统一，也不把 128 卡的有效扩展称为 near-linear。</p>
+
+  <p>这些是 PyTorch Distributed 论文在 2020 年、特定 V100 集群上的实测，不是 NCCL 或 DDP 的通用性能承诺。源码核对的是 commit 2ee7a63 的实现；论文写 25MB，源码按 25 MiB 计算，单位换算见第 03 节。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候 ring 的账不成立：小梯度、多机、NCCL 换算法、以及模型放不下</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些条件下本页的公式会高估或低估，以及 DDP 和 FSDP/ZeRO 的分界线。</p>
+
+  <h3>小梯度：2(N−1) 步的固定延迟</h3>
+
+  <p>Ring 的带宽最优性有一个明确前提：每步延迟相对带宽可忽略（Baidu 博客 §Allreduce Communication Cost）。当梯度很小、或者 bucket 很小时，每步搬的数据少，固定延迟占比上升，<code>2(N−1)</code> 步的延迟会盖过带宽收益。论文 §3.2.2 的测量也说明小 tensor 的集合通信效率更低：Gloo 在约 500K 参数/次时饱和，NCCL 在 NVLink 上到 20M 参数/次都没有明显饱和。DDP 的对策是 bucket，但桶太大又会让第一个桶等太久；§5.2 因此说 bucket size 必须按模型和机器实测。</p>
+
+  <p>如果模型里有很多不参与 loss 的参数，<code>find_unused_parameters=True</code> 会遍历 autograd graph 来提前标记它们（第 718-728 行）。这是处理 unused 参数所需的额外工作，不是免费的；默认 <code>False</code>（第 833 行），只有在确实有 unused 参数时才打开。</p>
+
+  <h3>多机：链路不再同构</h3>
+
+  <p>本页的 <code>2(N−1)/N × S</code> 假设每张卡到邻居的带宽相同。单机内可能是 NVLink/NVSwitch，跨机是 InfiniBand 或 TCP/IP，带宽和延迟都不同；NCCL 支持单机或多机、PCIe/NVLink/NVSwitch、InfiniBand Verbs 或 TCP/IP（NCCL README）。一旦跨机，环里最慢的那条链路决定每一步，不能把单机 ring 的均匀链路假设直接外推。</p>
+
+  <p>论文的多机数据也说明这一点：32 卡独占集群是 4 台机器、100GB/s NIC；256 卡共享资源池里，NCCL 的 ResNet50 每轮慢 100%，Gloo 的 ResNet/BERT 慢约 3 倍/6 倍，论文把 Gloo 的退化归因于网络瓶颈（§5.3）。这些都是 DDP 论文的实测，不是 NCCL 算法本身的结论。</p>
+
+  <h3>NCCL 算法切换：ring 只是其中一支</h3>
+
+  <p>NCCL 官方文档的 <code>NCCL_ALGO</code> 一节写得很清楚：默认未设置时，NCCL 会根据<strong>节点拓扑与架构自动选择</strong>可用算法；可选值包括 Ring、Tree、Collnet、CollnetChain/CollnetDirect、NVLS、NVLSTree、PAT（版本不同，支持项不同）。所以「DDP 用 ring all-reduce」是一个常见但过窄的说法：DDP 调用的是 AllReduce，具体走 ring 还是 tree/collnet/NVLS 由 NCCL 和拓扑决定。</p>
+
+  <p>NCCL 还曾提供 <code>NCCL_TREE_THRESHOLD</code>（2.4 引入、2.5 移除）：它设置一个字节阈值，小于该阈值的消息用 tree 而不是 ring。这个历史细节说明算法选择是版本相关的；本页的 <code>2(N−1)/N × S</code> 只描述 ring 这一支，不能当成 NCCL 的通用成本模型。需要强制或排除算法时，用 <code>NCCL_ALGO</code>；不要把它和 DDP 的 bucket 参数混为一谈。</p>
+
+  <h3>DDP vs FSDP/ZeRO：省不省显存是分界线</h3>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">DDP</span><h4>完整副本，只同步梯度</h4></div>
+      <p>每卡保留完整参数、梯度、优化器状态；每步通信量约为 <code>2S</code>（ring 下是 <code>2(N−1)/N × S</code>）。模型能放进单卡时，在数据并行方案里这通常是最简单、通信最少的方案。</p>
+      <p>它也可以和 <code>ZeroRedundancyOptimizer</code> 配合，只把优化器状态分片，降低每卡优化器显存（<code>torch/nn/parallel/distributed.py:524-528</code>）；这只切优化器状态，不切参数和梯度。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">FSDP / ZeRO-3</span><h4>连参数一起切，计算前再拼回</h4></div>
+      <p>FSDP 的 <code>FULL_SHARD</code> 把参数、梯度、优化器状态都分片：forward 前 all-gather 参数，forward 后 reshard；backward 前再次 all-gather，backward 后 reduce-scatter 梯度（<code>torch/distributed/fsdp/api.py:37-42</code>）。</p>
+      <p>FSDP 文档说它受 ZeRO Stage 3 启发（<code>torch/distributed/fsdp/fully_sharded_data_parallel.py:122</code>）。代价是每步通信操作更多、实现更复杂；是否更快取决于模型、网络和 overlap，页面不给统一倍数。</p>
+    </div>
+  </div>
+
+  <p>分界线可以写得很实际：<strong>模型 + 梯度 + 优化器状态能放进单卡，优先 DDP</strong>；放不下才考虑 FSDP/ZeRO 的分片。FSDP 的 <code>NO_SHARD</code> 是 DDP 式的完全复制，已被标记 deprecated，官方建议直接用 DDP（<code>torch/distributed/fsdp/api.py:50-55</code>）。另外，DDP 不支持用 <code>torch.autograd.grad</code> 算梯度，梯度必须累加到参数的 <code>.grad</code>（<code>torch/nn/parallel/distributed.py:647-650</code>）；包装后不能再替换模型参数（同文件第 660-668 行），也不应在之后增删参数（第 627-629 行）。</p>
+
+  <p><strong>本页交互的覆盖范围：</strong>单桶、连续张量、同构链路、所有 rank 同步进入集合通信、只计算 ring 的单向发送量（接收量相同）。<strong>未覆盖：</strong>NCCL 的 tree/collnet/NVLS 分支；多机跨 IB 的带宽差异；每步固定延迟、协议头、拥塞与 straggler；混合精度与梯度压缩 hook；多个 bucket 与反向计算的实际重叠率；FSDP/ZeRO 的分片通信。它是一张手算账，不是 NCCL 模拟器。</p>
+</section>
+
+<footer>
+  <div>PyTorch Distributed: Experiences on Accelerating Data Parallel Training · VLDB 2020</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2006.15704v1">https://arxiv.org/abs/2006.15704v1</a><br>
+    Ring 来源：<a href="https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/">Baidu Research 博客（作者转载）· Bringing HPC Techniques to Deep Learning</a><br>
+    源码：<a href="https://github.com/pytorch/pytorch/commit/2ee7a63cc8feb9171418ac602c0434dbb88348a1">pytorch/pytorch @ 2ee7a63</a><br>
+    NCCL 文档：<a href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html">环境变量（NCCL_ALGO / NCCL_TREE_THRESHOLD）</a><br>
+    笔记：<a href="/ring-all-reduce/">ring-all-reduce</a> · <a href="/data_parallel/">data_parallel</a>
+    <br>笔记纠错：ring-all-reduce 笔记把第二阶段写成 All-Reduce，实际是 All-Gather；本页按原文用 All-Gather。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var nEl = document.getElementById('ring-n');
+  var sEl = document.getElementById('ring-s');
+  var bEl = document.getElementById('ring-b');
+  var nVal = document.getElementById('ring-n-val');
+  var sVal = document.getElementById('ring-s-val');
+  var bVal = document.getElementById('ring-b-val');
+  var volEl = document.getElementById('ring-vol');
+  var stepsEl = document.getElementById('ring-steps');
+  var timeEl = document.getElementById('ring-time');
+  var msgEl = document.getElementById('ring-msg');
+  if (!nEl || !sEl || !bEl || !nVal || !sVal || !bVal || !volEl || !stepsEl || !timeEl || !msgEl) return;
+
+  function fixed5(x) {
+    return x.toFixed(5);
+  }
+
+  function update() {
+    var N = Number(nEl.value);
+    var S = Number(sEl.value);
+    var B = Number(bEl.value);
+    var vol = 2 * (N - 1) / N * S;
+    var steps = 2 * (N - 1);
+    var ms = vol / B * 1000;
+
+    nVal.textContent = String(N);
+    sVal.textContent = S.toFixed(2) + ' GiB';
+    bVal.textContent = String(B) + ' GiB/s';
+    volEl.textContent = fixed5(vol) + ' GiB';
+    stepsEl.textContent = String(steps);
+    timeEl.textContent = fixed5(ms) + ' ms';
+    msgEl.textContent = 'N=' + N + ' 时，每卡发送量（接收量相同） ' + fixed5(vol) +
+      ' GiB；共 ' + steps + ' 步；按 ' + B + ' GiB/s 的纯带宽估计是 ' +
+      fixed5(ms) + ' ms。每步固定延迟未计入。';
+  }
+
+  ['input', 'change'].forEach(function (evt) {
+    nEl.addEventListener(evt, update);
+    sEl.addEventListener(evt, update);
+    bEl.addEventListener(evt, update);
+  });
+
+  update();
+})();
+</script>
+</body>
+</html>

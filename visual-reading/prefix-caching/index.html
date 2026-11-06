@@ -1,0 +1,786 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 8 | 文档 docs/design/prefix_caching.md:222 | 2*4 |
+| 2 | 文档 docs/design/prefix_caching.md:222 | 8/4 |
+| 6 | 文档 docs/design/prefix_caching.md:222 | 14-8 |
+| 13 | 源码 vllm/v1/request.py:354 | 14-1 |
+| 12 | 源码 vllm/v1/request.py:354 | 3*4 |
+| 3 | 源码 vllm/v1/request.py:354 | 12/4 |
+| 2 | 源码 vllm/v1/request.py:354 | 14-12 |
+| 63 | 源码 vllm/config/cache.py:185 | 64-1 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="commit-e740bad">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prefix Caching · 相同前缀只 prefill 一次</title>
+<meta name="description" content="vLLM V1 的 Automatic Prefix Caching：链式块哈希如何把 token 前缀映射到物理块，引用计数与 LRU 如何管理共享和淘汰，以及命中率对 TTFT 与吞吐的影响边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.slot-val{overflow-wrap:anywhere}
+@media (max-width:560px){.sim{padding:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Prefix Caching</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">开销</a>
+      <a href="#flow">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 推理 · vLLM V1</span>
+  <h1>Prefix Caching：相同前缀，只算一次 prefill</h1>
+  <p class="hero-sub">
+    长 system prompt、few-shot 示例和多轮对话会被不同请求反复送进模型，相同的 token 前缀每次都要重算 KV。
+    vLLM V1 把每个满块压缩成一条<strong>链式哈希</strong>，用哈希表找到可复用的物理块，再用<strong>引用计数和 LRU</strong> 决定谁留下、谁被换出。
+    它省的是 prefill 计算，不是 decode 的逐 token 生成。
+  </p>
+  <div class="meta">
+    <span>vLLM V1 · commit e740bad</span>
+    <a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">源码 @ e740bad ↗</a>
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/prefix_caching.md" target="_blank" rel="noopener">设计文档 ↗</a>
+    <a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">PagedAttention 论文 ↗</a>
+    <a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang / RadixAttention 论文 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    因果注意力让每个位置的 K/V 只由它和它之前的 token 决定，所以相同前缀的请求在理论上可以共享同一份 KV。
+    vLLM V1 把这件事实做成缓存：<code>CacheConfig.enable_prefix_caching</code> 的代码默认值是 <code>True</code>（<code>vllm/config/cache.py:260</code>）。
+  </p>
+  <p>
+    缓存键不是单个块的 token，而是「<strong>父块哈希 + 本块 token + extra keys</strong>」的链式哈希。
+    任何位置改一个 token，该块和它之后所有块的哈希都会变；查找从第一块开始，遇到第一个 miss 就停（<code>vllm/v1/core/single_type_kv_cache_manager.py:797-802</code>）。
+  </p>
+  <p>
+    命中只增加引用计数，不复制 KV；空闲队列按 LRU 排序，带哈希的块在被分配时才惰性驱逐。
+    纯 full-attention 路径上只有满块进缓存，块内部分匹配不算命中，所以命中长度落在块边界上。
+  </p>
+  <p>
+    因此 APC 省的是 prefill 计算，decode 的逐 token 生成不受影响。当前缀不重复、或者输出很长时，端到端收益会被稀释。
+    下面的数字卡分别标出默认粒度、文档示例的块内损失，以及论文里共享前缀的吞吐效果。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="源码 vllm/config/cache.py:185">64<small> token</small></div>
+      <div class="k">V1 默认块大小<br>命中按整块对齐，块尾不足 64 token 不复用</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="文档 docs/design/prefix_caching.md:222">8/10</div>
+      <div class="k">文档示例：前 10 个 token 相同<br>只有前 8 个命中，第三块仅匹配 2/4</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§6.4">3.58<small>×</small></div>
+      <div class="k">341-token 共享前缀下的吞吐<br>相对 Orca (Oracle)，LLaMA-13B / WMT16 EN-DE</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>相同的前缀被反复 prefill，浪费的是 TTFT 和整卡吞吐</h2></div>
+  <p class="sec-sub">先建立共同认知：KV 由前缀决定，重复计算本来可以避免；难的是在并发、分块和显存压力下安全地找到并留住可复用的块。</p>
+
+  <p>
+    自回归模型在 prefill 阶段对 prompt 的每个 token 做一次前向，把每层的 K/V 写进 cache。
+    因果注意力决定了位置 <code>i</code> 的 K/V 只依赖 <code>0..i</code> 的 token，因此只要两条请求的开头是同一段 token，
+    这段前缀的 K/V 就是同一份数据；SGLang 论文 §3 把这一点写成「KV cache computation depends only on prefix tokens」。
+    重复计算这段前缀，不会改变结果，只会增加首 token 之前的计算量。
+  </p>
+
+  <p>
+    这种重复在真实负载里很常见。vLLM 文档列出两类典型场景：
+    用户拿同一份长文档（手册、年报）反复提问；或者多轮对话里每次都把完整聊天历史重新送进模型
+    （<code>docs/features/automatic_prefix_caching.md:72-73</code>）。前者共享文档正文，后者共享历史轮次。
+    前缀越长，重复 prefill 的绝对开销越大。
+  </p>
+
+  <div class="eq">
+    <span class="hl-a">相同前缀</span> → 相同 K/V → 可以指向同一份<span class="hl-c">物理块</span>
+  </div>
+  <div class="eq-cap">复用成立的前提是：同一模型实例、同一 adapter、同一多模态输入；这些差异由块哈希的 extra keys 区分</div>
+
+  <p>
+    困难不在「知道可以复用」，而在「每次请求进来时，怎么知道哪一块可以复用、复用后怎么保证它不被提前释放」。
+    请求是交错到达的，块会被 eviction，共享同一块的多个请求随时可能有一个结束。
+    更麻烦的是粒度：KV 按块管理，前缀的末尾往往停在块中间，而块内只匹配一部分时，不能把整块 KV 当作已计算。
+  </p>
+
+  <p>
+    所以一个可用的实现至少要回答三个问题：内容如何映射到物理块；多个请求同时引用时如何计数；显存不够时按什么顺序淘汰。
+    后面的哈希、引用计数和空闲队列，都是围绕这三个问题展开的。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>块共享已有两条路线：显式映射与 radix tree</h2></div>
+  <p class="sec-sub">PagedAttention 把逻辑块映射到物理块，用引用计数和 CoW 管理共享；RadixAttention 把 token 序列放进 radix tree，用 LRU 叶子淘汰。vLLM V1 的 APC（Automatic Prefix Caching）是第三条：链式哈希 + 哈希表。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">PagedAttention · §4.4</span><h4>先有块表，才有块共享</h4></div>
+      <p>
+        逻辑块到物理块的映射让多个序列指向同一份 KV。论文为每个物理块维护引用计数；序列分叉写时，
+        对需要修改的块做 copy-on-write（§4.4）。并行采样和 beam search 的共享都建立在这套映射上。
+      </p>
+      <p>
+        论文里的 shared prefix 场景由服务方<strong>预先预留</strong>一组物理块，请求把自己的逻辑块映射过去，
+        最后一块标记 CoW（§4.4）。这是一条显式配置的共享路径。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">RadixAttention · §3</span><h4>用树找最长公共前缀</h4></div>
+      <p>
+        SGLang 用 radix tree 维护 token 序列到 KV tensor 的映射，节点可以携带一段 token；
+        匹配、插入、淘汰都在树上完成（§3）。KV tensor 仍然是 paged 的非连续布局。
+      </p>
+      <p>
+        淘汰策略是 LRU：先淘汰最久未使用的叶子，祖先在变成叶子后再被淘汰；每个节点有引用计数，
+        计数非零的节点不可淘汰（§3）。这套结构和哈希表解决的是同一个匹配问题，只是索引形态不同。
+      </p>
+    </div>
+  </div>
+
+  <p class="eq-cap">表 1 · 三种前缀共享实现的对照（页面整理；出处见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方案</th><th>匹配方式</th><th>共享单位</th><th>回收 / 淘汰</th><th>跨请求自动复用</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>PagedAttention（§4.4）</td>
+          <td>逻辑块显式映射；共享前缀预先预留</td>
+          <td>物理块</td>
+          <td>引用计数 + CoW；序列级 all-or-nothing 换出（§4.5）</td>
+          <td>同一请求内；跨请求需预留</td>
+        </tr>
+        <tr>
+          <td>RadixAttention（§3）</td>
+          <td>radix tree 按 token 序列匹配</td>
+          <td>树节点（token 段）</td>
+          <td>LRU 从叶子淘汰；ref_cnt = 0 可淘汰</td>
+          <td>是</td>
+        </tr>
+        <tr>
+          <td>vLLM V1 APC（<code>docs/design/prefix_caching.md:5</code>）</td>
+          <td>链式块哈希 + 哈希表</td>
+          <td>满 KV 块</td>
+          <td>空闲队列 LRU；分配时惰性驱逐</td>
+          <td>是</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    三种实现都在做同一件事：把一段 token 前缀映射到可复用的 KV 单元。区别在索引结构——显式块表、radix tree、哈希表——
+    以及淘汰时维护的元数据。页面不对三种方案做优劣排序；它们对负载、块大小和调度策略的假设不同。
+  </p>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>块哈希把「前缀相同」变成一次哈希表查找</h2></div>
+  <p class="sec-sub">记住三件事：哈希是链式的；只有满块有哈希；命中块靠引用计数活过本次请求，靠空闲队列的 LRU 顺序等待淘汰。</p>
+
+  <div class="eq">
+    H<sub>0</sub> = SHA256(<span class="hl-a">NONE_HASH</span>, tokens[0 : B], extra<sub>0</sub>)<br>
+    H<sub>i</sub> = SHA256(<span class="hl-c">H<sub>i−1</sub></span>, tokens[iB : (i+1)B], extra<sub>i</sub>)
+  </div>
+  <div class="eq-cap">链式块哈希：父哈希把块的位置绑进键里；源码 vllm/v1/core/kv_cache_utils.py:727-733，首块父哈希用 NONE_HASH（同文件 :728）</div>
+
+  <p>
+    哈希的输入是三部分。父哈希 <code>H<sub>i−1</sub></code> 让相同内容出现在不同位置时得到不同键；
+    本块 token 元组降低碰撞概率；<code>extra<sub>i</sub></code> 把 LoRA ID、多模态输入哈希、<code>cache_salt</code> 等
+    影响 KV 的因素并进键里（<code>docs/design/prefix_caching.md:15-19</code>）。
+    因此「哈希相同」不只表示 token 相同，还表示产生 KV 的条件相同。
+  </p>
+
+  <p>
+    <code>BlockHash</code> 是 bytes 类型（<code>kv_cache_utils.py:51</code>）。真正存进哈希表的键还会在末尾拼上
+    <span data-src="源码 vllm/v1/core/kv_cache_utils.py:69">4</span> 字节的
+    KV group id（<code>make_block_hash_with_group_id</code>，同文件 :64-73），这样同一段 token 在不同 KV cache group 里不会串键。
+    纯 full-attention 模型通常只有一个 group，可以把它理解成「块哈希 → 物理块」的一张表。
+  </p>
+
+  <p>
+    每个物理块由 <code>KVCacheBlock</code> 描述：不可变的 <code>block_id</code>、当前引用数 <code>ref_cnt</code>、
+    在块被缓存时赋值的 <code>block_hash</code>（本页主路径是满块），以及空闲队列用的前后指针
+    （<code>kv_cache_utils.py:166-179</code>；文档里的简化版在 <code>docs/design/prefix_caching.md:106-119</code>）。
+    请求侧则维护 <code>block_hashes</code>：前端会预计算 prompt 的哈希，<code>Request</code> 初始化时补上剩余部分，
+    后续输出 token 填满新块时继续追加（<code>vllm/v1/request.py:238-243</code>、<code>:298-303</code>）。
+  </p>
+
+  <h3>查找：从第一块开始，遇到第一个 miss 就停</h3>
+  <p>
+    调度器调用 <code>get_computed_blocks()</code>。命中长度先被限制在 <code>prompt_length − 1</code>：
+    即使所有 token 都缓存过，也要留最后一个 token 重算 logits（<code>kv_cache_manager.py:318-324</code>、
+    <code>vllm/v1/request.py:354</code>）。随后 <code>find_longest_cache_hit()</code> 按哈希顺序逐块查表；
+    某一块查不到就 <code>break</code>，因为父哈希链保证后面的块不可能单独命中
+    （<code>single_type_kv_cache_manager.py:797-802</code>）。纯 full-attention 路径上只有满块会进表，块内部分匹配不算命中
+    （<code>docs/design/prefix_caching.md:22</code>）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">为什么是链式</span><h4>一个 token 变化会污染它之后的全部块</h4></div>
+    <p>
+      <code>H<sub>i</sub></code> 把 <code>H<sub>i−1</sub></code> 作为输入，所以改掉第 <code>i</code> 块里的一个 token，
+      第 <code>i</code> 块的哈希会变，第 <code>i+1</code> 块及之后所有块的父哈希也跟着变。
+      查找端不需要逐块比较 token，只要看到第一个不匹配的哈希就可以停止；代价是前缀中间的任意改动都会让后半段全部失效。
+    </p>
+  </div>
+
+  <h3>共享与 PagedAttention 的关系</h3>
+  <p>
+    PagedAttention 提供的是地址转换：请求持有逻辑块表，表项指向物理块。APC 没有换掉这层转换，
+    它只是在物理块之上加了一张「内容哈希 → 块」的索引。命中时，请求的块表直接指向已经有 KV 的物理块，
+    <code>touch()</code> 把 <code>ref_cnt</code> 加一（<code>block_pool.py:774-790</code>）；没有复制 KV。
+  </p>
+  <p>
+    与论文里的 CoW 路径相比，V1 的满块命中是只读共享。可写条件是「<code>ref_cnt == 1</code> 且块还没有哈希」
+    （<code>block_pool.py:794-796</code>）：一旦块变满并写入缓存，它就不再被修改。
+    因此 APC 的共享满块不需要 CoW；生成阶段要写入的是请求自己的尾块或新块。
+    论文 §4.4 给 shared prefix 的最后一块标记 CoW，是因为那里共享的块还可能被继续写；
+    V1 只缓存满块，最后一块本来就不在共享范围里。
+  </p>
+
+  <h3>引用计数与 LRU：缓存块平时就住在空闲队列里</h3>
+  <p>
+    这是 vLLM V1 最容易看漏的一点：一个块被缓存后，即使当前没有请求使用它，它也不会被单独放进另一个「缓存池」。
+    它继续留在 block pool 里，<code>ref_cnt</code> 为 0 时挂在空闲队列上，同时哈希表仍然指向它。
+    主路径上，只有分配器从队头把它取走时，才会清掉哈希、完成驱逐（<code>block_pool.py:681-715</code>、<code>:751-772</code>）。
+  </p>
+  <ul>
+    <li><strong>命中：</strong><code>touch()</code> 在 <code>ref_cnt == 0</code> 时先把块移出空闲队列，再执行 <code>ref_cnt += 1</code>（<code>block_pool.py:786-790</code>）。计数大于 0 的块不在队列里，不会被分配。</li>
+    <li><strong>释放：</strong>请求结束时 <code>ref_cnt</code> 递减；只有减到 0 的块才回到队列。带哈希的块进<strong>队尾</strong>，无哈希的块进<strong>队头</strong>（<code>block_pool.py:824-837</code>）。</li>
+    <li><strong>淘汰：</strong>分配从队头取块；队头带哈希就先清哈希。队头是最近最少使用的缓存块，所以这是块级 LRU（<code>docs/design/prefix_caching.md:204-208</code>）。</li>
+    <li><strong>顺序：</strong>请求释放时按逆序归还块，最后一个块（哈希覆盖 token 最多、后续最不可能被复用）最先进入队尾方向，因而更早被淘汰（<code>docs/design/prefix_caching.md:198</code>）。</li>
+  </ul>
+</section>
+
+<!-- ================= 04. 计算与开销 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>哈希只算一次，查找只到首个 miss；代价是块粒度和显存</h2></div>
+  <p class="sec-sub">工程上它很便宜：每满块一次哈希、每命中块一次字典探测。贵的是缓存占住的显存，以及块内无法复用的尾部。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">开销账本</span><h4>每块一次哈希，每块一次探测</h4></div>
+    <ul>
+      <li><strong>哈希：</strong>每个满块一次；<code>hash_block_tokens</code> 的 docstring 说明它用 LRU cache 避免对相同块内容重复计算（<code>kv_cache_utils.py:711</code>）。</li>
+      <li><strong>查找：</strong>单 group 模型每块一次字典探测；命中 h 块就是 h 次探测，首个 miss 后停止（<code>single_type_kv_cache_manager.py:799-802</code>）。多 group 模型每块要对每个 group 各查一次（<code>block_pool.py:190-200</code>）。</li>
+      <li><strong>分配：</strong>空闲队列是双向链表，单块取出、移除都是 O(1)；文档明确说这是为了中间节点也能 O(1) 移到尾部（<code>docs/design/prefix_caching.md:123-126</code>）。</li>
+      <li><strong>显存：</strong>缓存块仍占 block pool 的容量；命中时多个请求指向同一物理块，省的是重复块，不是被共享的那一份 KV。</li>
+    </ul>
+  </div>
+
+  <p>
+    块大小是这套机制的粒度税。V1 的代码默认块大小是 <span data-src="源码 vllm/config/cache.py:185">64</span> 个 token
+    （<code>vllm/config/cache.py:185</code>）。前缀尾部不足一个块的 token 不会进缓存，所以最坏情况下有
+    <span data-src="源码 vllm/config/cache.py:185">63</span> 个 token 的共享前缀无法复用（64 − 1）。
+    块越大，哈希和查找次数越少，但尾部浪费越大；块越小，命中越细，但每块元数据和查找次数上升。
+    论文 §7.2 也指出：块太大增加内部碎片、降低共享概率，块太小则不利于 GPU 并行读取和处理 KV。
+  </p>
+
+  <p>
+    还有一笔固定开销：即使 prompt 全部命中，也要留最后一个 token 重算 logits（<code>vllm/v1/request.py:354</code>）。
+    由于 <code>num_computed_tokens</code> 要按块大小对齐，实际可能重算一整个块，而不是只重算一个 token
+    （<code>vllm/v1/core/kv_cache_manager.py:318-323</code>）。这意味着「全部命中」也不等于零重算。
+  </p>
+
+  <p>
+    哈希算法本身也有取舍。默认是 <code>sha256</code>（<code>vllm/config/cache.py:262</code>），文档说明它用 Python pickle 序列化，
+    跨 Python / vLLM 版本不一定可复现；需要跨语言可复现时可选 <code>sha256_cbor</code>。
+    <code>xxhash</code> 更快，但不是加密哈希，理论上增加碰撞风险，多租户场景需要自行评估
+    （<code>docs/design/prefix_caching.md:24-31</code>）。
+  </p>
+</section>
+
+<!-- ================= 05. 流程 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一次命中的完整路径：查表 → touch → 只算剩余 token → 满块回填</h2></div>
+  <p class="sec-sub">把调度器、块池和请求三者的动作按时间排开；注意引用计数是在查表之后、分配阶段更新的，查表本身不改状态。</p>
+
+  <figure>
+    <svg viewBox="0 0 840 500" role="img" aria-label="Prefix Caching 从切块、链式哈希、查表、分配、前向到释放的六步流程" font-family="Inter,'Noto Sans SC',sans-serif">
+      <defs>
+        <marker id="pc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <g>
+        <rect x="20" y="20" width="140" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="90" y="46" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">01 切块</text>
+        <text x="90" y="64" text-anchor="middle" fill="var(--bg)" font-size="10.5">B 个 token / 块</text>
+        <rect x="180" y="20" width="380" height="58" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="196" y="45" fill="var(--text)" font-size="12.5">请求 token 按块切开，满块才有哈希</text>
+        <text x="196" y="64" fill="var(--text-muted)" font-size="11.5">block_hashes 由前端预计算，后续满块增量追加</text>
+        <rect x="580" y="20" width="240" height="58" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="596" y="45" fill="var(--c1)" font-size="12.5">只有满块进入缓存</text>
+        <text x="596" y="64" fill="var(--c1)" font-size="11.5">块内部分匹配不算命中</text>
+      </g>
+      <line x1="370" y1="78" x2="370" y2="92" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#pc-arrow)"></line>
+
+      <g>
+        <rect x="20" y="96" width="140" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="90" y="122" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">02 算哈希</text>
+        <text x="90" y="140" text-anchor="middle" fill="var(--bg)" font-size="10.5">父哈希 + 本块</text>
+        <rect x="180" y="96" width="380" height="58" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="196" y="121" fill="var(--text)" font-size="12.5">H_i = SHA256(H_(i-1), 本块 token, extra)</text>
+        <text x="196" y="140" fill="var(--text-muted)" font-size="11.5">首块用 NONE_HASH 作为父哈希</text>
+        <rect x="580" y="96" width="240" height="58" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+        <text x="596" y="121" fill="var(--c2)" font-size="12.5">哈希键还带 group id</text>
+        <text x="596" y="140" fill="var(--c2)" font-size="11.5">同一段 token 不会串 group</text>
+      </g>
+      <line x1="370" y1="154" x2="370" y2="168" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#pc-arrow)"></line>
+
+      <g>
+        <rect x="20" y="172" width="140" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="90" y="198" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">03 查表</text>
+        <text x="90" y="216" text-anchor="middle" fill="var(--bg)" font-size="10.5">首 miss 即停</text>
+        <rect x="180" y="172" width="380" height="58" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="196" y="197" fill="var(--text)" font-size="12.5">从 H_0 起逐块查哈希表</text>
+        <text x="196" y="216" fill="var(--text-muted)" font-size="11.5">遇到第一个 miss 立即 break，后面不再探测</text>
+        <rect x="580" y="172" width="240" height="58" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="596" y="197" fill="var(--c1)" font-size="12.5">返回命中块列表</text>
+        <text x="596" y="216" fill="var(--c1)" font-size="11.5">此时不改引用计数</text>
+      </g>
+      <line x1="370" y1="230" x2="370" y2="244" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#pc-arrow)"></line>
+
+      <g>
+        <rect x="20" y="248" width="140" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="90" y="274" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">04 分配</text>
+        <text x="90" y="292" text-anchor="middle" fill="var(--bg)" font-size="10.5">touch + 取新块</text>
+        <rect x="180" y="248" width="380" height="58" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="196" y="273" fill="var(--text)" font-size="12.5">touch 命中块；新块从空闲队头取</text>
+        <text x="196" y="292" fill="var(--text-muted)" font-size="11.5">队头带哈希则先驱逐，再交给请求</text>
+        <rect x="580" y="248" width="240" height="58" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="596" y="273" fill="var(--accent-deep)" font-size="12.5">ref_cnt 0 → 1</text>
+        <text x="596" y="292" fill="var(--accent-deep)" font-size="11.5">块移出空闲队列，暂不会被淘汰</text>
+      </g>
+      <line x1="370" y1="306" x2="370" y2="320" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#pc-arrow)"></line>
+
+      <g>
+        <rect x="20" y="324" width="140" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="90" y="350" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">05 前向</text>
+        <text x="90" y="368" text-anchor="middle" fill="var(--bg)" font-size="10.5">只算剩余 token</text>
+        <rect x="180" y="324" width="380" height="58" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="196" y="349" fill="var(--text)" font-size="12.5">只 prefill 未命中的 token</text>
+        <text x="196" y="368" fill="var(--text-muted)" font-size="11.5">满块写回哈希表，供同批其他请求复用</text>
+        <rect x="580" y="324" width="240" height="58" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+        <text x="596" y="349" fill="var(--accent-deep)" font-size="12.5">省下的是 prefill 计算</text>
+        <text x="596" y="368" fill="var(--accent-deep)" font-size="11.5">decode 的逐 token 计算不变</text>
+      </g>
+      <line x1="370" y1="382" x2="370" y2="396" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#pc-arrow)"></line>
+
+      <g>
+        <rect x="20" y="400" width="140" height="58" rx="8" fill="var(--text)"></rect>
+        <text x="90" y="426" text-anchor="middle" fill="var(--bg)" font-size="13" font-weight="700">06 释放</text>
+        <text x="90" y="444" text-anchor="middle" fill="var(--bg)" font-size="10.5">ref_cnt 减到 0</text>
+        <rect x="180" y="400" width="380" height="58" rx="8" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+        <text x="196" y="425" fill="var(--text)" font-size="12.5">ref_cnt 减到 0 才回到空闲队列</text>
+        <text x="196" y="444" fill="var(--text-muted)" font-size="11.5">有哈希 → 队尾；无哈希 → 队头</text>
+        <rect x="580" y="400" width="240" height="58" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+        <text x="596" y="425" fill="var(--c1)" font-size="12.5">队头 = 下次分配先取</text>
+        <text x="596" y="444" fill="var(--c1)" font-size="11.5">也就是 LRU 的淘汰端</text>
+      </g>
+    </svg>
+    <figcaption>图 1 · APC 的查表—分配—回填—释放回路。依据 <code>docs/design/prefix_caching.md</code> §Operations 与 vLLM V1 源码整理；图中只画满块路径，hybrid 模型的细粒度分支不在图内。</figcaption>
+  </figure>
+
+  <ol>
+    <li><strong>请求进入：</strong>前端预计算 prompt 的块哈希，<code>Request</code> 初始化时调用 <code>update_block_hashes()</code>；后续输出 token 填满新块时继续追加（<code>request.py:238-243</code>、<code>:298-303</code>）。</li>
+    <li><strong>查表：</strong>调度器调用 <code>get_computed_blocks()</code>；命中上限是 <code>prompt_length − 1</code>，再交给 <code>find_longest_cache_hit()</code>（<code>kv_cache_manager.py:318-329</code>）。</li>
+    <li><strong>首 miss 停止：</strong>按块哈希顺序查 <code>cached_block_hash_to_block</code>，第一块缺失就 <code>break</code>；链式哈希保证后面的块不可能单独命中（<code>single_type_kv_cache_manager.py:797-802</code>）。</li>
+    <li><strong>分配：</strong><code>allocate_slots()</code> 先 <code>touch</code> 命中块（ref_cnt 0→1，移出空闲队列），再从队头取新块；队头若带哈希，先清掉哈希完成驱逐（<code>block_pool.py:774-790</code>、<code>:681-715</code>）。</li>
+    <li><strong>前向与回填：</strong>模型只 prefill 未命中的 token；请求推进到满块时，<code>cache_full_blocks()</code> 把哈希键插入表（<code>block_pool.py:203-276</code>）。</li>
+    <li><strong>释放：</strong>请求结束时 ref_cnt 递减；减到 0 的块回到空闲队列。带哈希的块进队尾（晚驱逐），无哈希的块进队头（先复用）（<code>block_pool.py:824-837</code>）。</li>
+  </ol>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>命中长度由块边界决定，收益由共享前缀长度决定</h2></div>
+  <p class="sec-sub">文档示例说明块内部分匹配的损失；论文实验说明前缀越长，吞吐收益越大。两组数字的口径不同，不能混在一起。</p>
+
+  <p>
+    先看文档里的最小例子。块大小取 4，请求 1 有 <span data-src="文档 docs/design/prefix_caching.md:222">14</span> 个 prompt token，
+    前 <span data-src="文档 docs/design/prefix_caching.md:222">10</span> 个与请求 0 相同。前两块各 4/4 命中；
+    第三块只对上 <span data-src="文档 docs/design/prefix_caching.md:222">2/4</span>；所以只命中
+    <span data-src="文档 docs/design/prefix_caching.md:222">8</span> 个 token，
+    剩余 <span data-src="文档 docs/design/prefix_caching.md:222">6</span> 个需要重算（<code>docs/design/prefix_caching.md:222</code>）。
+    这不是实现漏掉了 <span data-src="文档 docs/design/prefix_caching.md:222">2</span> 个 token，
+    而是「只有满块能缓存」的直接结果：第三块没有满，不能把它的 KV 当作完整前缀交给下一个请求。
+  </p>
+
+  <p>
+    下面的交互把这段例子缩成可调参数的模拟。拖动共享前缀长度，或者切换块大小，看命中长度怎样被块边界截断；
+    默认参数就是上面这组数字。
+  </p>
+
+  <div class="sim" id="pc-sim">
+    <div class="sim-top" id="sim-btns">
+      <button type="button" class="rule-btn active" data-b="4">块大小 B = 4<span class="r-sub">文档示例值</span></button>
+      <button type="button" class="rule-btn" data-b="8">块大小 B = 8<span class="r-sub">页面自定的对照值</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>共享前缀 token 数 s <span class="v" id="sim-s-val">10</span></label>
+        <input id="sim-s" type="range" min="0" max="14" step="1" value="10">
+      </div>
+      <div class="ctrl">
+        <label>prompt 长度 P <span class="v">14</span></label>
+        <div class="slot-val">固定为文档示例长度</div>
+      </div>
+    </div>
+
+    <div class="slots" id="sim-slots">
+      <div class="slot hit" id="slot-0">
+        <div class="slot-name" id="slot-0-name">块 0 · token 0–3</div>
+        <div class="slot-val" id="slot-0-val">4/4 命中</div>
+      </div>
+      <div class="slot hit" id="slot-1">
+        <div class="slot-name" id="slot-1-name">块 1 · token 4–7</div>
+        <div class="slot-val" id="slot-1-val">4/4 命中</div>
+      </div>
+      <div class="slot" id="slot-2">
+        <div class="slot-name" id="slot-2-name">块 2 · token 8–11</div>
+        <div class="slot-val" id="slot-2-val">2/4 部分</div>
+      </div>
+      <div class="slot" id="slot-3">
+        <div class="slot-name" id="slot-3-name">块 3 · token 12–13</div>
+        <div class="slot-val" id="slot-3-val">0/2 未命中</div>
+      </div>
+    </div>
+
+    <div class="readout" id="sim-readout" data-src="文档 docs/design/prefix_caching.md:222">
+      <div class="r-head">命中结果</div>
+      <div id="sim-msg">命中 2 个完整块 = 8 token；剩余 6 token 需要重算。块 2 只匹配 2/4 个 token，按满块缓存规则不算命中。</div>
+    </div>
+  </div>
+  <p class="eq-cap">
+    默认参数对应 <code>docs/design/prefix_caching.md:222</code> 的 14-token 示例；块大小 4 是文档示例值，V1 代码默认是 64（<code>vllm/config/cache.py:185</code>）。
+    这个模拟是<strong>简化模拟，不是源码还原</strong>。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：两组参数，JS 与手算同一套整数规则<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A（默认）：s = 10，B = 4，P = 14</strong></p>
+      <ol>
+        <li>可用完整块 = floor(10 / 4) = 2；命中上限 = floor((14 − 1) / 4) = 3 块。</li>
+        <li>命中块数 = min(2, 3) = <code>2</code>；命中 token = 2 × 4 = <code>8</code>。</li>
+        <li>重算 token = 14 − 8 = <code>6</code>。</li>
+        <li>块状态：块 0 = 4/4 命中；块 1 = 4/4 命中；块 2 = 2/4 部分；块 3 = 0/2 未命中。</li>
+      </ol>
+      <p><strong>组 B：s = 14，B = 4，P = 14</strong></p>
+      <ol>
+        <li>可用完整块 = floor(14 / 4) = 3；命中上限 = floor((14 − 1) / 4) = 3 块。</li>
+        <li>命中块数 = min(3, 3) = <code>3</code>；命中 token = 3 × 4 = <code>12</code>。</li>
+        <li>重算 token = 14 − 12 = <code>2</code>；最后一个 token 必须重算，且命中长度按块对齐。</li>
+        <li>块状态：块 0–2 = 4/4 命中；块 3 = 2/2 匹配但未满块，不缓存。</li>
+      </ol>
+      <p>
+        JS 只做 <code>Math.floor / Math.min</code> 和整数乘减，没有随机数；上面两组参数在页面上切换后逐位一致。
+        上限里的 <code>14 − 1 = 13</code> 来自 <code>vllm/v1/request.py:354</code> 的「最后一个 token 必须重算」。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">覆盖分支与差异清单</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>满块命中的块粒度；首个 miss 后不再命中（模拟假设前 s 个 token 是严格连续共享，
+        且这些满块已经在缓存里）；<code>max_cache_hit_length = prompt_length − 1</code>；
+        命中长度按块大小向下对齐；块内部分匹配不算命中。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>真实 SHA-256 计算与哈希表查找；父哈希链导致的失效传播（模拟只按连续共享长度计算）；
+        引用计数与空闲队列；LoRA / 多模态的 extra keys；<code>cache_salt</code>；
+        hybrid Mamba / sliding window 的细粒度部分命中；EAGLE 丢弃最后一块；KV connector；
+        抢占、重算与调度顺序；同一哈希的重复块。
+      </p>
+      <p>
+        因此它是<strong>简化模拟，不是源码还原</strong>。真实实现要先算链式哈希、逐块查
+        <code>cached_block_hash_to_block</code>，再在 <code>allocate_slots</code> 里 touch 命中的块；
+        这个模拟只回答「块边界截断后还能命中多少 token」。
+      </p>
+    </div>
+  </details>
+
+  <h3>共享前缀越长，吞吐收益越大</h3>
+  <p>
+    PagedAttention 论文的 §6.4 做了一个共享前缀的翻译实验：模型是 LLaMA-13B，数据是 WMT16 EN–DE，
+    基线是 Orca (Oracle)。前缀从 1 个示例（<span data-src="§6.4">80</span> token）增加到 5 个示例
+    （<span data-src="§6.4">341</span> token），
+    vLLM 的端到端吞吐分别是基线的 <span data-src="§6.4">1.67×</span> 和 <span data-src="§6.4">3.58×</span>。
+  </p>
+
+  <p class="eq-cap">表 2 · 共享前缀长度的吞吐对照（PagedAttention 论文 §6.4；LLaMA-13B / WMT16 EN-DE）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>共享前缀</th><th>前缀 token 数</th><th>吞吐 vs Orca (Oracle)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1-shot（1 个示例）</td><td class="num">80</td><td class="num">1.67×</td></tr>
+        <tr><td>5-shot（5 个示例）</td><td class="num">341</td><td class="num">3.58×</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    条件必须和数字一起读：这是论文 §6.4 的<strong>共享前缀</strong>实验，vLLM 当时通过服务方预留物理块来共享，
+    不是 V1 的自动哈希查找。3.58× 是 5-shot / 341 token 条件下的端到端吞吐比，
+    不能直接外推到所有 APC 负载，也不能拆成单独的 prefill 收益。能直接归因的是论文 §4.4 的描述：
+    共享前缀后，prompt 阶段只需要计算用户的任务输入，重复的前缀 prefill 被省掉。
+  </p>
+
+  <p>
+    同一论文 §6.3 的块共享实验口径不同：它统计「共享省下的块数 ÷ 不共享时的总块数」，场景是同一请求内的并行采样与 beam search。
+    Alpaca 上并行采样节省 <span data-src="§6.3">6.1%–9.8%</span> 显存、beam search 节省
+    <span data-src="§6.3">37.6%–55.2%</span>；ShareGPT 上分别是 <span data-src="§6.3">16.2%–30.5%</span> 与
+    <span data-src="§6.3">44.3%–66.3%</span>（§6.3）。
+    这些数字说明块共享的显存收益，不是 APC 的命中率或 TTFT 数字。
+  </p>
+
+  <p>
+    收益边界与 prefill 占比有关。文档明确写：APC 只减少 prefill 时间，不减少 decode 的逐 token 生成；
+    当答案很长、或者新请求与已有请求没有相同前缀时，收益消失（<code>docs/features/automatic_prefix_caching.md:77</code>）。
+    命中率对 TTFT 的影响也沿着同一条线：命中减少的是首 token 之前的 prefill token 数；
+    如果请求在队列里等待，TTFT 还包含排队时间，缓存命中只作用于真正开始 prefill 之后的那段计算。
+  </p>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它解决不了块内浪费、decode 和显存竞争</h2></div>
+  <p class="sec-sub">把适用边界写清楚：只缓存满块、只省 prefill、只认精确前缀，缓存本身还要占显存。</p>
+
+  <ul>
+    <li>
+      <strong>只缓存满块：</strong>块内部分匹配不算命中。默认 64-token 块下，前缀尾部最多有
+      <span data-src="源码 vllm/config/cache.py:185">63</span> 个 token 无法复用（64 − 1）。
+      共享前缀如果总停在块中间，命中长度按块下取整；影响有多大，取决于前缀长度的分布。
+    </li>
+    <li>
+      <strong>最后一个 token 必重算：</strong>即使全部命中，也要留 token 产生 logits；块对齐可能让重算扩大到一整块
+      （<code>vllm/v1/request.py:354</code>、<code>kv_cache_manager.py:318-323</code>）。
+    </li>
+    <li>
+      <strong>只省 prefill：</strong>decode 的逐 token 生成不变；长输出、无共享前缀的负载没有收益
+      （<code>docs/features/automatic_prefix_caching.md:77</code>）。
+    </li>
+    <li>
+      <strong>只认精确前缀：</strong>改一个 token，该块及其后所有块的哈希都会变；不是语义相似匹配，也不做编辑距离。
+      共享必须从第一个 token 起连续相同，中间缺一块就停。
+    </li>
+    <li>
+      <strong>缓存要占显存：</strong>缓存块留在 block pool 里，哪怕当前没有请求使用；它们仍计入 free blocks 的容量，
+      块池紧张时按空闲队列 LRU 淘汰，命中率会随并发和负载波动。
+    </li>
+    <li>
+      <strong>多租户要隔离：</strong><code>cache_salt</code> 会进入首块哈希，只有相同 salt 的请求才能共享
+      （<code>docs/design/prefix_caching.md:87</code>）；默认哈希是 <code>sha256</code>，
+      换成 <code>xxhash</code> 属于非加密哈希，碰撞风险需要自行评估（<code>vllm/config/cache.py:262</code>、<code>docs/design/prefix_caching.md:24-31</code>）。
+    </li>
+    <li>
+      <strong>混合模型与重复块：</strong>Mamba / sliding window 的细粒度部分命中、EAGLE 丢块、KV connector
+      不在本页范围；V1 的 block table 是 append-only，可能暂时缓存同一哈希的重复块，直到请求释放
+      （<code>docs/design/prefix_caching.md:194</code>）。
+    </li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>什么时候值得开</h4></div>
+    <p>
+      负载里有稳定、较长的公共前缀（system prompt、few-shot 示例、长文档、多轮历史），且 prefill 在端到端时间里占不可忽略的比例时，
+      APC 的收益最直接。反过来，请求各不相同、或者输出长度远大于输入时，文档的结论是 APC 不带来性能收益；
+      此时缓存块仍然占着 block pool 的容量（<code>docs/features/automatic_prefix_caching.md:77</code>）。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>Automatic Prefix Caching · vLLM V1（commit e740bad）</div>
+  <div class="src">
+    源码：<a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">vllm @ e740bad</a><br>
+    文档：<a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/prefix_caching.md" target="_blank" rel="noopener">docs/design/prefix_caching.md</a> ·
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/features/automatic_prefix_caching.md" target="_blank" rel="noopener">docs/features/automatic_prefix_caching.md</a><br>
+    论文：<a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener">PagedAttention（arXiv 2309.06180）</a> ·
+    <a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">SGLang / RadixAttention（arXiv 2312.07104）</a><br>
+    笔记：<a href="/vllm高效推理全链路/">vLLM 高效推理全链路</a>
+  </div>
+  <div class="src" style="margin-top:12px">
+    勘误 / 版本差异：笔记《vLLM 高效推理全链路》§6.3 描述的是旧版 v0 的 <code>CachedBlockAllocator</code>——
+    哈希是 <code>hash((前缀 token 元组, lora_id))</code>，每个块把从开头到本块末尾的 token 一起哈希；
+    淘汰由 <code>evictor</code> 按 LRU + <code>max_num_tokens</code> 处理。
+    本页按 V1 源码：块哈希是「父哈希 + 本块 token + extra」的链式结构，淘汰由 block pool 的空闲队列完成，
+    两者不是同一套实现。笔记原文未改。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('pc-sim');
+  if (!sim) return;
+
+  var slider = document.getElementById('sim-s');
+  var sliderVal = document.getElementById('sim-s-val');
+  var msgEl = document.getElementById('sim-msg');
+  var slotsWrap = document.getElementById('sim-slots');
+  if (!slider || !sliderVal || !msgEl || !slotsWrap) return;
+
+  var buttons = sim.querySelectorAll('.rule-btn');
+  var B = 4;
+  var P = 14;
+
+  function render() {
+    var s = parseInt(slider.value, 10);
+    if (isNaN(s)) s = 0;
+    if (s < 0) s = 0;
+    if (s > P) s = P;
+    sliderVal.textContent = String(s);
+
+    var nBlocks = Math.ceil(P / B);
+    var maxFullByCap = Math.floor((P - 1) / B);
+    var sharedFull = Math.floor(s / B);
+    var hitBlocks = Math.min(sharedFull, maxFullByCap);
+    var hit = hitBlocks * B;
+    var recompute = P - hit;
+    var partialIdx = -1;
+    var partialMatch = 0;
+    var partialSize = 0;
+    var tailIdx = -1;
+    var tailMatch = 0;
+    var tailSize = 0;
+
+    for (var i = 0; i < 4; i++) {
+      var slot = document.getElementById('slot-' + i);
+      if (!slot) continue;
+      if (i >= nBlocks) {
+        slot.hidden = true;
+        continue;
+      }
+      slot.hidden = false;
+
+      var start = i * B;
+      var end = Math.min(P, start + B);
+      var size = end - start;
+      var matched = Math.min(Math.max(s - start, 0), size);
+      var nameEl = document.getElementById('slot-' + i + '-name');
+      var valEl = document.getElementById('slot-' + i + '-val');
+
+      if (nameEl) {
+        nameEl.textContent = '块 ' + i + ' · token ' + start + '–' + (end - 1);
+      }
+
+      var label;
+      if (i < hitBlocks) {
+        label = matched + '/' + size + ' 命中';
+      } else if (matched === 0) {
+        label = '0/' + size + ' 未命中';
+      } else if (size < B) {
+        label = matched + '/' + size + ' 匹配（未满块）';
+      } else {
+        label = matched + '/' + size + ' 部分';
+      }
+      if (valEl) valEl.textContent = label;
+
+      if (i < hitBlocks) {
+        slot.classList.add('hit');
+      } else {
+        slot.classList.remove('hit');
+      }
+
+      if (matched > 0 && matched < size && size === B) {
+        partialIdx = i;
+        partialMatch = matched;
+        partialSize = size;
+      }
+      if (matched > 0 && size < B) {
+        tailIdx = i;
+        tailMatch = matched;
+        tailSize = size;
+      }
+    }
+
+    if (B === 8) {
+      slotsWrap.className = 'slots s2';
+    } else {
+      slotsWrap.className = 'slots';
+    }
+
+    var msg = '命中 ' + hitBlocks + ' 个完整块 = ' + hit + ' token；剩余 ' + recompute + ' token 需要重算。';
+    if (partialIdx >= 0) {
+      msg += ' 块 ' + partialIdx + ' 只匹配 ' + partialMatch + '/' + partialSize + ' 个 token，按满块缓存规则不算命中。';
+    }
+    if (tailIdx >= 0) {
+      msg += ' 尾块只有 ' + tailMatch + '/' + tailSize + ' 个 token（不足 B = ' + B + '），未满块，不缓存。';
+    }
+    if (hitBlocks === 0) {
+      msg = '命中 0 个完整块 = 0 token；' + P + ' token 全部需要重算。';
+    }
+    if (s === P) {
+      msg += ' 即使前缀全同，最后一个 token 也必须重算，且命中长度按块对齐。';
+    }
+    msgEl.textContent = msg;
+  }
+
+  function setB(nextB) {
+    if (nextB !== 4 && nextB !== 8) return;
+    B = nextB;
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      var vb = parseInt(btn.getAttribute('data-b'), 10);
+      if (vb === B) {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+    }
+    render();
+  }
+
+  for (var i = 0; i < buttons.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        var nextB = parseInt(btn.getAttribute('data-b'), 10);
+        setB(nextB);
+      });
+    })(buttons[i]);
+  }
+
+  slider.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

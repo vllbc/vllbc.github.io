@@ -1,0 +1,653 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 4 | vllm/config/vllm.py:2696 | (32-8)/8+1 |
+| 8 | vllm/config/vllm.py:2696 | (64-8)/8+1 |
+| 16 | vllm/config/vllm.py:2696 | (128-8)/8+1 |
+| 31 | vllm/config/vllm.py:2696 | (248-8)/8+1 |
+| 1 | vllm/config/vllm.py:2696 | (256-256)/16+1 |
+| 17 | vllm/config/vllm.py:2696 | (512-256)/16+1 |
+| 49 | vllm/config/vllm.py:2696 | (1024-256)/16+1 |
+| 7 | vllm/config/vllm.py:2696 | 3+4 |
+| 11 | vllm/config/vllm.py:2696 | 3+8 |
+| 19 | vllm/config/vllm.py:2696 | 3+16 |
+| 35 | vllm/config/vllm.py:2696 | 3+31+1 |
+| 51 | vllm/config/vllm.py:2696-2708（基础网格；max_num_seqs=256 或 ≥512） | 3+31+17 |
+| 52 | vllm/config/vllm.py:2666-2667, 2718-2720（max_num_seqs=264 等不在网格且 ≤ cap） | 51+1 |
+| 83 | vllm/config/vllm.py:2696-2708（基础网格；SM100 cap=1024，默认 max_num_seqs=1024） | 3+31+49 |
+| 3 | §04 手算 A | 8-5 |
+| 37.5 | §04 手算 A | 3/8*100 |
+| 12 | §04 手算 B | 512-500 |
+| 2.34 | §04 手算 B | 12/512*100 |
+| 4.9 | PR #20059 Serving Benchmark Result | (1992.27-1898.67)/1898.67*100 |
+| 2.0 | PR #20059 Serving Benchmark Result | (1946.35-1907.38)/1907.38*100 |
+| 3.0 | PR #20059 Serving Benchmark Result | (17.08-16.57)/17.08*100 |
+| 3.0 | PR #20059 Serving Benchmark Result | (16.85-16.34)/16.85*100 |
+| 3.0 | PR #20059 Serving Benchmark Result | (78.69-76.37)/76.37*100 |
+| 3.3 | PR #20059 Serving Benchmark Result | (76.03-73.61)/73.61*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="e740bad">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CUDA Graphs · 把 decode 的逐 kernel launch 压成一次提交</title>
+<meta name="description" content="按 vLLM commit e740bad 的源码拆解 CUDA Graphs：decode 为何 launch-bound、capture/instantiate/replay、静态 buffer 与 padding、full/piecewise 模式与 attention backend 的降级关系。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页特有的少量微调；公共样式全部来自 base.css */
+.src-path{overflow-wrap:anywhere}
+section.block{scroll-margin-top:64px}
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px}
+.sim-note{font-size:12px;color:var(--text-soft);line-height:1.75;margin:12px 0 0}
+.ctrl-note{font-family:"JetBrains Mono",monospace;font-size:10.5px;color:var(--text-soft);margin-top:4px}
+.mode-out{font-family:"JetBrains Mono",monospace;font-weight:600;color:var(--accent-deep);font-size:15px}
+.mode-reason{font-size:13px;color:var(--text-muted);margin:6px 0 0}
+.cg-svg text{font-family:Inter,"Noto Sans SC",sans-serif}
+.cg-svg .panel{fill:var(--bg-surface);stroke:var(--border);stroke-width:1}
+.cg-svg .inner{fill:var(--bg);stroke:var(--border);stroke-width:1}
+.cg-svg .node{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1}
+.cg-svg .hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.2}
+.cg-svg .t{font-size:12px;font-weight:600;fill:var(--text)}
+.cg-svg .s{font-size:10.5px;fill:var(--text-muted)}
+.cg-svg .tag{font-size:10.5px;font-family:"JetBrains Mono",monospace;fill:var(--accent-deep)}
+.cg-svg .arrow-line{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.cg-svg .arrow-head{fill:var(--text-soft)}
+.cg-svg .dash{fill:none;stroke:var(--accent);stroke-width:1;stroke-dasharray:4 3}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">CUDA Graphs</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">开销与显存</a>
+      <a href="#flow">执行数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>推理系统 · vLLM V1 · commit e740bad</span>
+  <h1>CUDA Graphs：把 decode 的逐 kernel launch 压成一次提交</h1>
+  <p class="hero-sub">decode 每个 token 只算一点，但整模型仍有大量 kernel 要由 CPU 逐个提交；batch 一小，GPU 就在等 CPU。CUDA Graph 把一段固定 GPU 工作录成图，之后一次 <code>cudaGraphLaunch</code> 提交整张图。代价是形状必须静态、输入地址必须固定，runtime batch 要 padding 到捕获档位。</p>
+  <div class="meta">
+    <span>vLLM project · V1 source</span>
+    <a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">源码 ↗</a>
+    <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener">NVIDIA CUDA Graphs ↗</a>
+    <a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/cuda_graphs.md" target="_blank" rel="noopener">vLLM 设计文档 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>decode 的瓶颈常常不在 GPU 算力，而在提交次数。</strong>每生成一个 token，模型仍要跑完所有层；每层有多个小 kernel。batch 小时每个 kernel 的 GPU 时间很短，CPU 的 Python、框架分发和 CUDA launch 反而成了关键路径。PyTorch 文档把 graph replay 的收益写成「greatly reduced CPU overhead」：它跳过 Python、C++ 和 CUDA driver 的参数设置与逐 kernel 分发。</p>
+  <p><strong>CUDA Graph 的主要收益不是「更快的 kernel」，而是「更少的提交」。</strong>stream capture 只记录、不执行；instantiate 生成可执行图；replay 时同一张图用同一批地址反复提交。vLLM V1 把这件事拆成两套 routine：FULL 捕获整个 forward（包括 attention，前提是 backend 支持），PIECEWISE 在 attention 前切开、attention 走 eager、其余进 graph。</p>
+  <p><strong>在默认的 piecewise 编译（-O2）下，默认不是 FULL，而是 FULL_AND_PIECEWISE；关闭编译时 resolve 可落到 NONE。</strong>uniform decode 走 FULL，prefill 与 mixed batch 走 PIECEWISE；<code>-O2</code> 默认就是它。<code>-O1</code> 只开 PIECEWISE，<code>--enforce-eager</code> 全关。档位越多，padding 越小，但捕获数量、启动时间和显存占用越高。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="vllm/config/vllm.py:2666-2720">51<small> 档</small></div><div class="k">非 SM100、<code>max_num_seqs=256</code>（或 ≥512，如 1024）时，基础 token 捕获网格的档位数（cap=512）；若 <code>max_num_seqs</code> 在 (256,512) 且不在网格上（如 264），源码会追加一档，总数为 52</div></div>
+    <div class="metric"><div class="v" data-src="vllm/config/vllm.py:2619">512<small> tokens</small></div><div class="k">非 SM100 的默认捕获上限；SM100（B200 等）为 1024</div></div>
+    <div class="metric"><div class="v" data-src="PR #20059 Serving Benchmark Result">4.9<small>%</small></div><div class="k">FULL+piecewise 相对 piecewise 的 output tok/s 提升（FA2 / A100 / 7B GPTQ，PR 初期版本）</div></div>
+  </div>
+</div>
+
+<!-- ================= 01 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>decode 的难点：GPU 干得越少，CPU 的提交开销越显眼</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 batch 小、序列短时，CUDA Graph 能省掉的不是计算，而是「把计算交给 GPU」的过程。</p>
+
+  <p>自回归 decode 每一步通常只生成一个 token（投机解码时多几个）。对模型来说，这一步仍要做完所有层：RMSNorm、QKV 投影、RoPE、attention、输出投影、MLP，张量并行时还有 all-reduce。每个操作都是一个或几个 CUDA kernel。batch 很小时，每个 kernel 的 GPU 执行时间很短，但 CPU 仍要逐个完成 Python 层的张量元数据、框架分发、CUDA driver 的参数校验与入队。</p>
+
+  <div class="eq">
+    T<sub>step</sub> ≈ max(<span class="hl-a">T<sub>cpu</sub></span>, <span class="hl-b">T<sub>gpu</sub></span>) + T<sub>sync</sub><br>
+    <span class="hl-a">T<sub>cpu</sub> ≈ T<sub>python</sub> + K · t<sub>launch</sub></span> · <span class="hl-b">T<sub>gpu</sub> ≈ K · t<sub>kernel</sub>(B)</span>
+  </div>
+  <p class="eq-cap">K 是这一步的 GPU 操作数，B 是 batch 大小。B 越小，t<sub>kernel</sub> 越短，T<sub>gpu</sub> 下降；K 和 t<sub>launch</sub> 不随 B 缩小，于是 max 的取值从 GPU 转向 CPU。</p>
+
+  <p>这就是「launch-bound」的含义：不是 GPU 不会算，而是 GPU 经常在等下一批 kernel 被提交。连续批处理把多个请求拼成一个 batch，能提高 B、拉长每个 kernel 的 GPU 时间；但在小模型、低并发、短输出或 P/D 分离的 decode 实例上，B 仍然可能很小，提交开销占比就高。反过来，如果 B 很大、每个 kernel 都能跑满 GPU，那么 launch 开销被摊薄，CUDA Graph 的收益也会变小。</p>
+
+  <p>还有一个容易混淆的边界：CUDA Graph 只记录 <strong>GPU 工作</strong>。PyTorch 文档写得很直接：「CPU work is not captured」；graph replay 跳过的是 Python、C++ 与 CUDA driver 的分发，不是调度器、分词、采样这些 CPU 逻辑。vLLM 的 scheduler 仍然每步选 batch、更新 KV cache 元数据；graph 只负责把选定 batch 的前向计算一次性提交。因此，graph 不能替代调度优化，也不能消除采样和 detokenization 的 CPU 时间。</p>
+
+  <p>下一节先看没有 graph 时两条常见路径：纯 eager，以及只做 <code>torch.compile</code>。</p>
+</section>
+
+<!-- ================= 02 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>eager 省了捕获，torch.compile 省了部分分发，但都没省掉逐 kernel launch</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么「编译过」不等于「图化」，以及 vLLM 为什么把编译与 CUDA Graph 做成两个可独立开关的维度。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">eager</span><h4>每个 op 都从框架层发一次 launch</h4></div>
+      <p>不做捕获时，模型 forward 就是普通的 PyTorch 执行：Python 逐层调用，框架逐个提交 kernel。启动最快，调试最直接；vLLM 的 <code>--enforce-eager</code> 就是这条路径，官方文档说它跳过编译与 CUDA graph 捕获，用稳态 decode 性能换启动时间（<span class="mono src-path">docs/configuration/optimization.md:25</span>）。</p>
+      <p>问题也在这里：kernel 数不随 batch 缩小，batch 一小，CPU 提交就成为关键路径。eager 不会自动把多个 kernel 合并成一次提交。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">torch.compile</span><h4>融合与代码生成，但仍按 kernel 启动</h4></div>
+      <p>Dynamo 抓图、Inductor 融合和代码生成能减少 Python 开销、减少部分算子，但编译产物仍然要在每个 step 逐个启动 kernel。vLLM 的 piecewise compilation 还会在 attention 等位置切图：attention 留在 eager，其余片段编译（<span class="mono src-path">docs/design/torch_compile.md:250-254</span>）。</p>
+      <p>切图的目的之一，是让这些片段可以被 CUDA Graph 捕获；编译本身并不等于图化。vLLM 文档明确说，full cudagraph 可以脱离编译单独使用，piecewise cudagraph 才要求 piecewise compilation（<span class="mono src-path">vllm/config/compilation.py:722-726</span>）。</p>
+    </div>
+  </div>
+
+  <p>把两者混为一谈，会得出错误的调优结论。编译解决的是「生成什么样的 GPU 代码、减少多少 Python 开销」；CUDA Graph 解决的是「这些 GPU 代码怎样被提交」。前者可以没有后者，后者也可以没有前者（FULL 模式）。vLLM 的 <code>-O1</code> 是 PIECEWISE，<code>-O2</code> 默认是 FULL_AND_PIECEWISE（<span class="mono src-path">docs/configuration/optimization.md:13-14</span>；<span class="mono src-path">vllm/config/vllm.py:337</span>），这两个档位同时改变了编译与图化策略，但不能把收益全部记在编译上。</p>
+
+  <p>那 CUDA Graph 具体怎样把 K 次提交变成一次？下一节拆 capture、instantiate、replay 三步，以及「静态 buffer」这个硬约束。</p>
+</section>
+
+<!-- ================= 03 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>capture 只记录，instantiate 固定拓扑，replay 复用同一批地址</h2></div>
+  <p class="sec-sub">读完这节你应该知道：CUDA Graph 的三段生命周期各自做什么、哪些东西一旦捕获就不能再变，以及 vLLM 如何用 descriptor 把「变」挡在 graph 外面。</p>
+
+  <h3>3.1 三段生命周期</h3>
+  <p>NVIDIA 的 CUDA Programming Guide 把图的生命周期分成定义、实例化、执行三段（§4.2.2）。stream capture 用 <code>cudaStreamBeginCapture()</code> 打开捕获模式，之后发到该 stream 上的工作「is not enqueued for execution」，而是被记成节点；<code>cudaStreamEndCapture()</code> 返回图。实例化用 <code>cudaGraphInstantiate()</code> 生成 <code>cudaGraphExec_t</code>，把校验和准备工作提前；执行用 <code>cudaGraphLaunch(graphExec, stream)</code>，同一张可执行图可以反复 launch，不必每次重新实例化（§4.2.2.2–§4.2.2.3）。</p>
+
+  <p>PyTorch 的封装对应同样的语义：<code>torch.cuda.graph</code> 进入捕获，捕获期间「CUDA work issued to a capturing stream doesn't actually run on the GPU」；<code>torch.cuda.CUDAGraph.replay()</code> 提交整张图，一次 replay 对应一次 <code>cudaGraphLaunch</code>。PyTorch 文档还强调，replay 时「the same memory addresses are used」，所以输入必须写进捕获时用的那块张量，输出也从同一块地址读。</p>
+
+  <div class="eq">
+    <span class="hl-a">capture</span>：stream 上的 op → nodes + edges（<strong>只记录，不执行</strong>）<br>
+    <span class="hl-b">instantiate</span>：graph → <code>cudaGraphExec_t</code>（<strong>拓扑固定，参数可有限更新</strong>）<br>
+    <span class="hl-c">replay</span>：graphExec + 同一批地址 → <code>cudaGraphLaunch</code>（<strong>一次提交整张图</strong>）
+  </div>
+  <p class="eq-cap">依据：NVIDIA CUDA Programming Guide §4.2.2；PyTorch CUDA semantics 的 CUDA Graphs 一节。</p>
+
+  <p>「参数可有限更新」有明确边界。NVIDIA 文档说，拓扑或节点类型变了必须重新实例化；只有参数变化时可以用 <code>cudaGraphExecUpdate()</code> 或逐节点 setter 就地更新，但要求图拓扑完全相同，且 kernel 的 context、memcpy 的设备和 <code>cudaMemcpyKind</code>、外部 semaphore 计数等不能变（§4.2.3）。vLLM 的选择更简单：不动态改图，而是为每个需要的形状各捕获一张图，运行时按 descriptor 选图。</p>
+
+  <h3>3.2 静态 buffer：为什么输入必须“原地覆盖”</h3>
+  <p>图里的 kernel 参数在捕获时就固定了，包括输入、输出和中间 buffer 的地址。PyTorch 文档的典型用法是：捕获时持有输入/输出张量，replay 前用 <code>copy_</code> 把新数据写进捕获输入，replay 后从捕获输出读结果。这样每次 replay 仍然读写同一组虚拟地址，图不需要改参数。</p>
+
+  <p>vLLM 在 FULL 模式里按同样的方式组织：捕获前用 dummy 输入准备 attention metadata，捕获时把模型输出复制到持久的 <code>hidden_states</code> buffer；replay 时只换输入 buffer 的内容，不换地址（<span class="mono src-path">vllm/v1/worker/gpu/cudagraph_utils.py:699-732</span>、<span class="mono src-path">:816-846</span>、<span class="mono src-path">:604-617</span>）。对 PIECEWISE，vLLM 还提供 <code>cudagraph_copy_inputs</code>：调用方不能保证输入 buffer 固定时，编译器把输入复制到内部管理的 buffer（<span class="mono src-path">vllm/config/compilation.py:803-810</span>）。</p>
+
+  <p>这也解释了为什么 graph 对「动态形状」如此敏感：形状变了，buffer 大小和 kernel 的 grid/block 配置就变了，旧图的参数不再成立。vLLM 的应对不是让一张图适配所有形状，而是把 runtime batch padding 到最近的捕获档位，然后用 <code>BatchDescriptor</code> 去查表。descriptor 只带少量字段：<code>num_tokens</code>、<code>num_reqs</code>、<code>uniform</code>、<code>has_lora</code>、<code>num_active_loras</code>（<span class="mono src-path">vllm/forward_context.py:30-50</span>）。</p>
+
+  <h3>3.3 vLLM 的两层封装</h3>
+  <p>在 vLLM V1 里，<code>CUDAGraphWrapper</code> 包住一个可调用对象，负责捕获/重放；<code>CudagraphDispatcher</code> 维护 FULL 与 PIECEWISE 两套合法 key，并在每步根据 batch 选 runtime mode。文档把优先级写得很清楚：<code>FULL</code> &gt; <code>PIECEWISE</code> &gt; <code>None</code>；key 不存在就退回 eager（<span class="mono src-path">docs/design/cuda_graphs.md:98-118</span>）。代码里的 <code>dispatch()</code> 也是这个顺序：先查 FULL key，再查放宽了 <code>num_reqs</code> 与 <code>uniform</code> 的 PIECEWISE key，最后返回 NONE（<span class="mono src-path">vllm/v1/cudagraph_dispatcher.py:233-322</span>）。</p>
+
+  <p>FULL 与 PIECEWISE 的差别不只是「捕获得多不多」，而是 attention 在不在图里。PIECEWISE 用 <code>splitting_ops</code> 把 attention 等不适合捕获的 op 切成断点，断点之间才进 graph；FULL 则把整个 forward 放进一张图，因此要求 attention backend 自己支持 CUDA Graph。这个约束是下一节与第 07 节的主线。</p>
+</section>
+
+<!-- ================= 04 ================= -->
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>档位是空间换时间：基础网格 51 档覆盖 1–512 token，代价是 padding 与显存</h2></div>
+  <p class="sec-sub">读完这节你应该知道：默认捕获网格怎样生成、一个 runtime batch 会被 pad 到哪一档、每多一档要付出什么，以及为什么没有一张可直接引用的“每档固定 MiB”表。</p>
+
+  <h3>4.1 默认网格：从 1 到 cap，步长逐级变粗</h3>
+  <p>vLLM 的默认捕获上限不是直接取 <code>max_num_seqs</code>，而是先算一个平台上限：非 SM100 为 512，SM100（如 B200）为 1024；再取 <code>min(max_num_seqs × decode_query_len × 2, 平台上限)</code>，最后再与 <code>max_num_batched_tokens</code> 取小（<span class="mono src-path">vllm/config/vllm.py:2619-2625</span>、<span class="mono src-path">:2669</span>）。decode_query_len 通常为 1；投机解码时为 <code>1 + num_speculative_tokens</code>。</p>
+
+  <p>网格本身是分段的：<code>[1, 2, 4]</code>，然后 8 到 248 每 8 一个档，256 以上每 16 一个档，直到 cap（<span class="mono src-path">vllm/config/vllm.py:2696-2708</span>）。cap 较小时高段自然为空。按这个基础网格复算，非 SM100 的典型配置（<code>max_num_seqs=256</code> 或 <code>max_num_seqs ≥ 512</code>，<code>max_num_batched_tokens ≥ 512</code>）会得到 cap=512、共 51 档；若 <code>max_num_seqs</code> 在 (256,512) 且不在网格上（如 264），源码会把它追加进 <code>uniform_decode_sizes</code>（<span class="mono src-path">vllm/config/vllm.py:2666-2667</span>、<span class="mono src-path">:2718-2720</span>），总数为 52 档。SM100 的 cap=1024 默认 <code>max_num_seqs=1024</code> 时为 83 档；off-grid 时同理追加一档。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 3：cap 与基础网格档位数（按 <code>vllm/config/vllm.py:2696-2708</code> 的基础网格复算；<code>max_num_seqs</code> 不在网格且 ≤ cap 时源码会追加一档（<code>:2666-2667</code>、<code>:2718-2720</code>）。假设 <code>decode_query_len=1</code>、非 interactivity、<code>max_num_batched_tokens ≥ cap</code>、未显式配置 <code>cudagraph_capture_sizes</code>。不是仓库发布的基准表）</caption>
+      <thead>
+        <tr><th>cap（tokens）</th><th>默认档位数</th><th>档位构成</th><th>典型来源</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">32</td><td class="num">7</td><td>[1, 2, 4] + 8..32 步 8（4 个）</td><td><code>max_num_seqs=16</code> 之类的小配置</td></tr>
+        <tr><td class="num">64</td><td class="num">11</td><td>3 + 8..64 步 8（8 个）</td><td><code>max_num_seqs=32</code></td></tr>
+        <tr><td class="num">128</td><td class="num">19</td><td>3 + 8..128 步 8（16 个）</td><td><code>max_num_seqs=64</code></td></tr>
+        <tr><td class="num">256</td><td class="num">35</td><td>3 + 31 + 1</td><td><code>max_num_seqs=128</code></td></tr>
+        <tr><td class="num">512</td><td class="num">51</td><td>3 + 31 + 17（基础网格；<code>max_num_seqs=264</code> 时再 +1 = 52）</td><td>非 SM100、<code>max_num_seqs=256</code>（或 ≥512，如 1024）</td></tr>
+        <tr><td class="num">1024</td><td class="num">83</td><td>3 + 31 + 49（基础网格；off-grid 时追加一档）</td><td>SM100（如 B200），默认 <code>max_num_seqs=1024</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>注意 cap 还受 <code>max_num_seqs</code> 与 <code>max_num_batched_tokens</code> 约束：如果 <code>max_num_seqs=128</code>，cap 只有 256，不是 512。vLLM 的 EngineArgs 在真实服务里会把其余档（含 A100 40G）的 <code>max_num_seqs</code> 默认成 256，≥70GB 且非 A100/非 GB10 的档默认成 1024（<span class="mono src-path">vllm/engine/arg_utils.py:3014-3038</span>）；因此非 SM100 的典型服务配置（默认 256 或 1024）通常落在 cap=512、基础网格 51 档；若自定义成 264 这类 off-grid 值，捕获数为 52。</p>
+
+  <h3>4.2 padding 策略：向上取最近档，超过最大档就退回 eager</h3>
+  <p>dispatcher 会预先算一张 <code>_bs_to_padded_graph_size</code> 表：如果 runtime batch 恰好等于某个捕获档，就用该档；否则用下一个更大的档；超过最大档则没有匹配，走 eager（<span class="mono src-path">vllm/v1/cudagraph_dispatcher.py:71-90</span>）。这就是静态形状约束的实际表现：图不重新编译，batch 被 pad 到已捕获的形状。</p>
+
+  <div class="eq">
+    padded(b) = min { s ∈ <span class="hl-a">S</span> : s ≥ b }<br>
+    waste(b) = padded(b) − b<br>
+    waste_ratio(b) = waste(b) / padded(b)
+  </div>
+  <p class="eq-cap">S 是捕获档位集合，b 是 runtime batch 的 token 数。padding 只改变 padding 位置的内容，不改变真实 token 的结果；代价是多余的计算和 attention 槽位。</p>
+
+  <p>默认网格在小档位很密、在大档位变粗，所以 padding 浪费不是均匀的。下面的交互按 4.1 的默认生成式算档位数，并按 4.2 的映射算 padding；它复现的是「非 interactivity、decode_query_len=1、无 LoRA、无投机」的简化路径。</p>
+
+  <div class="sim" id="sim-cap">
+    <div class="controls">
+      <div class="ctrl">
+        <label for="cg-mns">max_num_seqs <span class="v" id="cg-mns-v">256</span></label>
+        <input type="range" id="cg-mns" min="8" max="512" step="8" value="256">
+        <div class="ctrl-note">非 SM100，decode_query_len=1</div>
+      </div>
+      <div class="ctrl">
+        <label for="cg-bs">runtime batch（tokens） <span class="v" id="cg-bs-v">500</span></label>
+        <input type="range" id="cg-bs" min="1" max="512" step="1" value="500">
+        <div class="ctrl-note">每请求 1 token 的 uniform decode</div>
+      </div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">cap</div><div class="slot-val" id="cg-cap">512</div></div>
+      <div class="slot"><div class="slot-name">graphs</div><div class="slot-val" id="cg-count">51</div></div>
+      <div class="slot" id="cg-pad-slot"><div class="slot-name">padded</div><div class="slot-val" id="cg-padded">512</div></div>
+    </div>
+    <div class="bar" aria-hidden="true">
+      <i class="b1" id="cg-bar-used" style="width:97.66%"></i>
+      <i class="b2" id="cg-bar-waste" style="width:2.34%"></i>
+    </div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>有效 token</span><span><i style="background:var(--c1)"></i>padding</span></div>
+    <div class="readout" data-src="vllm/config/vllm.py:2666-2720">
+      <div class="r-head">默认捕获档位 / padding</div>
+      <p>cap = min(max_num_seqs × 2, 512) = <strong id="cg-cap2">512</strong>；网格 <strong id="cg-count2">51</strong> 档。batch <strong id="cg-bs2">500</strong> → padded <strong id="cg-padded2">512</strong><span id="cg-tail">，浪费 <strong id="cg-waste">12</strong> tokens（<strong id="cg-pct">2.34%</strong>）。</span><span id="cg-eager-note" hidden>；超过最大捕获档，dispatcher 返回 NONE，走 eager。</span></p>
+    </div>
+    <p class="sim-note">简化模拟：只复现非 interactivity 的默认 token 网格与「向上取档」映射；未覆盖 Blackwell 的 1024 上限、投机解码的 <code>query_len &gt; 1</code> 取整、LoRA 分档、用户自定义 <code>cudagraph_capture_sizes</code>、<code>max_num_batched_tokens</code> 截断，以及 v2 runner 的 request-keyed 解码图。</p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组 batch / max_num_seqs 下的档位数与 padding 浪费 <span class="sum-sub">与上面的滑块逐位对账</span></summary>
+    <div class="details-body">
+      <p><strong>口径：</strong>cap = min(max_num_seqs × 2, 512)，且假设 <code>max_num_batched_tokens ≥ cap</code>；档位集合 = [1, 2, 4] + 8..min(cap,248) 步 8 + 256..cap 步 16；若 max_num_seqs ≤ cap 且不在集合中，再补上 max_num_seqs（<span class="mono src-path">vllm/config/vllm.py:2666-2667</span>、<span class="mono src-path">:2718-2720</span>）；若 max_num_tokens ≤ cap 且不在集合中，还会补上 max_num_tokens（<span class="mono src-path">:2709-2714</span>）。padding 浪费比例 = (padded − batch) / padded × 100%。这是页面按源码生成式做的示例，不是仓库公布的基准。</p>
+      <p><strong>组 A：max_num_seqs=64，batch=5。</strong>cap = min(128, 512) = 128。档位 = [1, 2, 4] + 8..128 步 8（16 个，8, 16, …, 128），共 <strong>19</strong> 档；max_num_seqs=64 已在集合中。batch=5 向上取到 8，浪费 8 − 5 = <strong>3</strong> tokens，3 / 8 = <strong>37.50%</strong>。</p>
+      <p><strong>组 B：max_num_seqs=256，batch=500。</strong>cap = min(512, 512) = 512。档位 = 3 + 31（8..248）+ 17（256..512 步 16）= <strong>51</strong> 档；256 已在集合中。batch=500 向上取到 512，浪费 512 − 500 = <strong>12</strong> tokens，12 / 512 = <strong>2.34%</strong>。</p>
+      <p>JS 在这两组参数下分别输出 19 档 / 37.50% 与 51 档 / 2.34%，与上面的手算一致。滑块初始值（max_num_seqs=256、batch=500）对应组 B。组 A 的 max_num_seqs=64 与 batch=5 可直接拖到对应位置复核。</p>
+      <p><strong>未覆盖：</strong>max_num_seqs 很大时 cap 会被 512 截断；SM100 的 cap=1024 不在本模拟中；投机解码会把尺寸向上取整到 <code>query_len</code> 的倍数（<span class="mono src-path">vllm/config/compilation.py:1690-1718</span>）；LoRA 会按 active adapter 数复制档位（<span class="mono src-path">vllm/config/compilation.py:811-818</span>）。</p>
+    </div>
+  </details>
+
+  <h3>4.3 显存：没有固定的“每档 MiB”，只有可复现的测量口径</h3>
+  <p>vLLM 的 graph 共享 memory pool：捕获时先捕 PIECEWISE，再捕 FULL；FULL 图不比最宽 PIECEWISE 图宽时，可以复用已经分配的 buffer。同一模式内也按 num_tokens 从大到小捕获，让窄图复用宽图先占的 pool（<span class="mono src-path">vllm/v1/worker/gpu/cudagraph_utils.py:480-482</span>、<span class="mono src-path">vllm/v1/cudagraph_dispatcher.py:324-345</span>）。因此「第 n 档新增多少 MiB」不是常数，取决于该档的静态输入/输出、attention metadata、workspace，以及它与前面图的重叠程度。</p>
+
+  <p>仓库文档与源码中未找到按档位列出的 MiB 表（未获取）。它在启动时用 <code>start_free_gpu_memory − end_free_gpu_memory</code> 实测所有捕获的总增量，打印 <code>Graph capturing finished ... took X GiB</code>（<span class="mono src-path">vllm/v1/worker/gpu_model_runner.py:6567-6611</span>）；代码注释给出的经验范围是「This usually takes 5~20 seconds」（<span class="mono src-path">:6605</span>）。在真正分配 KV cache 之前，<code>profile_cudagraph_memory</code> 只捕获最大的两张 FULL 图做采样，用第二张的增量作为每图成本、并以 1 MiB 为下限外推总成本（<span class="mono src-path">vllm/v1/worker/gpu/cudagraph_utils.py:986-988</span>、<span class="mono src-path">:1101-1109</span>）。</p>
+
+  <p>这个估计默认会从可用 KV cache 预算里扣除：<code>VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS</code> 默认是 1，<code>available_kv_cache_memory_bytes = requested_memory − non_kv_cache_memory − cudagraph_memory_estimate</code>（<span class="mono src-path">vllm/v1/worker/gpu_worker.py:803-839</span>；<span class="mono src-path">vllm/envs.py:2339-2341</span>）。所以 graph 的显存代价不是「额外送」，而是从 KV cache 配额里扣；档位越多、图越宽，可用于 KV cache 的块越少。V1 用户指南也提示，V1 的 CUDA graph 捕获比 V0 更占显存（<span class="mono src-path">docs/usage/v1_guide.md:43</span>）。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 4：graph 显存的主要组成（页面按 capture 路径整理；具体 MiB 随模型、backend、硬件与 pool 共享变化，仓库文档/源码中未获取到固定表）</caption>
+      <thead>
+        <tr><th>组成</th><th>随档位/宽度怎么变</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>静态输入/输出 buffer</td><td>随 <code>num_tokens</code> 增长</td><td>输入 ids、positions、hidden states、slot mapping 等；replay 原地覆盖</td></tr>
+        <tr><td>中间激活 / workspace</td><td>随 <code>num_tokens</code> 增长，但 pool 可复用</td><td>graph pool 内的分配；窄图可复用宽图先占的块</td></tr>
+        <tr><td>attention metadata</td><td>随 <code>num_reqs</code>、<code>max_query_len</code> 增长</td><td>block table、seq lens、slot mapping 等；FULL 还要让 backend 生成可捕获的 metadata</td></tr>
+        <tr><td>graph executable / driver 结构</td><td>每图一份，近似固定</td><td>相对 buffer 通常较小；外推时以 1 MiB 为下限</td></tr>
+        <tr><td>KV cache 机会成本</td><td>档位越多，扣得越多</td><td>默认从 KV cache 预算扣除 estimate</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>所以第 04 节的结论是：档位不是免费的。基础网格 51 档覆盖 1–512，最坏 padding 出现在刚超过某个档位的位置；小档位密、大档位粗，调度器无法通过「多加几档」无限逼近零浪费，因为每加一档都要多一次 capture、多一份 pool 占用和启动时间。</p>
+</section>
+
+<!-- ================= 05 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>启动时 capture，运行时先查 descriptor，再决定 replay 还是 eager</h2></div>
+  <p class="sec-sub">读完这节你应该知道：capture、instantiate、replay 在时间轴上分别发生在哪里，以及一次 decode step 从 scheduler 到 graph replay 的完整路径。</p>
+
+  <figure>
+    <svg class="cg-svg" viewBox="0 0 880 300" role="img" aria-labelledby="cg-svg-title cg-svg-desc">
+      <title id="cg-svg-title">capture、instantiate、replay 三段生命周期</title>
+      <desc id="cg-svg-desc">左侧 capture 把 stream 上的 op A、op B、op C 记录成带依赖的 graph，捕获期间不执行；中间 instantiate 把 graph 变成 cudaGraphExec_t；右侧 replay 用 cudaGraphLaunch 把整张图提交给 GPU，输入输出仍使用同一批静态 buffer 地址。</desc>
+      <defs>
+        <marker id="cg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path class="arrow-head" d="M0 0 L10 5 L0 10 z"></path>
+        </marker>
+      </defs>
+
+      <rect class="panel" x="10" y="20" width="270" height="250" rx="12"></rect>
+      <text class="tag" x="30" y="46">① capture / 录制</text>
+      <line class="arrow-line" x1="30" y1="100" x2="260" y2="100"></line>
+      <rect class="node" x="30" y="78" width="60" height="40" rx="6"></rect>
+      <text class="t" x="60" y="103" text-anchor="middle">op A</text>
+      <rect class="node" x="115" y="78" width="60" height="40" rx="6"></rect>
+      <text class="t" x="145" y="103" text-anchor="middle">op B</text>
+      <rect class="node" x="200" y="78" width="60" height="40" rx="6"></rect>
+      <text class="t" x="230" y="103" text-anchor="middle">op C</text>
+      <rect class="dash" x="20" y="66" width="250" height="66" rx="8"></rect>
+      <text class="s" x="30" y="152">记录到 graph，不执行</text>
+      <line class="arrow-line" x1="145" y1="132" x2="145" y2="168" marker-end="url(#cg-arrow)"></line>
+      <rect class="hot" x="80" y="176" width="40" height="28" rx="6"></rect>
+      <text class="t" x="100" y="194" text-anchor="middle">A</text>
+      <rect class="hot" x="145" y="176" width="40" height="28" rx="6"></rect>
+      <text class="t" x="165" y="194" text-anchor="middle">B</text>
+      <rect class="hot" x="210" y="176" width="40" height="28" rx="6"></rect>
+      <text class="t" x="230" y="194" text-anchor="middle">C</text>
+      <line class="arrow-line" x1="120" y1="190" x2="143" y2="190"></line>
+      <line class="arrow-line" x1="185" y1="190" x2="208" y2="190"></line>
+      <text class="s" x="145" y="230" text-anchor="middle">nodes + edges</text>
+      <text class="s" x="145" y="250" text-anchor="middle">stream capture</text>
+
+      <line class="arrow-line" x1="285" y1="145" x2="315" y2="145" marker-end="url(#cg-arrow)"></line>
+
+      <rect class="panel" x="320" y="20" width="230" height="250" rx="12"></rect>
+      <text class="tag" x="340" y="46">② instantiate / 实例化</text>
+      <rect class="node" x="345" y="75" width="50" height="30" rx="6"></rect>
+      <text class="t" x="370" y="95" text-anchor="middle">A</text>
+      <rect class="node" x="425" y="75" width="50" height="30" rx="6"></rect>
+      <text class="t" x="450" y="95" text-anchor="middle">B</text>
+      <rect class="node" x="505" y="75" width="30" height="30" rx="6"></rect>
+      <text class="t" x="520" y="95" text-anchor="middle">C</text>
+      <line class="arrow-line" x1="395" y1="90" x2="423" y2="90"></line>
+      <line class="arrow-line" x1="475" y1="90" x2="503" y2="90"></line>
+      <line class="arrow-line" x1="435" y1="105" x2="435" y2="150" marker-end="url(#cg-arrow)"></line>
+      <rect class="hot" x="340" y="158" width="190" height="48" rx="7"></rect>
+      <text class="t" x="435" y="178" text-anchor="middle">cudaGraphExec_t</text>
+      <text class="s" x="435" y="195" text-anchor="middle">校验 / 固定拓扑</text>
+      <text class="s" x="435" y="230" text-anchor="middle">setup 只做一次</text>
+      <text class="s" x="435" y="250" text-anchor="middle">参数可有限更新</text>
+
+      <line class="arrow-line" x1="555" y1="145" x2="585" y2="145" marker-end="url(#cg-arrow)"></line>
+
+      <rect class="panel" x="590" y="20" width="280" height="250" rx="12"></rect>
+      <text class="tag" x="610" y="46">③ replay / 重放</text>
+      <rect class="hot" x="610" y="70" width="240" height="40" rx="7"></rect>
+      <text class="t" x="730" y="95" text-anchor="middle">cudaGraphLaunch(exec, stream)</text>
+      <line class="arrow-line" x1="730" y1="110" x2="730" y2="145" marker-end="url(#cg-arrow)"></line>
+      <rect class="node" x="610" y="152" width="240" height="48" rx="7"></rect>
+      <text class="t" x="730" y="172" text-anchor="middle">GPU 执行整张 graph</text>
+      <text class="s" x="730" y="190" text-anchor="middle">一次提交，K 个 node</text>
+      <rect class="inner" x="610" y="212" width="240" height="30" rx="6"></rect>
+      <text class="s" x="730" y="232" text-anchor="middle">static buffers：同一批地址</text>
+      <text class="s" x="730" y="260" text-anchor="middle">replay 前只换 buffer 内容</text>
+    </svg>
+    <figcaption>图 1：CUDA Graph 的三段生命周期。capture 只记录，instantiate 固定拓扑，replay 复用同一批静态地址；vLLM 在启动时完成 capture，在每步只做 descriptor 查表与 replay。</figcaption>
+  </figure>
+
+  <h3>5.1 启动阶段：warmup → capture → 记录时间与显存</h3>
+  <p>vLLM 在 worker 初始化时调用 <code>capture_model()</code>。捕获前先做一次 eager warmup；<code>_warmup_and_capture</code> 按 <code>cudagraph_num_of_warmups</code> 跑若干次 <code>CUDAGraphMode.NONE</code> 的 dummy run，再用非 NONE 模式捕获（<span class="mono src-path">vllm/v1/worker/gpu_model_runner.py:6613-6660</span>）。捕获顺序是先 PIECEWISE、再 FULL；同一模式内按 num_tokens 从大到小，先占大 pool（<span class="mono src-path">vllm/v1/worker/gpu/cudagraph_utils.py:480-482</span>、<span class="mono src-path">vllm/v1/cudagraph_dispatcher.py:324-345</span>）。</p>
+
+  <p>捕获完成后，vLLM 记录 <code>start_free_gpu_memory − end_free_gpu_memory</code> 作为 graph 总占用，并打印耗时与 GiB（<span class="mono src-path">vllm/v1/worker/gpu_model_runner.py:6567-6611</span>）。这一步发生在 KV cache 初始化之后、服务开始之前（<span class="mono src-path">vllm/v1/worker/gpu_worker.py:1016-1164</span>）。</p>
+
+  <h3>5.2 每步执行：descriptor 是唯一的选图依据</h3>
+  <p>一次 decode step 的路径可以压成四步：</p>
+  <ul>
+    <li><strong>scheduler 选 batch：</strong>决定这一步的请求、token 数与 query 长度；decode 通常是每请求 1 token，投机解码时是 <code>1 + num_speculative_tokens</code>。</li>
+    <li><strong>dispatcher 造 descriptor 并 pad：</strong>把 <code>num_tokens</code> pad 到最近的捕获档，带上 <code>num_reqs</code>、<code>uniform</code>、LoRA 计数，形成 <code>BatchDescriptor</code>。</li>
+    <li><strong>按优先级选图：</strong>FULL key 命中就用 FULL；否则放宽 <code>num_reqs</code>、<code>uniform</code> 后查 PIECEWISE；都没有就返回 NONE，走 eager（<span class="mono src-path">vllm/v1/cudagraph_dispatcher.py:233-322</span>）。</li>
+    <li><strong>replay 或 eager：</strong>FULL 走 <code>run_fullgraph()</code>，内部先 <code>get_offloader().sync_prev_onload()</code>，再 <code>self.graphs[desc].replay()</code>（<span class="mono src-path">vllm/v1/worker/gpu/cudagraph_utils.py:604-617</span>）；PIECEWISE 走编译后的片段 + wrapper；NONE 走普通 forward。</li>
+  </ul>
+
+  <p>这条路径解释了为什么 graph 不改变模型的数学结果：dispatcher 只决定「用哪张已捕获的图」，图里的 kernel 序列与 eager 执行的是同一套计算；padding 位置的内容被标记为无效，attention 与后续层不会把它们当成真实 token。真正的风险在于 metadata 与 buffer 地址是否仍然一致，而不在于图本身会不会「算错」。</p>
+</section>
+
+<!-- ================= 06 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>有出处的 A100 实测：FA2 吞吐 +4.9%，TTFT 反而变差</h2></div>
+  <p class="sec-sub">读完这节你应该知道：这组数字在什么条件下成立、为什么平均 TPOT 变好而 TTFT 和 P99 TPOT 可能变差，以及为什么默认模式不是 FULL。</p>
+
+  <p>vLLM 设计文档没有把性能数字写进正文，只在「About the Performance」链接到 PR #20059 的评论。下面的表 2 转录该评论 Serving Benchmark Result 中的关键指标（未转录 successful requests、benchmark duration、input/generated tokens、median/P99 TTFT、median TPOT、median/P99 ITL）；作者注明这是 PR 的早期版本，CLI 后来改过，数据「just kept for reference」。条件必须在同一句里交代：A100 40G、torch 2.6、CUDA 12.4、Qwen2.5-7B-Instruct-GPTQ-Int4、ShareGPT 100 prompts、request-rate 20、gpu-memory-utilization 0.9。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 2：FULL + piecewise 相对 PIECEWISE 的 serving 实测（PR #20059 评论；A100 40G / Qwen2.5-7B-Instruct-GPTQ-Int4 / ShareGPT 100 prompts / request-rate 20）</caption>
+      <thead>
+        <tr><th>指标</th><th>FA2 · piecewise</th><th>FA2 · FULL+piecewise</th><th>FlashInfer · piecewise</th><th>FlashInfer · FULL+piecewise</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Output tok/s</td><td class="num">1898.67</td><td class="num">1992.27</td><td class="num">1907.38</td><td class="num">1946.35</td></tr>
+        <tr><td>Total tok/s</td><td class="num">3937.88</td><td class="num">4132.01</td><td class="num">3955.65</td><td class="num">4036.48</td></tr>
+        <tr><td>Request throughput（req/s）</td><td class="num">8.77</td><td class="num">9.20</td><td class="num">8.81</td><td class="num">8.99</td></tr>
+        <tr><td>Mean TTFT（ms）</td><td class="num">76.37</td><td class="num">78.69</td><td class="num">73.61</td><td class="num">76.03</td></tr>
+        <tr><td>Mean TPOT（ms）</td><td class="num">17.08</td><td class="num">16.57</td><td class="num">16.85</td><td class="num">16.34</td></tr>
+        <tr><td>Mean ITL（ms）</td><td class="num">13.45</td><td class="num">12.83</td><td class="num">13.34</td><td class="num">13.11</td></tr>
+        <tr><td>P99 TPOT（ms）</td><td class="num">67.68</td><td class="num">78.21</td><td class="num">65.75</td><td class="num">58.86</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>按表 2 复算，FA2 的 output tok/s 相对提升 <strong>4.9%</strong>（1992.27 vs 1898.67），mean TPOT 相对下降 <strong>3.0%</strong>（17.08 → 16.57 ms）；FlashInfer 的 output tok/s 相对提升 <strong>2.0%</strong>（1946.35 vs 1907.38），mean TPOT 相对下降 <strong>3.0%</strong>（16.85 → 16.34 ms）。作者在评论里把这两个吞吐变化概括为「5%」与「2%」，把 TPOT 变化概括为「2.9%」与「3.1%」；按表复算分别是 4.9% / 2.0% 与 3.0% / 3.0%，作者未说明取整口径；<span class="infer">推断</span>（依据：2.9% 可由截断到一位复现，3.1% 可由改用 16.34 作分母复现，但作者未注明）。</p>
+
+  <p><strong>反直觉的地方在首 token 与尾延迟。</strong>FA2 的 mean TTFT 从 76.37 ms 升到 78.69 ms（相对 +3.0%），P99 TPOT 从 67.68 ms 升到 78.21 ms；FlashInfer 的 mean TTFT 从 73.61 ms 升到 76.03 ms（相对 +3.3%），但它的 P99 TPOT 从 65.75 ms 降到 58.86 ms。也就是说，同一组「FULL + piecewise」配置，平均 decode 间隔变好，并不保证首 token 和尾延迟一起变好；FA2 与 FlashInfer 的尾延迟方向甚至相反。</p>
+
+  <p>作者对 FA2 的 TTFT 退化给了一个解释：full graph 在 mixed prefill-decode batch 上会让 FA2 的 attention 启动更多 block，而 eager attention 的 block 数少得多；他把原因归到 full graph 对 mixed batch 的启动配置，而不是 kernel 本身变慢。这个解释与「默认用 FULL_AND_PIECEWISE、只让 uniform decode 走 FULL」的设计是一致的：mixed batch 留在 PIECEWISE，避开 full graph 在 prefill/mixed 上的额外开销。</p>
+
+  <p>这组数据也说明收益的尺度：在这台 A100、这个 7B GPTQ 模型、这个 ShareGPT 负载下，吞吐提升是个位数百分比，不是数量级。CUDA Graph 省的是提交开销；当 GPU 已经是瓶颈、或模型/backend 的 kernel 本身很重时，省下来的 CPU 时间占比自然下降。</p>
+</section>
+
+<!-- ================= 07 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：静态形状、attention backend、通信与不可捕获算子</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些情况下 graph 会退回 eager、哪些 backend 只能支持部分模式，以及 torch.compile 与 CUDA Graph 各自管什么。</p>
+
+  <h3>7.1 动态形状与 padding 的硬边界</h3>
+  <p>图捕获的是固定形状和固定地址。runtime batch 只要超过最大捕获档，dispatcher 就找不到 key，直接返回 NONE 走 eager（<span class="mono src-path">vllm/v1/cudagraph_dispatcher.py:233-322</span>）。这意味着「最大档必须覆盖常见 batch」是一个显式的容量选择：档位太小，频繁退回 eager；档位太大，显存与启动成本上升。PyTorch 文档还把 data-dependent control flow 列为 graph 的限制（<code>torch.cond()</code> 是例外），并禁止在捕获期间做 CPU 同步（如 <code>.item()</code>）和在 graph 私有 pool 之外分配。</p>
+
+  <p>投机解码会把这件事变得更复杂：uniform decode 的 query 长度是 <code>1 + num_speculative_tokens</code>，捕获尺寸要向上取整到 query_len 的倍数（<span class="mono src-path">vllm/config/compilation.py:1690-1718</span>）。如果长度动态变化，vLLM 还有 varlen decode graph 的路径，但它要求 backend 能重放可变长度的 decode batch；不满足时仍然回到固定档位或 eager。</p>
+
+  <h3>7.2 attention backend 决定 FULL 能走多远</h3>
+  <p>vLLM 用 <code>AttentionCGSupport</code> 描述 backend 的捕获能力，等级从高到低是 <code>ALWAYS</code> &gt; <code>UNIFORM_BATCH</code> &gt; <code>UNIFORM_SINGLE_TOKEN_DECODE</code> &gt; <code>NEVER</code>（<span class="mono src-path">vllm/v1/attention/backend.py:563-578</span>）。FULL 的 mixed prefill-decode 需要 <code>ALWAYS</code>；uniform decode 至少需要 <code>UNIFORM_SINGLE_TOKEN_DECODE</code>（query_len=1）或 <code>UNIFORM_BATCH</code>（query_len&gt;1）。混合模型（如 Mamba mixer）取所有 backend 的最低等级。</p>
+
+  <div class="tbl-scroll">
+    <table>
+      <caption>表 1：attention backend 的 cudagraph_support（转录自 docs/design/cuda_graphs.md 的同名表；文档表中未列出的 backend 为 NEVER）</caption>
+      <thead>
+        <tr><th>Attention backend</th><th>cudagraph_support</th><th>备注</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>FlashAttention v2</td><td><code>UNIFORM_BATCH</code></td><td>文档注释：实际为 <code>ALWAYS</code>，但为性能回退到 <code>FULL_AND_PIECEWISE</code></td></tr>
+        <tr><td>FlashAttention v3</td><td><code>ALWAYS</code></td><td>prefill/mixed 与 decode 共用 routine</td></tr>
+        <tr><td>Triton Attention</td><td><code>ALWAYS</code></td><td>文档建议 <code>FULL_AND_PIECEWISE</code>，因为 prefill 与 decode 的 kernel 不同</td></tr>
+        <tr><td>AITER FlashAttention</td><td><code>UNIFORM_BATCH</code></td><td></td></tr>
+        <tr><td>FlashInfer</td><td><code>UNIFORM_SINGLE_TOKEN_DECODE</code></td><td>Blackwell 上使用 TRTLLM attention 时变为 <code>UNIFORM_BATCH</code></td></tr>
+        <tr><td>FlashMLA</td><td><code>UNIFORM_BATCH</code></td><td></td></tr>
+        <tr><td>FlashInferMLA</td><td><code>UNIFORM_BATCH</code></td><td></td></tr>
+        <tr><td>FlashInferMLASparse</td><td><code>UNIFORM_BATCH</code></td><td></td></tr>
+        <tr><td>AITER MLA</td><td><code>UNIFORM_SINGLE_TOKEN_DECODE</code></td><td></td></tr>
+        <tr><td>CUTLASS MLA</td><td><code>UNIFORM_SINGLE_TOKEN_DECODE</code></td><td></td></tr>
+        <tr><td>Mamba attention</td><td><code>UNIFORM_SINGLE_TOKEN_DECODE</code></td><td></td></tr>
+        <tr><td>未列出的 backend</td><td><code>NEVER</code></td><td>文档原文：Unlisted backends are all declared as NEVER</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>模式不是硬选，vLLM 会按 backend 能力降级。下面的交互复现 <code>resolve_cudagraph_mode_and_sizes</code> 的主路径：给定请求模式和 backend 等级，看最终模式。它假设 <code>VLLM_COMPILE</code>、attention 在 <code>splitting_ops</code> 中、<code>uniform_decode_query_len=1</code>、piecewise capture 可用；不覆盖混合 backend 取最小值、Mamba block 检查、v2 runner、LoRA 与用户自定义尺寸。</p>
+
+  <div class="sim" id="sim-mode">
+    <div class="sim-top" id="cg-support-btns">
+      <button type="button" class="rule-btn active" data-support="ALWAYS">ALWAYS<span class="r-sub">mixed + uniform</span></button>
+      <button type="button" class="rule-btn" data-support="UNIFORM_BATCH">UNIFORM_BATCH<span class="r-sub">同 query 长度</span></button>
+      <button type="button" class="rule-btn" data-support="UNIFORM_SINGLE_TOKEN_DECODE">UNIFORM_SINGLE<span class="r-sub">仅 query_len=1</span></button>
+      <button type="button" class="rule-btn" data-support="NEVER">NEVER<span class="r-sub">无 full graph</span></button>
+    </div>
+    <div class="sim-top" id="cg-request-btns">
+      <button type="button" class="rule-btn active" data-request="FULL">FULL<span class="r-sub">全体 full</span></button>
+      <button type="button" class="rule-btn" data-request="FULL_DECODE_ONLY">FULL_DECODE_ONLY<span class="r-sub">仅 decode full</span></button>
+      <button type="button" class="rule-btn" data-request="FULL_AND_PIECEWISE">FULL_AND_PIECEWISE<span class="r-sub">默认</span></button>
+      <button type="button" class="rule-btn" data-request="PIECEWISE">PIECEWISE<span class="r-sub">attention 留 eager</span></button>
+      <button type="button" class="rule-btn" data-request="NONE">NONE<span class="r-sub">全 eager</span></button>
+    </div>
+    <div class="readout" data-src="vllm/config/compilation.py:1531">
+      <div class="r-head">resolve_cudagraph_mode_and_sizes 主路径</div>
+      <p>解析结果：<span class="mode-out" id="cg-mode-out">ALWAYS + FULL → FULL</span></p>
+      <p class="mode-reason" id="cg-mode-reason">backend 支持 mixed full，保持请求模式。</p>
+    </div>
+    <p class="sim-note">简化模拟：按 <code>resolve_cudagraph_mode_and_sizes</code> 的前三个主分支复现降级；未覆盖 hybrid backend 取最小值、Mamba 每序列 block 检查、<code>FULL</code> 在 <code>NEVER</code> 下的最终二次检查、v2 runner 的 request-keyed 尺寸、LoRA 分档与 <code>FULL</code> 之外的 mode 组合细节。</p>
+  </div>
+
+  <p>这张表解释了一个常见误解：<code>FULL</code> 不是「总是最好」。如果 backend 只支持单 token decode，mixed batch 的 full graph 不被允许，vLLM 会把它降成 <code>FULL_AND_PIECEWISE</code>（attention 在 <code>splitting_ops</code> 时）或 <code>FULL_DECODE_ONLY</code>；如果 backend 是 <code>NEVER</code>，请求 <code>FULL</code> 会直接报错，而 <code>FULL_DECODE_ONLY</code> / <code>FULL_AND_PIECEWISE</code> 在 <code>VLLM_COMPILE</code> 且 attention 在 <code>splitting_ops</code> 中（或启用 <code>use_inductor_graph_partition</code>）时退到 <code>PIECEWISE</code>，否则退到 <code>NONE</code>（<span class="mono src-path">vllm/config/compilation.py:1576-1601</span>、<span class="mono src-path">:1637-1649</span>）。</p>
+
+  <h3>7.3 多卡、通信与不可捕获的算子</h3>
+  <p>多卡时，每张卡都要捕获自己的图，且各 rank 的 batch 形状必须对齐。数据并行会把 <code>num_tokens</code> pad 到所有 DP rank 的最大值，再通过 <code>num_tokens_across_dp</code> 传给 forward context（<span class="mono src-path">vllm/v1/worker/dp_utils.py:190-223</span>、<span class="mono src-path">vllm/v1/worker/gpu_model_runner.py:3840-3856</span>；tensor 创建见 <span class="mono src-path">vllm/v1/worker/gpu/cudagraph_utils.py:744-748</span>）；张量并行与流水线并行则要求各 rank 的捕获顺序、通信 buffer 和中间张量地址保持一致。通信本身也要能被图捕获；vLLM 在 DP&gt;1 时对 DeepEP 高吞吐后端直接关闭 CUDA Graph，因为它的 kernel 与 graph 不兼容（<span class="mono src-path">vllm/config/compilation.py:1397-1413</span>）。</p>
+
+  <p>不可捕获的算子通常落在四类：需要 CPU 同步的算子（<code>.item()</code>、动态控制流）、动态分配或数据依赖形状的算子、被 backend 声明为 <code>NEVER</code> 的 attention、以及被显式排除在 <code>splitting_ops</code> 之外的 op。vLLM 的 <code>splitting_ops</code> 默认包含一组 attention / linear-attention / kv-cache 相关 op（<span class="mono src-path">vllm/config/compilation.py:921-943</span>），并且在 Dynamo 分割路径下还会把 <code>unified_kv_cache_update</code> 等加入断点（<span class="mono src-path">:1367-1368</span>）。</p>
+
+  <p>编译与图化的交互边界也在这里：<code>fuse_attn_quant</code> 需要看整张图，无法与 piecewise compilation 共存，vLLM 会把 <code>splitting_ops</code> 置空并切到 <code>FULL</code>（<span class="mono src-path">vllm/config/compilation.py:1415-1429</span>）；<code>use_inductor_graph_partition</code> 是 torch&gt;=2.9 的实验路径，在 Inductor codegen 阶段切分，而不是在 Dynamo 之后切 FX 图（<span class="mono src-path">vllm/config/compilation.py:820-838</span>、<span class="mono src-path">:1159-1166</span>）。<code>cudagraph_specialize_lora</code> 默认开启，会为「无 LoRA」与不同 active LoRA 数分别捕获图，增加图数量和启动时间；关掉它可以省图，但每次都要跑 LoRA 算子（<span class="mono src-path">vllm/config/compilation.py:811-818</span>）。</p>
+
+  <p>最后，<code>--enforce-eager</code> 仍然是最终退路：它同时关掉编译和 CUDA graph，启动最快，但稳态 decode 失去提交开销的优化（<span class="mono src-path">docs/configuration/optimization.md:25</span>）。如果你的 backend 是 <code>NEVER</code>、batch 形状高度动态、或者模型里有大量数据依赖控制流，eager 或 PIECEWISE 往往比强行 FULL 更稳。</p>
+</section>
+
+<footer>
+  <div>CUDA Graphs · vLLM V1 commit e740bad</div>
+  <div class="src">
+    源码：<a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">vllm-project/vllm @ e740bad</a><br>
+    NVIDIA 文档：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html" target="_blank" rel="noopener">CUDA Programming Guide §4.2 CUDA Graphs</a><br>
+    vLLM 文档：<a href="https://github.com/vllm-project/vllm/blob/e740badc2e3df13a5c2abfca04ed0ac917985c5f/docs/design/cuda_graphs.md" target="_blank" rel="noopener">docs/design/cuda_graphs</a><br>
+    PR 实测：<a href="https://github.com/vllm-project/vllm/pull/20059" target="_blank" rel="noopener">vllm-project/vllm #20059</a><br>
+    笔记：<a href="/nano-vllm%E9%98%85%E8%AF%BB%E7%AC%94%E8%AE%B0/">nano-vllm 阅读笔记</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  /* ---------- 交互 1：捕获档位与 padding ---------- */
+    var mns = document.getElementById('cg-mns');
+    var bs = document.getElementById('cg-bs');
+    var mnsV = document.getElementById('cg-mns-v');
+    var bsV = document.getElementById('cg-bs-v');
+    var capEl = document.getElementById('cg-cap');
+    var cap2El = document.getElementById('cg-cap2');
+    var countEl = document.getElementById('cg-count');
+    var count2El = document.getElementById('cg-count2');
+    var paddedEl = document.getElementById('cg-padded');
+    var padded2El = document.getElementById('cg-padded2');
+    var bs2El = document.getElementById('cg-bs2');
+    var tailEl = document.getElementById('cg-tail');
+    var eagerNote = document.getElementById('cg-eager-note');
+    var wasteEl = document.getElementById('cg-waste');
+    var pctEl = document.getElementById('cg-pct');
+    var padSlot = document.getElementById('cg-pad-slot');
+    var usedBar = document.getElementById('cg-bar-used');
+    var wasteBar = document.getElementById('cg-bar-waste');
+    if (mns && bs && mnsV && bsV && capEl && cap2El && countEl && count2El &&
+        paddedEl && padded2El && bs2El && tailEl && eagerNote && wasteEl &&
+        pctEl && padSlot && usedBar && wasteBar) {
+
+    function makeGrid(cap, maxSeqs) {
+      var s = [];
+      var base = [1, 2, 4];
+      for (var i = 0; i < base.length; i++) {
+        if (base[i] <= cap) { s.push(base[i]); }
+      }
+      if (cap >= 8) {
+        var upper = Math.min(cap + 1, 256);
+        for (var v = 8; v < upper; v += 8) { s.push(v); }
+      }
+      if (cap >= 256) {
+        for (var w = 256; w <= cap; w += 16) { s.push(w); }
+      }
+      if (maxSeqs <= cap && s.indexOf(maxSeqs) === -1) { s.push(maxSeqs); }
+      s.sort(function (a, b) { return a - b; });
+      var out = [];
+      for (var j = 0; j < s.length; j++) {
+        if (j === 0 || s[j] !== s[j - 1]) { out.push(s[j]); }
+      }
+      return out;
+    }
+
+    function render() {
+      var m = parseInt(mns.value, 10);
+      var b = parseInt(bs.value, 10);
+      var cap = Math.min(m * 2, 512);
+      var grid = makeGrid(cap, m);
+      var padded = null;
+      for (var i = 0; i < grid.length; i++) {
+        if (grid[i] >= b) { padded = grid[i]; break; }
+      }
+
+      mnsV.textContent = String(m);
+      bsV.textContent = String(b);
+      bs2El.textContent = String(b);
+      capEl.textContent = String(cap);
+      cap2El.textContent = String(cap);
+      countEl.textContent = String(grid.length);
+      count2El.textContent = String(grid.length);
+
+      if (padded === null) {
+        paddedEl.textContent = 'eager';
+        padded2El.textContent = 'eager';
+        padSlot.classList.remove('hit');
+        usedBar.style.width = '0%';
+        wasteBar.style.width = '0%';
+        tailEl.hidden = true;
+        eagerNote.hidden = false;
+      } else {
+        var waste = padded - b;
+        var ratio = waste / padded * 100;
+        var usedPct = b / padded * 100;
+        paddedEl.textContent = String(padded);
+        padded2El.textContent = String(padded);
+        wasteEl.textContent = String(waste);
+        pctEl.textContent = ratio.toFixed(2) + '%';
+        tailEl.hidden = false;
+        eagerNote.hidden = true;
+        padSlot.classList.toggle('hit', waste > 0);
+        usedBar.style.width = usedPct.toFixed(2) + '%';
+        wasteBar.style.width = ratio.toFixed(2) + '%';
+      }
+    }
+
+    mns.addEventListener('input', render);
+    bs.addEventListener('input', render);
+    render();
+  }
+
+  /* ---------- 交互 2：模式降级 ---------- */
+  var supportBtns = document.querySelectorAll('#cg-support-btns .rule-btn');
+  var requestBtns = document.querySelectorAll('#cg-request-btns .rule-btn');
+  var modeOut = document.getElementById('cg-mode-out');
+  var modeReason = document.getElementById('cg-mode-reason');
+
+  if (supportBtns.length && requestBtns.length && modeOut && modeReason) {
+    var support = 'ALWAYS';
+    var request = 'FULL';
+
+    function resolve(s, r) {
+      if (r === 'NONE') {
+        return ['NONE', '请求就是 NONE；不做 CUDA Graph 捕获。'];
+      }
+      if (r === 'PIECEWISE') {
+        return ['PIECEWISE', '单模式；attention 是 breakpoint，不需要 backend 支持 full graph。'];
+      }
+      var mixedFull = (r === 'FULL');
+      var decodeFull = (r === 'FULL' || r === 'FULL_DECODE_ONLY' || r === 'FULL_AND_PIECEWISE');
+
+      if (mixedFull && s !== 'ALWAYS') {
+        if (s === 'NEVER') {
+          return ['报错 ValueError', 'mixed FULL 需要 ALWAYS；NEVER backend 会直接拒绝请求。'];
+        }
+        return ['FULL_AND_PIECEWISE', 'mixed FULL 不被支持；attention 在 splitting_ops 中，降级为 full uniform decode + piecewise mixed。'];
+      }
+      if (decodeFull && s === 'NEVER') {
+        return ['PIECEWISE', 'decode FULL 至少需要 UNIFORM_SINGLE_TOKEN_DECODE；NEVER 时若 attention 可 piecewise 编译，退回 PIECEWISE。'];
+      }
+      return [r, 'backend 等级满足该模式的 full graph 条件，保持请求模式。'];
+    }
+
+    function paint() {
+      for (var i = 0; i < supportBtns.length; i++) {
+        supportBtns[i].classList.toggle('active', supportBtns[i].getAttribute('data-support') === support);
+      }
+      for (var j = 0; j < requestBtns.length; j++) {
+        requestBtns[j].classList.toggle('active', requestBtns[j].getAttribute('data-request') === request);
+      }
+      var result = resolve(support, request);
+      modeOut.textContent = support + ' + ' + request + ' → ' + result[0];
+      modeReason.textContent = result[1];
+    }
+
+    for (var a = 0; a < supportBtns.length; a++) {
+      supportBtns[a].addEventListener('click', function () {
+        support = this.getAttribute('data-support');
+        paint();
+      });
+    }
+    for (var b = 0; b < requestBtns.length; b++) {
+      requestBtns[b].addEventListener('click', function () {
+        request = this.getAttribute('data-request');
+        paint();
+      });
+    }
+    paint();
+  }
+})();
+</script>
+</body>
+</html>

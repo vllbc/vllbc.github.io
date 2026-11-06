@@ -1,0 +1,961 @@
+<!-- LEDGER
+| 5.31 | Table 3 | 372/70 |
+| 2.02 | Table 1 | 131.1/65.0 |
+| 1.94 | Table 1 | 910/470 |
+| 50.4 | Table 1 | (131.1-65.0)/131.1*100 |
+| 7.4 | Table 3 | 44.3-36.9 |
+| 10.5 | Table 3 | 235.5/22.4 |
+| 1.55 | Table 7 | 226/146 |
+| 2.11 | Table 7 | 792/375 |
+| 16 | §5.2 | 2048/128 |
+| 1024 | §04 | 8192/8 |
+| 8 | §04 | 64/8 |
+| 2048 | §04 | 1024*2 |
+| 40 | §04 | 1024*2/64*1.25 |
+| 320 | §04 | 40*8 |
+| 512 | §04 | 0.25*2048 |
+| 472 | §04 | 512-40 |
+| 23.0 | §04 | 472/2048*100 |
+| 4096 | §04 | 512*8 |
+| 3776 | §04 | 4096-320 |
+| 16384 | §04 | 2048*8 |
+| 23.0 | §04 | 3776/16384*100 |
+| 2560 | §04 | 64*40 |
+| 20971520 | §04 | 2560*4096*2 |
+| 16777216 | §04 | 2048*4096*2 |
+| 20.0 | §04 | 20971520/1048576 |
+| 16.0 | §04 | 16777216/1048576 |
+| 1.25 | §04 | 20/16 |
+| 176160768 | §04 | 3*4096*14336 |
+| 1409286144 | §04 | 8*176160768 |
+| 2818572288 | §04 | 2*1409286144 |
+| 2.625 | §04 | 2818572288/1073741824 |
+| 11274289152 | §04 | 64*176160768 |
+| 22548578304 | §04 | 2*11274289152 |
+| 21.000 | §04 | 22548578304/1073741824 |
+| 32.0 | §04 | 2*16.0 |
+| 40.0 | §04 | 2*20.0 |
+| 64.0 | §04 | 4*16.0 |
+| 80.0 | §04 | 4*20.0 |
+| 7.8 | §3.3 | 52/6.7 |
+| 3.07 | Table 1 | 37.78-34.71 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="multi-paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expert Parallel · MoE 训练：专家分卡，token 走 all-to-all</title>
+<meta name="description" content="MoE 训练里 EP、TP、DP 如何分工；capacity factor 与 token drop；aux loss 与 router z-loss；dispatch/combine 的 all-to-all 字节账；Megatron-Core 与 DeepSpeed-MoE 的实现差异；GShard、Switch、Tutel、MegaBlocks 的结果与边界。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+/* 本页局部微调；公共组件与配色全部来自 base.css */
+.sim-note{font-size:12.5px;color:var(--text-soft);line-height:1.8;margin:10px 0 0}
+.infer{font-size:11px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;margin-left:4px;font-family:"JetBrains Mono",monospace}
+.table-cap{font-size:12.5px;color:var(--text-soft);margin:22px 0 8px;line-height:1.7}
+.table-note{font-size:12px;color:var(--text-soft);margin:-8px 0 18px;line-height:1.7}
+.cap-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:16px 0 14px}
+.cap-cell{border:1px solid var(--border);border-radius:var(--radius);padding:11px 13px;background:var(--bg)}
+.cap-cell .k{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft);line-height:1.5}
+.cap-cell .cap-v{font-family:"JetBrains Mono",monospace;font-size:15.5px;font-weight:600;color:var(--text);line-height:1.5;margin-top:4px}
+.cap-cell .cap-v.hot{color:var(--accent-deep)}
+p code,li code,td code,.details-body code,.src-ref{overflow-wrap:anywhere}
+.src-ref{font-size:12px;color:var(--text-soft);line-height:1.8}
+.src-ref code{font-size:11.5px}
+details.handcalc{margin-top:14px}
+details.handcalc h4{margin:14px 0 6px;font-size:14px;color:var(--text)}
+.hand-table{font-size:12.5px}
+.hand-table th,.hand-table td{padding:6px 8px}
+@media (max-width:600px){
+  .cap-grid{grid-template-columns:1fr}
+  .cap-cell .cap-v{font-size:14.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Expert Parallel / MoE</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#comm">通信与显存</a>
+      <a href="#flow">数据流</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>系统 · MoE 分布式训练 · 2020–2022</span>
+  <h1>Expert Parallel：专家分卡，token 过 all-to-all</h1>
+  <p class="hero-sub">
+    MoE 把 FFN 换成 E 个专家，每个 token 只走 top-k 个。EP 把<strong>专家归属</strong>按 rank 切开，
+    token 通过 dispatch/combine 两次 all-to-all 找到专家；capacity factor 把动态路由压成静态形状，
+    代价是 drop 或 padding。TP 切专家内部矩阵，DP 复制/分片其余参数——三条轴各管一段。
+  </p>
+  <div class="meta">
+    <span>GShard · Switch · DeepSpeed-MoE · Tutel · MegaBlocks · Megatron-Core 70f7a26 · DeepSpeed f47dc3e</span>
+    <a href="https://arxiv.org/abs/2101.03961" target="_blank" rel="noopener">Switch ↗</a>
+    <a href="https://arxiv.org/abs/2006.16668" target="_blank" rel="noopener">GShard ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a26" target="_blank" rel="noopener">Megatron-Core ↗</a>
+    <a href="https://github.com/deepspeedai/DeepSpeed/tree/f47dc3e3d48e748d699720ea65eca1f45c136255" target="_blank" rel="noopener">DeepSpeed ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>稠密模型每 token 的 FLOPs 随总参数涨；MoE 只让 top-k 个专家参与，总参数随 E 涨，单 token 计算只随 k 个专家涨。</strong>
+    GShard 的 600B MoE 在 2048 张 TPU v3 上训练 4.0 天、avg BLEU 44.3；同文 dense T(96L) 要 42 天、235.5 TPU core-years，avg BLEU 36.9（Table 3）。
+  </p>
+  <p>
+    <strong>EP 切的是“哪个 rank 拥有哪个专家”，不切单个专家内部的矩阵。</strong>
+    每个 rank 只存 E/EP 个专家；token 先在本 rank 做 top-k，再按目标专家分组，经 dispatch all-to-all 送出，
+    专家算完再经 combine all-to-all 收回。all-to-all 路径上每层前向 2 次、反向 2 次，共 4 次（<span class="src-ref">tensor_parallel/mappings.py:428</span>；<span class="src-ref">sharded_moe.py:100</span>）；Megatron-Core 默认走 all-gather，见 §04。
+  </p>
+  <p>
+    <strong>capacity factor 把动态路由压成静态槽位。</strong>
+    容量 = <code>ceil((T_local × k / E) × cf)</code>；超出容量的分配被 drop，或补齐到容量后计算。
+    Megatron-Core 默认 <code>moe_expert_capacity_factor=None</code>（dropless），DeepSpeed 的 <code>MoE</code> 默认 <code>capacity_factor=1.0</code> 且 <code>drop_tokens=True</code>——默认值不同，账也不同。
+  </p>
+  <p>
+    <strong>EP 的收益不是免费的。</strong>
+    GShard 从 128 到 2048 个专家（16×），step time 只涨 1.7×，但 all-to-all 在 MoE+Transformer 层里的时间占比从 16% 到 36%（§5.2）。
+    DeepSpeed-MoE 在 128 张 A100 上把 1.3B+MoE-128 的训练吞吐做到 372 samples/s；对照的 6.7B dense 是 70 samples/s，两者达到相同模型质量（Table 3 的条件）。
+    比值 5.31× 是按表内 372/70 复算，原文 gain 列写 5×；代价是 52B 对 6.7B 的参数与显存。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="GShard Table 3">44.3<small>BLEU</small></div>
+      <div class="k">GShard MoE(2048E, 36L)，600B 参数，2048 TPU v3，4.0 天；同文 dense T(96L) 为 36.9</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="GShard §5.2">36<small>%</small></div>
+      <div class="k">2048 个专家时 all-to-all 在 MoE+Transformer 层中的时间占比；128 个专家时为 16%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="DeepSpeed-MoE Table 3">5.31<small>×</small></div>
+      <div class="k">DeepSpeed-MoE：1.3B+MoE-128 372 vs 6.7B dense 70 samples/s（128 A100）；两者达到相同模型质量，5.31× 为 372/70 复算（原文 gain 列写 5×）</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>稠密扩展把每个 token 都算一遍，稀疏扩展只算被选中的专家</h2></div>
+  <p class="sec-sub">先分清两种“变大”：稠密模型是每 token 计算量随参数涨；MoE 是总参数涨、单 token 计算只随 top-k 涨。</p>
+
+  <p>
+    稠密 Transformer 的 FFN 每层只有一个 MLP，所有 token 都过同一个 MLP。把隐藏维、层数或词表做大，参数量上去，
+    每个 token 的 FLOPs 也一起上去。MoE 换掉 FFN：放 E 个专家，每个 token 只选 top-k 个。总参数可以随 E 增长，
+    单 token 的计算量约等于 k 个专家，而不是 E 个。
+  </p>
+
+  <div class="eq">
+    稠密：FLOPs/token ≈ 2 · P<sub>dense</sub><br>
+    MoE：FLOPs/token ≈ 2 · (P<sub>shared</sub> + <span class="hl-c">k · P<sub>expert</sub></span>)<br>
+    P<sub>total</sub> ≈ P<sub>shared</sub> + <span class="hl-b">E · P<sub>expert</sub></span>
+  </div>
+  <div class="eq-cap">近似式，忽略 attention、路由与通信；P<sub>shared</sub> 含非专家参数，P<sub>expert</sub> 是单个专家的 FFN 参数。</div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Dense</span><h4>参数和计算一起涨</h4></div>
+      <p>FFN 只有一份，E=1。想加容量就得加宽或加深，每 token 的矩阵乘也跟着变大。单卡放不下时，用 TP/PP/DP 把同一份计算切开或复制。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">MoE</span><h4>参数涨，激活的计算不涨</h4></div>
+      <p>E 个专家只激活 k 个。总参数可以到 E × P<sub>expert</sub>，但每 token 只算 k 个专家的 FFN。代价是专家必须放在不同设备上，token 要跨设备流动。</p>
+    </div>
+  </div>
+
+  <p>
+    GShard 的对照很直观：MoE(2048E, 36L) 有 600B 参数，在 2048 张 TPU v3 上训练 4.0 天，avg BLEU 44.3；
+    同文的 dense T(96L) 是 2.3B 参数（§1），训练 42 天、235.5 TPU core-years，avg BLEU 36.9（Table 3）。
+    这不是同参数量对照：dense 侧是 2.3B，MoE 侧是 600B。它说明的是“在相同设备数（2048 TPU v3）下，稀疏扩展能把参数做大，而每 token 计算不按参数比例涨”。
+  </p>
+  <p>
+    难点也随之出现：路由是数据相关的，专家却按设备静态放置。某个 token 选了 rank 1 上的专家，它的激活就得从 rank 0 发过去；
+    一个 expert 收到的 token 数每步都在变，但 GPU 上的 buffer 和 GEMM 形状需要提前确定。capacity factor、token drop、
+    all-to-all 和负载均衡损失，都是为了处理“动态路由”和“静态硬件”之间的这道缝。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>TP 切专家内部，EP 切专家归属，DP 管副本</h2></div>
+  <p class="sec-sub">TP/EP/DP 三条轴不是替代关系：TP 让单个专家放得下，EP 让专家总数上得去，DP 给专家提供数据副本；PP 再切层。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">TP-only</span><h4>把每个专家都切小</h4></div>
+      <p>对每个专家的 <code>H×F</code> 矩阵做列/行切分，每张卡算一部分，出口 all-reduce。每卡专家权重是 <code>E × P<sub>expert</sub> / TP</code>；TP 越大，单个专家的 GEMM 越小，每层仍要 all-reduce。</p>
+      <p class="sim-note">Megatron-Core 里专家 TP 组是独立参数：<code>expert_tensor_parallel_size</code> 默认等于 TP（<span class="src-ref">parallel_state.py:951</span>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">EP + capacity</span><h4>把专家整块分给 rank</h4></div>
+      <p>每个 rank 拥有 <code>E/EP</code> 个完整专家。token 按目标专家分组，经 all-to-all 送到对应 rank；算完再 all-to-all 收回。容量因子决定每个专家最多收多少 token，超出就 drop 或 padding。</p>
+      <p class="sim-note">GShard、Switch、DeepSpeed-MoE 都走这条路线；DeepSpeed 论文建议 EP 等于专家数，避免每个专家分到的 token 变少（§4.1.3）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Dropless</span><h4>不设固定容量</h4></div>
+      <p>不把每个专家补齐到容量，而是按实际 token 数构造 block-sparse 计算。MegaBlocks 用 128×128 的块稀疏 GEMM 处理不规则专家 batch，不丢 token；但每个 expert batch 仍会 pad 到 128 的整数倍（§5.1.2 / §5.2）。</p>
+      <p class="sim-note">它改的是“专家计算的形状”，dispatch/combine 的 all-to-all 仍在。MegaBlocks 在 dMoE-Medium 上比 padding-based Tutel 快 4.35×（Figure 7）。</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">分工</span><h4>四条轴各自切什么、通信什么</h4></div>
+    <ul>
+      <li><strong>DP</strong>：切 batch；非专家参数按普通 DP 组 all-reduce 梯度。专家参数另有一个 expert-DP 组，只同步专家参数的副本（<span class="src-ref">parallel_state.py:2590</span>；<span class="src-ref">deepspeed/utils/groups.py:393</span>）。</li>
+      <li><strong>TP</strong>：切单层/单专家内部的矩阵；每层 all-reduce。专家 TP 组可以和普通 TP 组不同，默认相同（<span class="src-ref">parallel_state.py:951</span>）。</li>
+      <li><strong>EP</strong>：切专家归属；dispatch/combine 各一次 all-to-all。专家权重不在 EP 组内做梯度 all-reduce——每个专家在 EP 维度上只属于一个 rank。</li>
+      <li><strong>PP</strong>：切层；层间传激活。MoE 层可以落在不同 pipeline stage 上，PR-MoE 甚至在不同层用不同 EP 度数（DeepSpeed-MoE §4.1.3）。</li>
+    </ul>
+    <p class="sim-note">所以“EP 与 DP 的组网约束”不是一句口号：EP 组负责 all-to-all，expert-DP 组负责专家梯度，普通 DP 组负责非专家梯度；三组各管一段，rank 排列必须让每一组都连续或按框架约定交错。</p>
+  </div>
+
+  <p>
+    DeepSpeed-MoE 给了多专家、多数据并行的具体配置：一个在 128 张 GPU 上、不同 MoE 层分别有 32/64/128 个专家的 PR-MoE，
+    非专家部分用 128-way DP，专家部分用 {32,64,128} 的 EP 加 {4,2,1} 的 DP（§4.1.3）。
+    这样每张 GPU 在每层恰好负责 1 个专家，不因层而异。这个例子说明 EP 和 DP 不是二选一，而是可以按层组合。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>路由器选 top-k，capacity 把动态路由压成静态槽位</h2></div>
+  <p class="sec-sub">先看 router 怎么给每个 token 选专家，再看容量怎么限制每个专家收多少 token，最后看 aux loss 和 z-loss 各自管什么。</p>
+
+  <h3>Router：每个 token 算 E 个分数，取 top-k</h3>
+  <p>
+    路由器是一个小的线性层 <code>W<sub>g</sub> ∈ R<sup>H×E</sup></code>。每个 token 得到 E 个 logits，softmax 或 sigmoid 后取 top-k；
+    被选中专家的 gate 值用来加权专家输出。Switch 用 top-1；GShard 用 top-2，并按权重随机决定是否把 token 发给第二专家；
+    Megatron-Core 默认 top-2、softmax，且 <code>moe_router_pre_softmax=False</code>（先选 top-k，再在选中项上归一化，<span class="src-ref">transformer_config.py:965,1004,1013</span>）。
+  </p>
+
+  <div class="eq">
+    logits = x · W<sub>g</sub> &nbsp;→&nbsp; p = softmax(logits)<br>
+    TopK(p) = {(e<sub>1</sub>, p<sub>1</sub>), …, (e<sub>k</sub>, p<sub>k</sub>)}<br>
+    y = <span class="hl-c">Σ<sub>i=1..k</sub> p<sub>i</sub> · Expert<sub>e<sub>i</sub></sub>(x)</span>
+  </div>
+  <div class="eq-cap">top-k 路由与加权求和；Switch 取 k=1（§2.1），GShard 取至多 2 个（§2.2）。</div>
+
+  <h3>Capacity：每个专家最多收多少 token</h3>
+  <p>
+    Switch 的容量公式是“batch 里的 token 数 / 专家数 × capacity factor”（Eq. 3）；GShard 的 expert capacity 是 <code>O(N/E)</code>（每个专家），每个 group 分到 <code>2N/(G·E)</code>（G 为 group 数，§2.2）。
+    把 top-k 写进分子后，就是 Megatron-Core 的 <code>get_capacity</code>：
+  </p>
+  <div class="eq">
+    C<sub>rank</sub> = ceil( (<span class="hl-a">T<sub>local</sub> × k</span> / E) × <span class="hl-c">cf</span> )<br>
+    C<sub>expert</sub> = C<sub>rank</sub> × EP &nbsp;&nbsp;(TP=1)
+  </div>
+  <div class="eq-cap">Megatron-Core 的 <code>get_capacity</code> 用 <code>math.ceil</code>（<span class="src-ref">moe_utils.py:265</span>）；dispatcher 以 <code>T_local × topk</code> 为分子，并把每个本地专家的 token 数乘以 <code>TP × EP</code>（<span class="src-ref">token_dispatcher.py:534,544</span>）。这里的 <code>C_rank</code> 是单个 rank 对每个专家的槽位，不是整个 rank 的 token 预算；GShard 按 group 分配容量，记法不同。</div>
+
+  <p>
+    超出容量的分配有两种处理：drop 或 pad。drop 时，被丢的 token 不经过这个专家，其表示直接走 residual；
+    Megatron-Core 的 <code>moe_token_drop_policy</code> 可选 <code>"probs"</code>（丢概率最低的）或 <code>"position"</code>（丢 batch 末尾的，<span class="src-ref">transformer_config.py:1163</span>）。
+    pad 时，把每个专家的输入补齐到容量，GEMM 形状固定，代价是白算 padding。Megatron-Core 默认
+    <code>moe_expert_capacity_factor=None</code>、<code>moe_pad_expert_input_to_capacity=False</code>，也就是默认不做容量限制、不 pad（<span class="src-ref">transformer_config.py:1148,1152</span>）；
+    DeepSpeed 的 <code>MoE</code> 默认 <code>capacity_factor=1.0</code>、<code>min_capacity=4</code>、<code>drop_tokens=True</code>（<span class="src-ref">layer.py:44-49</span>）。
+  </p>
+
+  <h3>Aux loss 和 z-loss：一个管均衡，一个管数值幅度</h3>
+  <p>
+    Switch/GShard 的辅助负载均衡损失是“每个专家的 token 比例”与“每个专家的平均路由概率”的点积，再乘专家数：
+  </p>
+  <div class="eq">
+    L<sub>aux</sub> = α · E · Σ<sub>i</sub> <span class="hl-a">f<sub>i</sub></span> · <span class="hl-b">P<sub>i</sub></span><br>
+    f<sub>i</sub> = (路由到专家 i 的分配数) / (T × k)<br>
+    P<sub>i</sub> = (1/T) · Σ<sub>t</sub> p<sub>t,i</sub>
+  </div>
+  <div class="eq-cap">Switch Eq. 4–6（k=1）；GShard §2.2 用 mean gates 作为可微近似；Megatron-Core 的 <code>switch_load_balancing_loss_func</code> 把 topk 写进分母（<span class="src-ref">moe_utils.py:72</span>）。</div>
+
+  <p>
+    在均匀路由下，<code>f<sub>i</sub> = 1/E</code>、<code>P<sub>i</sub> = 1/E</code>，所以 <code>L<sub>aux</sub> = α</code>。
+    它只通过 <code>P<sub>i</sub></code> 对 router 可微；<code>f<sub>i</sub></code> 来自不可微的 top-k 选择。Megatron-Core 的
+    <code>moe_aux_loss_coeff</code> 默认是 <code>0.0</code>，注释建议从 <code>1e-2</code> 起步（<span class="src-ref">transformer_config.py:1103</span>）；
+    DeepSpeed 的 <code>top1gating</code>/<code>top2gating</code>/<code>topkgating</code> 直接返回 <code>l_aux</code>（<span class="src-ref">sharded_moe.py:264,357,442</span>）。
+  </p>
+  <p>
+    z-loss 不是负载均衡项，它压的是 router logits 的 log-sum-exp 幅度：
+  </p>
+  <div class="eq">
+    L<sub>z</sub> = β · mean<sub>t</sub> ( log Σ<sub>j</sub> exp(logits<sub>t,j</sub>) )<sup>2</sup>
+  </div>
+  <div class="eq-cap">Megatron-Core 的 <code>z_loss_func</code> 对每个 token 的 <code>logsumexp(logits)</code> 平方后取均值，再乘系数（<span class="src-ref">moe_utils.py:170</span>）；默认 <code>moe_z_loss_coeff=None</code>，注释建议 <code>1e-3</code> 起步（<span class="src-ref">transformer_config.py:1108</span>）。</div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">实现差异</span><h4>DeepSpeed 的 top-2 l_aux 缩放与 Megatron 不同</h4></div>
+    <p>
+      DeepSpeed 的 <code>top1gating</code> 用 <code>sum(me·ce)·E</code>，<code>top2gating</code> 用 <code>mean(me·ce)·E²</code>，
+      <code>topkgating</code> 用 <code>mean(me·ce)·E²/k</code>（<span class="src-ref">sharded_moe.py:264,357,442</span>）。
+      Megatron-Core 的 <code>switch_load_balancing_loss_func</code> 统一把 <code>topk</code> 放进分母（<span class="src-ref">moe_utils.py:163</span>）。
+      按代码逐项对照，DeepSpeed 的 top-2 路径没有除以 2，而 top-k 路径除了 k；两套实现给出的 l_aux 数值不能直接横向比较。
+    </p>
+  </div>
+
+  <div class="sim" id="ep-cap-sim">
+    <div class="sim-top" id="ep-cap-btns">
+      <button class="rule-btn" type="button" data-ep="1">EP=1<span class="r-sub">1 rank</span></button>
+      <button class="rule-btn" type="button" data-ep="2">EP=2<span class="r-sub">2 ranks</span></button>
+      <button class="rule-btn" type="button" data-ep="4">EP=4<span class="r-sub">4 ranks</span></button>
+      <button class="rule-btn active" type="button" data-ep="8">EP=8<span class="r-sub">8 ranks</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="ep-cap-cf">capacity factor cf <span class="v" id="ep-cap-cf-v">1.25</span></label>
+        <input type="range" id="ep-cap-cf" min="1" max="2" step="0.05" value="1.25" aria-label="capacity factor">
+      </div>
+      <div class="ctrl">
+        <label for="ep-cap-skew">最热专家在本 rank 的份额 <span class="v" id="ep-cap-skew-v">25%</span></label>
+        <input type="range" id="ep-cap-skew" min="5" max="50" step="1" value="25" aria-label="最热专家占本 rank 全部路由分配的比例">
+      </div>
+    </div>
+
+    <div class="cap-grid">
+      <div class="cap-cell"><div class="k">单 rank 对每专家槽位 C_rank</div><div class="cap-v" id="ep-cap-rank">40</div></div>
+      <div class="cap-cell"><div class="k">每专家总容量 C_rank × EP</div><div class="cap-v" id="ep-cap-expert">320</div></div>
+      <div class="cap-cell"><div class="k">最热专家本 rank 负载 / 本 rank 分配</div><div class="cap-v" id="ep-cap-hot">512.0 / 2048</div></div>
+      <div class="cap-cell"><div class="k">单 rank 溢出 / 丢弃率</div><div class="cap-v hot" id="ep-cap-over">472.0 / 23.0%</div></div>
+    </div>
+
+    <div class="readout" data-src="moe_utils.py:265">
+      <div class="r-head">容量账本（T_global = 8192，E = 64，k = 2）</div>
+      <div id="ep-cap-readout">T_local = 1024；A = 2048；C_rank = 40；C_expert = 320；单 rank 最热 512 / 溢出 472 / 丢弃率 23.0%；EP 对称时总负载 4096、总溢出 3776（总容量 320）；pad 每 rank 2560 行 / 20.0 MiB；dropless 2048 行 / 16.0 MiB。</div>
+    </div>
+
+    <p class="sim-note">
+      简化模型：只用“最热专家在本 rank 的份额”描述不均衡，假设每个 EP rank 上该专家的负载相同（各 512 条分配）。
+      <code>C_rank</code> 是单 rank 对每个专家的槽位，整个 rank 的发送槽位还要乘 E；单 rank 溢出 472，EP 对称时每专家总负载 512×8=4096、总容量 320、总溢出 3776。
+      未覆盖真实路由分布、top-k 中一条分配被丢但另一条仍处理、probs 的第二次 all-to-all、TP&gt;1、共享专家与网络 overlap。
+      丢弃率按 assignment 计，分母是本 rank 的全部 2048 条分配，不是最热专家的 512 条；也不是按 token 计。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 A：capacity factor 1.25 下的容量与 A2A 字节 <span class="sum-sub">默认参数：EP=8，T_global=8192</span></summary>
+    <div class="details-body">
+      <p>参数：<code>T_global=8192</code>，<code>EP=8</code> → <code>T_local=1024</code>；<code>E=64</code>；<code>k=2</code>；<code>cf=1.25</code>；最热专家在本 rank 的份额 25%；<code>H=4096</code>；bf16 每元素 2 B。</p>
+      <p>1. 路由分配：<code>A = T_local × k = 1024 × 2 = 2048</code>。</p>
+      <p>2. 单 rank 对每个专家的槽位：<code>C_rank = ceil((A / E) × cf) = ceil((2048 / 64) × 1.25) = ceil(40) = 40</code>。</p>
+      <p>3. 每个专家从 EP 个 rank 收到的总容量：<code>C_expert = C_rank × EP = 40 × 8 = 320</code>（TP=1）。</p>
+      <p>4. 单 rank 上最热专家的分配：<code>0.25 × 2048 = 512</code>；单 rank 对每专家容量 40，所以单 rank 溢出 <code>512 − 40 = 472</code>，丢弃率 <code>472 / 2048 × 100 = 23.0%</code>。若各 rank 对称，每专家总负载 <code>512 × 8 = 4096</code>，总容量 320，总溢出 <code>4096 − 320 = 3776</code>，丢弃率 <code>3776 / 16384 × 100 = 23.0%</code>，与单 rank 口径相同。</p>
+      <p>5. pad 模式每 rank 发送行数：<code>E × C_rank = 64 × 40 = 2560</code>；字节：<code>2560 × 4096 × 2 = 20,971,520 B = 20.0 MiB</code>。dropless 行数：<code>A = 2048</code>；字节：<code>2048 × 4096 × 2 = 16,777,216 B = 16.0 MiB</code>；比值：<code>20 / 16 = 1.25</code>。</p>
+      <p>显示规则：容量取整；百分比与 MiB 保留 1 位（四舍五入）；参数个数用千分位。交互默认输出（单 rank 溢出 472 / 23.0%；EP 对称时总负载 4096、总溢出 3776）与以上逐项相同。</p>
+      <p><strong>覆盖</strong>：单 rank 与 EP 对称两种口径、pad 与 dropless 两种行数、每层 dispatch 字节。<strong>未覆盖</strong>：真实路由分布、top-k 中一条被丢但另一条仍处理、probs 的第二次 all-to-all、TP&gt;1、共享专家、网络延迟与 overlap。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="comm">
+  <div class="sec-head"><span class="sec-num">04</span><h2>每层 4 次 all-to-all；专家权重按 EP 除，梯度按 expert-DP 同步</h2></div>
+  <p class="sec-sub">把通信量和显存写成字节账，才能判断 EP 是在省时间，还是把时间换成了网络。</p>
+
+  <h3>All-to-all 字节：每层前向 2 次、反向 2 次</h3>
+  <p>
+    dispatch 把 token 按目标专家分组送出，combine 把专家输出按源 rank 收回。设每个 rank 每层要处理的隐藏状态行数为 R，
+    隐藏维为 H，元素字节为 b：
+  </p>
+  <div class="eq">
+    V = <span class="hl-a">R</span> × H × b<br>
+    dropless：R = T<sub>local</sub> × k<br>
+    pad：R = E × C<sub>rank</sub><br>
+    前向 = 2V（dispatch + combine）&nbsp;·&nbsp; 反向 = 2V &nbsp;→&nbsp; <span class="hl-c">每层 4V</span>
+  </div>
+  <div class="eq-cap">b=2（bf16）；TP=1、未计 probs 的标量 all-to-all；dropless 的 combine 行数按实际路由行数计，pad 的 combine 按容量计。</div>
+
+  <p>
+    反向为什么也是 2 次？框架把 all-to-all 包在 autograd 里：combine 的反向是 dispatch 形状的 all-to-all，
+    dispatch 的反向是 combine 形状的 all-to-all。Megatron-Core 的 <code>_AllToAll.backward</code> 交换 input/output splits 再调用一次
+    all-to-all（<span class="src-ref">tensor_parallel/mappings.py:474</span>）；DeepSpeed 的 <code>_AllToAll.backward</code> 直接对 grad 再做一次 all-to-all
+    （<span class="src-ref">sharded_moe.py:108</span>）。所以一个 MoE 层在训练步里共有 4 次 all-to-all。
+  </p>
+
+  <h3>专家权重显存：每卡只放 E/EP 个专家</h3>
+  <div class="eq">
+    M<sub>expert/rank</sub> = (E / EP) × <span class="hl-a">3 × H × F</span> × b
+  </div>
+  <div class="eq-cap">按 TP=1；若专家 TP&gt;1，每卡权重再除以专家 TP。3 个矩阵是 gate / up / down，按 gated FFN 计；若专家是 2 矩阵 FFN，把 3 换成 2。b=2（bf16）；只算专家 FFN 权重，不含优化器状态、梯度、激活、embedding 与 attention。</div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Megatron-Core</span><h4>默认 all-gather，可选 all-to-all</h4></div>
+      <p>
+        默认 <code>moe_token_dispatcher_type="allgather"</code>（<span class="src-ref">transformer_config.py:1119</span>）：
+        在 TP×EP 组内 all-gather token，本地按专家 permutation，combine 用 reduce-scatter 收回（<span class="src-ref">token_dispatcher.py:380</span>）。
+        也可切到 <code>"alltoall"</code>：dispatch 用变长 <code>all_to_all_single</code>，支持 pad-to-capacity（<span class="src-ref">token_dispatcher.py:697</span>）。
+        all-gather 路径把每个 rank 的 token 复制到组内所有 rank，all-to-all 路径只把 token 送到目标专家所在 rank；两条路径的字节账不同。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">DeepSpeed-MoE</span><h4>EP&gt;1 时走等分 all-to-all</h4></div>
+      <p>
+        <code>MOELayer.forward</code> 在 <code>ep_size &gt; 1</code> 时调用 <code>_AllToAll.apply</code>（<span class="src-ref">sharded_moe.py:701</span>），
+        combine 再调用一次（<span class="src-ref">sharded_moe.py:730</span>）。<code>_AllToAll.forward</code> 用等分
+        <code>all_to_all_single</code>（<span class="src-ref">sharded_moe.py:104</span>），dispatch buffer 按容量 <code>[E, C, H]</code> 组织；
+        top-1/top-2 的 <code>l_aux</code> 在 gate 内计算并返回（<span class="src-ref">sharded_moe.py:264,357</span>）。
+      </p>
+    </div>
+  </div>
+
+  <h3>专家梯度：不在 EP 组内 all-reduce</h3>
+  <p>
+    EP 把专家分给不同 rank；在 EP 维度上，每个专家只属于一个 rank，只在该 rank 的专家副本上计算前向和反向，所以专家权重梯度不需要跨 EP 组 all-reduce。
+    需要同步的是<strong>专家参数的 DP 副本</strong>：Megatron-Core 把它们放在 expert-DP 组里，文档字符串写明该组用于
+    “expert grad all-reduce, optimizer state, checkpoint replicas”（<span class="src-ref">parallel_state.py:2590</span>）。
+    DeepSpeed 在 <code>deepspeed/utils/groups.py</code> 里也把 EP 组与 expert-DP 组分开：例如 world=16、EP=2 时，
+    expert-DP 组是 <code>[0,2,4,…,14]</code> 和 <code>[1,3,5,…,15]</code>，注释写明 “all reduce is only on MoE params”
+    （<span class="src-ref">deepspeed/utils/groups.py:393</span>）。非专家参数仍走普通 DP 组。若专家还做 TP 切分，专家 TP 组内仍有 all-reduce；这里只讨论 EP 与 expert-DP 的分工。
+  </p>
+
+  <div class="sim" id="ep-budget-sim">
+    <div class="sim-top" id="ep-budget-btns">
+      <button class="rule-btn active" type="button" data-mode="drop">dropless<span class="r-sub">按实际行数</span></button>
+      <button class="rule-btn" type="button" data-mode="pad">pad-to-capacity<span class="r-sub">cf=1.25</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="ep-budget-ep">EP（2 的幂） <span class="v" id="ep-budget-ep-v">8</span></label>
+        <input type="range" id="ep-budget-ep" min="0" max="6" step="1" value="3" aria-label="EP 度数，按 2 的幂">
+      </div>
+      <div class="ctrl">
+        <label for="ep-budget-h">hidden H <span class="v" id="ep-budget-h-v">4096</span></label>
+        <input type="range" id="ep-budget-h" min="2048" max="8192" step="1024" value="4096" aria-label="hidden size">
+      </div>
+      <div class="ctrl">
+        <label for="ep-budget-f">expert FFN F <span class="v" id="ep-budget-f-v">14336</span></label>
+        <input type="range" id="ep-budget-f" min="4096" max="16384" step="1024" value="14336" aria-label="expert FFN hidden size">
+      </div>
+    </div>
+
+    <div class="cap-grid">
+      <div class="cap-cell"><div class="k">每卡专家数 E / EP</div><div class="cap-v" id="ep-budget-local">8</div></div>
+      <div class="cap-cell"><div class="k">每卡专家权重（bf16）</div><div class="cap-v" id="ep-budget-mem">2.625 GiB</div></div>
+      <div class="cap-cell"><div class="k">dispatch 每卡每层</div><div class="cap-v" id="ep-budget-disp">16.0 MiB</div></div>
+      <div class="cap-cell"><div class="k">4 次 A2A 合计 / 层</div><div class="cap-v hot" id="ep-budget-total">64.0 MiB</div></div>
+    </div>
+
+    <div class="readout" data-src="tensor_parallel/mappings.py:428">
+      <div class="r-head">EP 预算账本（T_global = 8192，E = 64，k = 2）</div>
+      <div id="ep-budget-readout">T_local = 1024；C_rank = 40；dropless dispatch 16.0 MiB；前向 32.0 MiB；含反向 64.0 MiB。</div>
+    </div>
+
+    <p class="sim-note">
+      简化：每卡专家数按 E/EP 均分；按 gated FFN 的 3 个矩阵计（2 矩阵 FFN 数值不同）；只算 bf16 专家 FFN 权重；
+      A2A 只算隐藏状态，未计 probs 标量、优化器状态、激活、共享专家、专家梯度 all-reduce 与网络 latency。EP 变化时保持 T_global 不变，所以每卡 token 数按 1/EP 缩小。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 B：EP=8 的专家权重显存与每层 A2A 字节 <span class="sum-sub">默认参数：EP=8，H=4096，F=14336</span></summary>
+    <div class="details-body">
+      <p>参数：<code>E=64</code>，<code>EP=8</code> → 每卡 8 个专家；每个专家 3 个矩阵（gate / up / down），每个 <code>H×F</code>；bf16 每元素 2 B。</p>
+      <p>1. 每个专家参数：<code>3 × 4096 × 14336 = 176,160,768</code>。每卡 8 个：<code>8 × 176,160,768 = 1,409,286,144</code> 参数。</p>
+      <p>2. bf16 权重字节：<code>1,409,286,144 × 2 = 2,818,572,288 B</code>；<code>2,818,572,288 / 1,073,741,824 = 2.625 GiB</code>。</p>
+      <p>3. <code>T_local = 8192 / 8 = 1024</code>；单 rank 对每个专家的槽位 <code>C_rank = ceil((1024 × 2 / 64) × 1.25) = 40</code>。</p>
+      <p>4. dropless dispatch：<code>1024 × 2 × 4096 × 2 = 16,777,216 B = 16.0 MiB</code>；pad dispatch：<code>64 × 40 × 4096 × 2 = 20,971,520 B = 20.0 MiB</code>。</p>
+      <p>5. 每层前向 = dispatch + combine = 2×；反向 = 2×；合计 4×。dropless：前向 <code>2 × 16.0 = 32.0 MiB</code>，合计 <code>4 × 16.0 = 64.0 MiB</code>；pad：前向 <code>2 × 20.0 = 40.0 MiB</code>，合计 <code>4 × 20.0 = 80.0 MiB</code>。</p>
+      <p>6. 64 个专家的总权重：<code>64 × 176,160,768 = 11,274,289,152</code> 参数；<code>2 × 11,274,289,152 = 22,548,578,304 B = 21.000 GiB</code>（仅 bf16 权重）。</p>
+      <p>显示规则同上。交互默认（EP=8、H=4096、F=14336、dropless）输出 8 个专家/卡、2.625 GiB、16.0 MiB、32.0 MiB、64.0 MiB，与以上逐项相同。</p>
+      <p><strong>覆盖</strong>：FFN 三矩阵的 bf16 权重、EP 均分专家、每层 4 次 A2A 的字节。<strong>未覆盖</strong>：优化器状态、梯度、激活、临时 buffer、embedding/attention、TP&gt;1、专家数不被 EP 整除、网络带宽与 latency、专家梯度 all-reduce。</p>
+    </div>
+  </details>
+
+  <p class="table-cap">Table 2（Tutel）：All-to-All 在 MoE 层开销中的占比，以及完全重叠后的理论上限。模型设置：fflayer hidden 4K、channel 4K、2 experts/GPU、64K tokens/iteration。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>GPU 数</th><th>MoE 开销 (ms)</th><th>All-to-All (ms)</th><th>All-to-All 占比</th><th>潜在加速</th></tr></thead>
+      <tbody>
+        <tr><td class="num">16</td><td class="num">560.9</td><td class="num">189.1</td><td class="num">33.7%</td><td class="num">1.51×</td></tr>
+        <tr><td class="num">64</td><td class="num">698.9</td><td class="num">323.8</td><td class="num">46.3%</td><td class="num">1.86×</td></tr>
+        <tr><td class="num">256</td><td class="num">866.4</td><td class="num">491.3</td><td class="num">56.7%</td><td class="num">1.76×</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">潜在加速是“All-to-All 与计算完全重叠”时的上限（Table 2 原表最后一列），不是实测端到端加速。占比随规模上升；原表的 potential overhead saving 从 46.3% 到 43.3%，所以 256 GPU 的潜在加速（1.76×）低于 64 GPU（1.86×）。</p>
+
+  <p>
+    Tutel 另外报告了单层 MoE 的显存：32,768 tokens/step 时，Fairseq MoE 是 57.9 GiB，Tutel 是 5.7 GiB，表内写作
+    -90.2%（Table 5）；4,096 tokens/step 时是 3.7 GiB 对 2.9 GiB（-21.6%）。条件是 D=H=4096、top-k=2、E_g=2 的静态设置。
+    Table 5 只记录单层 MoE 的 GPU 显存；Tutel 在 §4.2 把 fast encode/decode 列为显存优化点，表内没有把差距拆成 padding 与 buffer 两部分。
+  </p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>前向两次、反向两次，token 在 dispatch/combine 之间往返</h2></div>
+  <p class="sec-sub">跟着一个 MoE 层走一遍：router 选专家，dispatch 送到专家所在 rank，专家算完，combine 收回并加权求和。</p>
+
+  <figure>
+    <svg viewBox="0 0 920 380" role="img" aria-labelledby="moe-svg-title">
+      <title id="moe-svg-title">MoE 层的 token 路径：token 进 router 选 top-k，经 dispatch all-to-all 送到专家所在 rank，专家计算后经 combine all-to-all 收回</title>
+      <defs>
+        <marker id="moe-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-soft)"/>
+        </marker>
+      </defs>
+      <g font-family="Inter, 'Noto Sans SC', sans-serif">
+        <!-- token source -->
+        <rect x="14" y="120" width="86" height="110" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"/>
+        <g fill="var(--c1)">
+          <rect x="27" y="134" width="16" height="16" rx="3"/>
+          <rect x="49" y="134" width="16" height="16" rx="3"/>
+          <rect x="71" y="134" width="16" height="16" rx="3"/>
+          <rect x="27" y="156" width="16" height="16" rx="3"/>
+          <rect x="49" y="156" width="16" height="16" rx="3"/>
+          <rect x="71" y="156" width="16" height="16" rx="3"/>
+        </g>
+        <text x="57" y="194" text-anchor="middle" font-size="12" font-weight="600" fill="var(--c1)">rank r token</text>
+        <text x="57" y="212" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--text-soft)">T_local × H</text>
+
+        <!-- router -->
+        <rect x="126" y="125" width="120" height="100" rx="8" fill="var(--bg-surface)" stroke="var(--border-strong)"/>
+        <text x="186" y="149" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--text)">Router</text>
+        <text x="186" y="169" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">top-k 选择</text>
+        <text x="186" y="188" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">softmax</text>
+        <text x="186" y="207" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--text-soft)">p, expert id</text>
+
+        <!-- a2a dispatch -->
+        <rect x="276" y="125" width="160" height="100" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"/>
+        <text x="356" y="149" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--c2)">All-to-All</text>
+        <text x="356" y="169" text-anchor="middle" font-size="11.5" fill="var(--c2)">dispatch</text>
+        <text x="356" y="190" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">按目标专家分组</text>
+        <text x="356" y="209" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--text-soft)">变长 / 补齐</text>
+
+        <!-- all-to-all boundary -->
+        <line x1="456" y1="42" x2="456" y2="368" stroke="var(--c2)" stroke-width="1.2" stroke-dasharray="5 4" opacity=".65"/>
+        <text x="450" y="56" text-anchor="end" font-size="10.5" font-family="'JetBrains Mono', monospace" fill="var(--c2)">EP all-to-all</text>
+
+        <!-- rank 0 -->
+        <rect x="478" y="44" width="230" height="156" rx="8" fill="none" stroke="var(--c2)" stroke-dasharray="5 4"/>
+        <text x="488" y="62" font-size="11" font-weight="600" fill="var(--c2)">EP rank 0 · experts 0–1</text>
+        <rect x="496" y="74" width="86" height="56" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="539" y="97" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-deep)">E0</text>
+        <text x="539" y="116" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">FFN</text>
+        <rect x="600" y="138" width="86" height="56" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="643" y="161" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-deep)">E1</text>
+        <text x="643" y="180" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">FFN</text>
+
+        <!-- rank 1 -->
+        <rect x="478" y="208" width="230" height="160" rx="8" fill="none" stroke="var(--c2)" stroke-dasharray="5 4"/>
+        <text x="488" y="226" font-size="11" font-weight="600" fill="var(--c2)">EP rank 1 · experts 2–3</text>
+        <rect x="496" y="238" width="86" height="56" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="539" y="261" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-deep)">E2</text>
+        <text x="539" y="280" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">FFN</text>
+        <rect x="600" y="302" width="86" height="56" rx="7" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="643" y="325" text-anchor="middle" font-size="13" font-weight="700" fill="var(--accent-deep)">E3</text>
+        <text x="643" y="344" text-anchor="middle" font-size="10.5" fill="var(--accent-deep)">FFN</text>
+
+        <!-- combine -->
+        <rect x="736" y="125" width="160" height="100" rx="8" fill="var(--c3-soft)" stroke="var(--c3)"/>
+        <text x="816" y="149" text-anchor="middle" font-size="13.5" font-weight="700" fill="var(--c3)">All-to-All</text>
+        <text x="816" y="169" text-anchor="middle" font-size="11.5" fill="var(--c3)">combine</text>
+        <text x="816" y="190" text-anchor="middle" font-size="11.5" fill="var(--text-muted)">按源 rank 收回</text>
+        <text x="816" y="209" text-anchor="middle" font-size="11" font-family="'JetBrains Mono', monospace" fill="var(--text-soft)">Σ p_i · E_i(x)</text>
+
+        <!-- arrows -->
+        <line x1="100" y1="175" x2="124" y2="175" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+        <line x1="246" y1="175" x2="274" y2="175" stroke="var(--text-soft)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+
+        <polyline points="436,160 460,160 460,102 494,102" fill="none" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+        <polyline points="436,170 470,170 470,166 598,166" fill="none" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+        <polyline points="436,185 470,185 470,266 494,266" fill="none" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+        <polyline points="436,195 480,195 480,330 598,330" fill="none" stroke="var(--c2)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+
+        <polyline points="582,102 716,102 716,165 734,165" fill="none" stroke="var(--c3)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+        <polyline points="686,166 716,166" fill="none" stroke="var(--c3)" stroke-width="1.4"/>
+        <polyline points="582,266 716,266 716,185 734,185" fill="none" stroke="var(--c3)" stroke-width="1.4" marker-end="url(#moe-arrow)"/>
+        <polyline points="686,330 716,330" fill="none" stroke="var(--c3)" stroke-width="1.4"/>
+
+        <text x="816" y="250" text-anchor="middle" font-size="10.5" fill="var(--text-soft)">回源 rank 后 unpermute</text>
+      </g>
+    </svg>
+    <figcaption>本页重绘：一个 MoE 层的 token 路径。图中 EP=2、每 rank 2 个专家、top-k=2；只画 rank r 的 token，其他 rank 走同一流程。dispatch 与 combine 各一次 all-to-all；反向各自再走一次反向 all-to-all。</figcaption>
+  </figure>
+
+  <h3>前向：路由、派发、专家、收回</h3>
+  <ol>
+    <li><strong>Router</strong>：每个 token 算 E 个 logits，取 top-k，得到专家 id 和 gate 概率。Megatron-Core 默认先 top-k 再 softmax（<code>moe_router_pre_softmax=False</code>，<span class="src-ref">transformer_config.py:1004</span>）。</li>
+    <li><strong>Permute</strong>：按目标 rank/专家排序，把 token 重排成发送 buffer。dropless 时行数是 <code>T_local × k</code>；pad 时每 rank 发送 <code>E × C_rank</code> 行。</li>
+    <li><strong>Dispatch all-to-all</strong>：每个 rank 把发往其他 rank 的 chunk 送出，同时接收自己本地专家需要的 token。Megatron-Core 的 all-to-all 支持变长 splits（<span class="src-ref">token_dispatcher.py:720</span>）；DeepSpeed 用容量大小的等分 buffer（<span class="src-ref">sharded_moe.py:104</span>）。</li>
+    <li><strong>Experts</strong>：本地 <code>E/EP</code> 个专家处理自己收到的 token。Megatron-Core 可用 <code>TEGroupedMLP</code> 或 <code>SequentialMLP</code>（<span class="src-ref">experts.py:282,1942</span>）；DeepSpeed 用 <code>Experts</code>/<code>GroupedExperts</code>（<span class="src-ref">experts.py:13</span>；<span class="src-ref">ep_experts.py:439</span>）。</li>
+    <li><strong>Combine all-to-all</strong>：专家输出按源 rank 发回；<code>unpermute</code> 恢复原顺序，乘 gate 概率并求和，最后加 residual。</li>
+  </ol>
+
+  <h3>反向：4 次 all-to-all 的来历</h3>
+  <ol>
+    <li><strong>Combine 的反向</strong>：输出梯度按 combine 的逆方向做一次 all-to-all，回到专家所在 rank。</li>
+    <li><strong>Expert 反向</strong>：本地专家算权重梯度和输入梯度。专家权重梯度不跨 EP 组同步；跨 expert-DP 副本做 all-reduce/reduce-scatter（<span class="src-ref">parallel_state.py:2590</span>）。</li>
+    <li><strong>Dispatch 的反向</strong>：输入梯度再按 dispatch 的逆方向做一次 all-to-all，回到源 rank。</li>
+    <li><strong>Router 反向</strong>：gate 概率的梯度穿过加权求和回到 router；aux loss 的梯度只通过 <code>P<sub>i</sub></code> 回传，z-loss 直接作用在 logits 上（<span class="src-ref">moe_utils.py:170</span>）。</li>
+  </ol>
+
+  <div class="eq">
+    rank r： [T<sub>local</sub>, H]<br>
+    top-k： [T<sub>local</sub> × k, H] + probs<br>
+    dispatch： pad [E × C<sub>rank</sub>, H] / dropless [T<sub>local</sub> × k, H]<br>
+    experts： pad [E × C<sub>rank</sub>, H] → [E × C<sub>rank</sub>, H] / dropless [T<sub>local</sub> × k, H] → [T<sub>local</sub> × k, H]<br>
+    combine： pad [E × C<sub>rank</sub>, H] / dropless [T<sub>local</sub> × k, H]<br>
+    output： [T<sub>local</sub>, H]
+  </div>
+  <div class="eq-cap">形状按 TP=1 书写；pad 的 <code>E × C_rank</code> 是每 rank 发送/接收的槽位数，dropless 是实际路由行数（均衡时约 <code>T_local × k</code>）；combine 的槽位数与 dispatch 相同。实际变量长度由 routing map 决定。</div>
+
+  <p>
+    共享专家不在上图里：它不经过 router，也不走 all-to-all，而是对每个 token 直接计算，再与 routed 专家输出相加。
+    Megatron-Core 用 <code>shared_experts.py</code> 的 <code>SharedExpertMLP</code>；DeepSpeed-MoE 的 Residual-MoE 用
+    <code>use_residual</code> 加一个 dense MLP（<span class="src-ref">layer.py:81</span>）。图中未画这条分支，容量账和 A2A 字节账也不含它。
+  </p>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>报告数字：EP 把 step time 压到亚线性，但通信占比上升</h2></div>
+  <p class="sec-sub">下面每一行对应一个来源与配置；不同来源的行指标口径不同，不能跨来源比较或相加。同一论文内的对照（如 Switch 的 CF、GShard 的 MoE vs dense）只在原文设定的指标内成立。模型、并行配置、硬件和指标都写在同一行。</p>
+
+  <p class="table-cap">Table 1（Switch）：128 experts、experts every other FFN、32 TPUv3 cores、相同计算量。质量列是 100k steps 的 Neg. Log Perp.，越低越好；时间列是到达 -1.50 阈值的时间。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th>capacity factor</th><th>质量 @100k (Neg. Log Perp.)</th><th>到 -1.50 时间 (h)</th><th>速度 (examples/s)</th></tr></thead>
+      <tbody>
+        <tr><td>Switch-Base</td><td class="num">2.0</td><td class="num">-1.554</td><td class="num">72.8</td><td class="num">860</td></tr>
+        <tr><td>Switch-Base</td><td class="num">1.25</td><td class="num">-1.553</td><td class="num">65.0</td><td class="num">910</td></tr>
+        <tr><td>Switch-Base</td><td class="num">1.0</td><td class="num">-1.561</td><td class="num">62.8</td><td class="num">1000</td></tr>
+        <tr><td>T5-Large dense</td><td class="num">—</td><td class="num">-1.550</td><td class="num">131.1</td><td class="num">470</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">Switch-Base 与 T5-Large 不是同参数量模型；Table 1 的对照是在相同硬件、相同计算量（32 TPUv3 cores）下：质量列是 100k steps 的 Neg. Log Perp.，时间列是各模型到达 -1.50 阈值的时间（原文明确说模型需要训练超过 100k steps 才能到阈值）。Switch-Base 从 CF 2.0 到 1.25 的时间是 72.8→65.0 h，速度是 860→910 examples/s；CF 1.0 进一步到 62.8 h / 1000 examples/s。</p>
+
+  <p class="table-cap">跨论文结果：来源分别是 Table 3（GShard）、Table 3（DeepSpeed-MoE）、Table 7（Tutel）、Figure 7–8（MegaBlocks；8 A100、8-way EP、64 experts、top-1 的设置见 §6）、Table 9（Switch）。DeepSpeed 两行是 Table 3 的同质量对照：1.3B+MoE-128 与 6.7B dense 达到相同模型质量，372/70 是吞吐比，原文 gain 列写 5×。不同来源的行指标口径不同，禁止跨来源比较或相加。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>来源</th><th>模型 / 设置</th><th>并行 / 硬件</th><th>指标</th><th>数值</th></tr></thead>
+      <tbody>
+        <tr><td>Switch Table 1</td><td>Switch-Base，128 experts，CF 1.25</td><td>32 TPUv3 cores</td><td>到 -1.50 时间 / 速度</td><td class="num">65.0 h / 910 ex/s</td></tr>
+        <tr><td>Switch Table 9</td><td>Switch-C，2048 experts，EP only，1.6T（§5.4）</td><td>TPUv3，EP only</td><td>到固定 perplexity</td><td class="num">4× vs T5-XXL</td></tr>
+        <tr><td>GShard Table 3</td><td>MoE(2048E, 36L)，600B</td><td>2048 TPUv3</td><td>avg BLEU / core-years</td><td class="num">44.3 / 22.4</td></tr>
+        <tr><td>GShard Table 3</td><td>dense T(96L)，2.3B（§1）</td><td>2048 TPUv3</td><td>avg BLEU / core-years</td><td class="num">36.9 / 235.5</td></tr>
+        <tr><td>DeepSpeed Table 3</td><td>1.3B+MoE-128（52B）</td><td>128 A100</td><td>training samples/s</td><td class="num">372</td></tr>
+        <tr><td>DeepSpeed Table 3</td><td>6.7B dense</td><td>128 A100</td><td>training samples/s</td><td class="num">70</td></tr>
+        <tr><td>Tutel Table 7</td><td>SwinV2-MoE</td><td>128 A100，1 expert/GPU</td><td>train / infer images/s</td><td class="num">226 / 792</td></tr>
+        <tr><td>Tutel Table 7</td><td>Fairseq MoE</td><td>128 A100</td><td>train / infer images/s</td><td class="num">146 / 375</td></tr>
+        <tr><td>MegaBlocks Figure 7</td><td>dMoE-Medium vs padding-based Tutel</td><td>8 A100，8-way EP</td><td>end-to-end 加速</td><td class="num">4.35×</td></tr>
+        <tr><td>MegaBlocks Figure 8</td><td>dMoE-Medium vs 逐模型调 CF 的 Tutel</td><td>8 A100，8-way EP</td><td>end-to-end 加速</td><td class="num">1.18×</td></tr>
+        <tr><td>MegaBlocks Figure 7</td><td>dMoE vs Megatron-LM dense</td><td>8 A100（dense 基线）</td><td>end-to-end 加速</td><td class="num">1.8–2.4×</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">MegaBlocks 的两条对照不同：Figure 7 的 4.35× 是相对“padding-based Tutel”路径；Figure 8 的 1.18× 是相对“为每个模型调过 capacity factor 的 Tutel”。论文摘要写 “up to 40% over MoEs trained with Tutel”，对应 Figure 8 中 XS 的 1.38×。这几个数字不能合并成一个“对 Tutel 的加速”。</p>
+
+  <p>
+    Switch 的 Table 1 在 C4、128 experts、32 TPUv3 cores 的设定下报告：CF 1.0 和 1.25 比 2.0 更快。
+    T5-Large 到阈值要 131.1 h，Switch-Base CF 1.25 要 65.0 h，时间比是 2.02×；速度 910 vs 470 examples/s，
+    速度比是 1.94×；时间少 50.4%（相对口径：(131.1−65.0)/131.1）。这些只在 Table 1 的设定内成立。
+  </p>
+  <p>
+    GShard 的扩展账更直接：专家数从 128 到 2048（16×），执行时间只涨 1.7×，但 all-to-all 在 MoE+Transformer 层里的占比从 16% 到 36%（§5.2）。
+    600B MoE 的 22.4 TPU core-years 对 dense T(96L) 的 235.5，core-year 比是 10.5×；avg BLEU 44.3 对 36.9，差 7.4（Table 3）。
+    这不是同参数量对照，前面已经说明。
+  </p>
+  <p>
+    DeepSpeed-MoE 在 128 张 A100 上把 1.3B+MoE-128 的训练吞吐做到 372 samples/s；6.7B dense 是 70 samples/s，两者达到相同模型质量（Table 3 的条件）。按表内数字复算 372/70 ≈ 5.31×，原文 gain 列写 5×。
+    代价是模型从 6.7B 参数变成 52B（§3.3 / Table 2），大约 7.8×；MoE 的显存和通信压力都随专家数上去。
+  </p>
+  <p>
+    Tutel 在 128 张 A100、1 expert/GPU 的 SwinV2-MoE 上，训练 226 vs 146 images/s、推理 792 vs 375 images/s，
+    分别是 1.55× 和 2.11×（Table 7）。同一篇论文的 Table 2 显示，64 GPU 时 all-to-all 已占 MoE 层开销的 46.3%，
+    完全重叠的潜在加速是 1.86×；到 256 GPU，占比 56.7%，潜在加速 1.76×。
+  </p>
+  <p>
+    MegaBlocks 在 8 张 A100、64 experts、top-1 的设置下（§6），dMoE-Medium 比 padding-based Tutel 快 4.35×（Figure 7），
+    但相对调过 CF 的 Tutel 只有 1.18×（Figure 8）。相对 Megatron-LM 的 dense Transformer，Figure 7 报告 1.8–2.4×。
+    Table 3 里 Tutel 在 Medium 上只能用 micro-batch 1，MegaBlocks 能用 8——padding 的显存代价直接压低了前者的 batch。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：drop、失衡、小 batch、组网，任何一条都可能吃掉 EP 收益</h2></div>
+  <p class="sec-sub">EP 的前提是“每个专家都有足够多的 token、且 token 能便宜地到达专家”。下面四个边界里任何一个不成立，账就要重算。</p>
+
+  <h3>Token drop：容量是静态的，路由是动态的</h3>
+  <p>
+    capacity factor 把每个专家的 token 数固定住，但 router 的选择是数据相关的。容量小，溢出多，token 被丢后只走 residual；
+    容量大，padding 多，白算的 GEMM 和 all-to-all 字节都上去。Switch 的 Table 1 在 C4、128 experts、32 TPUv3 cores 下报告
+    CF 1.0/1.25 比 2.0 更快；MegaBlocks 的 Figure 2 在 The Pile、64 experts 下报告容量越高 loss 越低，最高容量（动态不丢 token）最低。
+    两处是不同数据、不同模型、不同容量策略，本页并列，不合并成一条通用规则。
+  </p>
+
+  <h3>负载失衡：aux loss 只约束期望，不保证每一步均衡</h3>
+  <p>
+    aux loss 鼓励 router 把 token 平均分给专家，但它不能保证每一步都均衡。Tutel 的 Table 1 在 ImageNet-22K、SwinV2-S、32 experts、top-1、
+    capacity factor 为无穷大的设定下，给出 LB loss 权重与 top-1 精度的关系：
+  </p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>LB loss 权重</th><th>0.001</th><th>0.01</th><th>0.1</th><th>1.0</th></tr></thead>
+      <tbody>
+        <tr><td>Acc@1 (%)</td><td class="num">37.32</td><td class="num">37.78</td><td class="num">37.16</td><td class="num">34.71</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="table-note">Table 1（Tutel）：权重 1.0 时 34.71%，0.01 时 37.78%，差 3.07 个百分点。表内结论是“过大的 LB 权重会伤精度”；这里只转录这四个点，不外推到其他模型。</p>
+  <p>
+    z-loss 不解决均衡，它压的是 logits 的幅度，让 router 的 softmax 不至于进入数值不稳的区域。Megatron-Core 把两者分开：
+    <code>moe_aux_loss_coeff</code> 管均衡，<code>moe_z_loss_coeff</code> 管 logits 幅度，默认分别是 0.0 和 None（<span class="src-ref">transformer_config.py:1103,1108</span>）。
+    两个系数都需要按模型扫，不能互相替代。
+  </p>
+
+  <h3>小 batch：专家数上去，每个专家的 batch 变小</h3>
+  <p>
+    如果全局 token 数不变，专家数 E 增大时，每个专家分到的 token 数按 1/E 缩小；只增大 EP 而 E 不变时，每卡 token 数按 1/EP 缩小，但每个专家的全局 token 数不变。
+    DeepSpeed-MoE §4.1.3 的建议是让 EP 等于专家数，用 DP 把全局 batch 补回来，避免每个专家的 batch 变小；但专家数很多时，单专家 batch 仍然可能小到 GEMM 不高效。
+    MegaBlocks 的 Table 3 是一个具体例子：Medium 模型上，Tutel 的 padding 路径只能用 micro-batch 1，MegaBlocks 能用 8。
+    batch 小的时候，all-to-all 的 latency 更容易成为瓶颈；Tutel Table 2 的 16 GPU 场景，all-to-all 已占 33.7%，64 GPU 到 46.3%。
+  </p>
+
+  <h3>组网：EP 组、expert-DP 组、普通 DP 组要同时满足整除</h3>
+  <p>
+    Megatron-Core 在初始化时要求 <code>world_size</code> 能被专家网格的 <code>TP × EP × PP</code> 整除（GTP remat 默认为 1），并单独计算
+    <code>expert_data_parallel_size</code>（<span class="src-ref">parallel_state.py:960</span>）；配置校验要求
+    <code>num_moe_experts % expert_model_parallel_size == 0</code>（<span class="src-ref">transformer_config.py:2752</span>），
+    且 <code>EP&gt;1</code> 时 <code>num_moe_experts</code> 不能为空（<span class="src-ref">transformer_config.py:2232</span>）。
+    DeepSpeed 的 <code>deepspeed/utils/groups.py</code> 也把 EP 组和 expert-DP 组分开生成，rank 排列随 <code>use_data_before_expert_parallel</code> 变化
+    （<span class="src-ref">deepspeed/utils/groups.py:563,570</span>）。
+  </p>
+  <p>
+    常见组网里，EP 组的 all-to-all 会跨节点，TP 的 all-reduce 多在节点内。DeepSpeed-MoE 的推理系统用两级 all-to-all（节点内再节点间）来减少跨节点跳数（§5.3）；
+    Tutel 的 2DH all-to-all 也是同一思路。<span class="infer">工程判断</span>把 EP 组铺到慢速跨节点链路上，all-to-all 的 latency 会直接吃掉专家计算的收益。
+  </p>
+
+  <h3>什么时候别用 EP</h3>
+  <ul>
+    <li><strong>单专家 batch 太小</strong>：全局 token 少、专家数多（EP 通常也大），每个专家的 GEMM 很小；此时 padding 或 block-sparse 的调度开销占比高，EP 的算力收益会被抵消。</li>
+    <li><strong>跨节点 all-to-all 是瓶颈</strong>：EP 组必须跨慢速网络时，dispatch/combine 的 latency 可能高于专家计算；先做层级 all-to-all 或把 EP 限制在节点内，再谈扩展。</li>
+    <li><strong>要求严格不丢 token，但没有 dropless kernel</strong>：capacity factor 调大只是把 drop 换成 padding，显存和通信都涨；MegaBlocks 这类 block-sparse 路径不丢 token，但每个 expert batch 仍要 pad 到 block size（128）的整数倍，不能当成零 padding。</li>
+    <li><strong>专家数不能被 EP 整除</strong>：Megatron-Core 会直接拒绝初始化；先调整专家数或 EP 度数，不要指望运行时自动补齐。</li>
+  </ul>
+  <p class="sim-note">
+    <span class="infer">工程判断</span>
+    本节最后的列表是工程建议，不是论文实验结论；依据是上面引用的约束与字节账。具体收益仍要在目标集群上测 all-to-all 带宽、每专家 batch 和 GEMM 形状。
+  </p>
+</section>
+
+<footer>
+  <div>Expert Parallel / Mixture-of-Experts 分布式训练 · 页面按 GShard、Switch、DeepSpeed-MoE、Tutel、MegaBlocks 与 Megatron-Core / DeepSpeed 源码整理</div>
+  <div class="src">
+    论文版本：GShard v1（<a href="https://arxiv.org/abs/2006.16668">2006.16668</a>）·
+    Switch v3（<a href="https://arxiv.org/abs/2101.03961">2101.03961</a>）·
+    DeepSpeed-MoE v2（<a href="https://arxiv.org/abs/2201.05596">2201.05596</a>）·
+    Tutel v2（<a href="https://arxiv.org/abs/2206.03382">2206.03382</a>）·
+    MegaBlocks v1（<a href="https://arxiv.org/abs/2211.15841">2211.15841</a>）<br>
+    源码：Megatron-Core <a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a26">70f7a26</a> ·
+    DeepSpeed <a href="https://github.com/deepspeedai/DeepSpeed/tree/f47dc3e3d48e748d699720ea65eca1f45c136255">f47dc3e</a><br>
+    笔记：<a href="/moemixture-of-experts/">MoE（Mixture of Experts）</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var T_GLOBAL = 8192;
+  var E = 64;
+  var K = 2;
+  var H = 4096;
+
+  function fmt0(x) {
+    return String(Math.round(x));
+  }
+  function fmt1(x) {
+    return (Math.round(x * 10) / 10).toFixed(1);
+  }
+  function fmt3(x) {
+    return (Math.round(x * 1000) / 1000).toFixed(3);
+  }
+  function fmtInt(x) {
+    return Math.round(x).toLocaleString('en-US');
+  }
+  function ceil6(x) {
+    return Math.ceil(Math.round(x * 1e6) / 1e6);
+  }
+
+  var capRoot = document.getElementById('ep-cap-sim');
+  if (capRoot) {
+    var capEp = 8;
+    var capCf = 1.25;
+    var capSkew = 0.25;
+    var capButtons = capRoot.querySelectorAll('#ep-cap-btns .rule-btn');
+
+    function capUpdate() {
+      var tLocal = T_GLOBAL / capEp;
+      var a = tLocal * K;
+      var cRank = ceil6(a / E * capCf);
+      var cExpert = cRank * capEp;
+      var hot = capSkew * a;
+      var over = Math.max(0, hot - cRank);
+      var rate = over / a * 100;
+      var totalLoad = hot * capEp;
+      var totalOver = Math.max(0, totalLoad - cExpert);
+      var paddedRows = E * cRank;
+      var paddedMib = paddedRows * H * 2 / 1048576;
+      var dropMib = a * H * 2 / 1048576;
+
+      var rankEl = document.getElementById('ep-cap-rank');
+      if (rankEl) rankEl.textContent = fmt0(cRank);
+      var expertEl = document.getElementById('ep-cap-expert');
+      if (expertEl) expertEl.textContent = fmt0(cExpert);
+      var hotEl = document.getElementById('ep-cap-hot');
+      if (hotEl) hotEl.textContent = fmt1(hot) + ' / ' + fmt0(a);
+      var overEl = document.getElementById('ep-cap-over');
+      if (overEl) overEl.textContent = fmt1(over) + ' / ' + fmt1(rate) + '%';
+
+      var readout = document.getElementById('ep-cap-readout');
+      if (readout) {
+        readout.textContent =
+          'T_local = ' + fmt0(tLocal) +
+          '；A = ' + fmt0(a) +
+          '；C_rank = ' + fmt0(cRank) +
+          '；C_expert = ' + fmt0(cExpert) +
+          '；单 rank 最热 ' + fmt0(hot) + ' / 溢出 ' + fmt0(over) + ' / 丢弃率 ' + fmt1(rate) + '%' +
+          '；EP 对称时总负载 ' + fmt0(totalLoad) + '、总溢出 ' + fmt0(totalOver) + '（总容量 ' + fmt0(cExpert) + '）' +
+          '；pad 每 rank ' + fmt0(paddedRows) + ' 行 / ' + fmt1(paddedMib) + ' MiB' +
+          '；dropless ' + fmt0(a) + ' 行 / ' + fmt1(dropMib) + ' MiB。';
+      }
+
+      var cfLabel = document.getElementById('ep-cap-cf-v');
+      if (cfLabel) cfLabel.textContent = capCf.toFixed(2).replace(/0$/, '');
+      var skewLabel = document.getElementById('ep-cap-skew-v');
+      if (skewLabel) skewLabel.textContent = fmt0(capSkew * 100) + '%';
+    }
+
+    for (var i = 0; i < capButtons.length; i++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          capEp = parseInt(btn.getAttribute('data-ep'), 10) || 1;
+          for (var j = 0; j < capButtons.length; j++) {
+            capButtons[j].classList.remove('active');
+          }
+          btn.classList.add('active');
+          capUpdate();
+        });
+      })(capButtons[i]);
+    }
+
+    var capCfEl = document.getElementById('ep-cap-cf');
+    if (capCfEl) {
+      capCfEl.addEventListener('input', function () {
+        capCf = parseFloat(this.value);
+        if (!isFinite(capCf)) capCf = 1.25;
+        capUpdate();
+      });
+    }
+    var capSkewEl = document.getElementById('ep-cap-skew');
+    if (capSkewEl) {
+      capSkewEl.addEventListener('input', function () {
+        var v = parseFloat(this.value);
+        if (!isFinite(v)) v = 25;
+        capSkew = v / 100;
+        capUpdate();
+      });
+    }
+    capUpdate();
+  }
+
+  var budRoot = document.getElementById('ep-budget-sim');
+  if (budRoot) {
+    var budEp = 8;
+    var budH = 4096;
+    var budF = 14336;
+    var budMode = 'drop';
+    var budButtons = budRoot.querySelectorAll('#ep-budget-btns .rule-btn');
+
+    function budUpdate() {
+      var tLocal = T_GLOBAL / budEp;
+      var cRank = ceil6(tLocal * K / E * 1.25);
+      var localExperts = E / budEp;
+      var perRankParams = localExperts * 3 * budH * budF;
+      var bytes = perRankParams * 2;
+      var gib = bytes / 1073741824;
+      var rows = budMode === 'pad' ? E * cRank : tLocal * K;
+      var mib = rows * budH * 2 / 1048576;
+      var total = 4 * mib;
+
+      var localEl = document.getElementById('ep-budget-local');
+      if (localEl) localEl.textContent = fmt0(localExperts);
+      var memEl = document.getElementById('ep-budget-mem');
+      if (memEl) memEl.textContent = fmt3(gib) + ' GiB';
+      var dispEl = document.getElementById('ep-budget-disp');
+      if (dispEl) dispEl.textContent = fmt1(mib) + ' MiB';
+      var totalEl = document.getElementById('ep-budget-total');
+      if (totalEl) totalEl.textContent = fmt1(total) + ' MiB';
+
+      var readout = document.getElementById('ep-budget-readout');
+      if (readout) {
+        readout.textContent =
+          'T_local = ' + fmt0(tLocal) +
+          '；C_rank = ' + fmt0(cRank) +
+          '；每卡 ' + fmt0(localExperts) + ' 个专家 / ' + fmtInt(perRankParams) + ' 参数 / ' + fmt3(gib) + ' GiB' +
+          '；' + (budMode === 'pad' ? 'pad' : 'dropless') + ' dispatch ' + fmt0(rows) + ' 行 / ' + fmt1(mib) + ' MiB' +
+          '；前向 ' + fmt1(mib * 2) + ' MiB；含反向 ' + fmt1(total) + ' MiB。';
+      }
+
+      var epLabel = document.getElementById('ep-budget-ep-v');
+      if (epLabel) epLabel.textContent = fmt0(budEp);
+      var hLabel = document.getElementById('ep-budget-h-v');
+      if (hLabel) hLabel.textContent = fmt0(budH);
+      var fLabel = document.getElementById('ep-budget-f-v');
+      if (fLabel) fLabel.textContent = fmt0(budF);
+    }
+
+    for (var k = 0; k < budButtons.length; k++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          budMode = btn.getAttribute('data-mode') === 'pad' ? 'pad' : 'drop';
+          for (var j = 0; j < budButtons.length; j++) {
+            budButtons[j].classList.remove('active');
+          }
+          btn.classList.add('active');
+          budUpdate();
+        });
+      })(budButtons[k]);
+    }
+
+    var budEpEl = document.getElementById('ep-budget-ep');
+    if (budEpEl) {
+      budEpEl.addEventListener('input', function () {
+        var exp = parseInt(this.value, 10);
+        if (!isFinite(exp)) exp = 3;
+        budEp = Math.pow(2, exp);
+        budUpdate();
+      });
+    }
+    var budHEl = document.getElementById('ep-budget-h');
+    if (budHEl) {
+      budHEl.addEventListener('input', function () {
+        var v = parseInt(this.value, 10);
+        if (!isFinite(v)) v = 4096;
+        budH = v;
+        budUpdate();
+      });
+    }
+    var budFEl = document.getElementById('ep-budget-f');
+    if (budFEl) {
+      budFEl.addEventListener('input', function () {
+        var v = parseInt(this.value, 10);
+        if (!isFinite(v)) v = 14336;
+        budF = v;
+        budUpdate();
+      });
+    }
+    budUpdate();
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,611 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 0.14 | Goyal Table 1 | 23.74-23.60 |
+| 1.10 | Goyal Table 1 | 24.84-23.74 |
+| 2.14 | Goyal Table 1 | 25.88-23.74 |
+| 1.04 | Goyal Table 1 | 25.88-24.84 |
+| 0.1 | Smith §5.2 | 94.4-94.3 |
+| 3145728 | Megatron §5.1 | 1536*2048 |
+| 32 | Goyal Table 1 | 8192/256 |
+| 3.2 | Goyal §5.1 | 0.1*32 |
+| 126 | Megatron 源码 megatron/training/config/training_config.py:21 | (1024-16)/8 |
+| 2380 | Megatron 源码 megatron/training/config/training_config.py:21 | 300000/126 |
+| 8 | Megatron 源码 megatron/training/config/training_config.py:13 | 8*1*1 |
+| 16384 | Megatron 源码 megatron/training/config/training_config.py:13 | 8*2048 |
+| 32 | Megatron 源码 megatron/training/config/training_config.py:13 | 4*8*1 |
+| 65536 | Megatron 源码 megatron/training/config/training_config.py:13 | 32*2048 |
+| 128 | Megatron 源码 megatron/training/config/training_config.py:13 | 4*8*4 |
+| 262144 | Megatron 源码 megatron/training/config/training_config.py:13 | 128*2048 |
+| 128 | Megatron 源码 megatron/training/config/training_config.py:13 | 1*16*8 |
+| 524288 | Megatron 源码 megatron/training/config/training_config.py:13 | 128*4096 |
+| 16 | Megatron 源码 megatron/training/config/training_config.py:13 | 4*4 |
+| 8 | Megatron 源码 megatron/training/config/training_config.py:13 | 1*8 |
+| 3.5000 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | (1000*2.0+3000*4.0)/(1000+3000) |
+| 3.0000 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | (2.0+4.0)/2 |
+| 0.5000 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | 3.5-3.0 |
+| 3.1000 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | (512*1.5+2048*3.5)/(512+2048) |
+| 2.5000 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | (1.5+3.5)/2 |
+| 0.6000 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | 3.1-2.5 |
+| 25.0 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | 1000/(1000+3000)*100 |
+| 75.0 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | 3000/(1000+3000)*100 |
+| 20.0 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | 512/(512+2048)*100 |
+| 80.0 | Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345 | 2048/(512+2048)*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>梯度累积与 Global Batch · GBS=MBS×DP×GA 的账与同步边界</title>
+<meta name="description" content="从 Megatron、PyTorch DDP/FSDP 与 DeepSpeed 源码拆开梯度累积：global batch 账本、no_sync 的 all-reduce 边界、mean-of-means 与 token-level loss 归约、clip 与 optimizer step 的位置，以及 linear scaling rule 的适用条件。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.flow text{font-family:Inter,"Noto Sans SC",sans-serif}
+code{overflow-wrap:anywhere}
+.codeblock{background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;margin:18px 0;overflow-x:auto;font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.8;white-space:pre;box-shadow:var(--shadow-sm)}
+.handcalc .details-body{font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.9}
+.handcalc .res{color:var(--accent-deep);font-weight:600}
+@media (max-width:520px){.codeblock{font-size:11.5px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">梯度累积 · Global Batch</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#ledger">账本</a>
+      <a href="#flow">数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>分布式训练 · 2017–2021</span>
+  <h1>梯度累积与 Global Batch：小步拼大更新，账要算在 loss 和同步点上</h1>
+  <p class="hero-sub">显存限制的是<strong>一次前向/反向的 micro-batch</strong>，不是统计意义上的 global batch。梯度累积用顺序执行的 micro-batch 把二者拆开，代价是 loss 归约口径、梯度同步位置和 optimizer step 边界都要重新对齐。这篇页面把 Megatron、PyTorch DDP/FSDP、DeepSpeed 的实现和 Goyal、Smith、Megatron SC21 的实测放在同一张账本上。</p>
+  <div class="meta">
+    <span>Goyal et al. 2017 · Smith et al. 2018 · Narayanan et al. 2021</span>
+    <a href="https://arxiv.org/abs/1706.02677" target="_blank" rel="noopener">Goyal 原文 ↗</a>
+    <a href="https://arxiv.org/abs/1711.00489" target="_blank" rel="noopener">Smith 原文 ↗</a>
+    <a href="https://arxiv.org/abs/2104.04473" target="_blank" rel="noopener">Megatron SC21 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM" target="_blank" rel="noopener">Megatron 代码 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p><strong>账本本身是乘法，难的是口径。</strong> <code>global_batch_size = micro_batch_size × data_parallel_size × gradient_accumulation_steps</code>；Megatron 的配置文档原话是 “local batch size times data parallel size times number of micro batches”（<code>megatron/training/config/training_config.py:13-14</code>）。</p>
+  <p><strong>累积的是梯度，不是 loss。</strong> 每个 micro-batch 的 <code>backward()</code> 把梯度加到同一组 <code>.grad</code> 上；<code>no_sync</code> 只是把 all-reduce 推到累积边界。DDP 在退出 <code>no_sync</code> 后的第一次前向/反向同步，FSDP 在累积期间保留完整梯度，Megatron 则在 FSDPv2，或 FSDPv1/DDP 且开启 <code>overlap_grad_reduce</code> 时安装 <code>no_sync</code>。</p>
+  <p><strong>变长序列会把 mean-of-means 和 token-level mean 分开。</strong> 默认路径是「micro-batch 内按 token 平均 → 再按 micro-batch 平均」；<code>calculate_per_token_loss=True</code> 则把整个 global batch 的非 padding token 作为分母。两者只在各 micro-batch token 数相等时相同。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Goyal Table 1">0.14<small> pp</small></div><div class="k">ResNet-50 / ImageNet，90 epochs，SGD Nesterov m=0.9；8k batch + gradual warmup 的 top-1 error 23.74 与 256 batch 的 23.60 相差 0.14 个百分点</div></div>
+    <div class="metric"><div class="v" data-src="Smith §5.2">94.4<small>%</small></div><div class="k">WRN 16-4 / CIFAR-10，SGD m=0.9，ghost BN 128；lr 固定 0.1、batch 128 起每步 ×5（上限 5120）的单次测试准确率；五次追加运行的中位数 94.2%</div></div>
+    <div class="metric"><div class="v" data-src="Megatron §5.1">1536</div><div class="k">Megatron SC21 中 GPT-3 175B 训练收敛时的 global batch（样本，Megatron §5.4.3）；Megatron §5.1 的 175B 估算按 1024 张 A100、300B tokens 取 B=1536；530B 对比在 640 GPUs（ZeRO-3、microbatch 4）上把 B 提到 2560（Megatron Table 2 caption）</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>显存卡住的是 micro-batch，不是 global batch</h2></div>
+  <p class="sec-sub">读完这节应知道：global batch 是优化与统计单位，micro-batch 是显存与执行单位；两者之间隔着 DP 和累积步数。</p>
+  <p>训练一步要存的不只是参数，还有前向激活、反向中间量和梯度。对固定模型，<strong>激活峰值随一次前向的样本数增长</strong>；参数、梯度和 optimizer state 则与 micro-batch 大小基本无关。于是「一步看多少样本」和「一次放进 GPU 多少样本」必须拆成两个变量。</p>
+  <div class="eq">
+    <span class="hl-a">global_batch_size</span> = <span class="hl-b">micro_batch_size</span> × <span class="hl-c">data_parallel_size</span> × <span class="hl-c">gradient_accumulation_steps</span>
+  </div>
+  <p class="sec-sub" style="text-align:center;margin-top:-12px">Megatron 的训练配置文档把它写成 “local batch size times data parallel size times number of micro batches”（<code>megatron/training/config/training_config.py:13-14</code>）。</p>
+  <p>三个乘数买的东西不同。<strong>micro_batch_size</strong> 决定单次前向的激活峰值，也决定 BN、dropout 等按 micro-batch 统计的层看到多少样本；<strong>data_parallel_size</strong> 决定模型副本数和集合通信宽度；<strong>gradient_accumulation_steps</strong> 决定一个 optimizer step 前串行跑多少个 micro-batch。把 GBS 固定在 128，可以让 MBS=4、DP=8、GA=4，也可以让 MBS=8、DP=16、GA=1；样本数相同，显存、通信次数和每卡的处理节奏都不同。</p>
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">MBS</span><h4>一次放多少</h4></div>
+      <p>直接决定激活峰值。调小它最省显存，但单卡矩阵乘的尺寸变小，GPU 利用率可能下降；BN 的 per-worker 统计也跟着变。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">DP</span><h4>复制多少份</h4></div>
+      <p>每张卡一份完整模型（TP/PP 之外），梯度在 DP 组内归约。增加 DP 能提高吞吐，但集合通信量和副本显存不会消失。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">GA</span><h4>串行多少步</h4></div>
+      <p>前向/反向依次执行，激活只保留当前 micro-batch；梯度在缓冲区里累加。它省激活，不省参数、梯度和 optimizer state。</p>
+    </div>
+  </div>
+  <p>因此「把 batch 调大」不是单一动作。减小 batch 会改变梯度噪声和优化步数；增加 DP 需要更多副本和带宽；增加 GA 则把并行时间换成串行时间。三者的账必须在同一个 GBS 下对齐，否则训练曲线和吞吐都不可比。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条路：减 batch、累积、并行，各自买不同的东西</h2></div>
+  <p class="sec-sub">读完这节应知道：三种方案都能让模型「跑起来」，但它们改变的是不同资源，不能互相替代。</p>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">A · 减小 batch</span><h4>最直接，但改变优化</h4></div>
+      <p>显存随 MBS 下降，代价是每步梯度更 noisy、达到同样样本数需要更多 optimizer step。Goyal 的 baseline 是 256 张图（8 GPUs × 32 images/worker），Smith 的原始 CIFAR-10 schedule 用 batch 128、约 80,000 次参数更新（Smith §5.2）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">B · 梯度累积</span><h4>用时间换显存</h4></div>
+      <p>每次只前向/反向一个 micro-batch，梯度加到同一组 <code>.grad</code>；累积到边界才 step。DeepSpeed 在 <code>backward()</code> 里先做 <code>loss / gradient_accumulation_steps</code>（默认 <code>scale_wrt_gas=True</code>，<code>deepspeed/runtime/engine.py:3444</code>），PyTorch 的 <code>no_sync</code> 则把梯度同步推迟到退出上下文后的第一次前向/反向（<code>torch/nn/parallel/distributed.py:1700-1702</code>）。</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><span class="pill p3">C · 并行</span><h4>分模型、分序列、分数据</h4></div>
+    <p>DP 复制模型、按数据切分；TP/PP/CP 把层、流水线阶段或序列切开。Megatron 里 <code>batch_parallel_size = world_size / (TP × PP × CP)</code>（<code>megatron/training/arguments.py:494-499</code>），它才是账本里乘 GBS 的「独立数据分区数」。TP/PP/CP 不会额外乘一个 GBS 因子；PP 的 microbatch 计数就是 GA 本身，见 §07。</p>
+  </div>
+  <p class="sec-sub" style="margin-bottom:8px">表 1 · 三种方案改的是不同资源（定性对照，不含实测数字）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th scope="col">方案</th><th scope="col">降激活峰值</th><th scope="col">降参数/优化器内存</th><th scope="col">对 GBS 的影响</th><th scope="col">主要代价</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>减小 MBS</td><td>是</td><td>否</td><td>变小</td><td>梯度噪声上升、optimizer step 变多</td></tr>
+        <tr><td>梯度累积</td><td>是</td><td>否</td><td>可保持不变</td><td>串行时间、loss 归约与同步边界</td></tr>
+        <tr><td>DP</td><td>否（每卡一份）</td><td>否</td><td>× DP</td><td>梯度 all-reduce / reduce-scatter 带宽</td></tr>
+        <tr><td>TP / PP / CP</td><td>是（切模型或序列）</td><td>是</td><td>不乘 GBS</td><td>集合通信、流水线气泡、实现复杂度</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>一个常见混淆是把「PP 的 microbatch」当成第二个 gradient accumulation。Megatron 的 pipeline schedule 收到的 <code>num_microbatches</code> 就是 <code>get_num_microbatches()</code>（<code>megatron/training/training.py:3574-3579</code>；<code>scheduled_num_microbatches</code> 由 <code>3460</code> 赋值），它同时是 GA 计数；PP 只改变这些 micro-batch 在流水线中的调度方式，不额外乘一个 PP 因子。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>累积的是梯度；同步只发生在累积边界</h2></div>
+  <p class="sec-sub">读完这节应知道：<code>no_sync</code> 省掉的是每个 micro-batch 的集合通信，不是梯度显存；loss 的除法位置决定变长序列的加权。</p>
+
+  <h3>3.1 先 backward，再 step：梯度在 <code>.grad</code> 里相加</h3>
+  <p><code>loss.backward()</code> 会把当前计算图的梯度<strong>累加</strong>到参数的 <code>.grad</code> 上，而不是覆盖。PyTorch 文档对 <code>no_sync</code> 的描述是 “gradients will be accumulated on module variables”（<code>torch/nn/parallel/distributed.py:1700-1702</code>）。因此不需要 <code>losses += loss</code>；需要的是别在 micro-batch 之间 <code>zero_grad()</code>。</p>
+  <p>Megatron 在每个训练迭代开始时清零一次梯度缓冲区，然后跑 <code>num_microbatches</code> 次前向/反向，最后只调用一次 <code>optimizer.step()</code>（<code>megatron/training/training.py:3473-3478</code>、<code>3574-3580</code>、<code>3662</code>）。DeepSpeed 在累积边界上用 <code>(micro_steps + 1) % gradient_accumulation_steps == 0</code> 判断是否更新（<code>deepspeed/runtime/engine.py:3494</code>），ZeRO-3 则在 <code>micro_step_id == 0</code> 时拷贝、之后 <code>add_</code> 到 fp32 梯度分区（<code>deepspeed/runtime/zero/stage3.py:2041-2047</code>）。</p>
+  <div class="codeblock"># PyTorch DDP 的典型写法（示意；不是 Megatron 的训练循环）
+optimizer.zero_grad(set_to_none=True)
+for i in range(gas):
+    micro = next(loader)
+    ctx = ddp.no_sync() if i &lt; gas - 1 else nullcontext()
+    with ctx:                      # forward 必须在 no_sync 内，见文档 warning
+        loss = criterion(model(micro), micro.target)
+        (loss / gas).backward()    # 等长 micro-batch 的常用缩放
+optimizer.step()</div>
+  <p>这段示意只覆盖「等长 micro-batch + 每卡同 token 数」的情形；变长序列或 padding 不同时，<code>loss / gas</code> 不是 token-level 的正确缩放，见 §3.3。</p>
+
+  <h3>3.2 DDP/FSDP 的 <code>no_sync</code>：把 all-reduce 推到边界</h3>
+  <p>PyTorch DDP 的 <code>no_sync</code> 把 <code>require_backward_grad_sync</code> 置为 <code>False</code>，退出时恢复。文档明确：梯度先累积在模块变量上，<strong>在退出上下文后的第一次前向/反向同步</strong>；并且 <code>forward</code> 必须放在上下文内，否则梯度仍会同步（<code>torch/nn/parallel/distributed.py:1696-1722</code>）。DDP 默认的通信 hook 是「先除以组大小，再 all-reduce」（<code>torch/distributed/algorithms/ddp_comm_hooks/default_hooks.py:19-32</code>），所以 DDP 的同步是跨 rank 的<strong>平均</strong>。</p>
+  <p>FSDP 的 <code>no_sync</code> 只能用在 root 实例上，并递归作用到子实例；它会在累积期间保留<strong>完整模型梯度</strong>而不是梯度分片，因此显存通常更高；使用 CPU offload 时，梯度也要等到最终同步后才下 CPU（<code>torch/distributed/fsdp/fully_sharded_data_parallel.py:1044-1081</code>）。FULL_SHARD 平时在反向结束后做 reduce-scatter；<code>no_sync</code> 期间不做这一步。</p>
+  <p>DeepSpeed 的 <code>no_sync</code> 由 <code>inside_no_sync_ctxt</code> 标记；<code>Engine.step()</code> 里直接断言不能在该上下文内调用（<code>deepspeed/runtime/engine.py:3606-3608</code>）。ZeRO stage ≥ 2 在反向期间重叠梯度分区，stage 0/1 只在累积边界做 <code>allreduce_gradients</code>（<code>deepspeed/runtime/engine.py:3094-3112</code>）。</p>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">Megatron 的另一套</span><h4>不要直接把 DDP 的 <code>no_sync</code> 语义套到 Megatron 账本</h4></div>
+    <p>Megatron DDP 的 <code>no_sync</code> 只是把每个 bucket group 的 <code>is_last_microbatch</code> 置为 <code>False</code>，退出时恢复（<code>megatron/core/distributed/distributed_data_parallel.py:640-650</code>）。它只在模型是 FSDPv2，或 FSDPv1/DDP 且开启 <code>overlap_grad_reduce</code> 时安装（<code>megatron/training/training.py:4980-4995</code>）。如果 <code>overlap_grad_reduce</code> 关闭，反向期间本来就不发梯度归约，归约被推迟到迭代末尾的 <code>finish_grad_sync</code>（<code>megatron/core/distributed/distributed_data_parallel.py:718-729</code>），此时没有需要抑制的通信。Megatron 的同步边界由 schedule + <code>finalize_model_grads</code> 决定，不是由 Python 层的 <code>with no_sync()</code> 单独决定。</p>
+  </div>
+
+  <h3>3.3 loss 归约：三次平均，还是按 token 加权</h3>
+  <p>Megatron 的 GPT loss function 返回的是<strong>当前 micro-batch 的 token loss 之和</strong>，同时返回非 padding token 数：<code>loss = torch.sum(losses * loss_mask)</code>，<code>num_tokens = loss_mask.sum()</code>（<code>pretrain_gpt.py:288-293</code>）。它不是先做 mean 再返回。</p>
+  <p>默认路径（<code>calculate_per_token_loss=False</code>）在 schedule 里做两次除法：先 <code>output_tensor /= clamp(num_tokens, min=1)</code>，再 <code>output_tensor /= num_microbatches</code>（<code>megatron/core/pipeline_parallel/schedules.py:343-349</code>）。随后 DDP 在 DP 组内做平均。合起来是三层平均：<strong>micro-batch 内按 token 平均 → micro-batch 之间等权平均 → DP rank 之间等权平均</strong>。如果每个 micro-batch 的 token 数相同，这与全局 token-level mean 相同；不同则不等。</p>
+  <p>逐 token 路径（<code>calculate_per_token_loss=True</code>）保留 loss 的和，在 <code>finalize_model_grads</code> 里把最后一个 PP stage 的 <code>num_tokens</code> 广播到 PP 组、在 DP(+CP) 组内 all-reduce（<code>dp_cp_group</code>），然后用 <code>1 / total_global_tokens</code> 缩放所有梯度（<code>megatron/core/distributed/finalize_model_grads.py:805-822</code>）。这条路径下 DDP 不做 <code>1/dp</code> 预缩放（<code>megatron/core/distributed/distributed_data_parallel.py:268-273</code>），分母只出现一次。</p>
+  <div class="eq">
+    mean-of-means = (1 / M) × Σ<sub>m</sub> (L<sub>m</sub> / n<sub>m</sub>)<br>
+    token-level = (Σ<sub>m</sub> L<sub>m</sub>) / (Σ<sub>m</sub> n<sub>m</sub>)
+  </div>
+  <p class="sec-sub" style="text-align:center;margin-top:-12px">L<sub>m</sub> 是第 m 个 micro-batch 的 token loss 之和，n<sub>m</sub> 是它的非 padding token 数。两式相等当且仅当所有 n<sub>m</sub> 相同（或权重相同）；变长序列、padding 比例不同、packing 后各 micro-batch 长度不同，都会让它们分开。</p>
+  <p>这不是数值误差，而是<strong>梯度权重</strong>的差异：mean-of-means 给每个 micro-batch 相同权重，短 micro-batch 的每个 token 被相对放大；token-level 给每个 token 相同权重。Megatron 的配置注释也说明，默认行为是「假设所有 token 都非 padding」，逐 token 路径才按 global batch 的实际非 padding token 数计算（<code>megatron/core/transformer/transformer_config.py:324-326</code>）。</p>
+
+  <div class="sim" data-src="Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button" data-mode="mean">mean-of-means<span class="r-sub">每段等权</span></button>
+      <button class="rule-btn" type="button" data-mode="token">token-level<span class="r-sub">每 token 等权</span></button>
+    </div>
+    <div class="slots s2">
+      <div class="slot"><div class="slot-name">micro-batch A</div><div class="slot-val"><span id="naOut">1000</span> tokens<br><span id="laOut">2.0</span> mean loss</div></div>
+      <div class="slot"><div class="slot-name">micro-batch B</div><div class="slot-val"><span id="nbOut">3000</span> tokens<br><span id="lbOut">4.0</span> mean loss</div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl"><label for="na">A token 数 <span class="v" id="naVal">1000</span></label><input id="na" type="range" min="100" max="8000" step="1" value="1000"></div>
+      <div class="ctrl"><label for="nb">B token 数 <span class="v" id="nbVal">3000</span></label><input id="nb" type="range" min="100" max="8000" step="1" value="3000"></div>
+      <div class="ctrl"><label for="la">A 的 mean loss <span class="v" id="laVal">2.0</span></label><input id="la" type="range" min="0.5" max="5.0" step="0.1" value="2.0"></div>
+      <div class="ctrl"><label for="lb">B 的 mean loss <span class="v" id="lbVal">4.0</span></label><input id="lb" type="range" min="0.5" max="5.0" step="0.1" value="4.0"></div>
+    </div>
+    <div class="readout" data-src="Megatron 源码 megatron/core/pipeline_parallel/schedules.py:345">
+      <div class="r-head">当前口径 · 两个 micro-batch 合成一个 global batch</div>
+      <div id="lossModeOut"><strong>mean-of-means</strong>：3.0000</div>
+      <div id="lossCompare">mean-of-means：3.0000 · token-level：3.5000 · 两者相差 0.5000</div>
+      <div id="weightLine">token 权重：A 25.0% / B 75.0%</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 · 变长序列的两组对照 <span class="sum-sub">与上面的滑块同口径</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组：n<sub>A</sub>=1000，L<sub>A</sub>=2.0；n<sub>B</sub>=3000，L<sub>B</sub>=4.0。</strong></p>
+      <p>mean-of-means = (2.0 + 4.0) / 2 = <span class="res">3.0000</span></p>
+      <p>token-level = (1000×2.0 + 3000×4.0) / (1000+3000) = 14000 / 4000 = <span class="res">3.5000</span></p>
+      <p>差 = 3.5000 − 3.0000 = <span class="res">0.5000</span>；权重 A = 1000/4000 = <span class="res">25.0%</span>，B = <span class="res">75.0%</span>。</p>
+      <p><strong>第 2 组：n<sub>A</sub>=512，L<sub>A</sub>=1.5；n<sub>B</sub>=2048，L<sub>B</sub>=3.5。</strong></p>
+      <p>mean-of-means = (1.5 + 3.5) / 2 = <span class="res">2.5000</span></p>
+      <p>token-level = (512×1.5 + 2048×3.5) / (512+2048) = 7936 / 2560 = <span class="res">3.1000</span></p>
+      <p>差 = 3.1000 − 2.5000 = <span class="res">0.6000</span>；权重 A = 512/2560 = <span class="res">20.0%</span>，B = <span class="res">80.0%</span>。</p>
+      <p><strong>简化与未覆盖：</strong>只算两个 micro-batch、无 padding、无 drop_last、无 packing；真实训练里 M 个 micro-batch 的 mean-of-means 要再除以 M，token-level 要汇总 ΣL 与 Σn。默认路径的 DP 平均也未画进来；它会在 rank 之间再做一次等权平均。未覆盖 rampup 与 PP：前者改变 GBS/GA，后者改变 micro-batch 的调度，二者都不改变这里的两个归约公式。</p>
+    </div>
+  </details>
+
+  <h3>3.4 clip 和 optimizer step 放在哪里</h3>
+  <p>梯度裁剪必须在<strong>完整累积、DP 归约之后</strong>、参数更新之前。Megatron 的 <code>optimizer.step()</code> 依次做 <code>prepare_grads()</code>、<code>clip_grad_norm(config.clip_grad)</code>、<code>step_with_ready_grads()</code>（<code>megatron/core/optimizer/optimizer.py:1078-1109</code>）；裁剪用的 grad norm 在 <code>grad_stats_parallel_group</code> 上归约（<code>megatron/core/optimizer/optimizer.py:545-551</code>），看到的是全局梯度，不是某个 micro-batch 的局部梯度。</p>
+  <p>DeepSpeed ZeRO-3 同样在 <code>step()</code> 里按子组做 <code>unscale_and_clip_grads</code>，再调用 optimizer（<code>deepspeed/runtime/zero/stage3.py:2913-2960</code>、<code>3019-3028</code>）。如果在 micro-batch 循环里裁剪，你裁剪的是尚未累加的偏梯度，算法已经变了；这不是「同一个 clip 换个位置」。</p>
+  <p><code>zero_grad()</code> 放在 optimizer step 之后、下一个累积循环之前。Megatron 在每次迭代开头清一次（<code>megatron/training/training.py:3473-3478</code>）；DeepSpeed 在边界 step 内部/之后处理。不要在 micro-batch 之间清零。</p>
+</section>
+
+<section class="block" id="ledger">
+  <div class="sec-head"><span class="sec-num">04</span><h2>先算 GBS，再谈 lr：账本、整除约束与缩放规则</h2></div>
+  <p class="sec-sub">读完这节应知道：GBS 由 MBS、独立数据分区数和 GA 相乘；lr 的线性缩放只在论文列出的条件下成立，不能从 GBS 直接推。</p>
+
+  <h3>4.1 账本与整除约束</h3>
+  <div class="eq">
+    GBS = MBS × DP × GA<br>
+    TGB = GBS × seq_len
+  </div>
+  <p class="sec-sub" style="text-align:center;margin-top:-12px">TGB 是固定长度、无 padding、无 packing 时的 token 数；真实训练要按非 padding token 统计。</p>
+  <p>Megatron 在初始化时断言 <code>global_batch_size % (micro_batch_size × data_parallel_size) == 0</code>，并计算 <code>num_micro_batches = global_batch_size // (micro_batch_size × data_parallel_size)</code>（<code>megatron/core/num_microbatches_calculator.py:381-388</code>）。如果 GBS 没显式给，默认取 <code>micro_batch_size × batch_parallel_size</code>（<code>megatron/training/arguments.py:641-642</code>），也就是 num_microbatches=1。</p>
+  <p>这里的 DP 是「独立数据分区数」。Megatron 把 <code>get_batch_parallel_size(args)</code> 传给 num-microbatches calculator（<code>megatron/training/global_vars.py:225-234</code>），而 <code>batch_parallel_size = world_size / (TP × PP × CP)</code>（<code>megatron/training/arguments.py:494-499</code>）。TP/PP/CP 不乘 GBS；PP 的 microbatch 计数就是 GA，见 §07。</p>
+
+  <p class="sec-sub" style="margin-bottom:8px">表 2 · 四组账本示例（按 GBS = MBS × DP × GA 计算；无 drop_last、无 packing、固定 seq_len）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th scope="col">设定</th><th scope="col">MBS</th><th scope="col">seq_len</th><th scope="col">DP</th><th scope="col">GA</th><th scope="col">GBS 样本</th><th scope="col">GBS token</th><th scope="col">optimizer step / 全局 batch</th><th scope="col">梯度同步 / step</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A 单卡</td><td class="num">8</td><td class="num">2048</td><td class="num">1</td><td class="num">1</td><td class="num">8</td><td class="num">16,384</td><td class="num">1</td><td class="num">0（单 DP）</td></tr>
+        <tr><td>B 8 卡</td><td class="num">4</td><td class="num">2048</td><td class="num">8</td><td class="num">1</td><td class="num">32</td><td class="num">65,536</td><td class="num">1</td><td class="num">1</td></tr>
+        <tr><td>C 8 卡 + GA4</td><td class="num">4</td><td class="num">2048</td><td class="num">8</td><td class="num">4</td><td class="num">128</td><td class="num">262,144</td><td class="num">1</td><td class="num">1（no_sync）</td></tr>
+        <tr><td>D 16 卡 + GA8</td><td class="num">1</td><td class="num">4096</td><td class="num">16</td><td class="num">8</td><td class="num">128</td><td class="num">524,288</td><td class="num">1</td><td class="num">1（no_sync）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>「梯度同步 / step」列写 1 是指 <code>no_sync</code> / 延迟归约把 DP 集合通信放在累积边界；如果每个 micro-batch 都同步，次数是 GA。A 组 DP=1，没有跨 rank 通信，所以实际同步 0 次。两种做法的样本账相同，通信账不同。表里的 1 个 optimizer step 是定义，不是实测。</p>
+
+  <div class="sim" data-src="Megatron 源码 megatron/core/num_microbatches_calculator.py:381">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button" data-preset="a">示例 A<span class="r-sub">单卡 · 1 micro-batch</span></button>
+      <button class="rule-btn" type="button" data-preset="b">示例 B<span class="r-sub">8 卡 · 1 micro-batch</span></button>
+      <button class="rule-btn" type="button" data-preset="c">示例 C<span class="r-sub">8 卡 · GA4</span></button>
+      <button class="rule-btn" type="button" data-preset="d">示例 D<span class="r-sub">16 卡 · GA8</span></button>
+    </div>
+    <div class="slots s5">
+      <div class="slot"><div class="slot-name">MBS</div><div class="slot-val" id="mbsOut">8</div></div>
+      <div class="slot"><div class="slot-name">DP</div><div class="slot-val" id="dpOut">1</div></div>
+      <div class="slot"><div class="slot-name">GA</div><div class="slot-val" id="gaOut">1</div></div>
+      <div class="slot hit"><div class="slot-name">GBS 样本</div><div class="slot-val" id="gbsOut">8</div></div>
+      <div class="slot hit"><div class="slot-name">GBS token</div><div class="slot-val" id="tokOut">16,384</div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl"><label for="mbs">micro_batch_size <span class="v" id="mbsVal">8</span></label><input id="mbs" type="range" min="1" max="16" step="1" value="8"></div>
+      <div class="ctrl"><label for="seq">seq_len <span class="v" id="seqVal">2048</span></label><input id="seq" type="range" min="1024" max="8192" step="1024" value="2048"></div>
+      <div class="ctrl"><label for="dp">data_parallel_size <span class="v" id="dpVal">1</span></label><input id="dp" type="range" min="1" max="64" step="1" value="1"></div>
+      <div class="ctrl"><label for="ga">gradient_accumulation_steps <span class="v" id="gaVal">1</span></label><input id="ga" type="range" min="1" max="16" step="1" value="1"></div>
+    </div>
+    <div class="readout" data-src="Megatron 源码 megatron/core/num_microbatches_calculator.py:381">
+      <div class="r-head">当前账本 · 每个 optimizer step</div>
+      <div id="gbsLine"><strong>GBS = 8 样本</strong> · 16,384 token</div>
+      <div id="ledgerDetail">每 rank 每步：8 样本 · 1 个 micro-batch</div>
+      <div id="syncLine">optimizer step：1 次 / 全局 batch · 梯度同步：0 次（单 DP，无跨 rank 通信）</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算 · 两组账本 <span class="sum-sub">与上面的滑块同口径</span></summary>
+    <div class="details-body">
+      <p><strong>第 1 组：MBS=4，seq_len=2048，DP=8，GA=4。</strong></p>
+      <p>GBS 样本 = 4 × 8 × 4 = <span class="res">128</span></p>
+      <p>GBS token = 128 × 2048 = <span class="res">262,144</span></p>
+      <p>每 rank 每步样本 = 4 × 4 = <span class="res">16</span>；每 rank 每步 micro-batch = GA = <span class="res">4</span>。</p>
+      <p>optimizer step = <span class="res">1</span> 次 / 全局 batch；梯度同步 = <span class="res">1</span> 次（no_sync）或 <span class="res">4</span> 次（每个 micro-batch 都同步）。</p>
+      <p><strong>第 2 组：MBS=1，seq_len=4096，DP=16，GA=8。</strong></p>
+      <p>GBS 样本 = 1 × 16 × 8 = <span class="res">128</span></p>
+      <p>GBS token = 128 × 4096 = <span class="res">524,288</span></p>
+      <p>每 rank 每步样本 = 1 × 8 = <span class="res">8</span>；每 rank 每步 micro-batch = GA = <span class="res">8</span>。</p>
+      <p>optimizer step = <span class="res">1</span> 次 / 全局 batch；梯度同步 = <span class="res">1</span> 次（no_sync）或 <span class="res">8</span> 次（每个 micro-batch 都同步）。</p>
+      <p><strong>简化与未覆盖：</strong>假定 GBS 能被 MBS×DP 整除；未覆盖 drop_last（最后一批可能不足 GBS）、packing（token 数不等于样本数×seq_len）、rampup（GA 随训练变化）、PP（不额外乘 GBS，但会改变 pipeline 调度）。表 2 A 组 DP=1 时无跨 rank 通信，梯度同步实际为 0 次；上面两组 DP&gt;1，1 次是累积边界的语义计数。</p>
+    </div>
+  </details>
+
+  <h3>4.2 学习率缩放：linear scaling rule 只在它的条件下成立</h3>
+  <p data-src="Goyal §2.1">Goyal et al. §2.1 的规则是：<strong>minibatch size 乘以 k，learning rate 也乘以 k</strong>。§5.1 给出参考学习率 <code>η = 0.1 · kn/256</code>，baseline 是 k=8 GPUs × n=32 images/worker，即 kn=256、η=0.1。条件必须一起读：其他超参数保持不变，包括 weight decay（论文用 1e-4，且不作用于 BN 的 γ/β）和 BN 的 per-worker batch n=32；规则假设小 batch 步上的梯度变化不大，在训练早期会失效；§5.3 的 batch sweep 显示 8k 之后 error 上升。</p>
+  <p data-src="Goyal Table 1">Warmup 不是可选装饰。Goyal §2.2 给出 warmup 方法，§5.1 给出取值：从 η=0.1 在 5 epochs 内线性升到 3.2；constant warmup（先 0.1 保持 5 epochs 再跳）会在跳变后出现 error spike，训练无法完全恢复。Goyal Table 1 的三种 8k 设置里，gradual warmup 的 top-1 error 是 23.74，no warmup 是 24.84（差 1.10 个百分点），constant warmup 是 25.88（比 gradual 差 2.14 个百分点，甚至比 no warmup 还高 1.04 个百分点）。这些数字的条件是 ResNet-50 / ImageNet / 90 epochs / SGD Nesterov m=0.9 / 5 次独立运行。</p>
+  <p data-src="Smith §5.2">Smith et al. 给出另一条路径：不衰减 lr，而是在 decay 点<strong>增大 batch</strong>。§5.2 的 WRN 16-4 / CIFAR-10 实验里，SGD m=0.9、ghost BN 128；原始 schedule 是 lr 0.1、batch 128、约 80,000 次更新、94.3% 测试准确率；把 batch 从 128 起每个衰减点 ×5（上限 5120）、lr 保持 0.1，约 29,000 次更新、94.4%（单次；五次追加运行的中位数 94.2%）。Smith §5.1 的总结句是 “it is the noise scale which is relevant, not the learning rate.” 这不是「batch 越大越好」：同一节里把 momentum 提到 0.98、初始 batch 3200 的设置只到 93.3%（中位数 93.5%），更新少于 2,500 次。</p>
+  <p data-src="Megatron §5.1">Megatron SC21 报告的是系统层面的 batch 选择：§5.1 的 175B 训练时间估算按 1024 张 A100、300B tokens、B=1536、140 TFLOP/s/GPU 计算；§5.4.3 明确 GPT-3 训练收敛时用的就是 B=1536。530B 对比在 560 GPUs 上放不下时，Megatron Table 2 caption 说明这是 ZeRO-3、microbatch size 4 的条件，作者把 GPU 数提到 640、B 提到 2560。Megatron §5.1 固定 seq_len=2048，所以 1536×2048 = 3,145,728 token/batch。SC21 报告的是 B 的取值；linear scaling rule 的表述来自 Goyal，不来自 SC21。</p>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">工程顺序</span><h4>先定 token 预算，再定乘法链</h4></div>
+    <p>下面的顺序是本页整理的工程做法，不是论文规则：① 先按数据量、训练 token 预算和优化稳定性选 GBS（通常写成 token 数）；② 按单卡显存选 MBS；③ 按集群规模选 DP；④ 用 <code>GA = GBS / (MBS × DP)</code> 配平并检查整除；⑤ 若要用 lr×k，按 Goyal 的条件加 warmup、固定 BN per-worker batch 和 weight decay，并在目标 batch 上验证；⑥ 不满足条件时，直接在目标 GBS 上调 lr，不要从 256 的 0.1 直接外推。</p>
+  </div>
+  <p>一个容易忽略的边界：GBS 相同不代表更新等价。MBS 改变 BN/dropout 的 per-step 统计，GA 改变串行顺序，DP 改变 rank 间的平均；即使 loss 归约写成 token-level，数据顺序、dropout mask 和 optimizer 的动量轨迹也不会与「一次大 batch」逐位相同。只有在固定模型、无 BN/dropout 随机性、相同数据顺序且 loss 归约一致的条件下，累积梯度才与大 batch 梯度相等。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>一个 optimizer step 的数据流：GA 次前反向，1 次同步，1 次更新</h2></div>
+  <p class="sec-sub">读完这节应知道：同步、裁剪、step 各自只发生一次；micro-batch 循环里发生的是前向、反向和梯度累加。</p>
+
+  <figure>
+    <svg class="flow" viewBox="0 0 760 330" role="img" aria-labelledby="flowTitle flowDesc">
+      <title id="flowTitle">梯度累积与同步数据流</title>
+      <desc id="flowDesc">micro-batch 前向反向，梯度累加到缓冲区；只在最后一个 micro-batch 后做一次 DP all-reduce 或 reduce-scatter，然后裁剪、optimizer step、zero_grad。</desc>
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--text-soft)"/>
+        </marker>
+      </defs>
+      <rect x="40" y="18" width="560" height="52" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.5"/>
+      <text x="320" y="49" text-anchor="middle" font-size="15" font-weight="600" fill="var(--text)">micro-batch i：forward + backward（i = 1..GA）</text>
+      <text x="622" y="49" font-size="12.5" fill="var(--c2)">重复 GA 次</text>
+
+      <line x1="320" y1="70" x2="320" y2="96" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <rect x="40" y="98" width="560" height="52" rx="10" fill="var(--c2-soft)" stroke="var(--c2)" stroke-width="1.5"/>
+      <text x="320" y="129" text-anchor="middle" font-size="15" font-weight="600" fill="var(--text)">梯度累加到 .grad：no_sync / 延迟归约</text>
+      <text x="622" y="129" font-size="12.5" fill="var(--c2)">同步 0 次</text>
+
+      <line x1="320" y1="150" x2="320" y2="176" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <rect x="40" y="178" width="560" height="52" rx="10" fill="var(--c1-soft)" stroke="var(--c1)" stroke-width="1.5"/>
+      <text x="320" y="209" text-anchor="middle" font-size="15" font-weight="600" fill="var(--text)">累积边界：DP all-reduce / reduce-scatter</text>
+      <text x="622" y="209" font-size="12.5" fill="var(--c1)">同步 1 次</text>
+
+      <line x1="320" y1="230" x2="320" y2="256" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <rect x="40" y="258" width="560" height="52" rx="10" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="320" y="289" text-anchor="middle" font-size="15" font-weight="600" fill="var(--text)">clip → optimizer.step → zero_grad</text>
+      <text x="622" y="289" font-size="12.5" fill="var(--accent-deep)">参数更新 1 次</text>
+
+      <text x="40" y="322" font-size="11.5" fill="var(--text-soft)">GA = gradient_accumulation_steps；PP 的 microbatch 也是这同一个计数，不另乘 PP。</text>
+    </svg>
+    <figcaption>图 1 · 一个 optimizer step 的数据流。前 GA−1 个 micro-batch 在 <code>no_sync</code> / 延迟归约下累积；最后一个 micro-batch 退出 <code>no_sync</code>，DP 归约一次，然后裁剪、更新、清零。PP 只改变这些 micro-batch 在流水线中的调度，不改变计数。</figcaption>
+  </figure>
+
+  <p>把顺序拆成可核对的五步：</p>
+  <ul>
+    <li><strong>清零一次：</strong>迭代开始时 <code>zero_grad_buffer()</code> / <code>optimizer.zero_grad()</code>，之后整个 micro-batch 循环不再清零（<code>megatron/training/training.py:3473-3478</code>）。</li>
+    <li><strong>前向/反向 GA 次：</strong>每次取 MBS 条样本；前 GA−1 次在 <code>no_sync</code> 或延迟归约下只累加，最后一次触发 DP 归约。</li>
+    <li><strong>归约一次：</strong>DDP 默认 all-reduce（先除以组大小）；FSDP 用 reduce-scatter；Megatron 在 <code>finalize_model_grads</code> 里做 all-grads-sync，并在逐 token 路径上除以全局 token 数（<code>megatron/core/distributed/finalize_model_grads.py:805-822</code>）。</li>
+    <li><strong>裁剪一次：</strong><code>optimizer.step()</code> 内部先 <code>clip_grad_norm</code>，再更新参数（<code>megatron/core/optimizer/optimizer.py:1078-1109</code>）。</li>
+    <li><strong>更新一次：</strong>参数更新后进入下一个迭代；<code>zero_grad</code> 在下一轮开头。</li>
+  </ul>
+  <p>PP 的情形：每个 micro-batch 还要穿过 pipeline stages，schedule 里的 <code>num_microbatches</code> 仍是 GA（<code>megatron/training/training.py:3460</code>、<code>3574-3579</code>）。interleaved 1F1B schedule 要求 num_microbatches 是 PP degree 的整数倍（SC21 §2.2.2），这是调度约束，不是账本里多一个乘数。PP 带来的是 bubble，不是额外的 GBS。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>效果：8k batch 只差 0.14 个百分点，但 warmup 和模型条件不能丢</h2></div>
+  <p class="sec-sub">读完这节应知道：大 batch 的实测收益依赖 warmup、模型和优化器；论文里的「可行」不等于「无条件更好」。</p>
+
+  <p class="sec-sub" style="margin-bottom:8px">表 3 · Goyal et al. Table 1：ResNet-50 / ImageNet / 90 epochs / SGD Nesterov m=0.9 / weight decay 1e-4 / 5 次独立运行的均值 ± 标准差（每次运行取最终 5 epochs 的中位数误差）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th scope="col">设置</th><th scope="col">batch（kn）</th><th scope="col">lr η</th><th scope="col">warmup</th><th scope="col">top-1 error（%）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>baseline</td><td class="num">256</td><td class="num">0.1</td><td>—</td><td class="num">23.60 ± 0.12</td></tr>
+        <tr><td>8k</td><td class="num">8192</td><td class="num">3.2</td><td>无</td><td class="num">24.84 ± 0.37</td></tr>
+        <tr><td>8k</td><td class="num">8192</td><td class="num">3.2</td><td>constant，0.1 保持 5 epochs</td><td class="num">25.88 ± 0.56</td></tr>
+        <tr><td>8k</td><td class="num">8192</td><td class="num">3.2</td><td>gradual，0.1→3.2 over 5 epochs</td><td class="num">23.74 ± 0.09</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p data-src="Goyal Table 1">表 3 的读法：8k + gradual warmup 与 256 baseline 相差 <strong>0.14 个百分点</strong>（23.74 − 23.60），这是这篇论文条件下「大 batch 可行」的核心证据；但同一张表里 constant warmup 25.88 比 no warmup 24.84 还高 1.04 个百分点，说明 warmup 的形状本身会改变结论。8k 是 256 的 32 倍（8192/256），学习率 3.2 也是 0.1 的 32 倍；这个倍数关系只在这套设定和这些条件下成立。</p>
+
+  <p class="sec-sub" style="margin-bottom:8px">表 4 · Smith et al. §5.2：WRN 16-4 / CIFAR-10 / SGD / ghost BN 128；更新次数与测试准确率</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th scope="col">schedule</th><th scope="col">lr / batch</th><th scope="col">momentum</th><th scope="col">updates（约）</th><th scope="col">test acc（单次 / 五次追加运行的中位数）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>原始：lr 衰减</td><td>0.1 / 128 固定</td><td class="num">0.9</td><td class="num">80,000</td><td class="num">94.3% / 94.3%</td></tr>
+        <tr><td>增大 batch</td><td>0.1 / 128 起每个衰减点 ×5，上限 5120</td><td class="num">0.9</td><td class="num">29,000</td><td class="num">94.4% / 94.2%</td></tr>
+        <tr><td>再提高初始 lr</td><td>0.5 / 640 起</td><td class="num">0.9</td><td class="num">&lt;6,500</td><td class="num">94.5% / 94.2%</td></tr>
+        <tr><td>再提高 momentum</td><td>0.5 / 3200 起</td><td class="num">0.98</td><td class="num">&lt;2,500</td><td class="num">93.3% / 93.5%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p data-src="Smith §5.2">表 4 的读法：在相同的 epoch 预算下，把 lr 衰减换成 batch 增长，可以把参数更新从约 80,000 次压到约 29,000 次，单次准确率 94.4% 与原始 94.3% 相差 <strong>0.1 个百分点</strong>（94.4 − 94.3）。但这个替代不是无条件的：同一节里 momentum 0.98、初始 batch 3200 的设置只有 93.3%，说明噪声尺度、momentum 和 batch 上限要一起调。Smith §5.1 的表述是 “it is the noise scale which is relevant, not the learning rate.”</p>
+
+  <p>Megatron SC21 的 batch 选择更偏系统账：§5.1 的 175B 训练时间估算按 1024 张 A100、300B tokens、B=1536 计算，§5.4.3 明确 GPT-3 训练收敛时用的就是 B=1536；530B 对比在 560 GPUs 上放不下，Megatron Table 2 caption 说明这是 ZeRO-3、microbatch size 4 的条件，作者把 GPU 数提高到 640、B 提高到 2560。在 §5.1 固定的 seq_len=2048 下，1536×2048 = 3,145,728 token/batch。SC21 报告的是 B 与系统配置；本页不把它读成「更大的 batch 准确率更高」，它说明的是 batch 选择与显存、GPU 数、并行配置绑在一起。</p>
+  <p>把三组结果放在一起：Goyal 证明的是「在 ResNet-50 / ImageNet 的特定条件下，8k batch + 线性 lr + gradual warmup 可以接近 256 baseline」；Smith 证明的是「在 WRN / CIFAR-10 上，用 batch 增长替代 lr 衰减可以得到相近的 epoch 曲线，同时减少更新次数」；SC21 报告的是「大规模 GPT 训练实际使用的 B」。三者都不能单独外推成「GBS 越大越好」或「lr 必须线性缩放」。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>梯度累积省不了 BN 统计、token 权重和流水线气泡</h2></div>
+  <p class="sec-sub">读完这节应知道：梯度累积省的是激活，不是所有显存；它也不会自动修正 BN、loss 权重或流水线调度。</p>
+
+  <h3>BN 看的是 per-worker batch，不是 global batch</h3>
+  <p>BatchNorm 的均值和方差在每次前向的 micro-batch 上统计。梯度累积把多个 micro-batch 串行跑，但每个 micro-batch 仍然只看到 MBS 条样本，所以 BN 统计不会因为 GA 变大而变成 global batch 的统计。Goyal 在放大 batch 时保持每个 worker 的 n=32 不变，正是为了让 BN 的 loss function 不变（§2.3、§5.1）；Smith 的 CIFAR-10 实验用 ghost BN 128（§5.1、§5.2）。如果模型依赖 BN，想复现大 batch 的行为需要 sync BN、ghost BN 或重新调 BN 的 momentum，而不是只加 GA。</p>
+
+  <h3>变长序列：默认是 mean-of-means，不是 token-level</h3>
+  <p>默认路径先除以当前 micro-batch 的 token 数，再除以 micro-batch 数（<code>megatron/core/pipeline_parallel/schedules.py:343-349</code>）。当序列长度不同、padding 比例不同或 packing 后各段长度不同，短 micro-batch 会被赋更高的每 token 权重。逐 token 路径把整个 global batch 的非 padding token 数作为分母（<code>megatron/core/distributed/finalize_model_grads.py:805-822</code>），并在 DDP 上关闭 <code>1/dp</code> 预缩放（<code>megatron/core/distributed/distributed_data_parallel.py:268-273</code>）。使用哪条路径要在训练配置里明确写出来；不要用「loss 除以 GA」去代替 token 加权。</p>
+
+  <h3>梯度裁剪只在累积边界之后</h3>
+  <p>裁剪的 grad norm 必须在完整累积和 DP 归约之后计算。Megatron 的 <code>optimizer.step()</code> 先 <code>prepare_grads</code>、再 <code>clip_grad_norm</code>、最后 <code>step_with_ready_grads</code>（<code>megatron/core/optimizer/optimizer.py:1078-1109</code>），grad norm 在 <code>grad_stats_parallel_group</code> 上归约（<code>megatron/core/optimizer/optimizer.py:545-551</code>）。DeepSpeed ZeRO-3 在 <code>step()</code> 里做 <code>unscale_and_clip_grads</code>（<code>deepspeed/runtime/zero/stage3.py:3019-3028</code>）。在 micro-batch 循环里裁剪会改变算法，不能当成等价实现。</p>
+
+  <h3>rampup：在这个 Megatron 快照里已弃用</h3>
+  <p>历史上的 <code>rampup_batch_size</code> 是三元组：起始 batch、增量、ramp-up samples。配置文档的例子是 <code>[16, 8, 300000]</code> 配合 <code>global-batch-size 1024</code>：从 16 开始，按 (1024−16)/8 = 126 个区间线性升到 1024，每个区间约 300000/126 = 2380 个样本（<code>megatron/training/config/training_config.py:21-31</code>）。但在这个 commit 里，<code>rampup_batch_size</code> 已标记 deprecated 且被忽略（<code>megatron/core/num_microbatches_calculator.py:100-104</code>、<code>157-161</code>），替代品是 <code>step_batch_size_schedule</code>，格式 <code>"THRESHOLD:BS ..."</code>，阈值可按样本或 token（<code>megatron/training/config/training_config.py:33-40</code>）。schedule 更新时会按 consumed samples 重新算 <code>current_global_batch_size</code> 和 <code>num_micro_batches</code>（<code>megatron/core/num_microbatches_calculator.py:575-593</code>）。</p>
+  <p>不要把 batch rampup 和 lr warmup 混为一谈：前者改变 GBS/GA，后者改变学习率。Goyal 的 warmup 是 lr 从 0.1 升到 3.2（§2.2）；rampup 是让账本本身随训练推进变化。前者改变第几步的 GBS，后者改变第几步的 lr；两者都会让「第几步的有效更新」不同。</p>
+
+  <h3>PP 的 microbatch 不是第二个 GA</h3>
+  <p>Megatron 的 pipeline schedule 收到的 <code>num_microbatches</code> 就是 <code>get_num_microbatches()</code>（<code>megatron/training/training.py:3460</code>、<code>3574-3579</code>），也就是 <code>GBS / (MBS × DP)</code>。因此不要写 <code>GBS = MBS × DP × GA × PP</code>：PP 不乘 GBS。PP 的 microbatch 是流水线调度单位，每个 microbatch 的梯度都累加到同一组缓冲区；PP 带来的额外约束是 interleaved 1F1B 要求 num_microbatches 是 PP degree 的整数倍（SC21 §2.2.2），以及 bubble 会降低利用率。想通过增加 PP microbatch 来减少 bubble，必须同时调 GBS、MBS 或 DP，否则你改变的是优化 batch，不只是调度。</p>
+
+  <h3>它解决不了什么</h3>
+  <ul>
+    <li><strong>不省参数、梯度和 optimizer state：</strong>GA 只把激活峰值压到一个 micro-batch；模型、梯度缓冲区和优化器状态仍然要完整存放。</li>
+    <li><strong>不自动修正 BN：</strong>每个 micro-batch 的 BN 统计仍是局部的；大 batch 的 BN 行为要靠 sync BN / ghost BN 或调参。</li>
+    <li><strong>不保证大 batch 精度：</strong>Goyal 的 8k 结果依赖 gradual warmup、固定 BN per-worker batch 和特定 lr 规则；Smith 的高 momentum 设置也会掉点。</li>
+    <li><strong>不是逐位等价：</strong>dropout、数据顺序、BN 统计和 optimizer 动量轨迹都会让「累积」与「一次大 batch」不同；只有在固定模型、无随机性、相同数据顺序且 loss 归约一致时，梯度才相等。</li>
+    <li><strong>DDP 的 <code>no_sync</code> 不省显存：</strong>梯度仍然完整保存在 <code>.grad</code>；FSDP 的 <code>no_sync</code> 反而因为保留完整梯度而更费显存（<code>torch/distributed/fsdp/fully_sharded_data_parallel.py:1053-1059</code>）。</li>
+  </ul>
+
+  <h3>本页未覆盖</h3>
+  <p>手算和交互假设固定 seq_len、无 padding、无 drop_last、无 packing、无 rampup、无 PP bubble；没有覆盖 TP/CP 的通信账、PP 的 bubble 公式、ZeRO 的分区细节、FSDP 的 shard 策略、以及不同框架对 <code>no_sync</code> 的边界差异。表 2 B/C/D 行的「1 次同步」是 no_sync / 延迟归约下的计数；A 组 DP=1 为 0 次。如果实现选择每个 micro-batch 都同步，计数会变成 GA，但样本账不变。</p>
+</section>
+
+<footer>
+  <div>Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour · Don't Decay the Learning Rate, Increase the Batch Size · Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/1706.02677">Goyal arXiv 1706.02677</a> · <a href="https://arxiv.org/abs/1711.00489">Smith arXiv 1711.00489</a> · <a href="https://arxiv.org/abs/2104.04473">Megatron arXiv 2104.04473</a><br>
+    代码：Megatron <code>70f7a26</code> · PyTorch <code>2ee7a63</code> · DeepSpeed <code>f47dc3e</code><br>
+    版本：论文按 1706.02677v2、1711.00489v2、2104.04473v5 核对；表号与 §号以这些版本为准。<br>
+    笔记：<a href="/梯度累计/">梯度累计</a>
+  </div>
+  <p style="margin-top:14px">与笔记的差异：笔记给出 <code>loss / gradient_accumulation_steps</code> 的常用写法；本页补充的是——该写法默认每个 micro-batch 等权，变长序列需要 token-level 归约或显式 token 权重（见 §3.3）。原笔记未改动。</p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  function fmt(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function toNum(el) {
+    return el ? Number(el.value) : 0;
+  }
+  function setText(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  /* ---------- 交互 1：batch 账本 ---------- */
+  var mbs = document.getElementById('mbs');
+  var seq = document.getElementById('seq');
+  var dp = document.getElementById('dp');
+  var ga = document.getElementById('ga');
+
+  function updateLedger() {
+    if (!mbs || !seq || !dp || !ga) return;
+    var m = toNum(mbs);
+    var s = toNum(seq);
+    var d = toNum(dp);
+    var g = toNum(ga);
+
+    var gbs = m * d * g;
+    var tokens = gbs * s;
+    var perRank = m * g;
+    var syncNaive = g;
+
+    setText('mbsVal', String(m));
+    setText('seqVal', String(s));
+    setText('dpVal', String(d));
+    setText('gaVal', String(g));
+    setText('mbsOut', String(m));
+    setText('dpOut', String(d));
+    setText('gaOut', String(g));
+    setText('gbsOut', fmt(gbs));
+    setText('tokOut', fmt(tokens));
+
+    var line = document.getElementById('gbsLine');
+    if (line) {
+      line.innerHTML = '<strong>GBS = ' + fmt(gbs) + ' 样本</strong> · ' + fmt(tokens) + ' token';
+    }
+    var detail = document.getElementById('ledgerDetail');
+    if (detail) {
+      detail.textContent = '每 rank 每步：' + fmt(perRank) + ' 样本 · ' + g + ' 个 micro-batch';
+    }
+    var syncLine = document.getElementById('syncLine');
+    if (syncLine) {
+      if (d === 1) {
+        syncLine.textContent = 'optimizer step：1 次 / 全局 batch · 梯度同步：0 次（单 DP，无跨 rank 通信）';
+      } else {
+        syncLine.textContent = 'optimizer step：1 次 / 全局 batch · 梯度同步：1 次（no_sync）或 ' + fmt(syncNaive) + ' 次（每 micro-batch 同步）';
+      }
+    }
+  }
+
+  [mbs, seq, dp, ga].forEach(function (el) {
+    if (el) el.addEventListener('input', function () {
+      document.querySelectorAll('[data-preset]').forEach(function (b) { b.classList.remove('active'); });
+      updateLedger();
+    });
+  });
+  updateLedger();
+
+  /* 预设按钮 */
+  var presets = document.querySelectorAll('[data-preset]');
+  presets.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var p = btn.getAttribute('data-preset');
+      if (!mbs || !seq || !dp || !ga) return;
+      if (p === 'a') { mbs.value = 8; seq.value = 2048; dp.value = 1; ga.value = 1; }
+      if (p === 'b') { mbs.value = 4; seq.value = 2048; dp.value = 8; ga.value = 1; }
+      if (p === 'c') { mbs.value = 4; seq.value = 2048; dp.value = 8; ga.value = 4; }
+      if (p === 'd') { mbs.value = 1; seq.value = 4096; dp.value = 16; ga.value = 8; }
+      presets.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      updateLedger();
+    });
+  });
+
+  /* ---------- 交互 2：loss 归约 ---------- */
+  var na = document.getElementById('na');
+  var nb = document.getElementById('nb');
+  var la = document.getElementById('la');
+  var lb = document.getElementById('lb');
+  var mode = 'mean';
+
+  function updateLoss() {
+    if (!na || !nb || !la || !lb) return;
+    var a = toNum(na);
+    var b = toNum(nb);
+    var x = Number(la.value);
+    var y = Number(lb.value);
+
+    var mom = (x + y) / 2;
+    var tok = (a * x + b * y) / (a + b);
+    var gap = tok - mom;
+    var wa = a / (a + b) * 100;
+    var wb = b / (a + b) * 100;
+
+    setText('naVal', String(a));
+    setText('nbVal', String(b));
+    setText('laVal', x.toFixed(1));
+    setText('lbVal', y.toFixed(1));
+    setText('naOut', fmt(a));
+    setText('nbOut', fmt(b));
+    setText('laOut', x.toFixed(1));
+    setText('lbOut', y.toFixed(1));
+
+    var modeOut = document.getElementById('lossModeOut');
+    if (modeOut) {
+      var label = mode === 'mean' ? 'mean-of-means' : 'token-level';
+      var val = mode === 'mean' ? mom : tok;
+      modeOut.innerHTML = '<strong>' + label + '</strong>：' + val.toFixed(4);
+    }
+    var cmp = document.getElementById('lossCompare');
+    if (cmp) {
+      cmp.textContent = 'mean-of-means：' + mom.toFixed(4) + ' · token-level：' + tok.toFixed(4) + ' · 两者相差 ' + gap.toFixed(4);
+    }
+    var w = document.getElementById('weightLine');
+    if (w) {
+      w.textContent = 'token 权重：A ' + wa.toFixed(1) + '% / B ' + wb.toFixed(1) + '%';
+    }
+  }
+
+  [na, nb, la, lb].forEach(function (el) {
+    if (el) el.addEventListener('input', updateLoss);
+  });
+
+  var modeBtns = document.querySelectorAll('[data-mode]');
+  modeBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      mode = btn.getAttribute('data-mode');
+      modeBtns.forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      updateLoss();
+    });
+  });
+  updateLoss();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,861 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1.87 | Peri-LN Table 1 | 58.56-56.69 |
+| 0.09 | Peri-LN Table 1 | 3.2-3.11 |
+| 1.94 | Peri-LN Table 1 | 59.02-57.08 |
+| 2.84 | Peri-LN Table 1 | 56.55-53.71 |
+| 1.88 | Peri-LN Table 1 | 51.57-49.69 |
+| 12.11 | Peri-LN Table 1 | 58.56-46.45 |
+| 0.45 | Henry Table 2 | 33.24-32.79 |
+| 0.66 | Henry Table 2 | 36.75-36.09 |
+| 0.68 | Henry Table 2 | 28.96-28.28 |
+| 2.20 | Henry Table 2 | 24.21-22.01 |
+| 0.65 | Henry Table 2 | 33.23-32.58 |
+| 0.928 | Henry Table 2 | (0.45+0.66+0.68+2.2+0.65)/5 |
+| 8.71 | Henry Table 2 / Table 6 | 33.24-24.53 |
+| 1.68 | Henry Table 2 / Table 6 | 33.24-31.56 |
+| 0.61 | Henry Table 2 / Table 6 | 33.24-32.63 |
+| 1.04 | Henry Table 2 / Table 6 | 33.24-32.2 |
+| 0.90 | Henry Table 2 / Table 6 | 33.24-32.34 |
+| 0.00 | Henry Table 2 | 33.24-33.24 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="multi-paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pre/Post/Peri-LN 与 QK-Norm · 归一化放在哪，决定残差与 logits 怎样增长</title>
+<meta name="description" content="Post-LN、Pre-LN、Peri-LN 与 QK-Norm 的放置差异：残差方差、梯度尺度、warmup 依赖与 attention logits 控制。按 Vaswani 2017、Xiong 2020、Henry 2020、ViT-22B 与 Peri-LN 原文核对。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.slot-val{overflow-wrap:anywhere}
+.chain{font-size:12px;line-height:1.8;overflow-wrap:anywhere;word-break:break-word;margin-top:8px;color:var(--text-soft)}
+@media (max-width:560px){.sim{padding:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Pre/Post/Peri-LN · QK-Norm</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">计算与开销</a>
+      <a href="#pipeline">放置流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Transformer 架构 · 归一化放置</span>
+  <h1>Pre/Post/Peri-LN 与 QK-Norm：归一化放在哪，决定残差与 logits 怎样增长</h1>
+  <p class="hero-sub">
+    同一个 block，LayerNorm 放在残差相加之后（Post-LN）、模块输入之前（Pre-LN），还是模块两端各一次（Peri-LN），会改变前向方差与反向梯度。
+    QK-Norm 则把归一化推进 attention 内部，直接压住 <code>q·k</code> 的 logits 尺度。
+    本页按五篇原文核对公式、放置、规模实验与各自的失败条件，并用一个可手算的残差链示意解释三种放置的取舍。
+  </p>
+  <div class="meta">
+    <span>Vaswani 2017 · Xiong 2020 · Henry 2020 · ViT-22B · Peri-LN 2025</span>
+    <a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener">Attention Is All You Need ↗</a>
+    <a href="https://arxiv.org/abs/2002.04745" target="_blank" rel="noopener">On Layer Normalization ↗</a>
+    <a href="https://arxiv.org/abs/2010.04245" target="_blank" rel="noopener">Query-Key Normalization ↗</a>
+    <a href="https://arxiv.org/abs/2302.05442" target="_blank" rel="noopener">ViT-22B ↗</a>
+    <a href="https://arxiv.org/abs/2502.02732" target="_blank" rel="noopener">Peri-LN ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>Post-LN</strong> 是原始 Transformer 的写法：<code>y = Norm(x + Module(x))</code>（Vaswani §3.1）。相加发生在 Norm 里面，前向方差被压住；代价是反向梯度每层都要穿过 LN。
+    原始配方用 <span data-src="Vaswani §5.3">4000</span> 步 warmup；Xiong et al. 把 warmup 的必要性归因到初始化时输出端附近的梯度尺度（§3.3）。
+  </p>
+  <p>
+    <strong>Pre-LN</strong> 把 Norm 挪到模块入口：<code>y = x + Module(Norm(x))</code>，并在预测前加 final LN。残差干道变成恒等路径，warmup 可以去掉；但模块输出未经归一化就进入干道，方差会在训练中累积。
+    Peri-LN 再在模块输出上加一次 Norm，把乘法增长改成加法增长（§3.3, Eq. 4）。
+  </p>
+  <p>
+    <strong>QK-Norm</strong> 是另一条轴：它不碰残差干道，只在 softmax 前压住 <code>q·k</code>。Henry et al. 用 ℓ<sub>2</sub> normalization + 可学习温度 <code>g</code>；ViT-22B 用 LayerNorm 处理 q、k。
+    没有 QK normalization 时，ViT-22B 在 <span data-src="ViT-22B Appendix B">8B</span> 模型上看到 attention logits 增长到 <span data-src="ViT-22B Appendix B">50000</span> 以上，softmax 接近 one-hot（Appendix B）。
+  </p>
+  <p>
+    下面的数字卡分别标出 Post-LN 的 warmup 成本、去掉 warmup 后的 BLEU 损失，以及 Peri-LN 在 <span data-src="Peri-LN Table 1">3.2B</span> 规模上的平均分。三种残差放置与 QK-Norm 的口径不同，不能把某一组的增益直接搬到另一组。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Vaswani §5.3">4000<small> 步</small></div>
+      <div class="k">原始 Transformer 的 warmup_steps<br>Post-LN 用它换稳定（Vaswani §5.3）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Xiong §3.2">8.45<small> BLEU</small></div>
+      <div class="k">Post-LN 去掉 warmup 的 IWSLT14 De-En<br>有 warmup 时约 <span data-src="Xiong §3.2">34</span>（Xiong §3.2）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Peri-LN Table 1">58.56<small> avg</small></div>
+      <div class="k">Peri-LN <span data-src="Peri-LN Table 1">3.2B</span> 平均基准分<br>Pre-LN <span data-src="Peri-LN Table 1">56.69</span> / Post-LN <span data-src="Peri-LN Table 1">46.45</span>（Table 1）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>同一个 block，LN 放在残差相加前、后或两端，前向方差与反向梯度会走向不同极端</h2></div>
+  <p class="sec-sub">先分清两件事：残差干道跨层累积什么，attention 内部的 logits 又由什么控制；Post/Pre/Peri 改的是前者，QK-Norm 改的是后者。</p>
+
+  <p>
+    一个 Transformer block 由 attention 和 FFN 两个子层组成，每个子层都带一条残差连接。把 LayerNorm 放在 residual add 之前、之后，还是在模块输出上再加一次，是三种不同的计算图；公式只差括号的位置，但括号决定了哪一段被归一化、哪一段保持裸露。
+  </p>
+
+  <p>
+    <strong>Post-LN</strong> 写成 <code>y = Norm(x + Module(x))</code>（Vaswani §3.1；Peri-LN §3.1, Eq. 1）。相加发生在 Norm 里面，所以每个 block 的输出在进入下一层前已经被归一化；跨层残差干道携带的是归一化后的状态，未归一化的和只存在于 block 内部。
+    容易记反的一点是：Post-LN 的残差干道并不跨层累积未归一化和，真正把未归一化模块输出留在干道上的是 Pre-LN。Post-LN 的代价在反向：主干梯度每层都要穿过 LN。
+    Xiong et al. 的均值场分析给出，初始化时最后一层 FFN 权重的梯度上界是 <code>O(d√ln d)</code>，不随层数 L 下降（§3.3, Theorem 1）；实验中 <span data-src="Xiong Figure 3">6–14</span> 层 Post-LN 的该梯度范数维持在 <span data-src="Xiong Figure 3">1.6</span> 左右（Figure 3）。
+    这也解释了原始 Transformer 为什么需要 warmup：没有 warmup 时，IWSLT14 De-En 的 BLEU 只有 <span data-src="Xiong §3.2">8.45</span>，有 warmup 时约 <span data-src="Xiong §3.2">34</span>（§3.2）。
+  </p>
+
+  <p>
+    <strong>Pre-LN</strong> 写成 <code>y = x + Module(Norm(x))</code>，并在预测前加一次 final LN（Xiong Table 1；Peri-LN §3.1, Eq. 2）。LN 只碰模块输入，残差干道是恒等路径；模块输出未经归一化就直接加进干道。
+    初始化时方差大致随深度线性增长，训练开始后可能转为指数增长（Peri-LN §3.2, Figure 1）。论文的措辞是：一旦参数更新放大了输入，Pre-LN 的 hidden-state variance 会指数累积。
+    大激活因此可以沿残差路径一路保留到深层；在 <span data-src="Peri-LN §7.2">3.2B</span> 模型上，Pre-LN 的 top-<span data-src="Peri-LN §7.2">100</span> 绝对激活在 <span data-src="Peri-LN §7.2">0.5B</span> token 左右就超过 FP16 上限 <span data-src="Peri-LN Appendix K">65,504</span>（§7.2, Appendix K）。
+  </p>
+
+  <p>
+    <strong>QK-Norm</strong> 是另一条轴。即使残差干道稳定，attention 内部的 <code>q·k</code> 仍可能变大；softmax 只看差值，logits 一大就接近 one-hot。
+    Henry et al. 给了一个可手算的例子：<code>softmax([760,752,750]) = softmax([12,4,2]) = [0.99962, 0.00034, 0.00005]</code>（§3）。
+    ViT-22B 在 <span data-src="ViT-22B Appendix B">8B</span> 模型上观察到，没有 QK normalization 时 attention logits 会增长到 <span data-src="ViT-22B Appendix B">50000</span> 以上，softmax 变成 one-hot；同一段落还报告，loss 在 <span data-src="ViT-22B Appendix B">2000</span> 步内开始持续上升（Appendix B）。
+  </p>
+
+  <p>
+    所以「归一化放哪」不是一个问题，而是两个：残差干道要不要在跨层时被压住，attention logits 要不要在 softmax 前被压住。Post/Pre/Peri 回答第一个，QK-Norm 回答第二个；把两者混为一谈，就会把某一处的收益错记到另一处。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>Post-LN 用 warmup 换稳定，Pre-LN 用残差直通换掉 warmup，QK-Norm 则从 attention 内部下手</h2></div>
+  <p class="sec-sub">三条路线各自解决了上一节的一个失败模式，但都没有同时处理「残差方差」和「logit 尺度」；Peri-LN 是把第三种植入方式补上分析。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Post-LN · Vaswani 2017</span><h4>先相加，再归一化</h4></div>
+      <p>
+        原始 Transformer 的每个子层都是 <code>Norm(x + Sublayer(x))</code>（§3.1）。前向方差被压住，但优化依赖 warmup：原文用
+        <span data-src="Vaswani §5.3">4000</span> 步线性 warmup，Adam 的 β<sub>2</sub> 设为 <span data-src="Vaswani §5.3">0.98</span>（§5.3）。
+        Xiong et al. 后来把这种依赖归因到输出端附近的梯度尺度（§3.3）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Pre-LN · Xiong 2020</span><h4>先归一化，再进模块</h4></div>
+      <p>
+        把 LN 挪到模块输入，残差路径保持恒等；预测前再加 final LN（Table 1）。论文证明初始化时 Pre-LN 的梯度尺度不随深度放大（Theorem 1），并在 IWSLT14、WMT14、BERT 上验证 warmup 可以去掉（§4）。
+        代价是模块输出未经归一化就进入残差干道。
+      </p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">QK-Norm · Henry 2020 / ViT-22B</span><h4>把 q、k 先归一化，再点积</h4></div>
+      <p>
+        Henry et al. 把 q、k 在 head 维上做 ℓ<sub>2</sub> normalization，用 cosine similarity 替代 dot product，再乘一个可学习的 <code>g</code>；
+        <code>g</code> 初始化为 <code>log<sub>2</sub>(L² − L)</code>，L 取训练集序列长度的 <span data-src="Henry §3">97.5</span> 百分位（§3）。
+        ViT-22B 改用 LayerNorm 处理 q、k，再除以 √d（§2）。两者都只改 attention 内部。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Peri-LN · Kim et al. 2025</span><h4>模块两端各一次</h4></div>
+      <p>
+        Gemma、OLMo 等开源模型已经在模块输出上加 LN，但缺少统一分析；Peri-LN 把这种做法命名为「模块周围」的归一化，写成
+        <code>y = x + Norm(Module(Norm(x)))</code>（§3.3, Eq. 3）。它保留 Pre-LN 的直通残差，同时把模块输出先压住再汇入。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    三条残差路线并不是互斥的标签：Post-LN 把 LN 放在主路径上，Pre-LN 把它放在模块分支上，Peri-LN 在模块分支的两端各放一个。QK-Norm 则可以和其中任何一种叠加，因为它不碰残差干道。
+    下一节的公式只差括号位置，但括号决定了哪一段被归一化。
+  </p>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>三个公式只差括号：Norm 在相加后、相加前，还是模块两端各一次</h2></div>
+  <p class="sec-sub">记住每条公式里 Norm 作用在哪一段：Post 作用于「x + 模块输出」，Pre 只作用于模块输入，Peri 作用于模块输入和模块输出。</p>
+
+  <div class="eq">
+    <span class="hl-a">Post-LN</span>：y<sub>l</sub> = Norm( x<sub>l</sub> + Module(x<sub>l</sub>) )
+  </div>
+  <div class="eq-cap">Vaswani §3.1；Peri-LN §3.1, Eq. 1。Norm 在相加之后，主路径被归一化。</div>
+
+  <div class="eq">
+    <span class="hl-b">Pre-LN</span>：y<sub>l</sub> = x<sub>l</sub> + Module( Norm(x<sub>l</sub>) )
+  </div>
+  <div class="eq-cap">Xiong Table 1；Peri-LN §3.1, Eq. 2。Norm 只在模块入口，残差干道是恒等映射；预测前另有 final LN。</div>
+
+  <div class="eq">
+    <span class="hl-c">Peri-LN</span>：y<sub>l</sub> = x<sub>l</sub> + Norm( Module( Norm(x<sub>l</sub>) ) )
+  </div>
+  <div class="eq-cap">Peri-LN §3.3, Eq. 3。Eq.3 只覆盖每层；论文另含可选的 embedding/final LN。模块输入和输出各一次 Norm；残差干道本身仍不归一化。</div>
+
+  <p>
+    三者的差别可以压缩成一句话：<strong>Post-LN 归一化「和」，Pre-LN 归一化「输入」，Peri-LN 归一化「输入和输出」</strong>。
+    因此 Post-LN 的跨层状态被压回固定尺度，Pre-LN 的跨层状态是「上一层的和 + 未归一化模块输出」，Peri-LN 的跨层状态是「上一层的和 + 已归一化模块输出」。
+    这也解释了为什么 Peri-LN 的残差干道仍然可能有大值：它没有把整条干道归一化，只是把每层汇入的增量先压了一次（§3.3）。
+  </p>
+
+  <h3>QK-Norm：把 logits 的来源先压回 [−1, 1]</h3>
+  <p>
+    Henry et al. 的 QKNorm 只处理 q、k，不处理 v：先沿 head 维做 ℓ<sub>2</sub> normalization，再做点积，于是每个元素变成 cosine similarity，取值范围是 [−1, 1]。直接用 cosine 值会让 softmax 的差值太小，所以再乘一个可学习标量 <code>g</code>；<code>g</code> 的初始化是
+    <code>g<sub>0</sub> = log<sub>2</sub>(L² − L)</code>，其中 L 是训练集源/目标序列长度的 <span data-src="Henry §3">97.5</span> 百分位（§3, Eq. 3）。
+  </p>
+
+  <div class="eq">
+    q̂<sub>i</sub> = q<sub>i</sub> / ||q<sub>i</sub>||，&nbsp; k̂<sub>i</sub> = k<sub>i</sub> / ||k<sub>i</sub>||<br>
+    Attention = softmax( <span class="hl-c">g</span> · Q̂K̂<sup>T</sup> ) V
+  </div>
+  <div class="eq-cap">Henry §3, Eq. 2 与 Eq. 5。它替换的是 <code>softmax(QK<sup>T</sup>/√d)V</code>，不是替换 LayerNorm。</div>
+
+  <p>
+    这个 <code>g</code> 不是可有可无的温度：去掉它之后，IWSLT'15 en→vi 的测试 BLEU 从 <span data-src="Henry Table 2">33.24</span> 掉到 <span data-src="Henry Table 6">24.53</span>（完整 QKNorm 33.24 取自 Table 2，消融行取自 Table 6）。
+    原因是 cosine similarity 被限制在 [−1, 1]，不放大时 softmax 几乎均匀，模型难以把注意力集中到该看的位置；<code>g</code> 把范围拉开，但仍然是可学习的，不会像原始点积那样无界。
+  </p>
+
+  <div class="eq">
+    Attention<sub>ViT-22B</sub> = softmax( (1/√d) · <span class="hl-c">LN</span>(XW<sup>Q</sup>) · LN(XW<sup>K</sup>)<sup>T</sup> )
+  </div>
+  <div class="eq-cap">ViT-22B §2。这里用 LayerNorm 而不是 ℓ<sub>2</sub>，保留 1/√d 缩放；与 Henry 的 QKNorm 不是同一条公式。</div>
+
+  <p>
+    QK-Norm 的两个实现共享同一个目标：让 q、k 的点积不被向量范数支配，logits 不会无界增长。Henry 的做法是把向量长度信息完全去掉，再学一个全局温度；ViT-22B 的做法是保留 LayerNorm 后的尺度，再用固定的 1/√d。
+    两者都不改变残差路径，也不替代 Post/Pre/Peri 的选择。把「QK-Norm」当成一个公式会混淆这两条路线；本页在引用时分别标注。
+  </p>
+
+  <h3>自己动手：切换 Post / Pre / Peri，看残差链怎样累积</h3>
+  <p>
+    下面的玩具模型只跟踪一个标量方差 <code>v</code>：每层模块增益为 <code>k</code>，Post 把 <code>v</code> 压回 1，Pre 把模块输出按 <code>(1+k)</code> 乘进干道，Peri 在模块输出上加一次归一化、每层只加 1。
+    拖动层数 L 与增益 k，观察末态方差与「幅度雅可比」G。G 是这条标量递推的导数，不是论文的梯度范数；它的作用是让三种放置的取舍可以被手算。
+  </p>
+
+  <div class="sim" id="norm-sim">
+    <div class="sim-top" id="norm-btns">
+      <button type="button" class="rule-btn" data-place="post">Post-LN<span class="r-sub">y = Norm(x + Module(x))</span></button>
+      <button type="button" class="rule-btn active" data-place="pre">Pre-LN<span class="r-sub">y = x + Module(Norm(x))</span></button>
+      <button type="button" class="rule-btn" data-place="peri">Peri-LN<span class="r-sub">y = x + Norm(Module(Norm(x)))</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>层数 L <span class="v" id="sim-l-val">4</span></label>
+        <input id="sim-l" type="range" min="2" max="8" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label>模块增益 k <span class="v" id="sim-k-val">0.5</span></label>
+        <input id="sim-k" type="range" min="0.1" max="1" step="0.1" value="0.5">
+      </div>
+    </div>
+
+    <div class="slots" id="sim-slots">
+      <div class="slot">
+        <div class="slot-name">输入 v<sub>0</sub></div>
+        <div class="slot-val" id="sim-v0">1.0000</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name" id="sim-mid-name">第 2 层</div>
+        <div class="slot-val" id="sim-vmid">2.2500</div>
+      </div>
+      <div class="slot hit">
+        <div class="slot-name" id="sim-end-name">第 4 层</div>
+        <div class="slot-val" id="sim-vend">5.0625</div>
+      </div>
+      <div class="slot">
+        <div class="slot-name">幅度雅可比 G</div>
+        <div class="slot-val" id="sim-g">5.0625</div>
+      </div>
+    </div>
+
+    <div class="readout" id="sim-readout" data-source="Peri-LN" data-src="Peri-LN §3.3 Eq.4（简化）">
+      <div class="r-head" id="sim-head">当前放置：Pre-LN</div>
+      <div id="sim-msg">Pre-LN 把模块输出按 (1+k) 乘进干道；k = 0.5 时每层 ×1.5。前向末态 5.0625；幅度雅可比 G = 5.0625（玩具模型，不是论文的梯度范数）。</div>
+      <div class="chain mono" id="sim-chain">v: 1.0000 → 1.5000 → 2.2500 → 3.3750 → 5.0625</div>
+    </div>
+  </div>
+
+  <p class="eq-cap">
+    这里的 <code>v</code> 是标量方差示意，不是 hidden state 的真实维度；参数由页面自定，默认值 L = 4、k = 0.5 对应下面手算的组 A；数值由页面参数计算，非原文数字。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：两组参数，Post / Pre / Peri 各算一遍<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A：L = 4，k = 0.5</strong></p>
+      <ol>
+        <li>Post-LN：v<sub>1</sub> = v<sub>2</sub> = v<sub>3</sub> = v<sub>4</sub> = 1；G = 0。</li>
+        <li>Pre-LN：v<sub>1</sub> = 1 × 1.5 = 1.5；v<sub>2</sub> = 1.5 × 1.5 = 2.25；v<sub>3</sub> = 2.25 × 1.5 = 3.375；v<sub>4</sub> = 3.375 × 1.5 = 5.0625；G = 1.5<sup>4</sup> = 5.0625。</li>
+        <li>Peri-LN：v<sub>1</sub> = 1 + 1 = 2；v<sub>2</sub> = 2 + 1 = 3；v<sub>3</sub> = 3 + 1 = 4；v<sub>4</sub> = 4 + 1 = 5；G = 1。</li>
+      </ol>
+      <p><strong>组 B：L = 3，k = 1.0</strong></p>
+      <ol>
+        <li>Post-LN：v<sub>1</sub> = v<sub>2</sub> = v<sub>3</sub> = 1；G = 0。</li>
+        <li>Pre-LN：v<sub>1</sub> = 1 × 2 = 2；v<sub>2</sub> = 2 × 2 = 4；v<sub>3</sub> = 4 × 2 = 8；G = 2<sup>3</sup> = 8。</li>
+        <li>Peri-LN：v<sub>1</sub> = 1 + 1 = 2；v<sub>2</sub> = 2 + 1 = 3；v<sub>3</sub> = 3 + 1 = 4；G = 1。</li>
+      </ol>
+      <p>
+        JS 只做乘加与幂，显示固定 4 位小数；上面两组参数在页面上切换后逐位一致。这个递推是<strong>页面自定的简化示意</strong>，依据是 Peri-LN §3.2/§3.3 对 Post「常数方差」、Pre「乘法累积」、Peri「加法累积」的描述；
+        它不复现 Xiong 的梯度定理，也不含 attention 的 QK logits。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个交互覆盖了什么、没覆盖什么<span class="sum-sub">分支对照</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>三种放置对残差干道的标量方差递推——Post 归一化相加结果、Pre 不归一化模块输出、Peri 归一化模块输出；层数 L 与模块增益 k 对末态方差和幅度雅可比的影响。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>真实的 LayerNorm/RMSNorm Jacobian；attention 与 FFN 两个子层的区别；Post-LN 的 warmup 与优化器；Pre-LN 训练中方差从线性转为指数的完整动力学；QK-Norm 的 logits 与 softmax；embedding/final LN；多头与 head 维。
+      </p>
+      <p>
+        因此它是<strong>简化示意，不是原文公式的数值还原</strong>。论文的梯度结论见 §3.3 的 Theorem 1、§3.4 的 Figure 3；本交互的 G 只是标量递推的导数。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 04. 计算与开销 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>Post-LN 的输出端梯度不随深度下降，Pre-LN 按 1/√L 缩小；Peri-LN 用输出归一化把方差增长改成加法</h2></div>
+  <p class="sec-sub">这一节把「为什么需要 warmup」「为什么 Pre-LN 也会不稳定」「Peri-LN 多花一次归一化买到什么」拆成可核对的量与条件。</p>
+
+  <div class="eq">
+    Post-LN：|| ∂L/∂W<sup>2,L</sup> ||<sub>F</sub> ≤ O( d√ln d )<br>
+    Pre-LN：|| ∂L/∂W<sup>2,L</sup> ||<sub>F</sub> ≤ O( d√(ln d / L) )
+  </div>
+  <div class="eq-cap">Xiong §3.3, Theorem 1。两条都是初始化时最后一层 FFN 权重的 Frobenius 范数上界；Post 的界与 L 无关，Pre 的界随 L 增大而缩小。</div>
+
+  <p>
+    这两个上界解释了一个反直觉现象：Post-LN 在初始化时的输出端梯度更大，却需要更小的学习率；Pre-LN 的输出端梯度更小，却能承受更大的学习率。<span class="infer">推断</span> 原因是梯度的绝对尺度不是全部因素，梯度在层间的分布与方差累积同样影响稳定性（依据：Xiong §3.3 Theorem 1；§3.4 Figure 3）。
+    Xiong 的实验把这件事量化到具体模型：在 <span data-src="Xiong Figure 3">6–14</span> 层的 Post-LN 中，最后一层 FFN 的梯度范数维持在 <span data-src="Xiong Figure 3">1.6</span> 左右；Pre-LN 的同一量随深度增加而下降（§3.4, Figure 3）。
+  </p>
+
+  <h3>warmup 的代价：<span data-src="Vaswani §5.3">4000</span> 步，去掉后 BLEU <span data-src="Xiong §3.2">8.45</span> vs 约 <span data-src="Xiong §3.2">34</span></h3>
+  <p>
+    原始 Transformer 用 <span data-src="Vaswani §5.3">4000</span> 步 warmup（Vaswani §5.3）。Xiong et al. 在 IWSLT14 De-En 上做了去掉 warmup 的对照：Post-LN 若直接从较大的学习率开始，BLEU 只能到 <span data-src="Xiong §3.2">8.45</span>；使用 warmup 的模型约 <span data-src="Xiong §3.2">34</span>（§3.2）。
+    warmup 的长度本身也是敏感超参数：把 T<sub>warmup</sub> 设为 <span data-src="Xiong §3.2">500</span>，在 lr<sub>max</sub> = <span data-src="Xiong §3.2">5e-4</span> 与 <span data-src="Xiong §3.2">1e-3</span> 两种设置下，BLEU 分别只有 <span data-src="Xiong §3.2">31.16</span> 与 <span data-src="Xiong §3.2">2.77</span>（§3.2）。
+    这组数字说明 Post-LN 的 warmup 不是「加上就稳」的装饰，而是会改变最终质量的优化配置。
+  </p>
+
+  <p>
+    Pre-LN 的对照则显示 warmup 可以去掉：论文报告 Pre-LN 在 IWSLT14 De-En 上达到约 <span data-src="Xiong §4.2">34</span> BLEU、validation loss 约 <span data-src="Xiong §4.2">4</span>，与 Post-LN 可比；并且收敛更快——Pre-LN 的第 <span data-src="Xiong §4.2">9</span> 个 checkpoint 就接近 Post-LN 的第 <span data-src="Xiong §4.2">15</span> 个 checkpoint（§4.2）。
+    这些结论有条件：它们是 IWSLT14 De-En 的特定模型配置，不能直接外推到所有 Pre-LN 训练。
+  </p>
+
+  <h3>Peri-LN：多一次归一化，把乘法增长改成加法</h3>
+  <p>
+    Peri-LN 的关键不是「再多一个 LN」，而是把模块输出先归一化再汇入残差。论文把这一项写成
+    <code>Norm(Module(Norm(x<sub>l</sub>)))</code>，并假设它的方差近似常数 β<sub>0</sub>，于是有：
+  </p>
+  <div class="eq">
+    Var(x<sub>l+1</sub>) ≈ Var(x<sub>l</sub>) + β<sub>0</sub>
+  </div>
+  <div class="eq-cap">Peri-LN §3.3, Eq. 4。前提是归一化后的模块输出方差近似常数；结果是线性或次指数增长，而不是 Pre-LN 的乘法累积。</div>
+
+  <p>
+    论文进一步给出最后一层 MLP 权重的梯度界（Proposition 3.1，非正式陈述）：Pre-LN 的梯度范数正比于 <code>||h||</code>（Eq. 6）；Peri-LN 的界是
+    <code>4γ√D·||h|| / ||a||</code>（Eq. 8），多了一个由模块输出范数 <code>||a||</code> 提供的阻尼因子。也就是说，即使 <code>||h||</code> 很大，Peri-LN 的梯度也不会按同样比例放大。
+    这是局部上界，不是全局收敛证明；论文把形式化陈述与证明放在 Appendix C（§3.4）。
+  </p>
+
+  <p>
+    结构上，Post-LN 和 Pre-LN 每个子层各有一次归一化（Pre-LN 另加 final LN）；Peri-LN 每个子层两次。论文没有报告这部分带来的吞吐、显存或 FLOPs 变化；Peri-LN §5.3 做了固定 γ=1 与可学习 γ 的对照（可学习 γ 略好）；Peri-LN §5.4 讨论 hidden-state redundancy 与模块输出归一化的关系；Peri-LN Appendix L 的 Figure 39(d) 报告固定 γ 后深层主路径贡献下降。
+    因此「多一次归一化」的代价目前只能从结构上确认，不能给出一个原文没有的开销数字。
+  </p>
+
+  <h3>QK-Norm：<span data-src="ViT-22B Appendix B">50000</span> 的 logits 与 <span data-src="ViT-22B Appendix B">1e-3</span> 的学习率</h3>
+  <p>
+    ViT-22B 的 QK normalization 是为训练稳定性加的：在 <span data-src="ViT-22B Appendix B">8B</span> 模型上，没有它时 attention logits 会增长到 <span data-src="ViT-22B Appendix B">50000</span> 以上，softmax 接近 one-hot；同一段落还报告，loss 在 <span data-src="ViT-22B Appendix B">2000</span> 步内开始上升（Appendix B）。
+    加上 q、k 的 LayerNorm 后，模型可以用 <span data-src="ViT-22B Appendix B">1e-3</span> 的学习率稳定训练；而原始 ViT 的做法是随规模把学习率从 1e-3 降到 <span data-src="ViT-22B Appendix B">4e-4</span>（Appendix B）。
+    这是一个「用归一化换学习率预算」的例子，但它不是单项改动：ViT-22B 同时用了 parallel layers 和去掉 bias 的 LayerNorm（§2）。因此不能把全部收益归给 QK-Norm。<span class="infer">推断</span>（依据：ViT-22B §2 的三项改动；Appendix B 的对照只做到 ViT-L。）
+  </p>
+
+  <details>
+    <summary>Peri-LN 原文里需要并置的一处口径<span class="sum-sub">图注与正文</span></summary>
+    <div class="details-body">
+      <p>
+        Figure 1 的图注写：<code>we observe the growth in hidden-state variance for both Pre-LN and Post-LN architectures</code>（<span data-src="Peri-LN Figure 1">1.5B</span> 模型，训练到 <span data-src="Peri-LN Figure 1">6.3B</span> token）。
+        §3.2 正文写：<code>Post-LN maintains a roughly constant variance</code>。两处并置：图注把 Post-LN 也纳入了「方差增长」的描述，正文则说 Post-LN 的方差大致恒定。
+        页面不替原文判断哪一处是笔误，也不把两句话合并成一句。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05. 放置流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>四条路径只改一段：Post 改相加后，Pre 改相加前，Peri 改两端，QK-Norm 改 attention 内部</h2></div>
+  <p class="sec-sub">把每个 block 的计算图摊开，看清哪一段被归一化、哪一段仍然裸露；这张图也解释了为什么 QK-Norm 可以和三种残差放置任意组合。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 620" role="img" aria-label="Post-LN、Pre-LN、Peri-LN 与 QK-Norm 的归一化放置对比" font-family="Inter,'Noto Sans SC',sans-serif">
+      <defs>
+        <marker id="norm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border-strong)"></path>
+        </marker>
+        <marker id="norm-arrow-c3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--c3)"></path>
+        </marker>
+      </defs>
+
+      <!-- Panel 1: Post-LN -->
+      <rect x="20" y="20" width="420" height="270" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+      <text x="40" y="48" font-size="14" font-weight="700" fill="var(--c1)">Post-LN</text>
+      <text x="40" y="66" font-size="10.5" fill="var(--text-soft)">LN 在 residual add 之后</text>
+      <circle cx="40" cy="150" r="3" fill="var(--c1)"></circle>
+      <text x="42" y="140" font-size="11" fill="var(--text-muted)">x</text>
+      <text x="395" y="140" font-size="11" fill="var(--text-muted)">y</text>
+      <rect x="70" y="125" width="90" height="50" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="115" y="155" text-anchor="middle" font-size="12" fill="var(--c1)">Module</text>
+      <circle cx="205" cy="150" r="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></circle>
+      <text x="205" y="156" text-anchor="middle" font-size="16" fill="var(--text)">+</text>
+      <rect x="245" y="125" width="80" height="50" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="285" y="155" text-anchor="middle" font-size="12" fill="var(--c1)">Norm</text>
+      <path d="M 40 150 V 100 H 205 V 138" fill="none" stroke="var(--c1)" stroke-width="1.5" marker-end="url(#norm-arrow)"></path>
+      <line x1="40" y1="150" x2="70" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="160" y1="150" x2="193" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="217" y1="150" x2="245" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="325" y1="150" x2="390" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <text x="120" y="95" font-size="10" fill="var(--text-soft)">残差</text>
+      <text x="40" y="215" font-size="11" fill="var(--text-muted)">主路径：相加后归一化；梯度每层穿过 Norm</text>
+
+      <!-- Panel 2: Pre-LN -->
+      <rect x="460" y="20" width="420" height="270" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+      <text x="480" y="48" font-size="14" font-weight="700" fill="var(--c2)">Pre-LN</text>
+      <text x="480" y="66" font-size="10.5" fill="var(--text-soft)">LN 在模块输入</text>
+      <circle cx="480" cy="150" r="3" fill="var(--c2)"></circle>
+      <text x="482" y="140" font-size="11" fill="var(--text-muted)">x</text>
+      <text x="835" y="140" font-size="11" fill="var(--text-muted)">y</text>
+      <rect x="510" y="125" width="80" height="50" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="550" y="155" text-anchor="middle" font-size="12" fill="var(--c2)">Norm</text>
+      <rect x="620" y="125" width="90" height="50" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="665" y="155" text-anchor="middle" font-size="12" fill="var(--c2)">Module</text>
+      <circle cx="755" cy="150" r="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></circle>
+      <text x="755" y="156" text-anchor="middle" font-size="16" fill="var(--text)">+</text>
+      <path d="M 480 150 V 100 H 755 V 138" fill="none" stroke="var(--c2)" stroke-width="1.5" marker-end="url(#norm-arrow)"></path>
+      <line x1="480" y1="150" x2="510" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="590" y1="150" x2="620" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="710" y1="150" x2="743" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="767" y1="150" x2="830" y2="150" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <text x="560" y="95" font-size="10" fill="var(--text-soft)">残差</text>
+      <text x="480" y="215" font-size="11" fill="var(--text-muted)">主路径：恒等直通；模块输出不归一化</text>
+
+      <!-- Panel 3: Peri-LN -->
+      <rect x="20" y="320" width="420" height="270" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+      <text x="40" y="348" font-size="14" font-weight="700" fill="var(--accent)">Peri-LN</text>
+      <text x="40" y="366" font-size="10.5" fill="var(--text-soft)">LN 在模块两端</text>
+      <circle cx="40" cy="450" r="3" fill="var(--accent)"></circle>
+      <text x="42" y="440" font-size="11" fill="var(--text-muted)">x</text>
+      <text x="420" y="440" font-size="11" fill="var(--text-muted)">y</text>
+      <rect x="70" y="425" width="70" height="50" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="105" y="455" text-anchor="middle" font-size="12" fill="var(--accent-deep)">Norm</text>
+      <rect x="170" y="425" width="90" height="50" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="215" y="455" text-anchor="middle" font-size="12" fill="var(--accent-deep)">Module</text>
+      <rect x="290" y="425" width="70" height="50" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="325" y="455" text-anchor="middle" font-size="12" fill="var(--accent-deep)">Norm</text>
+      <circle cx="395" cy="450" r="12" fill="var(--bg-surface)" stroke="var(--border-strong)"></circle>
+      <text x="395" y="456" text-anchor="middle" font-size="16" fill="var(--text)">+</text>
+      <path d="M 40 450 V 400 H 395 V 438" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#norm-arrow)"></path>
+      <line x1="40" y1="450" x2="70" y2="450" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="140" y1="450" x2="170" y2="450" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="260" y1="450" x2="290" y2="450" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="360" y1="450" x2="383" y2="450" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <line x1="407" y1="450" x2="418" y2="450" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow)"></line>
+      <text x="120" y="395" font-size="10" fill="var(--text-soft)">残差</text>
+      <text x="40" y="515" font-size="11" fill="var(--text-muted)">主路径：恒等直通；模块输出先归一化</text>
+
+      <!-- Panel 4: QK-Norm -->
+      <rect x="460" y="320" width="420" height="270" rx="12" fill="var(--bg)" stroke="var(--border)"></rect>
+      <text x="480" y="348" font-size="14" font-weight="700" fill="var(--c3)">QK-Norm</text>
+      <text x="480" y="366" font-size="10.5" fill="var(--text-soft)">只改 attention 内部</text>
+      <text x="485" y="455" font-size="11" fill="var(--text-muted)">X</text>
+      <rect x="520" y="400" width="80" height="34" rx="7" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="560" y="422" text-anchor="middle" font-size="11" fill="var(--c3)">XW^Q</text>
+      <rect x="620" y="400" width="80" height="34" rx="7" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="660" y="422" text-anchor="middle" font-size="11" fill="var(--c3)">Norm</text>
+      <text x="712" y="422" font-size="12" fill="var(--c3)">Q̂</text>
+      <rect x="520" y="455" width="80" height="34" rx="7" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="560" y="477" text-anchor="middle" font-size="11" fill="var(--c3)">XW^K</text>
+      <rect x="620" y="455" width="80" height="34" rx="7" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="660" y="477" text-anchor="middle" font-size="11" fill="var(--c3)">Norm</text>
+      <text x="712" y="477" font-size="12" fill="var(--c3)">K̂</text>
+      <line x1="500" y1="417" x2="520" y2="417" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></line>
+      <line x1="600" y1="417" x2="620" y2="417" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></line>
+      <line x1="700" y1="417" x2="708" y2="417" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></line>
+      <line x1="500" y1="472" x2="520" y2="472" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></line>
+      <line x1="600" y1="472" x2="620" y2="472" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></line>
+      <line x1="700" y1="472" x2="708" y2="472" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></line>
+      <rect x="760" y="417" width="100" height="55" rx="8" fill="var(--c3-soft)" stroke="var(--c3)"></rect>
+      <text x="810" y="440" text-anchor="middle" font-size="10.5" fill="var(--c3)">Q̂K̂T · g</text>
+      <text x="810" y="458" text-anchor="middle" font-size="10.5" fill="var(--c3)">softmax → ×V</text>
+      <path d="M 722 413 H 744 V 436 H 760" fill="none" stroke="var(--c3)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></path>
+      <path d="M 722 472 H 744 V 452 H 760" fill="none" stroke="var(--c3)" stroke-width="1.5" marker-end="url(#norm-arrow-c3)"></path>
+      <text x="480" y="530" font-size="10.5" fill="var(--text-muted)">QK-Norm 在 softmax 前压住 logits；残差干道不变</text>
+      <text x="480" y="552" font-size="10" fill="var(--text-soft)">Henry：ℓ₂ + 可学习 g；ViT-22B：LayerNorm + 1/√d</text>
+    </svg>
+    <figcaption>图 1 · 四种归一化放置。按 Vaswani §3.1、Xiong Table 1、Peri-LN §3.3 Eq. 3、Henry §3 与 ViT-22B §2 重绘；QK-Norm 画在 attention 内部，不改变残差路径。</figcaption>
+  </figure>
+
+  <p class="eq-cap">表 1 · 四种机制各自归一化什么（页面整理；出处见各行）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>机制</th><th>归一化对象</th><th>残差干道</th><th>主要目标</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Post-LN</td>
+          <td>相加后的和 <code>x + Module(x)</code></td>
+          <td>每层被归一化</td>
+          <td>压住前向方差</td>
+          <td>Vaswani §3.1；Peri-LN §3.1</td>
+        </tr>
+        <tr>
+          <td>Pre-LN</td>
+          <td>模块输入 <code>Norm(x)</code></td>
+          <td>不归一化，恒等直通</td>
+          <td>保持梯度通路</td>
+          <td>Xiong Table 1；Peri-LN §3.1</td>
+        </tr>
+        <tr>
+          <td>Peri-LN</td>
+          <td>模块输入与模块输出</td>
+          <td>不归一化；输出侧先压一次</td>
+          <td>控制方差增长</td>
+          <td>Peri-LN §3.3</td>
+        </tr>
+        <tr>
+          <td>QK-Norm</td>
+          <td>q、k（head 维）</td>
+          <td>不适用（不碰残差）</td>
+          <td>控制 attention logits</td>
+          <td>Henry §3；ViT-22B §2</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表把「归一化对象」和「残差干道」分开看：三种残差放置的分工不同——Post-LN 把 LN 放在主路径上；Pre-LN 与 Peri-LN 的主路径都不归一化，差别只在汇入残差前有没有把模块输出压一次；QK-Norm 则完全在 attention 内部，和残差路径正交。
+    因此在实现里，QK-Norm 可以和 Post-LN、Pre-LN、Peri-LN 任意组合；它不是第四种「残差放置」，而是 attention 子层内部的一个额外步骤。
+  </p>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>规模上 Peri-LN 的平均分更高，QK-Norm 把爆掉的 attention logits 拉回可训练范围</h2></div>
+  <p class="sec-sub">三组实验的口径不同：Xiong 是 IWSLT14 的 warmup 对照，Peri-LN 是 <span data-src="Peri-LN Table 1">400M</span>–<span data-src="Peri-LN Table 1">3.2B</span> 的 <span data-src="Peri-LN §4.1">30B</span>-token 预训练，QK-Norm 是 <span data-src="Henry Table 2">5</span> 个低资源语言对的翻译；数字不能跨组直接比较。</p>
+
+  <h3>warmup：Post-LN 去掉后 <span data-src="Xiong §3.2">8.45</span>，Pre-LN 的第 <span data-src="Xiong §4.2">9</span> 个 checkpoint 接近 Post-LN 的第 <span data-src="Xiong §4.2">15</span> 个</h3>
+  <p>
+    Xiong et al. 的 IWSLT14 De-En 实验里，Post-LN 去掉 warmup 后 BLEU 只有 <span data-src="Xiong §3.2">8.45</span>；有 warmup 时约 <span data-src="Xiong §3.2">34</span>。
+    warmup 长度从 <span data-src="Xiong §3.2">4000</span> 缩到 <span data-src="Xiong §3.2">500</span> 时，lr<sub>max</sub> = <span data-src="Xiong §3.2">5e-4</span> 的模型还能到 <span data-src="Xiong §3.2">31.16</span>，lr<sub>max</sub> = <span data-src="Xiong §3.2">1e-3</span> 的模型只有 <span data-src="Xiong §3.2">2.77</span>（§3.2）。
+    Pre-LN 去掉 warmup 后仍能达到约 <span data-src="Xiong §4.2">34</span> BLEU，并且第 <span data-src="Xiong §4.2">9</span> 个 checkpoint 就接近 Post-LN 的第 <span data-src="Xiong §4.2">15</span> 个 checkpoint（§4.2）。这些是 IWSLT14 De-En 的单一任务结果，不是跨任务的统一结论。
+  </p>
+
+  <h3>Peri-LN：<span data-src="Peri-LN Table 1">3.2B</span> 平均分 <span data-src="Peri-LN Table 1">58.56</span>，比 Pre-LN 高 <span data-src="Peri-LN Table 1">1.87</span> 分</h3>
+  <p>
+    Peri-LN 的主实验是 <span data-src="Peri-LN Table 1">400M</span> / <span data-src="Peri-LN Table 1">1.5B</span> / <span data-src="Peri-LN Table 1">3.2B</span> 的预训练，每个规模训练 <span data-src="Peri-LN §4.1">30B</span> token、跑 <span data-src="Peri-LN §4.1">5</span> 个种子；模型规模不含 embedding 参数，Loss 是 C4 evaluation loss（Table 1 表注）。
+    在 <span data-src="Peri-LN Table 1">3.2B</span> 上，Peri-LN 的平均分 <span data-src="Peri-LN Table 1">58.56</span>，Pre-LN <span data-src="Peri-LN Table 1">56.69</span>，Post-LN <span data-src="Peri-LN Table 1">46.45</span>；Peri-LN 比 Pre-LN 高 <span data-src="Peri-LN Table 1">1.87</span> 分（<span data-src="Peri-LN Table 1">58.56</span> − <span data-src="Peri-LN Table 1">56.69</span>），比 Post-LN 高 <span data-src="Peri-LN Table 1">12.11</span> 分（<span data-src="Peri-LN Table 1">58.56</span> − <span data-src="Peri-LN Table 1">46.45</span>）。
+    C4 evaluation loss 为 <span data-src="Peri-LN Table 1">3.11</span>，Pre-LN <span data-src="Peri-LN Table 1">3.20</span>，Post-LN <span data-src="Peri-LN Table 1">4.43</span>；Peri-LN 比 Pre-LN 低 <span data-src="Peri-LN Table 1">0.09</span>（<span data-src="Peri-LN Table 1">3.20</span> − <span data-src="Peri-LN Table 1">3.11</span>）。SFT Avg. 为 <span data-src="Peri-LN Table 1">59.02</span>，Pre-LN <span data-src="Peri-LN Table 1">57.08</span>，Post-LN <span data-src="Peri-LN Table 1">49.33</span>；Peri-LN 比 Pre-LN 高 <span data-src="Peri-LN Table 1">1.94</span> 分（<span data-src="Peri-LN Table 1">59.02</span> − <span data-src="Peri-LN Table 1">57.08</span>）。
+  </p>
+
+  <p>
+    另外两个规模也同向：<span data-src="Peri-LN Table 1">1.5B</span> 上 Peri-LN 平均分 <span data-src="Peri-LN Table 1">56.55</span>，Pre-LN <span data-src="Peri-LN Table 1">53.71</span>，差 <span data-src="Peri-LN Table 1">2.84</span> 分（<span data-src="Peri-LN Table 1">56.55</span> − <span data-src="Peri-LN Table 1">53.71</span>）；<span data-src="Peri-LN Table 1">400M</span> 上 <span data-src="Peri-LN Table 1">51.57</span> 对 <span data-src="Peri-LN Table 1">49.69</span>，差 <span data-src="Peri-LN Table 1">1.88</span> 分（<span data-src="Peri-LN Table 1">51.57</span> − <span data-src="Peri-LN Table 1">49.69</span>）。
+    这些是 <span data-src="Peri-LN §4.1">5</span> 个种子的均值；Table 1 同时给了标准差，论文没有在表注里报告显著性检验。
+  </p>
+
+  <p class="eq-cap">Table 1 · Peri-LN 与 Post/Pre-LN 在 <span data-src="Peri-LN Table 1">400M</span> / <span data-src="Peri-LN Table 1">1.5B</span> / <span data-src="Peri-LN Table 1">3.2B</span>、<span data-src="Peri-LN §4.1">30B</span> token、<span data-src="Peri-LN §4.1">5</span> 个种子下的平均基准分；每个模型规模不含 embedding 参数。数据转自 Table 1；Loss 为 C4 evaluation loss，SFT Avg. 为 LIMA 指令微调后的平均分，发散 checkpoint 不计入。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Size</th><th>Arch.</th><th>ARC-Easy</th><th>HellaSwag</th><th>PIQA</th><th>SIQA</th><th>Winogrande</th><th>Avg.</th><th>Loss</th><th>SFT Avg.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>400M</td><td>Post-LN</td><td class="num">35.70 ±1.09</td><td class="num">28.91 ±0.16</td><td class="num">62.26 ±0.73</td><td class="num">34.48 ±1.04</td><td class="num">50.88 ±0.75</td><td class="num">42.45</td><td class="num">7.46</td><td class="num">46.44</td></tr>
+        <tr><td>400M</td><td>Pre-LN</td><td class="num">54.87 ±1.63</td><td class="num">34.17 ±1.66</td><td class="num">68.79 ±1.34</td><td class="num">39.73 ±0.59</td><td class="num">50.88 ±2.35</td><td class="num">49.69</td><td class="num">3.43</td><td class="num">49.96</td></tr>
+        <tr><td>400M</td><td>Peri-LN</td><td class="num">57.51 ±0.81</td><td class="num">37.46 ±0.34</td><td class="num">69.48 ±0.39</td><td class="num">40.64 ±0.51</td><td class="num">52.74 ±0.67</td><td class="num">51.57</td><td class="num">3.34</td><td class="num">51.96</td></tr>
+        <tr><td>1.5B</td><td>Post-LN</td><td class="num">42.92 ±0.93</td><td class="num">31.69 ±0.41</td><td class="num">66.72 ±0.40</td><td class="num">35.84 ±0.61</td><td class="num">50.30 ±1.87</td><td class="num">45.49</td><td class="num">5.38</td><td class="num">48.95</td></tr>
+        <tr><td>1.5B</td><td>Pre-LN</td><td class="num">61.51 ±1.22</td><td class="num">39.88 ±1.53</td><td class="num">71.41 ±0.88</td><td class="num">41.23 ±0.97</td><td class="num">54.51 ±2.07</td><td class="num">53.71</td><td class="num">3.29</td><td class="num">53.89</td></tr>
+        <tr><td>1.5B</td><td>Peri-LN</td><td class="num">66.17 ±0.21</td><td class="num">43.94 ±0.34</td><td class="num">73.63 ±0.24</td><td class="num">42.34 ±0.83</td><td class="num">56.64 ±0.44</td><td class="num">56.55</td><td class="num">3.18</td><td class="num">56.94</td></tr>
+        <tr><td>3.2B</td><td>Post-LN</td><td class="num">45.30 ±3.23</td><td class="num">33.59 ±0.44</td><td class="num">66.45 ±2.86</td><td class="num">35.82 ±1.09</td><td class="num">51.10 ±1.60</td><td class="num">46.45</td><td class="num">4.43</td><td class="num">49.33</td></tr>
+        <tr><td>3.2B</td><td>Pre-LN</td><td class="num">65.24 ±2.32</td><td class="num">44.23 ±2.32</td><td class="num">73.86 ±1.19</td><td class="num">42.68 ±0.07</td><td class="num">57.42 ±2.51</td><td class="num">56.69</td><td class="num">3.20</td><td class="num">57.08</td></tr>
+        <tr class="best"><td>3.2B</td><td>Peri-LN</td><td class="num">68.73 ±0.57</td><td class="num">46.99 ±0.21</td><td class="num">74.31 ±0.41</td><td class="num">43.00 ±0.73</td><td class="num">59.76 ±0.78</td><td class="num">58.56</td><td class="num">3.11</td><td class="num">59.02</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>QK-Norm：<span data-src="Henry Table 2">5</span> 个语言对平均高 <span data-src="Henry Table 2">0.928</span> BLEU，去掉 g 后掉 <span data-src="Henry Table 2">8.71</span></h3>
+  <p>
+    Henry et al. 的翻译实验覆盖 <span data-src="Henry Table 2">5</span> 个低资源语言对：TED Talks 的 ar→en、en→he、gl→en、sk→en，以及 IWSLT'15 的 en→vi；基线是 Nguyen &amp; Salazar 2019，QKNorm 行同时使用 LayerNorm、PreNorm 与 FixNorm（Table 2 表注）。
+    <span data-src="Henry Table 2">5</span> 个语言对的测试 BLEU 差值分别为 <span data-src="Henry Table 2">0.45</span>、<span data-src="Henry Table 2">0.66</span>、<span data-src="Henry Table 2">0.68</span>、<span data-src="Henry Table 2">2.20</span>、<span data-src="Henry Table 2">0.65</span>，平均 <span data-src="Henry Table 2">0.928</span>（Table 2）。
+    差值不是均匀的：最小的 en→vi 只有 <span data-src="Henry Table 2">0.45</span>，最大的 gl→en 有 <span data-src="Henry Table 2">2.20</span>。
+  </p>
+
+  <p class="eq-cap">Table 2 · <span data-src="Henry Table 2">5</span> 个低资源语言对的测试 BLEU（Moses 脚本）；Δ 为 QKNorm − 基线，页面计算。Table 3 用 SacreBLEU，数值略有差异（en→vi 为 <span data-src="Henry Table 3">33.18</span>，Table 2 为 <span data-src="Henry Table 2">33.24</span>）；Table 3 未逐行转录，仅引用 en→vi 单元格。本页用 Table 2 计算 <span data-src="Henry Table 2">0.928</span>。</p>
+  <table>
+    <thead>
+      <tr><th>语言对</th><th>Nguyen &amp; Salazar 2019</th><th>QKNorm + LayerNorm</th><th>Δ</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>en→vi</td><td class="num">32.79</td><td class="num">33.24</td><td class="num">0.45</td></tr>
+      <tr><td>ar→en</td><td class="num">36.09</td><td class="num">36.75</td><td class="num">0.66</td></tr>
+      <tr><td>en→he</td><td class="num">28.28</td><td class="num">28.96</td><td class="num">0.68</td></tr>
+      <tr><td>gl→en</td><td class="num">22.01</td><td class="num">24.21</td><td class="num">2.20</td></tr>
+      <tr><td>sk→en</td><td class="num">32.58</td><td class="num">33.23</td><td class="num">0.65</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    消融里最关键的一项是 <code>g</code>：去掉可学习缩放后，en→vi 的 BLEU 从 <span data-src="Henry Table 2">33.24</span> 掉到 <span data-src="Henry Table 6">24.53</span>，差 <span data-src="Henry Table 2">8.71</span>；去掉 LayerNorm 后是 <span data-src="Henry Table 6">31.56</span>，差 <span data-src="Henry Table 2">1.68</span>；把 V 也做 ℓ<sub>2</sub> normalization 后是 <span data-src="Henry Table 6">32.34</span>，差 <span data-src="Henry Table 2">0.90</span>（33.24 取自 Table 2，消融行取自 Table 6）。
+    <span class="infer">推断</span>（由 Table 6 各行差值反推；原文只写 biggest drop comes from omitting g。）：QKNorm 的收益主要来自「归一化 q、k + 可学习缩放」这一组合，而不是「对所有投影都做归一化」。
+  </p>
+
+  <p class="eq-cap">Table 6 · QKNorm 组件消融（IWSLT'15 en→vi，消融行取自 Table 6；完整 QKNorm <span data-src="Henry Table 2">33.24</span> 取自 Table 2 的 Moses 基线）；Δ 为跨表计算。这里假定 Table 6 与 Table 2 同为 Moses 脚本口径；若口径不同，Δ 需重算。</p>
+  <table>
+    <thead>
+      <tr><th>实验</th><th>Test BLEU</th><th>Δ</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>完整 QKNorm（取自 Table 2）</td><td class="num">33.24</td><td class="num">0.00</td></tr>
+      <tr><td>Without g</td><td class="num">24.53</td><td class="num">8.71</td></tr>
+      <tr><td>Without LayerNorm</td><td class="num">31.56</td><td class="num">1.68</td></tr>
+      <tr><td>Without FixNorm</td><td class="num">32.63</td><td class="num">0.61</td></tr>
+      <tr><td>Without FixNorm or PreNorm</td><td class="num">32.20</td><td class="num">1.04</td></tr>
+      <tr><td>ℓ<sub>2</sub>-normalizing V along with Q and K</td><td class="num">32.34</td><td class="num">0.90</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    论文还扫了两个维度：Table 4 把 head 数从 <span data-src="Henry Table 4">2</span> 到 <span data-src="Henry Table 4">32</span> 变化，测试 BLEU 在 2–32 之间保持稳定（<span data-src="Henry Table 4">32.30–33.24</span>）；Table 5 把 <code>g</code> 初始化用的百分位从 <span data-src="Henry Table 5">75</span> 扫到 <span data-src="Henry Table 5">99</span>，<span data-src="Henry Table 5">97.5</span> 百分位对应 <span data-src="Henry Table 5">33.24</span>，<span data-src="Henry Table 5">75</span> 百分位对应 <span data-src="Henry Table 5">32.58</span>。
+    Table 4/5 未逐行转录，正文只引用这两个结论对应的单元格。
+  </p>
+
+  <h3>ViT-22B：先压 logits，再谈学习率</h3>
+  <p>
+    ViT-22B 的 QK normalization 不是消融里的一个装饰，而是让 <span data-src="ViT-22B Appendix B">8B</span> 模型不 diverged 的必要条件：没有它时 attention logits 超过 <span data-src="ViT-22B Appendix B">50000</span>，softmax 接近 one-hot，loss 在 <span data-src="ViT-22B Appendix B">2000</span> 步内开始上升（Appendix B）。
+    加上 q、k 的 LayerNorm 后，<span data-src="ViT-22B Appendix B">1e-3</span> 的学习率保持稳定；原始 ViT 的做法是随规模把学习率降到 <span data-src="ViT-22B Appendix B">4e-4</span>（Appendix B）。
+    但 ViT-22B 同时改了 parallel layers 和 bias 移除（§2），而 QK-Norm 的对照实验只做到 ViT-L（Appendix B），所以 22B 模型上的结果不能全部算到 QK-Norm 头上。<span class="infer">推断</span>（依据：ViT-22B §2 的三项改动；Appendix B 的对照只做到 ViT-L。）
+  </p>
+
+  <p>
+    一个反直觉的对照来自 Peri-LN：§4.4 与 Figure 5 报告，训练稳定时 final-layer gradient norm 的排序是 <strong>Post-LN &gt;&gt; Pre-LN &gt;&gt; Peri-LN</strong>；而 Table 1 的平均分排序是 <strong>Peri-LN &gt; Pre-LN &gt; Post-LN</strong>。两个排序方向相反。
+    论文没有把 final-layer gradient norm 当作排名指标；§5.2 用逐层梯度分布的均匀性解释稳定性，Figure 7 显示 Peri-LN 在初始化和训练结束时都更均匀。
+    <span class="infer">推断</span>（依据：§4.4 只给排序；§5.2 才讨论逐层均匀性，两处量的口径不同。）
+  </p>
+
+  <details>
+    <summary>Xiong 原文里一处需要并置的 BERT 速度表述<span class="sum-sub">不替原文改数</span></summary>
+    <div class="details-body">
+      <p>
+        §4.2 的 BERT 段落写：
+        <code>the Post-LN model achieves 1.69 validation loss at 500k updates while the Pre-LN model achieves similar validation loss at 700k updates, which suggests there is a 40% speed-up rate.</code>
+        同一句里 Pre-LN 需要更多 updates 才达到相近 loss，与「speed-up」的方向相反；页面并列保留原文，不替作者改数，也不据此重算速度。
+      </p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>两种修法各自只覆盖一段：残差方差与 attention logits 不能互相替代</h2></div>
+  <p class="sec-sub">把每个结论的适用规模、未报告项和失败条件写清楚；超出这些条件，页面不做外推。</p>
+
+  <ul>
+    <li>
+      <strong>Post-LN 的 warmup 不是可选项：</strong>去掉 warmup 后 IWSLT14 De-En BLEU 只有 <span data-src="Xiong §3.2">8.45</span>，有 warmup 约 <span data-src="Xiong §3.2">34</span>；warmup 长度从 <span data-src="Xiong §3.2">4000</span> 缩到 <span data-src="Xiong §3.2">500</span> 也会让部分设置掉到 <span data-src="Xiong §3.2">2.77</span>（§3.2）。
+      这些数字是特定模型与任务的结果，不能反过来断言「所有 Post-LN 都必须 <span data-src="Vaswani §5.3">4000</span> 步」。
+    </li>
+    <li>
+      <strong>Pre-LN 的主路径仍然裸露：</strong>模块输出未经归一化就进入残差干道；<span data-src="Peri-LN §7.2">3.2B</span> 模型上 Pre-LN 的 top-<span data-src="Peri-LN §7.2">100</span> 绝对激活在 <span data-src="Peri-LN §7.2">0.5B</span> token 左右超过 FP16 上限 <span data-src="Peri-LN Appendix K">65,504</span>（§7.2, Appendix K）。
+      Peri-LN 的输出归一化只是把增量压住，主路径本身仍然不归一化；Figure 11 中 Peri-LN 在该实验里保持在阈值以下，但这不是对任意规模、任意初始化的保证。
+    </li>
+    <li>
+      <strong>Peri-LN 的实验范围有限：</strong>最大到 <span data-src="Peri-LN §4.1">3.2B</span> 参数、<span data-src="Peri-LN §4.1">30B</span> token、<span data-src="Peri-LN §4.1">5</span> 个种子；论文没有报告吞吐、显存或 FLOPs 开销，也没有在表注里报告显著性检验。
+      每层多一次归一化是结构事实；它带来的实际训练成本需要按实现测量，不能从 Table 1 反推。
+    </li>
+    <li>
+      <strong>Peri-LN 的增益是点差，不是统一比例：</strong><span data-src="Peri-LN Table 1">3.2B</span> 上平均分高 <span data-src="Peri-LN Table 1">1.87</span> 分，<span data-src="Peri-LN Table 1">1.5B</span> 上高 <span data-src="Peri-LN Table 1">2.84</span> 分，<span data-src="Peri-LN Table 1">400M</span> 上高 <span data-src="Peri-LN Table 1">1.88</span> 分；这些是 <span data-src="Peri-LN §4.1">5</span> 个种子的均值，不同规模的幅度不同。
+      页面不把它们换算成「提升百分比」，因为论文没有给出这样的口径。
+    </li>
+    <li>
+      <strong>QK-Norm 只修 attention logits：</strong>Henry et al. 的实验是 <span data-src="Henry Table 2">5</span> 个低资源语言对，平均 <span data-src="Henry Table 2">0.928</span> BLEU，逐对从 <span data-src="Henry Table 2">0.45</span> 到 <span data-src="Henry Table 2">2.20</span>；<code>g</code> 的初始化依赖 <span data-src="Henry §3">97.5</span> 百分位，Table 5 中 <span data-src="Henry Table 5">97.5</span> 百分位为 <span data-src="Henry Table 5">33.24</span>，<span data-src="Henry Table 5">75</span> 百分位为 <span data-src="Henry Table 5">32.58</span>。
+      ViT-22B 的是 LayerNorm 版本，且与 parallel layers、bias 移除一起使用；两条 QK-Norm 路线不能混为一个公式。
+    </li>
+    <li>
+      <strong>机制不互相替代：</strong>QK-Norm 不改变残差干道的方差累积；Peri-LN 不改变 attention 内部的 logits。一个模型如果同时有残差方差和 logits 爆炸，需要分别处理，不能指望其中一种归一化顺带修好另一种。
+      <span class="infer">推断</span>（依据：Peri-LN 的额外 Output-LN 作用于模块输出，QK-Norm 只作用于 q、k，二者作用对象不重叠。）
+    </li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>先定位失败模式，再选归一化</h4></div>
+    <p>
+      如果失败表现为残差干道的大激活、FP16 溢出或 loss spike，优先看 Pre-LN 的方差累积与 Peri-LN 的输出归一化；如果失败表现为 attention 权重接近 one-hot、logits 随训练增大，优先看 QK-Norm。
+      Post-LN 的 warmup 敏感是第三类问题，改的是优化配置，不是把 LN 挪到别处就能等价解决。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>Pre/Post/Peri-LN 与 QK-Norm · 归一化放置与 attention logits 控制</div>
+  <div class="src">
+    论文：<a href="https://arxiv.org/abs/1706.03762" target="_blank" rel="noopener">Vaswani et al. 2017, Attention Is All You Need</a> ·
+    <a href="https://arxiv.org/abs/2002.04745" target="_blank" rel="noopener">Xiong et al. 2020, On Layer Normalization in the Transformer Architecture</a><br>
+    <a href="https://arxiv.org/abs/2010.04245" target="_blank" rel="noopener">Henry et al. 2020, Query-Key Normalization for Transformers</a> ·
+    <a href="https://arxiv.org/abs/2302.05442" target="_blank" rel="noopener">Dehghani et al. 2023, Scaling Vision Transformers to 22 Billion Parameters</a> ·
+    <a href="https://arxiv.org/abs/2502.02732" target="_blank" rel="noopener">Kim et al. 2025, Peri-LN: Revisiting Normalization Layer in the Transformer Architecture</a><br>
+    博客笔记：<a href="/qk-norm/">QK-Norm</a> · 精读列表：<a href="/visual-reading/">/visual-reading/</a>
+  </div>
+  <div class="src" style="margin-top:12px">
+    版本：Vaswani v7；Xiong v2；Henry v1；ViT-22B v1；Peri-LN v3。正文的 Table/Figure/§ 编号按各文对应版本；arXiv 链接不带版本号，以各文版本为准。
+  </div>
+  <div class="src" style="margin-top:12px">
+    笔记勘误：博客笔记《QK-Norm》把起源写作 2023 年 ViT-22B；本页按原文分别列出 Henry et al. 2020 与 ViT-22B 2023，不对先后下判断。笔记原文未改。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('norm-sim');
+  if (!sim) return;
+
+  var lSlider = document.getElementById('sim-l');
+  var kSlider = document.getElementById('sim-k');
+  var lVal = document.getElementById('sim-l-val');
+  var kVal = document.getElementById('sim-k-val');
+  var v0El = document.getElementById('sim-v0');
+  var vmidEl = document.getElementById('sim-vmid');
+  var vendEl = document.getElementById('sim-vend');
+  var gEl = document.getElementById('sim-g');
+  var midName = document.getElementById('sim-mid-name');
+  var endName = document.getElementById('sim-end-name');
+  var headEl = document.getElementById('sim-head');
+  var msgEl = document.getElementById('sim-msg');
+  var chainEl = document.getElementById('sim-chain');
+  var buttons = sim.querySelectorAll('.rule-btn');
+
+  if (!lSlider || !kSlider || !lVal || !kVal || !v0El || !vmidEl || !vendEl || !gEl || !midName || !endName || !headEl || !msgEl || !chainEl) return;
+
+  var place = 'pre';
+
+  function fmt(x) {
+    return Number(x).toFixed(4);
+  }
+
+  function render() {
+    var L = parseInt(lSlider.value, 10);
+    if (isNaN(L)) L = 4;
+    if (L < 2) L = 2;
+    if (L > 8) L = 8;
+
+    var k = parseFloat(kSlider.value);
+    if (isNaN(k)) k = 0.5;
+    if (k < 0.1) k = 0.1;
+    if (k > 1) k = 1;
+
+    lVal.textContent = String(L);
+    kVal.textContent = k.toFixed(1);
+
+    var v = [1];
+    var i;
+    for (i = 0; i < L; i++) {
+      if (place === 'post') {
+        v.push(1);
+      } else if (place === 'pre') {
+        v.push(v[i] * (1 + k));
+      } else {
+        v.push(v[i] + 1);
+      }
+    }
+
+    var mid = Math.floor(L / 2);
+    var g;
+    if (place === 'post') {
+      g = 0;
+    } else if (place === 'pre') {
+      g = Math.pow(1 + k, L);
+    } else {
+      g = 1;
+    }
+
+    v0El.textContent = fmt(v[0]);
+    vmidEl.textContent = fmt(v[mid]);
+    vendEl.textContent = fmt(v[L]);
+    gEl.textContent = fmt(g);
+    midName.textContent = '第 ' + mid + ' 层';
+    endName.textContent = '第 ' + L + ' 层';
+
+    var label;
+    var msg;
+    if (place === 'post') {
+      label = '当前放置：Post-LN';
+      msg = 'Post-LN 每层把主路径压回 1；k 不改变前向末态。前向末态 ' + fmt(v[L]) + '；幅度雅可比 G = ' + fmt(g) + '（玩具模型；真实 LN 的 Jacobian 不是零）。';
+    } else if (place === 'pre') {
+      label = '当前放置：Pre-LN';
+      msg = 'Pre-LN 把模块输出按 (1 + k) 乘进干道；k = ' + k.toFixed(1) + ' 时每层 ×' + (1 + k).toFixed(1) + '。前向末态 ' + fmt(v[L]) + '；幅度雅可比 G = ' + fmt(g) + '（玩具模型，不是论文的梯度范数）。';
+    } else {
+      label = '当前放置：Peri-LN';
+      msg = 'Peri-LN 在模块输出上加一次归一化，每层只加 1；k 不改变前向增量。前向末态 ' + fmt(v[L]) + '；幅度雅可比 G = ' + fmt(g) + '（玩具模型）。';
+    }
+    headEl.textContent = label;
+    msgEl.textContent = msg;
+
+    var parts = [];
+    for (i = 0; i <= L; i++) {
+      parts.push(fmt(v[i]));
+    }
+    chainEl.textContent = 'v: ' + parts.join(' → ');
+  }
+
+  function setPlace(next) {
+    if (next !== 'post' && next !== 'pre' && next !== 'peri') return;
+    place = next;
+    var i;
+    for (i = 0; i < buttons.length; i++) {
+      if (buttons[i].getAttribute('data-place') === place) {
+        buttons[i].classList.add('active');
+      } else {
+        buttons[i].classList.remove('active');
+      }
+    }
+    render();
+  }
+
+  var i;
+  for (i = 0; i < buttons.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        setPlace(btn.getAttribute('data-place'));
+      });
+    })(buttons[i]);
+  }
+
+  lSlider.addEventListener('input', render);
+  kSlider.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,761 @@
+<!-- LEDGER
+| 1.996 | Eq.2（s=4096,b=1,h=6144,a=64,t=8,bf16） | 4096*6144*(10+24/8+5*64*4096/(6144*8))*2/1e9 |
+| 1.556 | Eq.4（s=4096,b=1,h=6144,a=64,t=8,bf16） | 4096*6144/8*(34+5*64*4096/6144)*2/1e9 |
+| 440.4 | Eq.2−Eq.4（同上） | 10*4096*6144*(1-1/8)*2/1e6 |
+| 22.1 | Eq.2 与 Eq.4（同上） | (10*4096*6144*(1-1/8))/(4096*6144*(10+24/8+5*64*4096/(6144*8)))*100 |
+| 0.663 | Eq.2（s=2048,b=1,h=6144,a=64,t=8,bf16） | 2048*6144*(10+24/8+5*64*2048/(6144*8))*2/1e9 |
+| 0.442 | Eq.4（s=2048,b=1,h=6144,a=64,t=8,bf16） | 2048*6144/8*(34+5*64*2048/6144)*2/1e9 |
+| 220.2 | Eq.2−Eq.4（同上） | 10*2048*6144*(1-1/8)*2/1e6 |
+| 33.2 | Eq.2 与 Eq.4（同上） | (10*2048*6144*(1-1/8))/(2048*6144*(10+24/8+5*64*2048/(6144*8)))*100 |
+| 503.3 | §4.2.2（10sbh，s=4096,h=6144,bf16） | 10*4096*6144*2/1e6 |
+| 44.5 | 本页由 Eq.2/Eq.4 推得（s=1024,t=8） | (10*1024*6144*(1-1/8))/(1024*6144*(10+24/8+5*64*1024/(6144*8)))*100 |
+| 13.2 | 本页由 Eq.2/Eq.4 推得（s=8192,t=8） | (10*8192*6144*(1-1/8))/(8192*6144*(10+24/8+5*64*8192/(6144*8)))*100 |
+| 7.3 | 本页由 Eq.2/Eq.4 推得（s=16384,t=8） | (10*16384*6144*(1-1/8))/(16384*6144*(10+24/8+5*64*16384/(6144*8)))*100 |
+| 16384 | CP 表（N=32768,CP=2） | 32768/2 |
+| 64 | CP 表（N=32768,CP=2,kv=1024,bf16） | 2*(32768/2)*1024*2/1048576 |
+| 64 | CP 表（N=32768,CP=2） | (2-1)*2*(32768/2)*1024*2/1048576 |
+| 2.0 | CP 表（N=32768,CP=2,32 层） | 32*(2-1)*2*(32768/2)*1024*2/1073741824 |
+| 50.0 | CP 表（N=32768,CP=2） | (2-1)/2*100 |
+| 128 | CP 表（N=32768,GQA,bf16） | 2*32768*1024*2/1048576 |
+| 8192 | CP 表（N=32768,CP=4） | 32768/4 |
+| 32 | CP 表（N=32768,CP=4,kv=1024,bf16） | 2*(32768/4)*1024*2/1048576 |
+| 96 | CP 表（N=32768,CP=4） | (4-1)*2*(32768/4)*1024*2/1048576 |
+| 3.0 | CP 表（N=32768,CP=4,32 层） | 32*(4-1)*2*(32768/4)*1024*2/1073741824 |
+| 75.0 | CP 表（N=32768,CP=4） | (4-1)/4*100 |
+| 4096 | CP 表（N=32768,CP=8） | 32768/8 |
+| 16 | CP 表（N=32768,CP=8,kv=1024,bf16） | 2*(32768/8)*1024*2/1048576 |
+| 112 | CP 表（N=32768,CP=8） | (8-1)*2*(32768/8)*1024*2/1048576 |
+| 3.5 | CP 表（N=32768,CP=8,32 层） | 32*(8-1)*2*(32768/8)*1024*2/1073741824 |
+| 87.5 | CP 表（N=32768,CP=8） | (8-1)/8*100 |
+| 2048 | CP 表（N=32768,CP=16） | 32768/16 |
+| 8 | CP 表（N=32768,CP=16,kv=1024,bf16） | 2*(32768/16)*1024*2/1048576 |
+| 120 | CP 表（N=32768,CP=16） | (16-1)*2*(32768/16)*1024*2/1048576 |
+| 3.75 | CP 表（N=32768,CP=16,32 层） | 32*(16-1)*2*(32768/16)*1024*2/1073741824 |
+| 93.8 | CP 表（N=32768,CP=16） | (16-1)/16*100 |
+| 8 | MHA/GQA（8192/1024） | 8192/1024 |
+| 896 | CP 表（N=32768,CP=8,MHA h=8192） | (8-1)*2*(32768/8)*8192*2/1048576 |
+| 28 | CP 表（N=32768,CP=8,MHA h=8192,32 层） | 32*(8-1)*2*(32768/8)*8192*2/1073741824 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="2205.05198v1+2310.01889v4+2309.14509v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sequence Parallel 与 Context Parallel · 把序列切开，但别把通信切开</title>
+<meta name="description" content="SP 把 LayerNorm/Dropout 的激活沿序列切开，用 AG/RS 与 TP 融合；CP 把 attention 的输入与激活沿序列切开，KV 沿环传递。含 Megatron-Core 代码、通信量/显存手算与 Ring/Ulysses 对照。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.3}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.svg-ln-hot{stroke:var(--accent);stroke-width:1.6;fill:none;stroke-dasharray:5 4}
+.arrow-head{fill:var(--text-soft)}
+.arrow-head-hot{fill:var(--accent)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:15px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text-muted)}
+.tbl-scroll table{min-width:760px}
+.tbl-scroll table.t-wide{min-width:900px}
+.tbl-scroll table.t-wider{min-width:980px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">SP / CP</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#cost">算账</a>
+      <a href="#flow">数据流</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Infra · 2022–2024 · SP / CP</span>
+  <h1>Sequence Parallel 与 Context Parallel：<br>把序列切开，但别把通信切开</h1>
+  <p class="hero-sub">
+    TP 把矩阵乘切到多卡，却把 LayerNorm、Dropout 的激活整条序列复制在每张卡上。SP 把这段非 TP 区域沿 sequence 切开，并把 all-gather / reduce-scatter 塞进 TP 原来的通信边界；CP 更进一步，连 attention 的输入和激活都按序列切，每张卡只算自己的 Q，KV 则沿环传递。
+    <strong>两者都能省显存，但一个不增加带宽，另一个每层都要换 KV。</strong>
+  </p>
+  <div class="meta">
+    <span>Korthikanti et al. · Liu et al. · Jacobs et al. · NVIDIA / UC Berkeley / Microsoft</span>
+    <a href="https://arxiv.org/abs/2205.05198" target="_blank" rel="noopener">SP 原文 ↗</a>
+    <a href="https://arxiv.org/abs/2310.01889" target="_blank" rel="noopener">Ring 原文 ↗</a>
+    <a href="https://arxiv.org/abs/2309.14509" target="_blank" rel="noopener">Ulysses 原文 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM" target="_blank" rel="noopener">Megatron-Core @70f7a26 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>TP 的盲区：</strong>LayerNorm、Dropout、残差这些 token-wise 操作不需要跨卡，但 Megatron-LM 的 TP 仍让每张卡保留完整序列的这部分激活。论文 Eq.2 里 <code>10sbh</code> 就是不随 TP 缩小的那一项。
+  </p>
+  <p>
+    <strong>SP 的做法：</strong>把非 TP 区域按 sequence 切成 t 份；在 column-parallel linear 前 all-gather 成完整序列，在 row-parallel linear 后用 reduce-scatter 切回。论文把这两个操作记作 <code>g</code> / <code>ḡ</code>，并让它们与 TP 的 <code>f</code> / <code>f̄</code> 融合。TP 原有的 4 次 all-reduce 变成 4 次 AG + 4 次 RS；ring all-reduce 本来就是 RS + AG，所以总带宽不变。
+  </p>
+  <p>
+    <strong>CP 的做法：</strong>输入和所有激活沿 sequence 切；attention 需要全序列 KV，于是每张卡用自己的 Q 块对轮转过来的 KV 块做 attention。Ring Attention 用逐块 KV 轮转把通信藏进计算；Megatron-Core 用 TE 的 P2P ring、zigzag 布局和 GQA 来降低或均衡开销。
+  </p>
+  <p>
+    <strong>边界：</strong>SP 仍依附 TP，不新增并行维度；CP 是独立轴，总卡数 <code>TP×CP×PP×DP</code>。SP 省的是非 attention 激活，CP 省的是 attention 的显存和每卡计算，但 CP 的 KV 通信随序列长度增长，不会按 CP 比例缩小。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§0 Abstract">5×</div>
+      <div class="k">SP + selective recompute 的激活显存降幅<br>相对 TP baseline，不是 SP 单独</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§0 Abstract">54.2<small>%</small></div>
+      <div class="k">530B GPT-3-style（MT-NLG 530B），Present work = SP + selective recompute<br>2240 张 A100、8-way DP；比 full recompute 的 42.1% 快 29%</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§5.1">256×</div>
+      <div class="k">Ring Attention 在 TPUv4-512 上的上下文扩展<br>可训练超过 30M tokens</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>TP 只切矩阵乘，LayerNorm/Dropout 的激活仍按整条序列复制</h2></div>
+  <p class="sec-sub">先看清 TP 的激活账单：哪一项随 TP 缩小，哪一项不动。</p>
+
+  <p>张量并行（TP）把 attention 和 MLP 里的矩阵乘按 hidden 维切开，块内的激活也随 hidden 维切开。但 QKV 投影、MLP 第一层的<strong>输入</strong>，以及 LayerNorm 和 Dropout 这些逐 token 操作，并不在 TP 的切分范围里。它们要么在 TP 区域之外，要么需要完整 hidden 维，于是每张 TP rank 都保留一份完整序列的激活。</p>
+
+  <div class="eq">
+    M<sub>TP</sub> = s · b · h · ( <span class="hl-a">10</span> + 24/t + 5·a·s/(h·t) )
+  </div>
+  <div class="eq-cap">论文 Eq.2：t 是 TP size，a 是 attention heads，s 是序列长度。中间那一项 <code>10</code> 不除以 t，就是 LayerNorm/Dropout 等复制区域的激活</div>
+
+  <p>代入 22B 模型的配置（<code>h=6144</code>、<code>a=64</code>、<code>s=4096</code>、<code>b=1</code>、<code>t=8</code>、bf16），每层被复制的非 TP 激活是 <span data-src="§4.2.2 Eq.2（本页按 bf16 换算；见 LEDGER）">503.3 MB</span>。SP 把这块也按 t 切开，于是每层省下 <code>10sbh(1−1/t)</code>，t=8 时是 <span data-src="本页 Table 2（见 LEDGER）">440.4 MB</span>。注意，剩下的 <code>10sbh/t</code> 仍存在，只是不再是每卡一份完整拷贝。</p>
+
+  <p>另一半压力来自 attention 自己。Eq.2 的 <code>5·a·s/(h·t)</code> 项乘上 <code>sbh</code> 后是 <code>5abs²/t</code>，随序列长度平方增长。Ring Attention 论文给了一个量级：1 亿 token、batch 1、hidden 1024，内存就超过 1000 GB，而当时的 GPU/TPU HBM 普遍小于 100 GB（<code>§2</code>）。这就是 CP 要解决的问题：不是权重放不下，而是 attention 的序列维激活放不下。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">两个瓶颈</span><h4>SP 和 CP 不是同一件事的两个名字</h4></div>
+    <p><strong>SP</strong> 处理的是 TP 留下的“复制区域”：LayerNorm、Dropout、残差等非 TP 激活。它不改变 attention 的计算方式，也不减少 attention 的 <code>s²</code> 项。<strong>CP</strong> 处理的是 attention 本身：把输入和所有激活沿 sequence 切开，让每张卡只算一部分 Q，再通过 KV 交换看到全序列。Megatron-Core 的 CP 文档把这条界线写得很直接：CP 分割网络输入和所有激活，而此前的 SP 只分割 Dropout 和 LayerNorm 的激活（<code>context_parallel.md:19</code>）。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>TP、重算、Ulysses/Ring：各自绕开一段，但解决的不是同一个瓶颈</h2></div>
+  <p class="sec-sub">把几条路放在同一张表里，先分清「省激活」「省通信」「扩上下文」。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">TP</span><h4>切矩阵乘，不切逐 token 区域</h4></div>
+      <p>TP 把 attention 的 QKV 投影、MLP 的两层线性按 hidden 维切开，块内激活随 hidden 维缩小。代价是每次前向+反向有 4 次 all-reduce（论文 §4.2.2）。LayerNorm/Dropout 仍是完整序列，Eq.2 的 <code>10sbh</code> 不会随 t 缩小。</p>
+      <p><strong>卡在：</strong>继续加 TP 会让 Linear 的计算短到藏不住通信延迟（<code>context_parallel.md:32</code>）；而且它不解决 attention 的 <code>s²</code> 激活。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">recompute</span><h4>用算力换显存，但反向要多跑一遍</h4></div>
+      <p>Full activation recomputation 丢掉中间激活，反向从 checkpoint 重放。SP 论文的 22B 单层实测：baseline 的 fwd+bwd 是 19.6 ms，full recompute 变成 27.2 ms，开销 39%（Table 4）。</p>
+      <p><strong>卡在：</strong>重算的是整层，哪怕其中很多激活又小又便宜。SP 的价值之一是省出显存后，可以少做重算。</p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Ulysses</span><h4>先按序列切，再 all-to-all 换成 head 并行</h4></div>
+      <p>DeepSpeed-Ulysses 把输入沿 sequence 切开，attention 前用 all-to-all 让每张卡拿到<strong>完整序列、但只属于自己的一部分 head</strong>，attention 后再 all-to-all 换回序列切分。每层通信量约 <code>4Nh/P</code>，N 和 P 同比例增长时保持不变（§3.2）。</p>
+      <p><strong>卡在：</strong>依赖 all-to-all 和 head 数能被并行度整除 <span class="infer">推断</span>（由论文“每卡拿非重叠 head 子集”推得）；论文的对比基线是 Megatron-LM 的 SP，不是 CP。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">Ring</span><h4>Q 不动，KV 块沿环转</h4></div>
+      <p>Ring Attention 把序列切成 N<sub>h</sub> 块，每个 host 持一块 Q；KV 块沿环依次传给下一个 host，每步用当前 KV 块更新局部 attention。计算和传输重叠的条件是 block 计算时间 ≥ 传输时间（Algorithm 1、§3.1）。</p>
+      <p><strong>卡在：</strong>每个 host 最终要看过全部 KV，单卡 KV 通信量随 N 增长，不随设备数缩小；block 太小时通信藏不住。</p>
+    </div>
+  </div>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 1（本页归纳）：这几条路线的切分对象与通信方式。SP 行指 Megatron-LM 2022 的 sequence parallelism；CP 行指 Megatron-Core 的 context parallel 实现，两者是不同来源。</p>
+  <div class="tbl-scroll">
+  <table class="t-wider">
+    <thead><tr><th>方案</th><th>切什么</th><th>attention 怎么拿全序列</th><th>每层主要通信</th><th>主要省什么</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td>TP</td><td>矩阵乘的 hidden 维；块内激活</td><td>不需要，每卡已有完整序列</td><td>4 次 all-reduce（fwd+bwd）</td><td>参数、块内激活</td><td>§4.2.1</td></tr>
+      <tr><td>SP（2022）</td><td>LN/Dropout 等非 TP 区域按 sequence</td><td>进入 TP 线性层前 all-gather</td><td>4 次 AG + 4 次 RS</td><td>复制的非 TP 激活</td><td>§4.2.2</td></tr>
+      <tr><td>Ulysses</td><td>所有模块按 sequence；attention 换成 head 并行</td><td>all-to-all 后每卡拿部分 head 的完整序列</td><td>2 次 all-to-all，合计 <code>4Nh/P</code></td><td>激活 + 长上下文</td><td>§3.2</td></tr>
+      <tr><td>Ring</td><td>所有模块按 sequence；Q 本地</td><td>KV 块沿环传递，每卡看全部 KV</td><td>每层轮转 <code>CP−1</code> 块 KV</td><td>attention 激活 + 上下文</td><td>Algorithm 1</td></tr>
+      <tr><td>CP（Megatron-Core）</td><td>网络输入和所有激活按 sequence</td><td>KV all-gather；反向 KV 梯度 reduce-scatter</td><td>P2P ring 上的 KV AG / RS</td><td>激活 + 每卡计算</td><td><code>context_parallel.md:19</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>一个容易混淆的点：Ulysses 论文里的 “sequence parallelism” 指的是<strong>整个模型沿 sequence 切</strong>，attention 用 all-to-all 换成 head 并行；Megatron-LM 2022 的 SP 是<strong>TP 内部的激活优化</strong>，只切 LayerNorm/Dropout 这些非 TP 区域。两者都叫 SP，但切分范围和通信原语都不同。Megatron-Core 的 CP 文档特意把这条写出来，作为 CP 与 “prior SP” 的区别（<code>context_parallel.md:19</code>）。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>SP 在 TP 的缝里切序列，CP 让每张卡只算自己的 Q</h2></div>
+  <p class="sec-sub">SP 的 g/ḡ 与 TP 的 f/f̄ 对齐；CP 的 KV 沿环走，Q 不动。</p>
+
+  <h3>SP：all-gather 进、reduce-scatter 出</h3>
+  <p>论文把 MLP 的 LayerNorm → 线性 → GeLU → 线性 → Dropout 拆成下面这样。上标 <code>s</code> 表示按 sequence 切，<code>h</code> 表示按 hidden 切，<code>c</code>/<code>r</code> 表示按列/行切权重：</p>
+
+  <div class="eq" style="text-align:left">
+    [Y<sub>1</sub><sup>s</sup>, Y<sub>2</sub><sup>s</sup>] = LayerNorm([X<sub>1</sub><sup>s</sup>, X<sub>2</sub><sup>s</sup>])<br>
+    Y = <span class="hl-c">g</span>(Y<sub>1</sub><sup>s</sup>, Y<sub>2</sub><sup>s</sup>) &nbsp;&nbsp;←&nbsp; forward: all-gather，backward: reduce-scatter<br>
+    [Z<sub>1</sub><sup>h</sup>, Z<sub>2</sub><sup>h</sup>] = [GeLU(Y·A<sub>1</sub><sup>c</sup>), GeLU(Y·A<sub>2</sub><sup>c</sup>)]<br>
+    W<sub>1</sub> = Z<sub>1</sub><sup>h</sup>·B<sub>1</sub><sup>r</sup>, &nbsp; W<sub>2</sub> = Z<sub>2</sub><sup>h</sup>·B<sub>2</sub><sup>r</sup><br>
+    [W<sub>1</sub><sup>s</sup>, W<sub>2</sub><sup>s</sup>] = <span class="hl-c">ḡ</span>(W<sub>1</sub>, W<sub>2</sub>) &nbsp;&nbsp;←&nbsp; forward: reduce-scatter，backward: all-gather<br>
+    [V<sub>1</sub><sup>s</sup>, V<sub>2</sub><sup>s</sup>] = [Dropout(W<sub>1</sub><sup>s</sup>), Dropout(W<sub>2</sub><sup>s</sup>)]
+  </div>
+  <div class="eq-cap">论文 §4.2.2 式 (3)，以 2-way TP 为例。LayerNorm 和 Dropout 在 sequence 切分后的本地块上做；<code>g</code>/<code>ḡ</code> 是 TP 的 <code>f</code>/<code>f̄</code> 与序列转换的融合</div>
+
+  <p>为什么要把 all-gather 放在第一个线性层前？论文的拆分让 column-parallel 线性仍看到完整序列 <code>Y</code>，这样 TP 的列并行 GEMM 形状不变；第二个线性层是 row-parallel，输出是各卡的 partial sum，正好用 reduce-scatter 同时完成“跨 TP 求和”和“按 sequence 切回”两件事。论文明确说，这样做是为了把 <code>g</code>/<code>ḡ</code> 与 <code>f</code>/<code>f̄</code> 合并，避免引入额外的独立通信（§4.2.2）。</p>
+
+  <p>反向时两个操作互换：<code>g</code> 的 backward 是 reduce-scatter，<code>ḡ</code> 的 backward 是 all-gather。还有一个细节：<code>Y</code> 在 forward 只存本地的 <code>Y<sub>i</sub><sup>s</sup></code>，backward 需要完整 <code>Y</code> 时再做一次 all-gather；论文把这次通信与 <code>dY</code> 的计算重叠，以压低延迟（§4.2.2）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">源码</span><h4>Megatron-Core 里 SP 没有独立 process group</h4></div>
+    <p>在默认的静态配置里，<code>gather_from_sequence_parallel_region</code> 和 <code>reduce_scatter_to_sequence_parallel_region</code> 拿的就是 <strong>tensor model parallel group</strong>（<code>megatron/core/tensor_parallel/mappings.py:528-549</code>）。线性层在 forward 里 all-gather 输入、在 backward 里 reduce-scatter 输入梯度，group 都是 <code>tp_group</code>（<code>layers.py:787-793</code>、<code>864-873</code>）。开启 <code>reduce_scatter_embeddings</code> 时，embedding 输出可以直接 reduce-scatter 成 sequence-sharded（<code>layers.py:506-519</code>）。TP size 为 1 时，<code>sequence_parallel</code> 会被直接关掉（<code>layers.py:1311-1317</code>）。</p>
+    <p>另一个实现细节：开启 SP 后，transformer block 会 fork CUDA RNG tracker（<code>transformer_block.py:645-648</code>），保证 Dropout 的随机 mask 在 TP rank 之间可复现。</p>
+  </div>
+
+  <h3>CP：Q 留在本地，KV 沿环传递</h3>
+  <p>CP 把网络输入和所有激活沿 sequence 切成 CP 份。Linear、LayerNorm 这些逐 token 模块不需要跨 rank，直接算本地块即可；只有 attention 需要全序列 KV。Megatron-Core 的 CP 文档把流程写得很清楚：attention 前 all-gather KV，反向对 KV 的激活梯度做 reduce-scatter；每张卡 forward 只存本地 KV 块，backward 再 gather 一次（<code>context_parallel.md:19</code>）。</p>
+
+  <ol>
+    <li><strong>切输入：</strong>每张 CP rank 拿到 <code>N/CP</code> 个 token；QKV 投影在本地做。</li>
+    <li><strong>转 KV：</strong>每张卡把自己的 KV 块传给环上的下一个 rank，同时接收上一个 rank 的 KV 块。Q 块不动。</li>
+    <li><strong>局部 attention：</strong>用本地 Q 对当前 KV 块做 attention，在线 softmax 合并各块的统计量；重复 <code>CP−1</code> 步，直到本地 Q 看过全部 KV。</li>
+    <li><strong>输出：</strong>attention 输出留在本地 Q 块上，后续 MLP/LayerNorm 继续本地计算。</li>
+  </ol>
+
+  <p>Ring Attention 的 Algorithm 1 就是这个循环：每个 host 负责一个 query block，KV block 在 host 之间轮转；只要单块计算时间大于 KV 传输时间，通信就被完全重叠（§3.1、Algorithm 1）。Megatron-Core 的实现不自己写 attention kernel，而是把 CP 参数交给 Transformer Engine 的 <code>TEDotProductAttention</code>：<code>cp_group</code>、<code>cp_global_ranks</code>、<code>cp_stream</code>，默认 <code>cp_comm_type="p2p"</code>（<code>megatron/core/extensions/transformer_engine.py:2405-2429</code>）。普通 <code>DotProductAttention</code> 明确不支持 CP，会直接 assert（<code>dot_product_attention.py:57-59</code>）。</p>
+
+  <p>CP group 在 <code>parallel_state.py:1270-1297</code> 里按 token rank generator 的 <code>cp</code> 轴建立；如果启用 hierarchical CP，还会按 <code>hierarchical_context_parallel_sizes</code> 再建子组（<code>:1284-1297</code>）。<code>a2a+p2p</code> 这种层次化通信要求 TE ≥ 1.12（<code>transformer_engine.py:2419-2427</code>）。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">zigzag</span><h4>causal mask 下，rank r 拿的是前后两段，不是连续一段</h4></div>
+    <p>如果每张卡只拿连续的一段，causal attention 下后面的 rank 要算更多 KV 块，负载会倾斜。Megatron-Core 的 <code>CPLayout</code> 支持 <code>contiguous</code> 和 <code>zigzag</code>；zigzag 下 rank r 拿 front 段和 back 段（<code>context_parallel/layout.py:83-105</code>），让 causal 工作量在 CP rank 之间更均衡。代价是序列长度必须能被 <code>2×CP</code> 整除（<code>context_parallel/utils.py:80-98</code>），否则代码会抛 ValueError（<code>context_parallel/utils.py:80-98</code>），需要先 pad。文档还说，CP 用现成的 flash/cuDNN kernel，并避免为下三角 mask 做额外的逐块计算（<code>context_parallel.md:21</code>）。</p>
+  </div>
+
+  <p>KV 的体积可以靠 GQA/MQA 降：Megatron 文档指出，KV 交换量取决于 KV head 数，而不是完整 hidden 维（<code>context_parallel.md:19</code>）。本页后面的算例里，MHA 的 <code>h<sub>kv</sub>=8192</code> 和 GQA 的 <code>h<sub>kv</sub>=1024</code> 相差 <span data-src="本页 Table 4 的 MHA/GQA 算例（见 LEDGER）">8×</span>。</p>
+
+  <p>最后强调：CP 不减少 attention 的总 FLOPs。每张卡用 <code>N/CP</code> 个 Q 对 <code>N</code> 个 KV 做 attention，单卡计算量约为全量的 <code>1/CP</code>；所有 CP rank 加起来仍是 <code>N²</code> 量级。CP 换到的是<strong>每卡显存和每卡计算</strong>，不是总计算量。</p>
+</section>
+
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>SP 不增加带宽，CP 每层换 KV：省下的显存和付出的字节都能算</h2></div>
+  <p class="sec-sub">把公式代进 22B 的 SP 配置和一组 CP 的 KV 配置，看看数字落在哪。</p>
+
+  <h3>SP 的显存账：只省复制项</h3>
+  <p>把 Eq.2 与 Eq.4 相减：</p>
+  <div class="eq">
+    M<sub>TP</sub> − M<sub>TP+SP</sub> = 10·s·b·h·(1 − 1/t)
+  </div>
+  <div class="eq-cap">省下的正好是 Eq.2 里不随 t 缩小的 <code>10sbh</code> 项减去 SP 后仍保留的 <code>10sbh/t</code>；attention 项 <code>5abs²/t</code> 两边相同，不受 SP 影响</div>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 2（本页计算，公式来自 §4.2.1 Eq.2 与 §4.2.2 Eq.4）：参考配置 <code>s=4096、b=1、h=6144、a=64、t=8</code>，按 bf16 每元素 2 字节换算。论文公式以“元素数”计，这里乘 2 得到字节。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>项</th><th>公式</th><th class="num">元素数</th><th class="num">bf16 字节</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>TP 无 SP</td><td><code>sbh(10 + 24/t + 5as/(ht))</code></td><td class="num">998,244,352</td><td class="num">1,996,488,704 B = 1.996 GB</td><td>Eq.2</td></tr>
+      <tr><td>TP + SP</td><td><code>(sbh/t)(34 + 5as/h)</code></td><td class="num">778,043,392</td><td class="num">1,556,086,784 B = 1.556 GB</td><td>Eq.4</td></tr>
+      <tr class="best"><td>SP 省下</td><td><code>10sbh(1 − 1/t)</code></td><td class="num">220,200,960</td><td class="num">440,401,920 B = 440.4 MB</td><td>占 Eq.2 的 22.1%</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>这张表也解释了为什么 SP 单独并没有 5×：<code>s=4096</code> 时 attention 项已经很大，省下的 440.4 MB 只占 1.996 GB 的 22.1%。论文的 5× 是 SP + selective recompute 合起来、相对 TP baseline 的结果（Fig.7、Abstract）；SP 单独解决的是 LayerNorm/Dropout 这部分复制激活。序列越长，attention 项占比越高，SP 的相对节省越小——这个趋势在 07 节展开。</p>
+
+  <h3>自己动手：拖 t 和 s，看 SP 前后的每层激活</h3>
+  <p>模型固定 22B 的 <code>h=6144、a=64、b=1</code>，按 bf16 每元素 2 字节。只算 Eq.2/Eq.4 的每层激活，不含参数、梯度、优化器状态、通信和 allocator 开销。</p>
+
+  <div class="sim" id="sp-sim">
+    <div class="slots">
+      <div class="slot"><div class="slot-name">无 SP 每层</div><div class="slot-val" id="sp-no">1.996 GB</div></div>
+      <div class="slot"><div class="slot-name">有 SP 每层</div><div class="slot-val" id="sp-yes">1.556 GB</div></div>
+      <div class="slot"><div class="slot-name">SP 省下</div><div class="slot-val" id="sp-save">440.4 MB</div></div>
+      <div class="slot"><div class="slot-name">相对 Eq.2</div><div class="slot-val" id="sp-pct">22.1%</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>TP size t <span class="v" id="sp-tv">8</span></label>
+        <input type="range" id="sp-t" min="2" max="16" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label>序列长度 s <span class="v" id="sp-sv">4096</span></label>
+        <input type="range" id="sp-s" min="1024" max="16384" step="1024" value="4096">
+      </div>
+    </div>
+
+    <div class="readout" data-src="§4.2">
+      <div class="r-head">当前读数</div>
+      <div id="sp-msg">t=8，s=4096：Eq.2=1.996 GB，Eq.4=1.556 GB，省下 440.4 MB（相对 Eq.2 的 22.1%）。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组参数，SP 前后每层激活 <span class="sum-sub">与 JS 输出逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：t=8，s=2048，b=1，h=6144，a=64，bf16。</strong></p>
+      <ul>
+        <li><code>sbh = 2048×1×6144 = 12,582,912</code>。</li>
+        <li><code>5as/(ht) = 5×64×2048/(6144×8) = 655,360/49,152 = 13.3333</code>。</li>
+        <li><strong>Eq.2：</strong><code>12,582,912×(10+24/8+13.3333) = 12,582,912×26.3333 = 331,350,016</code> 元素；<code>×2 = 662,700,032 B = 0.663 GB</code>。</li>
+        <li><strong>Eq.4：</strong><code>(12,582,912/8)×(34+5×64×2048/6144) = 1,572,864×140.6667 = 221,249,536</code> 元素；<code>×2 = 442,499,072 B = 0.442 GB</code>。</li>
+        <li><strong>省下：</strong><code>331,350,016−221,249,536 = 110,100,480</code> 元素；<code>×2 = 220,200,960 B = 220.2 MB</code>；<code>110,100,480/331,350,016×100 = 33.2%</code>。</li>
+      </ul>
+      <p><strong>组 2：t=8，s=4096，其余相同。</strong></p>
+      <ul>
+        <li><code>sbh = 4096×6144 = 25,165,824</code>；<code>5as/(ht) = 1,310,720/49,152 = 26.6667</code>。</li>
+        <li><strong>Eq.2：</strong><code>25,165,824×(10+3+26.6667) = 25,165,824×39.6667 = 998,244,352</code> 元素；<code>×2 = 1,996,488,704 B = 1.996 GB</code>。</li>
+        <li><strong>Eq.4：</strong><code>(25,165,824/8)×(34+5×64×4096/6144) = 3,145,728×247.3333 = 778,043,392</code> 元素；<code>×2 = 1,556,086,784 B = 1.556 GB</code>。</li>
+        <li><strong>省下：</strong><code>998,244,352−778,043,392 = 220,200,960</code> 元素；<code>×2 = 440,401,920 B = 440.4 MB</code>；<code>220,200,960/998,244,352×100 = 22.1%</code>。</li>
+      </ul>
+      <p><strong>简化与未覆盖：</strong>只算论文 Eq.2/Eq.4 的每层激活，假设各层相同、b=1、bf16；没有计参数/梯度/优化器状态、TP 的 all-reduce 通信、SP 的 AG/RS 时间、显存碎片和 allocator 开销。Eq.2/Eq.4 本身是论文的近似公式，不含 attention 的临时 workspace 和 activation recompute 的额外驻留。</p>
+    </div>
+  </details>
+
+  <h3>SP 的通信账：4 次 all-reduce 对 4 次 AG + 4 次 RS</h3>
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 3（本页归纳，来源 §4.2.2）：一次 forward+backward 的通信原语计数。论文的原话是 TP 需要 4 次 all-reduce，TP+SP 需要 4 次 all-gather + 4 次 reduce-scatter；ring all-reduce 由 reduce-scatter 和 all-gather 组成，所以总带宽相同。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>方案</th><th>forward + backward 的通信</th><th>次数</th><th>总字节</th></tr></thead>
+    <tbody>
+      <tr><td>TP</td><td>all-reduce</td><td class="num">4</td><td>基准</td></tr>
+      <tr class="best"><td>TP + SP</td><td>all-gather + reduce-scatter</td><td class="num">4 + 4</td><td>与 TP 相同（ring all-reduce = RS + AG）</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>“带宽相同”不等于“时间相同”。论文在 22B 单层实测里指出，AG+RS 合起来的执行比单次 all-reduce 慢，因而 SP 的实测前向加速被削掉一部分（§6.2）。源码里只有反向 all-gather（wgrad 重取输入）与反向 reduce-scatter 开了 <code>async_op=True</code>（<code>layers.py:838-840</code>、<code>871-873</code>）；forward all-gather 是同步的（<code>layers.py:792</code>）。异步只能重叠，不能消除字节数。</p>
+
+  <h3>CP 的显存账：每卡只留 <code>N/CP</code> 的 Q 和 KV</h3>
+  <p>CP 下每张卡的序列长度是 <code>N/CP</code>；非 attention 激活近似按 CP 缩小。attention 的 KV 在 forward 只存本地块，backward 再 gather（<code>context_parallel.md:19</code>），所以常驻 KV 也从 <code>N</code> 降到 <code>N/CP</code>。但 attention 的临时 KV 交换量不是 <code>N/CP</code>，而是接近完整 KV——下一段算。</p>
+
+  <h3>CP 的通信账：每卡收 <code>CP−1</code> 个 KV 块</h3>
+  <p>用 Ring 的逐块轮转算：每张卡有 <code>N/CP</code> 个 token 的 KV 块，环上其余 <code>CP−1</code> 张卡各有一块，所以每张卡每层要接收 <code>CP−1</code> 块 K 和 V。单块字节数是 <code>2·(N/CP)·h<sub>kv</sub>·bytes</code>，因此：</p>
+  <div class="eq">
+    B<sub>KV,rank</sub> = (CP − 1) · 2 · (N/CP) · h<sub>kv</sub> · bytes<br>
+    = (1 − 1/CP) · 2 · N · h<sub>kv</sub> · bytes
+  </div>
+  <div class="eq-cap">K 和 V 各一份；<code>h<sub>kv</sub> = KV heads × head_dim</code>。这是每层、每个 rank 的接收量，不含 TP 的 AG/RS，也不含 QKV 投影本身的通信</div>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 4（本页计算，独立 CP 算例）：<code>N=32768</code>，MHA 取 <code>h<sub>kv</sub>=8192</code>（64 heads × 128）、GQA 取 <code>h<sub>kv</sub>=1024</code>（8 个 KV head × 128），head_dim 128，bf16，32 层；这套配置不沿用同页 22B 的 <code>h=6144</code>/head_dim 96，只用于 KV 通信量对照。统计口径：仅 forward，每个 rank 对每块 K/V 只计一次接收；环上每块还要逐跳转发 <code>CP−1</code> 次，链路总字节另计；反向会再 gather 一次 KV（约翻倍），且不含 KV 梯度 reduce-scatter。最后一列是“每卡收到的 KV”占“完整序列 KV”的比例，即 <code>1−1/CP</code>。</p>
+  <div class="tbl-scroll">
+  <table class="t-wide">
+    <thead><tr><th>CP</th><th class="num">每卡 tokens</th><th class="num">单块 KV</th><th class="num">每层收到</th><th class="num">32 层累计</th><th class="num">占全量 KV</th></tr></thead>
+    <tbody>
+      <tr><td>2</td><td class="num">16384</td><td class="num">64 MiB</td><td class="num">64 MiB</td><td class="num">2.0 GiB</td><td class="num">50.0%</td></tr>
+      <tr><td>4</td><td class="num">8192</td><td class="num">32 MiB</td><td class="num">96 MiB</td><td class="num">3.0 GiB</td><td class="num">75.0%</td></tr>
+      <tr class="best"><td>8</td><td class="num">4096</td><td class="num">16 MiB</td><td class="num">112 MiB</td><td class="num">3.5 GiB</td><td class="num">87.5%</td></tr>
+      <tr><td>16</td><td class="num">2048</td><td class="num">8 MiB</td><td class="num">120 MiB</td><td class="num">3.8 GiB</td><td class="num">93.8%</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>注意这个反直觉的结果：CP 从 2 加到 16，每卡 Q 和激活从 16384 降到 2048，但每层收到的 KV 从 64 MiB 涨到 120 MiB，越来越接近完整的 128 MiB。<strong>CP 缩小的是每卡计算和常驻激活，不是每卡 KV 通信。</strong>如果把 MHA 的 <code>h<sub>kv</sub></code> 换成 8192，CP=8 时每层每卡要收 <span data-src="本页 Table 4 的 MHA 算例（见 LEDGER）">896 MiB</span>，32 层是 <span data-src="本页 Table 4 的 MHA 算例（见 LEDGER）">28 GiB</span>，正好是 GQA 的 8 倍（<span data-src="本页 Table 4 的 MHA/GQA 算例（见 LEDGER）">8×</span>）。这就是 GQA/MQA 对 CP 特别重要的原因。</p>
+
+  <h3>自己动手：拖 CP 和 N，切换 MHA / GQA</h3>
+  <p>固定 <code>N</code> 可被 <code>2×CP</code> 整除、bf16、32 层；只算每层 attention 的 KV 轮转接收量，不含 TP 的 AG/RS、QKV 投影、attention 计算和反向。MHA 取 <code>h<sub>kv</sub>=8192</code>（64 head × 128），GQA 取 <code>h<sub>kv</sub>=1024</code>（8 KV head × 128）。</p>
+
+  <div class="sim" id="cp-sim">
+    <div class="sim-top">
+      <button class="rule-btn" type="button" data-kv="8192">MHA<span class="r-sub">h_kv = 8192</span></button>
+      <button class="rule-btn active" type="button" data-kv="1024">GQA<span class="r-sub">h_kv = 1024</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">每卡 tokens</div><div class="slot-val" id="cp-local">4096</div></div>
+      <div class="slot"><div class="slot-name">每层收到 KV</div><div class="slot-val" id="cp-layer">112.0 MiB</div></div>
+      <div class="slot"><div class="slot-name">32 层累计</div><div class="slot-val" id="cp-total">3.5 GiB</div></div>
+      <div class="slot"><div class="slot-name">占全量 KV</div><div class="slot-val" id="cp-share">87.5%</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>CP size <span class="v" id="cp-sizev">8</span></label>
+        <input type="range" id="cp-size" min="2" max="16" step="2" value="8">
+      </div>
+      <div class="ctrl">
+        <label>序列长度 N <span class="v" id="cp-seqv">32768</span></label>
+        <input type="range" id="cp-seq" min="8192" max="131072" step="8192" value="32768">
+      </div>
+    </div>
+
+    <div class="readout" data-src="本页 Table 4（Ring Algorithm 1 + context_parallel.md:19）">
+      <div class="r-head">当前读数</div>
+      <div id="cp-msg">CP=8，N=32768：每卡 4096 token，单块 KV 16.0 MiB，每层收到 112.0 MiB，32 层 3.5 GiB，占全量 KV 的 87.5%。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：CP=4 与 CP=8 的每卡序列和 KV 字节 <span class="sum-sub">与 JS 输出逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：CP=4，N=32768，GQA h<sub>kv</sub>=1024，bf16，32 层。</strong></p>
+      <ul>
+        <li><strong>每卡 tokens：</strong><code>32768/4 = 8192</code>。</li>
+        <li><strong>单块 KV：</strong><code>2×8192×1024×2 = 33,554,432 B = 32 MiB</code>。</li>
+        <li><strong>每层收到：</strong><code>(4−1)×32 = 96 MiB</code>。</li>
+        <li><strong>32 层：</strong><code>32×96 = 3072 MiB = 3.0 GiB</code>。</li>
+        <li><strong>占全量 KV：</strong><code>(4−1)/4×100 = 75.0%</code>（完整 KV 为 <code>2×32768×1024×2 = 128 MiB</code>）。</li>
+      </ul>
+      <p><strong>组 2：CP=8，N=32768，其余相同。</strong></p>
+      <ul>
+        <li><strong>每卡 tokens：</strong><code>32768/8 = 4096</code>。</li>
+        <li><strong>单块 KV：</strong><code>2×4096×1024×2 = 16,777,216 B = 16 MiB</code>。</li>
+        <li><strong>每层收到：</strong><code>(8−1)×16 = 112 MiB</code>。</li>
+        <li><strong>32 层：</strong><code>32×112 = 3584 MiB = 3.5 GiB</code>。</li>
+        <li><strong>占全量 KV：</strong><code>(8−1)/8×100 = 87.5%</code>。</li>
+      </ul>
+      <p><strong>简化与未覆盖：</strong>只算 forward 的 KV 接收量，且每个 rank 对每块 K/V 只计一次接收（环上每块逐跳转发 <code>CP−1</code> 次，链路总字节另计）；反向还要再 gather 一次 KV（<code>context_parallel.md:19</code>），实际字节约翻倍；也没有计 KV 梯度 reduce-scatter、TP 的 AG/RS、QKV 投影、RoPE 重排、attention 计算、packed sequence 的 padding、显存碎片和通信延迟；没有计 MHA/GQA 的 head 维不整除等实现约束。这里的“全量 KV”指完整序列的 K+V，不含 Q。</p>
+    </div>
+  </details>
+
+  <p>作为对照，Ulysses 的每层每链路通信量是 <code>4Nh/P</code>，其中 <code>P</code> 是序列并行度（§3.2）；它随 P 缩小，而 Ring/CP 的每卡 KV 接收量随 CP 趋近 <code>2Nh<sub>kv</sub></code>，不随 CP 缩小。两者的通信复杂度不同，不能只看“都叫序列并行”。</p>
+
+  <h3>Ring 的重叠条件：block 必须够大</h3>
+  <p>Ring Attention 把“计算 ≥ 传输”写成 <code>4dc²/F ≥ 4cd/B</code>，化简得 <code>c ≥ F/B</code>：block 大小至少等于设备的 FLOPS/带宽比（§3.1）。Table 5 转录论文 Table 2 的 5 行硬件参数；如果每卡分到的 token 数小于最小 block，KV 传输就藏不进计算。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 5（转录 Ring Attention Table 2，5 行全录）：最小 block <code>c=F/B</code>，最小序列 <code>s=6c</code>。FLOPS 是峰值，带宽是主机间单向带宽；表中 K 表示 ×10³。</p>
+  <div class="tbl-scroll">
+  <table class="t-wide">
+    <thead><tr><th>硬件</th><th class="num">FLOPS (TF)</th><th class="num">HBM (GB)</th><th class="num">带宽 (GB/s)</th><th class="num">最小 block (K tokens)</th><th class="num">最小序列 (K tokens)</th></tr></thead>
+    <tbody>
+      <tr><td>A100 NVLink</td><td class="num">312</td><td class="num">80</td><td class="num">300</td><td class="num">1.0</td><td class="num">6.2</td></tr>
+      <tr><td>A100 InfiniBand</td><td class="num">312</td><td class="num">80</td><td class="num">12.5</td><td class="num">24.5</td><td class="num">149.5</td></tr>
+      <tr><td>TPU v3</td><td class="num">123</td><td class="num">16</td><td class="num">112</td><td class="num">1.1</td><td class="num">6.6</td></tr>
+      <tr><td>TPU v4</td><td class="num">275</td><td class="num">32</td><td class="num">268</td><td class="num">1.0</td><td class="num">6.2</td></tr>
+      <tr><td>TPU v5e</td><td class="num">196</td><td class="num">16</td><td class="num">186</td><td class="num">1.1</td><td class="num">6.3</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>这张表给了一个很具体的边界：在 A100 NVLink 上，block 只要约 1K token 就能重叠；换到 A100 InfiniBand，最小 block 变成 24.5K token，序列至少要 149.5K。同样是 CP=8、每卡 4096 token，在 NVLink 上通信可以藏住，在 IB 上就藏不住——这时要么加 block，要么换 Ulysses 这类通信量随 P 缩小的方案。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>前向 AG/RS 夹住 TP 线性层，CP 在 attention 前后换 KV</h2></div>
+  <p class="sec-sub">把数据流拆成 SP 和 CP 两条线，再看它们在同一个 transformer layer 里怎么叠。</p>
+
+  <figure>
+    <svg viewBox="0 0 800 360" role="img" aria-label="Context Parallel 的 ring KV 传递：4 个 rank 各持一个 Q 块，KV 块沿环依次传递，每个 Q 块最终看过全部 KV">
+      <defs>
+        <marker id="cp-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="arrow-head" d="M0 0 L8 4 L0 8 Z"/></marker>
+        <marker id="cp-ar-hot" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="arrow-head-hot" d="M0 0 L8 4 L0 8 Z"/></marker>
+      </defs>
+
+      <text x="20" y="28" class="svg-l">CP=4：Q 块不动，KV 块沿环走 CP−1 步</text>
+
+      <rect class="svg-box" x="20" y="80" width="160" height="90" rx="9"/>
+      <rect class="svg-box" x="220" y="80" width="160" height="90" rx="9"/>
+      <rect class="svg-box" x="420" y="80" width="160" height="90" rx="9"/>
+      <rect class="svg-box" x="620" y="80" width="160" height="90" rx="9"/>
+
+      <text x="100" y="108" text-anchor="middle" class="svg-t">rank 0</text>
+      <text x="300" y="108" text-anchor="middle" class="svg-t">rank 1</text>
+      <text x="500" y="108" text-anchor="middle" class="svg-t">rank 2</text>
+      <text x="700" y="108" text-anchor="middle" class="svg-t">rank 3</text>
+
+      <text x="100" y="132" text-anchor="middle" class="svg-s">Q0 + KV0</text>
+      <text x="300" y="132" text-anchor="middle" class="svg-s">Q1 + KV1</text>
+      <text x="500" y="132" text-anchor="middle" class="svg-s">Q2 + KV2</text>
+      <text x="700" y="132" text-anchor="middle" class="svg-s">Q3 + KV3</text>
+
+      <text x="100" y="154" text-anchor="middle" class="svg-s">本地 Q 块</text>
+      <text x="300" y="154" text-anchor="middle" class="svg-s">本地 Q 块</text>
+      <text x="500" y="154" text-anchor="middle" class="svg-s">本地 Q 块</text>
+      <text x="700" y="154" text-anchor="middle" class="svg-s">本地 Q 块</text>
+
+      <path class="svg-ln" d="M180 125 L216 125" marker-end="url(#cp-ar)"/>
+      <path class="svg-ln" d="M380 125 L416 125" marker-end="url(#cp-ar)"/>
+      <path class="svg-ln" d="M580 125 L616 125" marker-end="url(#cp-ar)"/>
+      <text x="198" y="116" text-anchor="middle" class="svg-s">KV0</text>
+      <text x="398" y="116" text-anchor="middle" class="svg-s">KV1</text>
+      <text x="598" y="116" text-anchor="middle" class="svg-s">KV2</text>
+
+      <path class="svg-ln-hot" d="M700 170 L700 230 L100 230 L100 174" marker-end="url(#cp-ar-hot)"/>
+      <text x="400" y="222" text-anchor="middle" class="svg-s">KV3 → KV0：每步把当前 KV 块传给下一个 rank</text>
+
+      <text x="20" y="262" class="svg-l">Q 块始终留在原 rank；CP−1 步后，每个 Q 块都看过全部 KV。</text>
+      <text x="20" y="286" class="svg-l">attention 输出留在本地 Q 块上；KV 只作为临时输入，不随输出回传。</text>
+      <text x="20" y="310" class="svg-l">每张卡常驻：本地 Q + 本地 KV + 一块接收缓冲。图中省略 TP 组与 packed sequence。</text>
+      <text x="20" y="336" class="svg-s">依据：Ring Attention Algorithm 1；Megatron context_parallel.md:19（本页绘制）</text>
+    </svg>
+    <figcaption>图 1（本页绘制）：CP=4 的 ring KV 传递。每个 rank 用本地 Q 块对轮转过来的 KV 块做 attention；传输与计算重叠的前提是 block 足够大（Table 5）。图中没有画 TP 的 QKV 投影和 RoPE 重排，也没有画反向的 KV 梯度 reduce-scatter；这些步骤在 Table 6 里列出。</figcaption>
+  </figure>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 6（本页归纳）：同一个 transformer layer 里 SP 与 CP 的数据流。SP 列来自 §4.2.2 与 Megatron-Core 源码；CP 列来自 <code>context_parallel.md:19-21</code> 与 TE 封装。</p>
+  <div class="tbl-scroll">
+  <table class="t-wide">
+    <thead><tr><th>阶段</th><th>SP（叠加在 TP 上）</th><th>CP（独立轴）</th></tr></thead>
+    <tbody>
+      <tr><td>层输入</td><td>开启 <code>reduce_scatter_embeddings</code> 时，embedding 输出 reduce-scatter 成 sequence-sharded（<code>layers.py:506-519</code>）</td><td>按 sequence 切成 CP 份；每卡 <code>N/CP</code> token（<code>megatron/core/context_parallel/utils.py:56-104</code>；入口分派 <code>megatron/core/utils.py:2830-2884</code>）</td></tr>
+      <tr><td>LayerNorm / Dropout</td><td>本地做，只看 <code>s/t</code> 个 token</td><td>本地做，只看 <code>N/CP</code> 个 token</td></tr>
+      <tr><td>QKV / MLP 线性</td><td>all-gather → TP 列并行 GEMM → 行并行 GEMM → reduce-scatter</td><td>QKV 投影本地做；MLP 逐 token，本地做</td></tr>
+      <tr><td>Attention</td><td>在 TP 内做；KV 随 head 切分，不需要跨 TP 换 KV</td><td>本地 Q 对轮转 KV 做 attention；KV 从 CP 环上收全序列</td></tr>
+      <tr><td>反向</td><td><code>g</code> 变 reduce-scatter，<code>ḡ</code> 变 all-gather；额外 all-gather 存下的 <code>Y<sub>i</sub><sup>s</sup></code>，并与 <code>dY</code> 计算重叠</td><td>KV 重新 gather；KV 激活梯度 reduce-scatter；<code>cp_stream</code> 与计算重叠</td></tr>
+      <tr><td>输出</td><td>仍是 sequence-sharded，进入下一个 LayerNorm</td><td>仍是 sequence-sharded，进入下一层</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>组合方式是乘法：总卡数 <code>TP × CP × PP × DP</code>（<code>context_parallel.md:38</code>）。SP 不是独立轴，它复用 TP group；CP 是独立轴，KV 通信发生在“其他 TP group 的对应 rank”之间（<code>context_parallel.md:19</code>）。PP 只切层，不改变单层内的 SP/CP 数据流；DP 复制模型、切 batch。实际训练里常见的是 TP8 + CP2/4/8 + PP + DP 的组合 <span class="infer">推断</span>（依据：Megatron-Core CP 文档只说明 CP 可与 TP/PP/DP 组合），具体比例取决于模型大小、序列长度和互联带宽。</p>
+
+  <p>一个实现上的重叠点：SP 只在反向的 all-gather 与 reduce-scatter 上开了异步（<code>layers.py:838-840</code>、<code>871-873</code>），forward all-gather 是同步的（<code>layers.py:792</code>）；CP 的 TE 实现则单独开了 <code>cp_stream</code>（<code>transformer_engine.py:2409-2415</code>），目的都是把通信放到计算旁边。但异步不等于免费：如果 block 太小或带宽不够，通信仍会露在关键路径上。</p>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>SP + selective recompute 让 530B 在 2240 卡上跑到 54.2% MFU，Ring 把上下文拉到 30M+</h2></div>
+  <p class="sec-sub">论文实测的条件见表与正文：模型规模、并行配置、序列长度、是否混合精度。</p>
+
+  <h3>SP：显存省下来后，少做重算才是大头</h3>
+  <p>先看单层时间。SP 论文在 22B 模型的一层上做了对照（Table 4）：</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 7（转录 SP 论文 Table 4）：22B 模型单层，TP8，forward+backward。Overhead 是相对 “Baseline no recompute” 的 19.6 ms。SP 单独只把 combined 从 19.6 ms 降到 19.0 ms（论文写 −3%），真正的大头是 selective recompute 把 27.2 ms 的 full recompute 压到 20.9 ms。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>配置</th><th class="num">Forward (ms)</th><th class="num">Backward (ms)</th><th class="num">Combined (ms)</th><th class="num">Overhead</th></tr></thead>
+    <tbody>
+      <tr><td>Baseline no recompute</td><td class="num">7.7</td><td class="num">11.9</td><td class="num">19.6</td><td class="num">—</td></tr>
+      <tr><td>Sequence Parallelism</td><td class="num">7.2</td><td class="num">11.8</td><td class="num">19.0</td><td class="num">−3%</td></tr>
+      <tr><td>Baseline with recompute</td><td class="num">7.7</td><td class="num">19.5</td><td class="num">27.2</td><td class="num">39%</td></tr>
+      <tr><td>Selective Recompute</td><td class="num">7.7</td><td class="num">13.2</td><td class="num">20.9</td><td class="num">7%</td></tr>
+      <tr class="best"><td>Selective + Sequence</td><td class="num">7.2</td><td class="num">13.1</td><td class="num">20.3</td><td class="num">4%</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>端到端结果更能说明 SP 的定位：它本身不直接提速多少，但省出的显存让模型可以少做重算。Table 8 是论文 Table 5 的四个配置，TP 都是 8，序列长度 2048，<strong>没有使用 DP</strong>；Present work 指 SP + selective recompute。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 8（转录 SP 论文 Table 5 与 Table 3）：模型规模、GPU 数、并行配置与迭代时间。22B/175B/530B/1T 的 PP 分别是 1/8/35/64；序列长度 2048，vocab 51200。最后的 “Increase” 是论文列，口径是相对 full recompute 的吞吐提升；MFU 和 HFU 是同一个 Present work 配置下的两个利用率，不是前后对比。</p>
+  <div class="tbl-scroll">
+  <table class="t-wider">
+    <thead><tr><th>模型</th><th class="num">GPU 数</th><th class="num">TP</th><th class="num">PP</th><th class="num">Full recompute (s)</th><th class="num">Present work (s)</th><th class="num">Increase</th><th class="num">MFU</th><th class="num">HFU</th></tr></thead>
+    <tbody>
+      <tr><td>22B</td><td class="num">8</td><td class="num">8</td><td class="num">1</td><td class="num">1.42</td><td class="num">1.10</td><td class="num">29.0%</td><td class="num">41.5%</td><td class="num">43.7%</td></tr>
+      <tr><td>175B</td><td class="num">64</td><td class="num">8</td><td class="num">8</td><td class="num">18.13</td><td class="num">13.75</td><td class="num">31.8%</td><td class="num">51.4%</td><td class="num">52.8%</td></tr>
+      <tr class="best"><td>530B</td><td class="num">280</td><td class="num">8</td><td class="num">35</td><td class="num">49.05</td><td class="num">37.83</td><td class="num">29.7%</td><td class="num">56.0%</td><td class="num">57.0%</td></tr>
+      <tr><td>1T</td><td class="num">512</td><td class="num">8</td><td class="num">64</td><td class="num">94.42</td><td class="num">71.49</td><td class="num">32.1%</td><td class="num">56.3%</td><td class="num">57.0%</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>54.2% MFU 的完整口径是 Present work（SP + selective recompute）：530B GPT-3-style（即 MT-NLG 530B，不是 175B 的 GPT-3）扩到 8-way DP、2240 张 A100，迭代时间从 37.83 s 变成 39.15 s，MFU 从 56.0% 降到 54.2%；论文称这比 full recompute 的 42.1% 快 29%（§0 Abstract、§6.3）。Table 8 的 530B MFU 是<strong>不用 DP</strong> 的 280 卡结果（56.0%），HFU 是 57.0%；两个数不要和 54.2% 混用。</p>
+
+  <p>显存侧，论文 Fig.7 的结论是：SP 单独和 selective recompute 单独都把激活压到接近一半；两者合用约 5×，降到 TP baseline 的 20% 以下；full recompute 是 10%。这里的 5× 是<strong>合用</strong>的降幅，不是 SP 单独的降幅——SP 单独只去掉 Eq.2 里那部分复制激活。</p>
+
+  <h3>CP / Ring：最多（up to）随设备数线性扩</h3>
+  <p>Ring Attention 的实验条件先钉住：LLaMA 架构，3B/7B/13B/30B，用 FSDP 分片模型并配合 full gradient checkpointing，所有结果用<strong>全精度而不是混合精度</strong>，且不加 TP（§4、§5.1）。在这个条件下实测：32 张 A100 上，7B 模型做到超过 1M tokens，是此前最佳结果的 32 倍；TPUv4-512 上扩展 256 倍、可训练超过 30M tokens（§5.1）——256× 是这组配置的实测值，不是 512×。把论文 Table 3 横着看，倍数还取决于设备和模型：TPUv4-1024 上 3B/7B 是 512×，13B/30B 是 256×；设备也并不全给序列，FSDP 会先占掉一部分设备做模型分片，能用于扩序列的只是剩余设备（Appendix A），所以论文写的是 “up to device count times”，不能按 512× 直接外推。</p>
+  <p>§1 引言给的口径更大：比此前内存高效方案的最佳结果长 500 倍以上、可训练超过 100M tokens；这是引言里的主张，不是 Table 3 某个格子的实测值。v4 摘要只说 “up to device count times” 和 “millions of tokens”。线性扩的前提是每卡 block 够大：Table 5 的 <code>c ≥ F/B</code> 是通信重叠门槛，<code>s ≥ 6c</code> 是六块显存的容量门槛；c 小于 F/B 时 KV 传输会露在计算外。</p>
+
+  <p>Ulysses 的实测更偏“吞吐随 GPU 数 scaling”。Table 9 转录它的 Table 2/3：GPT-7B、dense attention、global batch 8，序列长度和 GPU 数同比例增长时，每 GPU TFLOPs 从 161.36 降到 147.40，迭代时间从 9676.76 ms 涨到 33486.5 ms——工作量随 <code>N²</code> 涨，吞吐只轻微下降。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 9（转录 DeepSpeed-Ulysses Table 2/3；Table 3 的 131072/128 行与 Table 2 第 2 行数值相同，合并列出）：GPT-7B、dense attention、global batch 8。前三行是固定序列 131072、增加 GPU 的强 scaling；后两行是序列与 GPU 同比例增加的弱 scaling。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th class="num">Seqlen</th><th class="num">GPUs</th><th class="num">Time (ms)</th><th class="num">TFLOPs / GPU</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="num">131072</td><td class="num">64</td><td class="num">32432.13</td><td class="num">165.53</td><td>固定序列，强 scaling</td></tr>
+      <tr><td class="num">131072</td><td class="num">128</td><td class="num">17052.51</td><td class="num">157.41</td><td>固定序列，强 scaling</td></tr>
+      <tr><td class="num">131072</td><td class="num">256</td><td class="num">9886.70</td><td class="num">136.09</td><td>固定序列，强 scaling</td></tr>
+      <tr><td class="num">65536</td><td class="num">64</td><td class="num">9676.76</td><td class="num">161.36</td><td>序列与 GPU 同比例</td></tr>
+      <tr class="best"><td class="num">262144</td><td class="num">256</td><td class="num">33486.50</td><td class="num">147.40</td><td>序列与 GPU 同比例</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Ulysses v2 摘要的原词是 “2.5x faster with 4x longer sequence length”（4× 序列、快 2.5×，不是“最高 2.5×”）；§1 贡献列表另有 “throughput improvements of up to 2.5x” 的表述。§4 的对比基线是 Megatron-LM 的 sequence parallelism。它的通信量 <code>4Nh/P</code> 比 Megatron SP 的 <code>4Nh</code> 小 P 倍（§3.2），所以序列越长、P 越大，Ulysses 的通信优势越明显；代价是 all-to-all 和 head 数整除约束。</p>
+
+  <p>Megatron-Core 的 CP 文档用 Figure 2 给出 175B GPT 在 TP+CP 组合下相对 full recomputation（TP8CP1）的加速曲线，本页未转录该图的读数；文档的定性结论是 TP+CP 能超过 full recomputation，因为去掉了大部分重算开销（<code>context_parallel.md:32-34</code>）。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>小序列、因果 mask、TP 耦合和通信重叠，决定这些数字能不能复用</h2></div>
+  <p class="sec-sub">这几条边界不改变结论，但会改变你该选 SP 还是 CP。</p>
+
+  <h3>序列越短，SP 的相对节省越大；序列越长，CP 才越有意义</h3>
+  <p>由 Eq.2/Eq.4，SP 省下的绝对字节是 <code>10sbh(1−1/t)</code>，随 s 线性增长；但分母里的 attention 项 <code>5abs²/t</code> 按 <code>s²</code> 增长，所以<strong>相对节省随 s 增大而下降</strong>。固定 <code>h=6144、a=64、t=8</code>：</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 10（本页由 Eq.2/Eq.4 计算）：SP 相对 Eq.2 的每层激活节省比例。s=1024 时非 attention 项占比高，省 44.5%；s=16384 时 attention 项主导，只剩 7.3%。绝对字节仍在涨，只是占比变小。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th class="num">s</th><th class="num">SP 省下比例（相对 Eq.2）</th><th>读法</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1024</td><td class="num">44.5%</td><td>非 attention 激活占比高，SP 很划算</td></tr>
+      <tr><td class="num">2048</td><td class="num">33.2%</td><td>论文 Table 3 的序列长度</td></tr>
+      <tr class="best"><td class="num">4096</td><td class="num">22.1%</td><td>本页 Table 2 的参考配置</td></tr>
+      <tr><td class="num">8192</td><td class="num">13.2%</td><td>attention 项开始主导</td></tr>
+      <tr><td class="num">16384</td><td class="num">7.3%</td><td>SP 仍在省，但已不是主要矛盾</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>这也解释了为什么长上下文场景需要 CP：SP 只去掉复制激活，attention 的 <code>s²</code> 项还在。CP 把每卡 Q 和激活降到 <code>1/CP</code>，但每卡 KV 通信趋近完整 KV；所以 CP 适合“单卡放不下、且互联带宽足够”的长序列，不适合短序列或低带宽集群。</p>
+
+  <h3>因果 mask 和 packed sequence 会改变布局</h3>
+  <ul>
+    <li><strong>causal + zigzag：</strong>CP 的 zigzag 让 rank r 拿前后两段，causal 工作量更均衡（<code>layout.py:83-105</code>）；代价是序列长度必须能被 <code>2×CP</code> 整除（<code>utils.py:80-98</code>）。</li>
+    <li><strong>packed/varlen：</strong>需要 THD 格式和 <code>cu_seqlens</code> 元数据；<code>layout.py</code> 提供 contiguous↔zigzag 的转换计划（<code>contiguous_to_zigzag</code>、<code>zigzag_to_contiguous</code>，<code>:582-628</code>）。文档说 CP 支持单向/双向 mask，但 dynamic CP 要求 per-token loss 和 varlen packed data，且不支持 deterministic mode / CUDA graphs / router z-loss（<code>context_parallel.md:38-70</code>）。</li>
+    <li><strong>推理：</strong>Megatron-Core 的 CP 训练组不用于推理；推理仍是 CP1（<code>context_parallel.md:70</code>）。</li>
+  </ul>
+
+  <h3>SP 与 TP 是耦合的，CP 与 TP 是正交的</h3>
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">SP × TP</span><h4>SP 没有自己的 group，TP=1 时自动关闭</h4></div>
+      <p>SP 的 AG/RS 用的就是 TP group（<code>mappings.py:528-549</code>）；TP size 为 1 时 <code>sequence_parallel</code> 被禁用（<code>layers.py:1311-1317</code>）。所以 SP 不能脱离 TP 单独开，也不能独立扩序列——它的并行度和 TP 绑死。</p>
+      <p>TP 太大还会让 Linear 的计算短到藏不住通信（<code>context_parallel.md:32</code>）；这时继续加 TP 不如加 CP。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">CP × TP</span><h4>CP 是独立轴，KV 只在对应 TP group 之间换</h4></div>
+      <p>CP 有独立的 process group（<code>parallel_state.py:1270-1297</code>），总卡数是 <code>TP×CP×PP×DP</code>（<code>context_parallel.md:38</code>）。KV 通信发生在“其他 TP group 的对应 rank”之间（<code>context_parallel.md:19</code>），不会跨 TP 的 hidden 分片。</p>
+      <p>所以 CP 可以和 TP/PP/DP 自由组合；SP 则是 TP 的内部优化，组合时只跟着 TP 走。</p>
+    </div>
+  </div>
+
+  <h3>通信重叠不是自动的</h3>
+  <ul>
+    <li><strong>Ring/CP：</strong>需要 block 足够大。A100 NVLink 的最小 block 约 1.0K token，A100 IB 约 24.5K token（Table 5）；低于这个值，KV 传输会露在计算外面。</li>
+    <li><strong>SP：</strong>总字节与 TP all-reduce 相同，但 AG+RS 的组合执行比单次 all-reduce 慢；论文的 22B 单层实测里，SP 的前向加速只有 6%（7.7→7.2 ms），低于按 <code>1/t</code> 的直觉（§6.2）。源码只把反向 all-gather 与 reduce-scatter 设为 <code>async_op=True</code>（<code>layers.py:838-840</code>、<code>871-873</code>；forward all-gather 在 <code>layers.py:792</code> 同步），重叠上限受带宽和依赖关系约束。</li>
+    <li><strong>CP 的 <code>cp_stream</code>：</strong>TE 实现单独开 stream（<code>transformer_engine.py:2409-2415</code>），能把 KV 通信放到计算旁边；但如果 KV 体积太大（MHA 而非 GQA），带宽仍是瓶颈。</li>
+  </ul>
+
+  <h3>它们各自不解决什么</h3>
+  <ul>
+    <li><strong>SP 不改变 attention 的 <code>s²</code> 计算量</strong>，也不改变主体 GEMM 的 FLOPs；它只是把非 TP 的复制激活按 sequence 切开。</li>
+    <li><strong>CP 不减少总 attention FLOPs</strong>，只把每卡计算/显存降到 <code>1/CP</code>；模型状态（含优化器状态）的内存不受 CP 影响（Ulysses 需要配合 ZeRO-3 才能同时扩模型，§3.3）。</li>
+    <li><strong>CP 的每卡 KV 通信不按 CP 缩小</strong>：<code>(1−1/CP)·2N·h<sub>kv</sub></code>，CP 越大越接近完整 KV；这是 Ring/CP 与 Ulysses 的 <code>4Nh/P</code> 最根本的差别。</li>
+    <li><strong>SP 不能单独扩上下文</strong>：它依附 TP，TP size 受 head 数和模型结构限制；真正的长序列扩展要靠 CP/Ulysses/Ring 这类序列维并行。</li>
+  </ul>
+
+  <p><span class="infer">推断</span> 选择顺序可以按成本模型来：TP 已开且 LayerNorm/Dropout 激活显著时，先开 SP（几乎不改代码、不增加带宽）；单卡 attention 激活或计算放不下时，再上 CP；head 数能被并行度整除、且 all-to-all 互联好时，Ulysses 的 <code>O(N/P)</code> 通信更有优势；需要“设备数×上下文”且能接受 <code>O(N)</code> KV 轮转时，用 Ring/CP。依据是 §4 的通信/显存公式与 §6 的实测条件，不是论文的直接建议。</p>
+</section>
+
+<footer>
+  <div>Reducing Activation Recomputation in Large Transformer Models · Ring Attention with Blockwise Transformers for Near-Infinite Context · DeepSpeed Ulysses</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2205.05198" target="_blank" rel="noopener">arXiv 2205.05198</a>（本页以 v1 为准）·
+    <a href="https://arxiv.org/abs/2310.01889" target="_blank" rel="noopener">arXiv 2310.01889</a>（以 v4 为准）·
+    <a href="https://arxiv.org/abs/2309.14509" target="_blank" rel="noopener">arXiv 2309.14509</a>（以 v2 为准）<br>
+    代码：Megatron-Core commit <code>70f7a26</code>；CP 文档 <code>docs/user-guide/features/context_parallel.md</code><br>
+    笔记：<a href="/ulysses_sequence_parallel/">ulysses_sequence_parallel</a>（Ulysses 部分；SP/CP 的数字均回原文与源码核对）<br>
+    说明：SP（2022）与 Megatron-Core 的 CP 实现是不同来源，页面分开标注；笔记只用于选题，不当作数字来源。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  // ---------- SP 显存交互 ----------
+  var spT = document.getElementById('sp-t');
+  var spS = document.getElementById('sp-s');
+  var spTv = document.getElementById('sp-tv');
+  var spSv = document.getElementById('sp-sv');
+  var spNo = document.getElementById('sp-no');
+  var spYes = document.getElementById('sp-yes');
+  var spSave = document.getElementById('sp-save');
+  var spPct = document.getElementById('sp-pct');
+  var spMsg = document.getElementById('sp-msg');
+  var H = 6144, A = 64, B = 1, BYTES = 2;
+
+  function fmt(x, d) {
+    return Number(x).toFixed(d);
+  }
+
+  function updateSP() {
+    if (!spT || !spS) return;
+    var t = Number(spT.value);
+    var s = Number(spS.value);
+    var sbh = s * B * H;
+    var no = sbh * (10 + 24 / t + 5 * A * s / (H * t));
+    var yes = sbh / t * (34 + 5 * A * s / H);
+    var saved = no - yes;
+    var noGB = no * BYTES / 1e9;
+    var yesGB = yes * BYTES / 1e9;
+    var savedMB = saved * BYTES / 1e6;
+    var pct = saved / no * 100;
+    if (spTv) spTv.textContent = String(t);
+    if (spSv) spSv.textContent = String(s);
+    if (spNo) spNo.textContent = fmt(noGB, 3) + ' GB';
+    if (spYes) spYes.textContent = fmt(yesGB, 3) + ' GB';
+    if (spSave) spSave.textContent = fmt(savedMB, 1) + ' MB';
+    if (spPct) spPct.textContent = fmt(pct, 1) + '%';
+    if (spMsg) {
+      spMsg.textContent = 't=' + t + '，s=' + s + '：Eq.2=' + fmt(noGB, 3) +
+        ' GB，Eq.4=' + fmt(yesGB, 3) + ' GB，省下 ' + fmt(savedMB, 1) +
+        ' MB（相对 Eq.2 的 ' + fmt(pct, 1) + '%）。';
+    }
+  }
+
+  if (spT) spT.addEventListener('input', updateSP);
+  if (spS) spS.addEventListener('input', updateSP);
+  updateSP();
+
+  // ---------- CP KV 交互 ----------
+  var cpSize = document.getElementById('cp-size');
+  var cpSeq = document.getElementById('cp-seq');
+  var cpSizev = document.getElementById('cp-sizev');
+  var cpSeqv = document.getElementById('cp-seqv');
+  var cpKvButtons = document.querySelectorAll('[data-kv]');
+  var cpLocal = document.getElementById('cp-local');
+  var cpLayer = document.getElementById('cp-layer');
+  var cpTotal = document.getElementById('cp-total');
+  var cpShare = document.getElementById('cp-share');
+  var cpMsg = document.getElementById('cp-msg');
+  var kvHidden = 1024;
+
+  function updateCP() {
+    if (!cpSize || !cpSeq) return;
+    var cp = Number(cpSize.value);
+    var n = Number(cpSeq.value);
+    var local = n / cp;
+    var chunkBytes = 2 * local * kvHidden * 2;
+    var recvBytes = (cp - 1) * chunkBytes;
+    var recvMiB = recvBytes / 1048576;
+    var totalGiB = 32 * recvBytes / 1073741824;
+    var share = (cp - 1) / cp * 100;
+    if (cpSizev) cpSizev.textContent = String(cp);
+    if (cpSeqv) cpSeqv.textContent = String(n);
+    if (cpLocal) cpLocal.textContent = String(local);
+    if (cpLayer) cpLayer.textContent = fmt(recvMiB, 1) + ' MiB';
+    if (cpTotal) cpTotal.textContent = fmt(totalGiB, 1) + ' GiB';
+    if (cpShare) cpShare.textContent = fmt(share, 1) + '%';
+    if (cpMsg) {
+      cpMsg.textContent = 'CP=' + cp + '，N=' + n + '：每卡 ' + local +
+        ' token，单块 KV ' + fmt(chunkBytes / 1048576, 1) + ' MiB，每层收到 ' +
+        fmt(recvMiB, 1) + ' MiB，32 层 ' + fmt(totalGiB, 1) +
+        ' GiB，占全量 KV 的 ' + fmt(share, 1) + '%。';
+    }
+  }
+
+  function setKvMode(kv, btn) {
+    kvHidden = kv;
+    var all = document.querySelectorAll('[data-kv]');
+    for (var i = 0; i < all.length; i++) {
+      all[i].classList.remove('active');
+    }
+    if (btn) btn.classList.add('active');
+    updateCP();
+  }
+
+  if (cpSize) cpSize.addEventListener('input', updateCP);
+  if (cpSeq) cpSeq.addEventListener('input', updateCP);
+  for (var i = 0; i < cpKvButtons.length; i++) {
+    cpKvButtons[i].addEventListener('click', function () {
+      setKvMode(Number(this.getAttribute('data-kv')), this);
+    });
+  }
+  updateCP();
+})();
+</script>
+</body>
+</html>

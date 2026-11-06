@@ -1,0 +1,664 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 0.100112915 | §3.1 | 0.75*0.75*0.75*0.75*0.75*0.75*0.75*0.75 |
+| 3.59954834 | §3.1 | (1-0.100112915)/(1-0.75) |
+| 1.35 | §3.3 | 1+7*0.05 |
+| 2.66633210 | §3.3 | 3.59954834/1.35 |
+| 0.0221643611 | §3.1 | 0.53*0.53*0.53*0.53*0.53*0.53 |
+| 2.08050136 | §3.1 | (1-0.0221643611)/(1-0.53) |
+| 1.25 | §3.3 | 1+5*0.05 |
+| 1.66440109 | §3.3 | 2.08050136/1.25 |
+| 3.5995 | §3.1 | (1-0.100112915)/(1-0.75) |
+| 2.6663 | §3.3 | 3.59954834/1.35 |
+| 2.0805 | §3.1 | (1-0.0221643611)/(1-0.53) |
+| 1.6644 | §3.3 | 2.08050136/1.25 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speculative Decoding · draft 先猜，target 一次验证</title>
+<meta name="description" content="Speculative Decoding 精读：draft-then-verify 的拒绝采样如何保持目标分布，期望接受长度 (1−α^(γ+1))/(1−α)，draft 成本与加速比边界，以及 vLLM 的 n-gram、draft model、EAGLE 路径与 KV 开销。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+pre.cmd{
+  background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;overflow-x:auto;margin:14px 0;
+  font-family:"JetBrains Mono",monospace;font-size:12.5px;line-height:1.7;
+}
+.tbl-cap{font-size:12.5px;color:var(--text-soft);margin:0 0 8px;line-height:1.7}
+.sim-note,.preset-note{font-size:12px;color:var(--text-soft);line-height:1.7;margin:10px 0 0}
+details.handcalc{margin-top:14px}
+.flow text{font-family:Inter,"Noto Sans SC",sans-serif}
+.flow .svg-panel{fill:var(--bg-soft);stroke:var(--border);stroke-width:1}
+.flow .svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.1}
+.flow .svg-box-draft{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.1}
+.flow .svg-box-target{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.1}
+.flow .svg-box-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.1}
+.flow .svg-title{fill:var(--text);font-size:12.5px;font-weight:700}
+.flow .svg-label{fill:var(--text);font-size:11.5px;font-weight:600}
+.flow .svg-small{fill:var(--text-muted);font-size:10px}
+.flow .svg-mono{fill:var(--text);font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600}
+.flow .svg-arrow{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.flow .svg-arrow-head{fill:var(--text-soft)}
+@media (max-width:520px){
+  .sim{padding:18px}
+  .flow .svg-small{font-size:10.5px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Speculative Decoding</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#cost">长度与成本</a>
+      <a href="#flow">验证数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 推理 · 投机解码 · 2022–2024</span>
+  <h1>Speculative Decoding：draft 先猜，target 一次验证</h1>
+  <p class="hero-sub">
+    自回归解码一次只出一个 token，瓶颈是 memory bandwidth，不是算术峰值。
+    论文让小模型先连续猜 <strong>γ</strong> 个 token，目标模型一次 forward 并行打分；拒绝采样保证输出分布仍然是目标模型的分布。
+    代价是 draft 成本、额外 KV 和 batch 下的收益衰减。
+  </p>
+  <div class="meta">
+    <span>Leviathan et al. · Chen et al. · Li et al. (EAGLE)</span>
+    <a href="https://arxiv.org/abs/2211.17192v2" target="_blank" rel="noopener">Leviathan v2 ↗</a>
+    <a href="https://arxiv.org/abs/2302.01318" target="_blank" rel="noopener">Chen v1 ↗</a>
+    <a href="https://arxiv.org/abs/2401.15077" target="_blank" rel="noopener">EAGLE v3 ↗</a>
+    <a href="https://github.com/vllm-project/vllm" target="_blank" rel="noopener">vLLM e740bad ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    解码的瓶颈是<strong>串行</strong>与<strong>访存</strong>：生成 K 个 token 要跑 K 次目标模型，每次都要把权重和 KV 从显存读一遍，算术单元经常闲着。
+    Speculative decoding 把“猜”和“验”分开：draft 模型串行猜 γ 个 token，目标模型一次并行验证，从而把多次目标模型调用压成一次。
+  </p>
+  <p>
+    核心是<strong>拒绝采样</strong>：draft 样本 x 以 <em>min(1, p(x)/q(x))</em> 的概率被接受；一旦拒绝，就从 <em>norm(max(0, p − q))</em> 重采样。
+    这样输出分布仍然是 p，draft 模型可以任意选，不需要重训目标模型。
+  </p>
+  <p>
+    期望输出 token 数是 <strong>(1 − α<sup>γ+1</sup>) / (1 − α)</strong>，walltime 加速比是 <strong>E / (1 + γc)</strong>。
+    α 低、c 高或 γ 过大时，加速比可以小于 1；γ 不是越大越好。
+  </p>
+  <p>
+    vLLM 把 draft 侧做成可插拔：n-gram / suffix 不加载模型，draft_model 用独立小模型，EAGLE 用目标模型的 hidden states。
+    验证仍走 rejection sampler；KV 为 γ 个 draft 位置预留，拒绝后按 <code>num_rejected</code> 回滚计数。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 2">3.4<small>×</small></div>
+      <div class="k">T5-XXL 11B / WMT EnDe / T5-small draft / temp=0 / γ=7 / α=0.75</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">2.6<small>×</small></div>
+      <div class="k">同设置 / temp=1；α 从 0.75 降到 0.62</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Table 2">3.1<small>×</small></div>
+      <div class="k">T5-XXL 11B / CNN/DM / T5-small draft / temp=0 / γ=5 / α=0.65</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>解码是串行的 memory-bound 循环，算力常常闲着</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么“多猜几个 token”有收益空间，以及为什么直接接受 draft 会改变输出分布。</p>
+
+  <p>
+    自回归解码的第 t 步只依赖前 t−1 个 token。生成 K 个 token 需要 K 次串行的目标模型调用；每次调用都要把模型权重和 KV Cache 从显存读到计算单元。对 Transformer 来说，这一步的算术量远小于访存量，因此 latency 主要由 memory bandwidth 决定，而不是 GPU 的峰值算力（Leviathan et al. §1；Chen et al. §1）。
+  </p>
+
+  <p>
+    论文的观察是：并非所有 token 都一样难。有些位置的目标分布很尖，小模型也能猜中；有些位置很难，必须由目标模型决定。如果把“猜”交给更便宜的模型，再把多个猜测拼成一个更长的序列，让目标模型一次 forward 并行验证，就能在目标模型调用次数不变的情况下多产出几个 token（§2.1）。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">要求 A</span><h4>并行：一次验证多个候选</h4></div>
+      <p>目标模型对 <code>prefix + x1 … xγ</code> 做一次 causal forward，得到 γ+1 个位置的分布。并行验证利用的是“目标模型在 memory-bound 下还有空闲算术资源”这一条件，而不是减少总计算量。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">要求 B</span><h4>同分布：输出仍然是 p</h4></div>
+      <p>如果直接接受 draft 的样本，输出分布会变成 q；如果只在 greedy 下比较 argmax，又只能覆盖贪心解码。要在随机采样下保持 p，需要一套接受/拒绝规则。</p>
+    </div>
+  </div>
+
+  <p>
+    这两个要求合在一起，才是 speculative decoding 的问题定义：<strong>不改变目标模型的参数、架构和输出分布</strong>，只改变解码的调度方式。论文的贡献不是“用小模型猜”，而是给出了一个能纠正 draft 分布、并且对任意 draft 模型都成立的采样规则（§2.3、§3.6）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">关键判断</span><h4>难点不在 draft，而在“拒绝之后怎么补”</h4></div>
+    <p>draft 模型可以很粗糙，甚至可以是 n-gram；只要拒绝采样把“多出来的 q 质量”扣掉、把“p 比 q 多出来的质量”补上，输出就仍然是 p。这个修正步骤必须是串行调用之外的一次采样，不能靠再跑一次目标模型。</p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>前人要么改模型，要么只能 greedy；两条路都换不来无损并行</h2></div>
+  <p class="sec-sub">读完这节你应该知道：speculative decoding 与量化/蒸馏、block/parallel decoding 的分界线，以及 EAGLE 在这条线上的位置。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>把每一步做便宜</h4></div>
+      <p>量化、蒸馏、剪枝、early exit 和自适应计算都试图降低单步成本。它们通常要改权重、改架构或重新训练，而且可能改变输出质量；它们没有利用“有些 token 很容易猜”这一结构，也不提供“输出分布不变”的保证（§1 的相关工作）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>一次生成多个 token</h4></div>
+      <p>block/parallel decoding 让多个 token 同时参与计算，但早期方法往往只支持 greedy，或者用近似接受规则而偏离目标分布；它们没有把“随机采样下的精确性”作为约束（Leviathan et al. §1、§5；EAGLE §5 的相关工作回顾）。</p>
+    </div>
+  </div>
+
+  <p>
+    Speculative decoding 的位置在两者之间：目标模型完全不动，draft 可以任意便宜，输出分布仍然按目标模型来。代价从“改模型”变成了“多一个 draft 模型 + 一次并行验证 + 拒绝后的重采样”。这也是它能在 off-the-shelf 模型上直接使用的原因（§1、§3.6）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">并列方法</span><h4>EAGLE：换 draft 侧，不换接受规则</h4></div>
+    <p>
+      EAGLE 仍在 speculative sampling 框架内，但不在 token 层自回归：它在目标模型倒数第二层特征（second-to-top-layer，LM head 之前的 hidden state）上自回归，并把 token 序列前移一步，以减少特征预测的不确定性；draft 树用 tree attention 验证（EAGLE §1、§4.3）。
+      它改变的是“草稿怎么来”，不是“接受/拒绝怎么算”；因此拒绝采样仍然负责保持目标分布。论文报告 LLaMA2-Chat 70B 上的 latency 加速为 2.7–3.5×（§1），具体条件见 06。
+    </p>
+  </div>
+
+  <p>
+    Chen et al. 与 Leviathan et al. 是同期独立工作，核心接受规则相同；Chen 的重点是 Chinchilla 70B 的分布式 serving，Leviathan 的重点是算法分析、T5-XXL 实测和 walltime 模型。两者都强调：draft 模型不需要和 target 同架构，但必须能给出可比较的分布。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>接受概率取 min(1,p/q)，拒绝时从 p−q 的正部重采样</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Algorithm 1 的每一步在做什么，以及为什么这个接受/拒绝规则能把 q 的样本修正成 p 的样本。</p>
+
+  <p>
+    记目标模型分布为 <code>p(x)</code>，draft 模型分布为 <code>q(x)</code>，前缀固定。Algorithm 1 先让 draft 自回归采样 γ 个 token，再让目标模型对 <code>prefix</code>、<code>prefix+x1</code>、…、<code>prefix+x1…xγ</code> 做并行 forward，得到 <code>p1 … pγ+1</code>。然后从左到右逐个判断是否接受。
+  </p>
+
+  <ol>
+    <li><strong>Draft：</strong>对 i=1…γ，计算 <code>qi ← Mq(prefix + x1…x(i−1))</code>，采样 <code>xi ~ qi</code>。</li>
+    <li><strong>Verify：</strong>目标模型一次并行计算 <code>p1 … pγ+1</code>；每个位置都是一个完整的分布，不是一个 argmax。</li>
+    <li><strong>Accept：</strong>对每个位置抽 <code>ri ~ U(0,1)</code>；若 <code>ri ≤ pi(xi)/qi(xi)</code> 则接受，否则停在第一个拒绝处。接受数为 <code>n</code>。</li>
+    <li><strong>Recover / Bonus：</strong>若 <code>n &lt; γ</code>，从 <code>norm(max(0, p(n+1) − q(n+1)))</code> 采样一个修正 token；若全部接受，则从 <code>p(γ+1)</code> 采样 bonus token。输出 <code>x1…xn, t</code>。</li>
+  </ol>
+
+  <div class="eq">
+    <code>u<sub>i</sub> ≤ p<sub>i</sub>(x<sub>i</sub>) / q<sub>i</sub>(x<sub>i</sub>)</code> → 接受 <code>x<sub>i</sub></code><br>
+    <code>u<sub>i</sub> &gt; p<sub>i</sub>(x<sub>i</sub>) / q<sub>i</sub>(x<sub>i</sub>)</code> → 拒绝，<code>x ~ norm(max(0, p<sub>i</sub> − q<sub>i</sub>))</code>
+  </div>
+  <p class="eq-cap">Algorithm 1 的接受/拒绝规则；第一个拒绝之后的位置全部丢弃。</p>
+
+  <p>
+    为什么这样就得到 p？把“输出的 token 是 x”拆成两条互斥路径：draft 抽到 x 且被接受，或者 draft 被拒绝、修正分布抽到 x。第一条路径的概率是 <code>min(q(x), p(x))</code>；第二条路径的概率是“总拒绝质量”乘以修正分布在 x 上的质量。把 <code>Σ max(0, p−q) = 1 − Σ min(p,q)</code> 代入，第二项正好化简为 <code>max(0, p(x) − q(x))</code>，两项相加就是 <code>p(x)</code>。
+  </p>
+
+  <div class="eq">
+    <code>P(output = x) = q(x)·min(1, p(x)/q(x)) + [1 − Σ<sub>z</sub> min(p(z),q(z))] · max(0, p(x)−q(x)) / Σ<sub>z</sub> max(0, p(z)−q(z))</code><br>
+    <code>= min(p(x), q(x)) + max(0, p(x) − q(x))</code><br>
+    <code class="hl-c">= p(x)</code>
+  </div>
+  <p class="eq-cap">按 Algorithm 1 的接受/拒绝路径展开；论文在 Appendix A.1 给出同一结论。浮点实现是数值等价，不是逐位相同。</p>
+
+  <p>
+    接受率本身也有闭式。对固定的前缀，draft 样本被接受的概率是 <code>β = Σ<sub>x</sub> min(p(x), q(x))</code>；把不同前缀上的 β 取期望，就得到论文的 <code>α = E[β]</code>（Theorem 3.5、Corollary 3.6）。当 p=q 时 α=1；当两个分布支撑不交时 α=0；一般情况下 α 衡量 draft 与 target 的重叠程度，而不是“draft 的 argmax 命中率”。
+  </p>
+
+  <div class="eq">
+    <code>β = Σ<sub>x</sub> min(p(x), q(x))</code>，<code class="hl-c">α = E[β] = E[min(p,q)]</code>
+  </div>
+  <p class="eq-cap">编号按 arXiv v2：Definition 3.1 定义 β；Theorem 3.5 给出 β 的表达式；Corollary 3.6 给出 α；Eq. (1) 给出期望 token 数；Theorem 3.8 给出 walltime。v2 没有 Theorem 3.1。</p>
+
+  <p>
+    这个规则对 draft 模型没有限制：q 可以是小 Transformer、n-gram、suffix 树，或 EAGLE 的特征级 draft；只要 q 能给出每个候选 token 的概率，接受/拒绝就能把分布修正回 p（§3.6）。代价是 q 的概率必须在目标模型验证时可用；如果只保留 draft 的 argmax，接受规则会退化成一种特殊情形，而不是一般形式。
+  </p>
+</section>
+
+<section class="block" id="cost">
+  <div class="sec-head"><span class="sec-num">04</span><h2>期望 token 数是 capped geometric；加速比被 c 和 γ 夹住</h2></div>
+  <p class="sec-sub">读完这节你应该知道：α、γ、c 三个量如何决定 E 和 S，以及为什么“更多 draft token”可能让加速比变负。</p>
+
+  <p>
+    先看一次目标模型调用能产出多少 token。设 γ 个 draft 位置中接受的数量为 n，输出 token 数为 <code>N = n + 1</code>（修正 token 或 bonus token 至少有一个）。在“各位置独立、接受率同为 α”的简化下，<code>P(n ≥ k) = α<sup>k</sup></code>，所以 <code>E[N] = Σ<sub>k=0</sub><sup>γ</sup> α<sup>k</sup></code>，即论文的 Eq. (1)。
+  </p>
+
+  <div class="eq">
+    <code>E[N] = 1 + α + α<sup>2</sup> + … + α<sup>γ</sup> = <span class="hl-c">(1 − α<sup>γ+1</sup>) / (1 − α)</span></code>
+  </div>
+  <p class="eq-cap">Eq. (1)：一次 Algorithm 1 调用生成的期望 token 数；α=1 时取极限 γ+1。</p>
+
+  <p>
+    再看成本。设目标模型一次 forward 的耗时是 T，draft 模型一次 forward 的耗时是 cT；一次 speculative step 要跑 γ 次 draft 和 1 次目标模型（并行验证假设 γ+1 个目标位置不增加 walltime），总成本是 <code>(γc + 1)T</code>，产出 <code>E[N]</code> 个 token。因此理论 walltime 加速比是：
+  </p>
+
+  <div class="eq">
+    <code>S(α, γ, c) = <span class="hl-c">(1 − α<sup>γ+1</sup>) / [(1 − α)(1 + γc)]</span></code>
+  </div>
+  <p class="eq-cap">Theorem 3.8；c = 单次 draft forward / 单次 target forward。§3.3 称，在 Mq 比 Mp 小约两个数量级的设置下 c 始终 &lt;0.05、通常接近 0；但 Table 4 中 T5-large 的 c=0.11。</p>
+
+  <p>
+    这个式子给出三条边界。第一，<code>c ≈ 0</code> 时 <code>S = E[N]</code>，上界是 <code>1/(1−α)</code>；n-gram 的 c 接近 0，所以即使 α 只有 0.2，也能有约 1.25× 的加速（§3.6）。第二，<code>S &gt; 1</code> 等价于 <code>c &lt; α(1+α+…+α<sup>γ−1</sup>)/γ</code>；右边不超过 α，所以 <code>α &lt; c</code> 时所有 γ 都不划算。第三，即使 α 略高于 c，γ 太大也会让分母 <code>1+γc</code> 线性增长，把 S 拉回 1 以下；最优 γ 需要按 Figure 3 数值搜索。
+  </p>
+
+  <div class="sim" id="spec-sim">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button" data-alpha="0.75" data-gamma="7">EnDe · temp=0<span class="r-sub">α=0.75 · γ=7</span></button>
+      <button class="rule-btn" type="button" data-alpha="0.62" data-gamma="7">EnDe · temp=1<span class="r-sub">α=0.62 · γ=7</span></button>
+      <button class="rule-btn" type="button" data-alpha="0.53" data-gamma="5">CNNDM · temp=1<span class="r-sub">α=0.53 · γ=5</span></button>
+    </div>
+    <p class="preset-note">预设的 α、γ 逐字取自 Table 2；c=0.05 取自 §3.3 的典型上界（Table 4 个别设置为 0.11）。模拟器只算 Eq. (1) 与 Theorem 3.8 的闭式值，Table 2 是实测 walltime，二者不必相等。</p>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="alphaRange">接受率 α <span class="v" id="alphaVal">0.75</span></label>
+        <input type="range" id="alphaRange" min="0.10" max="0.95" step="0.01" value="0.75">
+      </div>
+      <div class="ctrl">
+        <label for="gammaRange">draft 长度 γ <span class="v" id="gammaVal">7</span></label>
+        <input type="range" id="gammaRange" min="1" max="16" step="1" value="7">
+      </div>
+      <div class="ctrl">
+        <label for="costRange">draft 成本 c <span class="v" id="costVal">0.05</span></label>
+        <input type="range" id="costRange" min="0" max="0.10" step="0.01" value="0.05">
+      </div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">draft γ</div><div class="slot-val" id="slotGamma">7</div></div>
+      <div class="slot"><div class="slot-name">accept α</div><div class="slot-val" id="slotAlpha">0.75</div></div>
+      <div class="slot"><div class="slot-name">E[N]</div><div class="slot-val" id="slotE">3.5995</div></div>
+    </div>
+    <div class="readout" data-src="§3.1" id="expOut">
+      <div class="r-head">期望输出 token 数</div>
+      <strong id="expTokens">3.5995</strong> tokens / 次目标 forward
+    </div>
+    <div class="readout" data-src="§3.3" id="speedOut">
+      <div class="r-head">理论 walltime 加速比</div>
+      <strong id="speedup">2.6663×</strong><br>
+      <span id="simNote">c &lt; 盈亏平衡：S &gt; 1</span>
+    </div>
+    <p class="sim-note">这是简化模型：α 被视为各位置相同的常数，c 被视为常数，且假设 γ+1 个目标位置可以并行而不增加 walltime。未覆盖分支见下面的手算块。</p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算两组：α、γ 变化下的 E 与 S <span class="sum-sub">固定 c=0.05，结果保留 4 位小数</span></summary>
+    <div class="details-body">
+      <p><strong>简化模型：</strong>假设 γ 个 draft 位置的接受率都是 α 且相互独立，draft 单步成本 c 为常数，目标模型的 γ+1 个位置可以完全并行。这个模型只对应 Eq. (1) 与 Theorem 3.8 的闭式部分，不是对 vLLM 或论文实现的逐行还原。</p>
+
+      <p><strong>算例 A（Table 2：EnDe / T5-small / temp=0）：</strong>α=0.75，γ=7，c=0.05。</p>
+      <p>
+        <code>0.75^8 = 0.100112915</code><br>
+        <code>E = (1 − 0.100112915) / (1 − 0.75) = 3.59954834</code><br>
+        <code>S = 3.59954834 / (1 + 7×0.05) = 3.59954834 / 1.35 = 2.66633210</code><br>
+        页面显示：<code>E = 3.5995</code>，<code>S = 2.6663</code>。
+      </p>
+
+      <p><strong>算例 B（Table 2：CNNDM / T5-small / temp=1）：</strong>α=0.53，γ=5，c=0.05。</p>
+      <p>
+        <code>0.53^6 = 0.0221643611</code><br>
+        <code>E = (1 − 0.0221643611) / (1 − 0.53) = 2.08050136</code><br>
+        <code>S = 2.08050136 / (1 + 5×0.05) = 2.08050136 / 1.25 = 1.66440109</code><br>
+        页面显示：<code>E = 2.0805</code>，<code>S = 1.6644</code>。
+      </p>
+
+      <p><strong>JS 与手算同口径：</strong>E 用 <code>(1 − α^(γ+1)) / (1 − α)</code>，S 用 <code>E / (1 + γc)</code>，只在显示时用 <code>toFixed(4)</code> 四舍五入；中间值不取整。</p>
+
+      <p><strong>未覆盖：</strong>采样温度、top-k/top-p、batch 交互、KV 开销；也未建模 draft 与 target 的逐位置分布差异、硬件并行效率、实现固定开销和拒绝后的重采样方差。α 在论文里是特定模型/数据集上的期望，不是通用常数（§4.2）。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>验证是一次并行 forward，KV 只回滚被拒绝的尾部位</h2></div>
+  <p class="sec-sub">读完这节你应该知道：draft→verify→accept 的数据流，vLLM 的 n-gram / draft model / EAGLE 路径，以及 speculative token 在 KV Cache 里怎么记账。</p>
+
+  <figure>
+    <svg class="flow" viewBox="0 0 560 445" role="img" aria-label="draft, verify, accept 三步数据流">
+      <defs>
+        <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" class="svg-arrow-head"></path>
+        </marker>
+      </defs>
+      <rect x="15" y="10" width="530" height="110" rx="12" class="svg-panel"></rect>
+      <text x="30" y="32" class="svg-title">1 · Draft：小模型先猜 γ 个 token</text>
+      <rect x="30" y="45" width="120" height="52" rx="8" class="svg-box"></rect>
+      <text x="90" y="66" text-anchor="middle" class="svg-label">prompt</text>
+      <text x="90" y="84" text-anchor="middle" class="svg-small">prefix</text>
+      <line x1="150" y1="71" x2="185" y2="71" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="190" y="45" width="150" height="52" rx="8" class="svg-box-draft"></rect>
+      <text x="265" y="66" text-anchor="middle" class="svg-label">Mq × γ</text>
+      <text x="265" y="84" text-anchor="middle" class="svg-small">自回归采样</text>
+      <line x1="340" y1="71" x2="375" y2="71" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="380" y="45" width="150" height="52" rx="8" class="svg-box-draft"></rect>
+      <text x="455" y="66" text-anchor="middle" class="svg-mono">x1 … xγ</text>
+      <text x="455" y="84" text-anchor="middle" class="svg-small">γ 个草稿 token</text>
+
+      <line x1="280" y1="120" x2="280" y2="145" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+
+      <rect x="15" y="150" width="530" height="130" rx="12" class="svg-panel"></rect>
+      <text x="30" y="172" class="svg-title">2 · Verify：target 一次并行 forward</text>
+      <rect x="30" y="185" width="110" height="60" rx="8" class="svg-box"></rect>
+      <text x="85" y="208" text-anchor="middle" class="svg-label">prefix</text>
+      <text x="85" y="226" text-anchor="middle" class="svg-small">+ drafts</text>
+      <line x1="140" y1="215" x2="175" y2="215" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="180" y="185" width="210" height="60" rx="8" class="svg-box-target"></rect>
+      <text x="285" y="208" text-anchor="middle" class="svg-label">Mp(prefix + x1…xγ)</text>
+      <text x="285" y="226" text-anchor="middle" class="svg-small">γ+1 个位置的 logits 一次算完</text>
+      <line x1="390" y1="215" x2="415" y2="215" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="420" y="185" width="110" height="60" rx="8" class="svg-box-target"></rect>
+      <text x="475" y="208" text-anchor="middle" class="svg-mono">p1 … p(γ+1)</text>
+      <text x="475" y="226" text-anchor="middle" class="svg-small">目标分布</text>
+
+      <line x1="280" y1="280" x2="280" y2="305" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+
+      <rect x="15" y="310" width="530" height="120" rx="12" class="svg-panel"></rect>
+      <text x="30" y="332" class="svg-title">3 · Accept / Recover：从左到右</text>
+      <rect x="30" y="345" width="150" height="55" rx="8" class="svg-box"></rect>
+      <text x="105" y="367" text-anchor="middle" class="svg-mono">u ≤ p(x)/q(x) ?</text>
+      <text x="105" y="385" text-anchor="middle" class="svg-small">逐个接受</text>
+      <line x1="180" y1="372" x2="210" y2="372" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="215" y="345" width="150" height="55" rx="8" class="svg-box"></rect>
+      <text x="290" y="367" text-anchor="middle" class="svg-mono">n 个接受</text>
+      <text x="290" y="385" text-anchor="middle" class="svg-small">首个拒绝停止</text>
+      <line x1="365" y1="372" x2="395" y2="372" class="svg-arrow" marker-end="url(#arrowhead)"></line>
+      <rect x="400" y="345" width="130" height="55" rx="8" class="svg-box-accent"></rect>
+      <text x="465" y="367" text-anchor="middle" class="svg-mono">n + 1 tokens</text>
+      <text x="465" y="385" text-anchor="middle" class="svg-small">至少 1，至多 γ+1</text>
+      <text x="280" y="418" text-anchor="middle" class="svg-small">拒绝位置：从 norm(max(0, p − q)) 重采样；全接受：从 p(γ+1) 取 bonus</text>
+    </svg>
+    <figcaption>图 1 · 按 Algorithm 1 重绘的 draft→verify→accept 数据流。不是论文原图；重点是 target 只做一次 forward，接受/拒绝在采样器里逐位置进行。</figcaption>
+  </figure>
+
+  <p>
+    vLLM 的验证路径与这个数据流对应：scheduler 把每个请求的 draft token 放进 <code>scheduled_spec_decode_tokens</code>；<code>SpecDecodeMetadata</code> 把 batch 内的 draft token 拉平，<code>target_logits_indices</code> 和 <code>bonus_logits_indices</code> 指向需要验证的位置与 bonus 位置（<code>vllm/v1/spec_decode/metadata.py:10-24</code>）。rejection sampler 按 <code>cu_num_draft_tokens</code> 逐请求扫描，输出 <code>accepted + recovered + bonus</code>（<code>vllm/v1/sample/rejection_sampler.py:50-69,432-440,525-535</code>）。
+  </p>
+
+  <p class="tbl-cap">源码对照：vLLM e740bad；<code>vllm/v1/spec_decode/</code> 的 V1 proposer，以及 <code>docs/features/speculative_decoding/</code> 的 §Method Selection。V2 的 speculator 在 <code>vllm/v1/worker/gpu/spec_decode/</code>，配置面相同。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>method</th><th>草稿来源</th><th>关键配置</th><th>成本与限制</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>ngram</code></td>
+          <td>在上下文里找最长的后缀 n-gram，复制匹配位置之后的 k 个 token（<code>vllm/v1/spec_decode/ngram_proposer.py:210</code>）</td>
+          <td><code>num_speculative_tokens</code>；<code>prompt_lookup_min/max</code> 默认 5/5（<code>vllm/v1/worker/gpu/spec_decode/ngram/config.py:21-26</code>）</td>
+          <td>无额外模型权重，c 接近 0；依赖重复文本，α 随任务变化</td>
+        </tr>
+        <tr>
+          <td><code>suffix</code></td>
+          <td>后缀树 / 全局缓存匹配；<code>SuffixDecodingProposer</code>（<code>vllm/v1/spec_decode/suffix_decoding.py:10</code>）</td>
+          <td><code>suffix_decoding_max_tree_depth=24</code>、<code>suffix_decoding_max_cached_requests=10000</code>（<code>vllm/config/speculative.py:592,596</code>）</td>
+          <td>无额外模型权重；树越深，draft 越长，但拒绝后浪费也越多</td>
+        </tr>
+        <tr>
+          <td><code>draft_model</code></td>
+          <td>独立小模型；默认要求与 target 同 vocab</td>
+          <td><code>model</code>、<code>draft_tensor_parallel_size</code>、<code>num_speculative_tokens</code>；<code>use_heterogeneous_vocab</code> 可选（要求 greedy draft）</td>
+          <td>多一份权重和 KV；<code>DraftModelProposer</code> 当前要求 draft TP 与 target TP 相同（<code>vllm/v1/spec_decode/draft_model.py:64-78</code>）</td>
+        </tr>
+        <tr>
+          <td><code>eagle</code> / <code>eagle3</code></td>
+          <td>EAGLE head 读 target hidden states；<code>EagleProposer(pass_hidden_states_to_model=True)</code>（<code>vllm/v1/spec_decode/eagle.py:10-21</code>）</td>
+          <td><code>model</code> 是 EAGLE checkpoint；<code>num_speculative_tokens</code>；<code>parallel_drafting</code> 仅 V1，V2 已弃用</td>
+          <td>多一份 draft head / KV；<code>num_lookahead_tokens = num_speculative_tokens</code>（<code>vllm/v1/worker/gpu/spec_decode/eagle/config.py:56-58</code>）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">配置默认值</span><h4>SpeculativeConfig 在 e740bad 的默认面</h4></div>
+    <ul>
+      <li><code>num_speculative_tokens</code> 默认 <code>None</code>，必须 &gt;0；若仍为 <code>None</code> 且 draft config 没有 <code>n_predict</code>，启动时报错（<code>vllm/config/speculative.py:451,1634-1637</code>）。</li>
+      <li><code>model</code> 默认 <code>None</code>；<code>method</code> 默认 <code>None</code>，vLLM 会从 checkpoint 推断（<code>vllm/config/speculative.py:454,457,1338-1397</code>）。</li>
+      <li><code>draft_tensor_parallel_size</code> 默认 <code>None</code>；配置注释允许 1 或与 target TP 相同，但当前 <code>DraftModelProposer</code> 直接要求两者相同（<code>vllm/config/speculative.py:477</code>；<code>draft_model.py:64-78</code>）。</li>
+      <li><code>rejection_sample_method="standard"</code>；<code>draft_sample_method="greedy"</code>；<code>parallel_drafting=False</code>（<code>vllm/config/speculative.py:622,694,561</code>）。页面只展开 <code>standard</code>；<code>synthetic</code>/<code>block</code>/<code>fly</code> 是 vLLM 的扩展验证器，不在此展开。</li>
+    </ul>
+  </div>
+
+  <p>
+    命令行入口是 <code>--speculative-config</code>（别名 <code>-sc</code>），或三个快捷参数 <code>--spec-method</code>、<code>--spec-model</code>、<code>--spec-tokens</code>；快捷参数与 JSON 里的同名 key 互斥（<code>vllm/engine/arg_utils.py:1895-1899,2142-2148</code>）。旧写法 <code>--speculative-model</code> / <code>--num-speculative-tokens</code> 已弃用（<code>docs/features/speculative_decoding/draft_model.md</code>）。
+  </p>
+
+  <pre class="cmd">vllm serve &lt;target-model&gt; \
+  --speculative-config '{
+    "method": "draft_model",
+    "model": "&lt;draft-model&gt;",
+    "num_speculative_tokens": 5
+  }'</pre>
+
+  <h3>KV Cache：为 γ 个 draft 位置预留，拒绝后逻辑回滚</h3>
+  <p>
+    目标模型验证时，一次 forward 会为 <code>prefix + x1…xγ</code> 的所有位置写 KV；因果注意力保证每个位置只看到前面的 token，所以 γ+1 个位置的 logits 可以在同一次 forward 里算出。scheduler 为 spec decode 预留 <code>1 + num_spec_tokens + num_lookahead_tokens</code> 个 token 的 block，并按 block size 取整（<code>vllm/v1/core/sched/scheduler.py:376-382</code>）。
+  </p>
+  <p>
+    采样完成后，scheduler 从 <code>num_computed_tokens</code> 和 <code>num_output_placeholders</code> 中减去 <code>num_rejected</code>（<code>vllm/v1/core/sched/scheduler.py:2430-2447</code>）。这意味着被拒绝的尾部位不再计入“已计算 token”；物理块仍由 KV cache manager 按 block 管理，页面不展开块级回收细节。draft 模型也有自己的 KV Cache；EAGLE 的 lookahead 数等于 <code>num_speculative_tokens</code>，所以它的 KV 预留会随 γ 增长（<code>vllm/v1/worker/gpu/spec_decode/eagle/config.py:56-58</code>）。
+  </p>
+  <p>
+    指标口径也要分清：vLLM 的 <code>mean_acceptance_length = 1 + num_accepted / num_spec_steps</code> 把 bonus token 算进去，和 Eq. (1) 的 <code>E[N]</code> 同量纲；<code>draft_acceptance_rate = num_accepted / num_draft_tokens</code> 是聚合接受比例，不是论文的 per-position <code>α</code>（<code>vllm/v1/metrics/stats.py:407-409</code>）。
+  </p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>T5-XXL 上实测 1.4–3.4×（T5-small 2.3–3.4×）；draft 更大不一定更快</h2></div>
+  <p class="sec-sub">读完这节你应该知道：论文在哪些模型/数据集上测到了什么，以及 Table 2 里最反直觉的两三行。</p>
+
+  <p>
+    论文在 T5-XXL 11B 上比较了三种 draft 规模、两个任务和两种采样方式。Table 2 的完整 12 行转录如下；Speed 是相对 T5X 自回归实现的 walltime，条件是单 TPU-v4、batch size 1。
+  </p>
+
+  <p class="tbl-cap">Table 2（Leviathan et al. v2，全表转录）：目标模型 T5-XXL 11B；Mq 为 T5-small 77M / T5-base 250M / T5-large 800M；EnDe = WMT EnDe，CNNDM = CNN/DM；Temp=0 为 argmax，Temp=1 为标准采样。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Task</th><th>Mq</th><th>Temp</th><th>γ</th><th>α</th><th>Speed</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>EnDe</td><td>T5-small</td><td class="num">0</td><td class="num">7</td><td class="num">0.75</td><td class="num">3.4×</td></tr>
+        <tr><td>EnDe</td><td>T5-base</td><td class="num">0</td><td class="num">7</td><td class="num">0.8</td><td class="num">2.8×</td></tr>
+        <tr><td>EnDe</td><td>T5-large</td><td class="num">0</td><td class="num">7</td><td class="num">0.82</td><td class="num">1.7×</td></tr>
+        <tr><td>EnDe</td><td>T5-small</td><td class="num">1</td><td class="num">7</td><td class="num">0.62</td><td class="num">2.6×</td></tr>
+        <tr><td>EnDe</td><td>T5-base</td><td class="num">1</td><td class="num">5</td><td class="num">0.68</td><td class="num">2.4×</td></tr>
+        <tr><td>EnDe</td><td>T5-large</td><td class="num">1</td><td class="num">3</td><td class="num">0.71</td><td class="num">1.4×</td></tr>
+        <tr class="best"><td>CNNDM</td><td>T5-small</td><td class="num">0</td><td class="num">5</td><td class="num">0.65</td><td class="num">3.1×</td></tr>
+        <tr><td>CNNDM</td><td>T5-base</td><td class="num">0</td><td class="num">5</td><td class="num">0.73</td><td class="num">3.0×</td></tr>
+        <tr><td>CNNDM</td><td>T5-large</td><td class="num">0</td><td class="num">3</td><td class="num">0.74</td><td class="num">2.2×</td></tr>
+        <tr><td>CNNDM</td><td>T5-small</td><td class="num">1</td><td class="num">5</td><td class="num">0.53</td><td class="num">2.3×</td></tr>
+        <tr><td>CNNDM</td><td>T5-base</td><td class="num">1</td><td class="num">3</td><td class="num">0.55</td><td class="num">2.2×</td></tr>
+        <tr><td>CNNDM</td><td>T5-large</td><td class="num">1</td><td class="num">3</td><td class="num">0.56</td><td class="num">1.7×</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>三个反直觉点：</strong></p>
+  <ul>
+    <li><strong>draft 更大不等于更快。</strong>Table 2 里 T5-large 的 α 高于 T5-small，但 Speed 更低。论文的解释是 T5-small 在 c 与 α 之间取得更好的平衡（§4.1）：更大的 draft 让 α 上升，但 c 也上升，最终 walltime 由两者共同决定。</li>
+    <li><strong>temp=0 的接受率和加速比都高于 temp=1。</strong>论文在 T5-XXL 上观察到这一点（§4.1）。这是该实验设置下的结论，不是算法要求；随机采样下仍然可以用同一套拒绝采样保持分布。</li>
+    <li><strong>c 接近 0 的 n-gram 也能加速。</strong>论文报告 EnDe/T5-XXL + bigram 在 <span class="mono" data-src="§3.6">α≈0.2、γ=3 时约 1.25×</span>；因为 draft 成本接近 0，<code>E[N]</code> 本身就是加速比，α 低并不自动意味着负加速。</li>
+  </ul>
+
+  <p>
+    并列证据：Chen et al. 在 Chinchilla 70B 的分布式 serving 上报告 <span class="mono" data-src="§1">2–2.5×</span> 解码加速（§1）；EAGLE 在 LLaMA2-Chat 70B 上报告 <span class="mono" data-src="§1">2.7–3.5×</span> latency 加速、吞吐约 <span class="mono" data-src="§1">2×</span>（§1）。这些数字的模型、硬件、batch size 和数据集与 Table 2 不同，不能直接横向比较；它们说明的是同一条机制在不同 draft 侧实现上都能成立，而不是某个固定倍率。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>α 低于 c 时，验证越认真越慢</h2></div>
+  <p class="sec-sub">读完这节你应该知道：speculative decoding 在哪些条件下会失效，以及部署时最先撞到的是哪几个约束。</p>
+
+  <h3>负加速：α 低、c 高或 γ 过大</h3>
+  <p>
+    由 Theorem 3.8，<code>S &gt; 1</code> 等价于 <code>c &lt; α(1+α+…+α<sup>γ−1</sup>)/γ</code>。右边不超过 α，所以 <code>α &lt; c</code> 时任何 γ 都无法把 S 拉过 1；即使 α 略高于 c，γ 太大也会让分母 <code>1+γc</code> 线性增长，S 先升后降。论文用 Figure 3 数值搜索最优 γ；Corollary 3.9 给出 α&gt;c 时至少存在 γ=1 的改进，下界是 <code>(1+α)/(1+c)</code>。
+  </p>
+  <p>
+    Chen et al. 的 Figure 1 也显示：lookahead K 增大后，平均加速比会平台化甚至回退；XSum 在 <span class="mono" data-src="Figure 1">K=3</span> 时最优，而且延迟方差随 K 增大（§6.3）。这和 Eq. (1) 的饱和、Theorem 3.8 的线性分母是同一件事的两个视角：更多 draft token 带来更高的 E，但也带来更高的验证成本和更大的方差。
+  </p>
+
+  <h3>draft 模型显存：多一份权重和一份 KV</h3>
+  <p>
+    draft_model 和 EAGLE 都不是“免费”的：它们要多加载一份权重，还要为 draft 的 γ 个位置维护 KV。EAGLE 论文在 FP16 下报告：Vicuna 7B 的最大 batch size 从 <span class="mono" data-src="§4.4">8 降到 7</span>（24GB RTX 3090）；LLaMA2-Chat 70B 从 <span class="mono" data-src="§4.4">5 降到 4</span>（4×A100 40GB）。论文把这归因于 EAGLE 略高的显存占用和 tree attention 的额外计算（§4.4）。
+  </p>
+  <p>
+    vLLM 里，<code>draft_tensor_parallel_size</code> 控制 draft 的 TP；<code>DraftModelProposer</code> 当前要求它和 target TP 相同（<code>draft_model.py:64-78</code>）。<code>max_model_len</code> 可以单独限制 draft 的上下文长度（<code>vllm/config/speculative.py:502</code>）。EAGLE 的 <code>num_lookahead_tokens = num_speculative_tokens</code> 还会让 scheduler 为每个请求预留更多 KV block（<code>eagle/config.py:56-58</code>；<code>scheduler.py:376-382</code>）。
+  </p>
+
+  <h3>batch 变大，收益通常变小</h3>
+  <p>
+    Leviathan 的 Table 2 是 <span class="mono" data-src="§4.1">batch size 1</span>、单 TPU-v4 的 latency 数据；它不代表高 QPS 的吞吐。EAGLE 论文在 MT-bench、temp=0 下报告 LLaMA2-Chat 70B 的加速比随 batch size 从 <span class="mono" data-src="Table 7">3.01×（bs=1）降到 2.40×（bs=4）</span>，吞吐约 <span class="mono" data-src="Table 7">1.99×</span>（Table 7）。原因是 batch 越大，目标模型越接近 compute-bound，验证阶段多出来的 γ 个位置不再“免费”。
+  </p>
+  <p>
+    vLLM 文档的定性表也把 EAGLE 标为“低 QPS 高收益、高 QPS 中高收益”，把 n-gram 标为“低 QPS 低到中收益、高 QPS 中收益”（<code>docs/features/speculative_decoding/README.md</code> §Method Selection）。具体拐点取决于模型、流量、硬件和 draft 质量，不能只看一个倍率。
+  </p>
+
+  <h3>KV 与采样：两条容易被忽略的口径</h3>
+  <p>
+    KV 方面，验证阶段要为 γ 个 draft 位置写 KV；scheduler 预留 <code>1 + γ + lookahead</code> 个 token 的 block，采样后从 <code>num_computed_tokens</code> 和 <code>num_output_placeholders</code> 中减去 <code>num_rejected</code>（<code>scheduler.py:376-382,2430-2447</code>）。逻辑回滚不等于物理块立刻释放；块仍按 block 管理。draft 模型自己的 KV 也要算进显存预算。
+  </p>
+  <p>
+    采样方面，论文 §2.2 把 argmax、temperature、top-k、top-p 都折算成“调整后的 p、q”，再套用同一拒绝采样；Table 2 的 temp=0 &gt; temp=1 是 T5-XXL 上的实验观察（§4.1）。vLLM 的实现是另一层：<code>rejection_sample_method</code> 默认 <code>standard</code>，<code>draft_sample_method</code> 默认 <code>greedy</code>；<code>greedy</code> 把 draft 分布当成 one-hot，<code>probabilistic</code> 才保留完整 q 做概率比检验（<code>vllm/config/speculative.py:622,694</code>；<code>docs/features/speculative_decoding/README.md</code>）。不要把“vLLM 默认 greedy draft”直接等同于“target 用 temperature=0”。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">适合</span><h4>memory-bound、低到中 QPS、延迟敏感</h4></div>
+      <p>目标模型有闲置算术资源，draft 的 α 足够高，且显存能放下 draft 权重和 KV。此时 speculative decoding 把 memory bandwidth 的瓶颈转成一次并行验证，收益来自“一次目标 forward 出多个 token”。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">不适合</span><h4>已经 compute-bound、batch 很大、没有好 draft</h4></div>
+      <p><span class="infer">推断</span>（依据：§3.3 的并行假设、EAGLE §4.4 的 batch 结果、vLLM 文档的 QPS 定位）：当目标模型已经被 batch 填满、验证的 γ 个位置不再免费，或 α 低到覆盖不了 c 时，speculative decoding 会增加延迟而不是降低延迟；没有合适 draft 或显存紧张时，也应优先考虑其他优化。</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div>Speculative Decoding：Fast Inference from Transformers via Speculative Decoding / Accelerating Large Language Model Decoding with Speculative Sampling / EAGLE</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2211.17192v2">Leviathan et al., arXiv 2211.17192 v2 (ICML 2023 Oral)</a><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://arxiv.org/abs/2302.01318">Chen et al., arXiv 2302.01318 v1</a><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://arxiv.org/abs/2401.15077">Li et al., EAGLE, arXiv 2401.15077 v3</a><br>
+    vLLM：<a href="https://github.com/vllm-project/vllm">github.com/vllm-project/vllm</a> · commit e740bad<br>
+    文档：<code>docs/features/speculative_decoding/README.md</code>（实际路径；该目录下没有 <code>spec_decode.md</code>）<br>
+    笔记：<a href="/generate相关/">generate相关 · speculative decoding 一节</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var alpha = document.getElementById('alphaRange');
+  var gamma = document.getElementById('gammaRange');
+  var cost = document.getElementById('costRange');
+  var alphaVal = document.getElementById('alphaVal');
+  var gammaVal = document.getElementById('gammaVal');
+  var costVal = document.getElementById('costVal');
+  var slotGamma = document.getElementById('slotGamma');
+  var slotAlpha = document.getElementById('slotAlpha');
+  var slotE = document.getElementById('slotE');
+  var expTokens = document.getElementById('expTokens');
+  var speedup = document.getElementById('speedup');
+  var simNote = document.getElementById('simNote');
+  if (!alpha || !gamma || !cost || !alphaVal || !gammaVal || !costVal ||
+      !slotGamma || !slotAlpha || !slotE || !expTokens || !speedup || !simNote) {
+    return;
+  }
+
+  var presets = document.querySelectorAll('.sim-top .rule-btn');
+
+  function fmt(x) {
+    return x.toFixed(4);
+  }
+
+  function expected(a, g) {
+    return (1 - Math.pow(a, g + 1)) / (1 - a);
+  }
+
+  function theoreticalSpeedup(a, g, c) {
+    return expected(a, g) / (1 + g * c);
+  }
+
+  function breakEven(a, g) {
+    var sum = 0;
+    var p = 1;
+    var i;
+    for (i = 0; i < g; i += 1) {
+      sum += p;
+      p *= a;
+    }
+    return a * sum / g;
+  }
+
+  function setActive(btn) {
+    var i;
+    for (i = 0; i < presets.length; i += 1) {
+      if (presets[i] === btn) {
+        presets[i].classList.add('active');
+      } else {
+        presets[i].classList.remove('active');
+      }
+    }
+  }
+
+  function update() {
+    var a = parseFloat(alpha.value);
+    var g = parseInt(gamma.value, 10);
+    var c = parseFloat(cost.value);
+    var e = expected(a, g);
+    var s = theoreticalSpeedup(a, g, c);
+    var be = breakEven(a, g);
+
+    alphaVal.textContent = a.toFixed(2);
+    gammaVal.textContent = String(g);
+    costVal.textContent = c.toFixed(2);
+    slotGamma.textContent = String(g);
+    slotAlpha.textContent = a.toFixed(2);
+    slotE.textContent = fmt(e);
+    expTokens.textContent = fmt(e);
+    speedup.textContent = fmt(s) + '×';
+    if (c < be) {
+      simNote.textContent = 'c < 盈亏平衡 ' + fmt(be) + '：S > 1';
+    } else {
+      simNote.textContent = 'c ≥ 盈亏平衡 ' + fmt(be) + '：S ≤ 1（负加速）';
+    }
+  }
+
+  alpha.addEventListener('input', function () { setActive(null); update(); });
+  gamma.addEventListener('input', function () { setActive(null); update(); });
+  cost.addEventListener('input', function () { setActive(null); update(); });
+
+  var i;
+  for (i = 0; i < presets.length; i += 1) {
+    presets[i].addEventListener('click', function () {
+      alpha.value = this.getAttribute('data-alpha');
+      gamma.value = this.getAttribute('data-gamma');
+      setActive(this);
+      update();
+    });
+  }
+
+  update();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1050 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 75 | §1 | 3/4*100 |
+| 3.0 | Kimi Table 5 | 84.3-81.3 |
+| 7.0 | Kimi Table 5 | 29.6-22.6 |
+| 2.0 | Kimi Table 5 | 90.0-88.0 |
+| -1.1 | Kimi Table 5 | 35.0-36.1 |
+| -1.7 | Kimi Table 5 | 58.8-60.5 |
+| 5.5 | Kimi Table 5 | 68.5-63.0 |
+| 4.3 | Kimi Table 5 | 37.1-32.8 |
+| -0.5 | Kimi Table 5 | 32.7-33.2 |
+| 2.3 | Kimi Table 5 | 54.5-52.2 |
+| 5.0 | Kimi Table 4 | 62.1-57.1 |
+| 1.7 | Kimi Table 4 | 67.4-65.7 |
+| 2.2 | Kimi Table 3 | 73.8-71.6 |
+| 1.3 | Kimi Table 3 | 72.9-71.6 |
+| -2.9 | Kimi Table 3 | 60.2-63.1 |
+| 0.1 | RWKV-7 Table 3 | 71.5-71.4 |
+| 3.7 | RWKV-7 Table 3 | 71.5-67.8 |
+| 5.5 | RWKV-7 Table 4 | 61.1-55.6 |
+| 3.0 | RWKV-7 Table 4 | 61.1-58.1 |
+| 9.83 | §6.3 | 6*1000000*128*128/10000000000 |
+| 2.46 | §6.3 | 3*1000000*64*128/10000000000 |
+| 4.10 | §6.3 | 1000000*64*64/1000000000 |
+| 1.27 | §6.3 | (6*1000000*128*128+3*1000000*64*128+1000000*64*64)/100000000000 |
+| 2.56 | §6.3 | 2*1000000*1000000*128/100000000000000 |
+| 2016 | §6.3 | (2*1000000*1000000*128)/(6*1000000*128*128+3*1000000*64*128+1000000*64*64) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="multi-paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>线性注意力：RWKV / KDA · 固定状态如何替代 KV cache</title>
+<meta name="description" content="线性注意力把历史压成固定状态。RWKV-4 的 time-mix、RWKV-7 的向量门控 delta rule、Kimi Linear 的逐通道 KDA 与 3:1 混合，以及 chunked scan 的并行代价。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+code{overflow-wrap:anywhere}
+.eq{font-size:13.5px}
+.slot-val{overflow-wrap:anywhere}
+@media (max-width:560px){.sim{padding:16px}}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">线性注意力 · RWKV / KDA</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">怎么算</a>
+      <a href="#pipeline">架构</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM 架构 · 线性注意力</span>
+  <h1>线性注意力：把不断增长的 KV cache 压成固定状态</h1>
+  <p class="hero-sub">
+    softmax attention 每生成一个 token 都要读完整段历史，KV cache 随序列线性增长。
+    线性注意力换成一个<strong>与序列长度无关的矩阵状态</strong>，代价是状态容量有限，必须学会在写入时遗忘、在冲突时定向改写。
+    RWKV-4 用 time-mix/channel-mix 把这件事做成可训练的 RNN；RWKV-7 把更新写成向量门控的广义 delta rule；Kimi Linear 的 KDA 再把门细化到每个通道，并用 3:1 的 KDA:MLA 混合保住全局检索。
+  </p>
+  <div class="meta">
+    <span>RWKV-4 · RWKV-7 · Kimi Linear · Gated DeltaNet</span>
+    <a href="https://arxiv.org/abs/2305.13048" target="_blank" rel="noopener">RWKV-4 2305.13048 ↗</a>
+    <a href="https://arxiv.org/abs/2503.14456" target="_blank" rel="noopener">RWKV-7 2503.14456 ↗</a>
+    <a href="https://arxiv.org/abs/2510.26692" target="_blank" rel="noopener">Kimi Linear 2510.26692 ↗</a>
+    <a href="https://arxiv.org/abs/2412.06464" target="_blank" rel="noopener">Gated DeltaNet 2412.06464 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    线性注意力把历史压进一个 <code>d<sub>k</sub> × d<sub>v</sub></code> 的矩阵状态：每来一个 token，用外积写入；查询时用 q 读出。
+    decode 阶段只读这个状态，不读历史，因此每步计算和显存都与序列长度无关。
+  </p>
+  <p>
+    但固定状态不会自己忘记。加性写入只叠加、不删除，序列一长，不同的 key 就会挤进同一片方向，检索时取回混合值。
+    补缺口的两条机制是：<strong>gating/decay</strong> 按比例缩小旧状态，<strong>delta rule</strong> 沿当前 key 定向删除再写入。
+  </p>
+  <p>
+    Gated DeltaNet 把标量门和 delta rule 合在一起；KDA 把标量门换成逐通道对角门，并把门放在 Householder 之前；RWKV-7 则把衰减和学习率都向量化，还允许删除 key 与写入 key 不同。
+    三者都把更新写成对角加秩一的 DPLR，从而能 chunked 并行。
+  </p>
+  <p>
+    Kimi Linear 用 3:1 的 KDA:MLA 混合：长上下文平均分 <span data-src="Kimi Table 5">54.5</span> 对 MLA 的 <span data-src="Kimi Table 5">52.2</span>，1M prefill 快 <span data-src="Kimi Figure 7">2.9×</span>。
+    但解码加速原文给出 <span data-src="§5.6">6×</span>、<span data-src="§6.3">2.3×</span>、<span data-src="§6.3">6.3×</span> 三组数字，§06 并列呈现，不替作者合并。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="§1">75<small>%</small></div>
+      <div class="k">混合比例下 KV cache 用量最多减少<br>MLA 层仍保留随 T 增长的 KV</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Kimi Figure 7">2.9<small>×</small></div>
+      <div class="k">Kimi Linear vs MLA 的 prefill 加速<br>序列越长收益越明显（§5.6）</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§6.3">128×128</div>
+      <div class="k">KDA 每头状态大小，与序列长度无关<br>MLA 层仍保留随 T 增长的 KV cache</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>softmax 的 KV cache 随长度增长；固定状态省掉它，却要在写入时决定遗忘什么</h2></div>
+  <p class="sec-sub">先建立共同认知：线性注意力把历史压进一个与序列长度无关的矩阵状态；难点不是省显存，而是有限容量下如何选择性写入、定向删除。</p>
+
+  <p>
+    softmax attention 在 decode 时要把每个历史 token 的 K/V 留在显存里，再让当前 query 与它们逐个打分。
+    Kimi Linear 的 §1 把这条代价写成两点：时间随序列二次增长，KV cache 随序列线性增长。
+    序列越长，每一步 decode 要读的 K/V 越多，显存也越难留给更大的 batch。
+  </p>
+
+  <p>
+    线性注意力换成另一套记账方式：维护一个矩阵状态 <code>S<sub>t</sub></code>，每来一个 token 就把它的 key/value 外积加进去；查询时用 q 从状态里读。
+    状态大小是 <code>d<sub>k</sub> × d<sub>v</sub></code>，与已经处理了多少 token 无关。
+    Kimi 的 KDA 每个头取 <span data-src="§6.3">128×128</span>，decode 时只保留这一块状态。
+  </p>
+
+  <div class="eq">
+    S<sub>t</sub> = S<sub>t−1</sub> + k<sub>t</sub> v<sub>t</sub><sup>⊤</sup>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    o<sub>t</sub> = S<sub>t</sub><sup>⊤</sup> q<sub>t</sub>
+  </div>
+  <div class="eq-cap">最朴素的线性注意力：加性写入，没有遗忘；列向量约定见 Kimi Linear §2.2</div>
+
+  <p>
+    问题出在「只加不减」。RWKV-7 的 §2 把这件事讲得很直接：旧状态不会被移除，只会因为新值不断叠加而变成数值上更小的一部分；
+    状态容量有限，最终不同的值会混在一起，按某个 key 取回时拿到的是多条关联的混合。
+    Gated DeltaNet 的 §1 用另一个说法描述同一件事：能同时存下的正交 key-value 对数量受维度限制，序列长度超过维度后，memory collision 不可避免。
+  </p>
+
+  <p>
+    所以一个可用的固定状态至少要做三件事：决定哪些旧记忆该淡出；决定当前 token 的写入强度；在需要时把某个 key 上的旧值替换掉，而不是继续叠加。
+    后面的 gating、delta rule 和 chunked 并行，都是围绕这三件事展开的。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">容量账</span><h4>固定状态省掉的是「随 T 增长的存储」，不是「容量无限」</h4></div>
+    <p>
+      KV cache 的大小与序列长度成正比；线性状态的大小只与 head 维度有关。前者可以精确保留每个 token 的 K/V，后者必须把历史压缩进固定秩的矩阵。
+      压缩比越高，检索越依赖「写什么、删什么」的策略。这不是实现细节，而是结构性的取舍。<span class="infer">推断</span>（由固定秩状态与 GDN §1 的容量上限推出）
+    </p>
+  </div>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>从固定衰减到标量门控，再到 delta rule：每一代只补上一个缺口</h2></div>
+  <p class="sec-sub">RWKV-4 证明线性 RNN 可以训练到 <span data-src="RWKV-4 Table 2">14B</span>；Mamba-2 把衰减变成数据相关；DeltaNet 补上定向删除；GDN 把门控和 delta 合并。它们各自仍留下一个粒度问题。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">RWKV-4 · §3.1</span><h4>time-mix / channel-mix：固定衰减的 WKV</h4></div>
+      <p>
+        RWKV-4 的每个 block 由 time-mix 和 channel-mix 两个子块组成。time-mix 先做 token shift，把当前输入和上一时刻输入线性插值，再送进 WKV 算子：
+      </p>
+      <p>
+        <code>wkv<sub>t</sub> = (Σ<sub>i&lt;t</sub> e<sup>−(t−1−i)w+k<sub>i</sub></sup> ⊙ v<sub>i</sub> + e<sup>u+k<sub>t</sub></sup> ⊙ v<sub>t</sub>) / (Σ<sub>i&lt;t</sub> e<sup>−(t−1−i)w+k<sub>i</sub></sup> + e<sup>u+k<sub>t</sub></sup>)</code>
+      </p>
+      <p>
+        这里的 <code>w</code> 是每个通道一个的可学习衰减向量，<code>u</code> 是当前 token 的 bonus。它让模型能按相对位置指数衰减，但 <code>w</code> 不是输入的函数：同一层、同一通道的衰减曲线在训练完后固定。
+        channel-mix 则是一个带输出门的 <code>ReLU²</code> MLP。
+      </p>
+      <p>
+        它能以 <code>O(BTd²)</code> 的矩阵乘加 <code>O(BTd)</code> 的串行 scan 训练，也能在推理时写成逐 token 递推（§3.2–§3.3）。缺口是：衰减不能按输入变化，也不能只删掉某个 key 上的旧值。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Mamba-2 · §5.1 / §6</span><h4>标量门控 + SSD 分块算法</h4></div>
+      <p>
+        Mamba-2 把线性注意力的状态更新写成带标量衰减的递推：<code>S<sub>t</sub> = α<sub>t</sub> S<sub>t−1</sub> + v<sub>t</sub> k<sub>t</sub><sup>⊤</sup></code>，其中 <code>α<sub>t</sub></code> 由输入决定。
+        Gated DeltaNet 的 §2.1 把这种形式概括为「Linear Attention with decay」。
+      </p>
+      <p>
+        Mamba-2 的贡献之一是把这类状态空间模型写成结构化矩阵，并给出 SSD 的分块算法（§5、§6）：块内做矩阵乘，块间传递状态，从而在 GPU 上并行训练。
+        这套「chunked」思路后来被 GDN 和 KDA 继承。
+      </p>
+      <p>
+        缺口是粒度：<code>α<sub>t</sub></code> 是一个标量，整张状态一起衰减。想只忘掉某条过期的 key-value 关联，它做不到，只能让所有关联一起变淡。
+      </p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">DeltaNet · GDN §2.2</span><h4>delta rule：沿当前 key 定向替换</h4></div>
+      <p>
+        DeltaNet 把状态看成一张在线学习的 fast-weight 表，损失是 <code>½‖S<sup>⊤</sup>k<sub>t</sub> − v<sub>t</sub>‖²</code>。对状态做一步梯度下降，得到：
+      </p>
+      <p>
+        <code>S<sub>t</sub> = (I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>) S<sub>t−1</sub> + β<sub>t</sub> k<sub>t</sub> v<sub>t</sub><sup>⊤</sup></code>
+      </p>
+      <p>
+        <code>(I − β k k<sup>⊤</sup>)</code> 先把状态里沿 <code>k</code> 方向的分量消掉，再把新的 <code>k v<sup>⊤</sup></code> 写进去。β 控制替换强度：β=0 不写，β=1 完全替换。
+        这解决了「旧值擦不掉」的问题，但没有全局清空能力：上下文切换时，上一段的关联仍会留在其他方向上。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">Gated DeltaNet · Eq.10</span><h4>标量门 × delta：先整体缩放，再定向擦写</h4></div>
+      <p>
+        GDN 把两者合成一条规则：
+      </p>
+      <p>
+        <code>S<sub>t</sub> = S<sub>t−1</sub>(α<sub>t</sub>(I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>)) + β<sub>t</sub> v<sub>t</sub> k<sub>t</sub><sup>⊤</sup></code>
+      </p>
+      <p>
+        <code>α<sub>t</sub>→0</code> 时可以快速清空，<code>α<sub>t</sub>→1</code> 时退化为纯 delta rule。GDN 的 S-NIAH 实验正是用这两种失败模式来展示互补性：Mamba-2 在长序列上衰减太快，DeltaNet 在需要过滤时清不掉旧信息（§3.2）。
+      </p>
+      <p>
+        缺口仍在粒度：<code>α<sub>t</sub></code> 是每个 head 一个标量。Kimi Linear 的 §1 把这一点称为「coarse head-wise forget gate」——一个 head 里的所有通道共享同一个遗忘率。
+      </p>
+    </div>
+  </div>
+
+  <p class="eq-cap">表 1 · 状态更新的谱系（按各文公式整理；GDN 原文用行向量状态，KDA 用列向量，表中保留各自写法）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>状态更新</th><th>门控粒度</th><th>定向删除</th><th>出处</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>RWKV-4</td>
+          <td><code>s<sub>t</sub> = e<sup>−w</sup> ⊙ s<sub>t−1</sub> + e<sup>k<sub>t</sub></sup> ⊙ v<sub>t</sub></code>（逐通道向量状态）</td>
+          <td>通道级固定 <code>w</code>，非输入相关</td>
+          <td>否</td>
+          <td>§3.1.2</td>
+        </tr>
+        <tr>
+          <td>Mamba-2</td>
+          <td><code>S<sub>t</sub> = α<sub>t</sub> S<sub>t−1</sub> + v<sub>t</sub> k<sub>t</sub><sup>⊤</sup></code></td>
+          <td>标量 <code>α<sub>t</sub></code></td>
+          <td>否</td>
+          <td>GDN §2.1；Mamba-2 §5.1</td>
+        </tr>
+        <tr>
+          <td>DeltaNet</td>
+          <td><code>S<sub>t</sub> = S<sub>t−1</sub>(I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>) + β<sub>t</sub> v<sub>t</sub> k<sub>t</sub><sup>⊤</sup></code></td>
+          <td>无门控</td>
+          <td>是</td>
+          <td>GDN §2.2</td>
+        </tr>
+        <tr>
+          <td>Gated DeltaNet</td>
+          <td><code>S<sub>t</sub> = S<sub>t−1</sub>(α<sub>t</sub>(I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>)) + β<sub>t</sub> v<sub>t</sub> k<sub>t</sub><sup>⊤</sup></code></td>
+          <td>标量 <code>α<sub>t</sub></code></td>
+          <td>是</td>
+          <td>GDN Eq.10</td>
+        </tr>
+        <tr>
+          <td>RWKV-7</td>
+          <td><code>S<sub>t</sub> = S<sub>t−1</sub>(diag(w<sub>t</sub>) − κ̂<sub>t</sub><sup>⊤</sup>(a<sub>t</sub> ⊙ κ̂<sub>t</sub>)) + v<sub>t</sub><sup>⊤</sup> k̃<sub>t</sub></code></td>
+          <td>向量 <code>w<sub>t</sub></code>、<code>a<sub>t</sub></code></td>
+          <td>是，且删除/写入 key 可不同</td>
+          <td>RWKV-7 Eq.17</td>
+        </tr>
+        <tr>
+          <td>KDA</td>
+          <td><code>S<sub>t</sub> = (I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>) Diag(α<sub>t</sub>) S<sub>t−1</sub> + β<sub>t</sub> k<sub>t</sub> v<sub>t</sub><sup>⊤</sup></code></td>
+          <td>逐通道 <code>α<sub>t</sub></code></td>
+          <td>是</td>
+          <td>Kimi Linear Eq.1</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表按状态更新公式排，不按性能排。RWKV-4 的状态是逐通道向量，不是矩阵，不能直接和后面几行的矩阵状态比容量。
+    表中把「门控」和「定向删除」并列，是为了看两者的分工；RWKV-7 和 KDA 分别把门控推进到向量级和通道级。
+  </p>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>KDA 把门放到 Householder 之前：逐通道衰减 + 定向写入</h2></div>
+  <p class="sec-sub">记住两条更新链：GDN 的标量门 → KDA 的对角门；RWKV-7 的向量门 + 解耦删除/替换键。两者都把状态更新写成可 chunk 的 DPLR。</p>
+
+  <p>
+    先看 GDN 的形式。它把标量门放在 Householder 更新外面，整张状态先乘 <code>α<sub>t</sub></code>，再做 rank-1 修正：
+  </p>
+  <div class="eq">
+    S<sub>t</sub> = α<sub>t</sub>(I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>) S<sub>t−1</sub> + β<sub>t</sub> k<sub>t</sub> v<sub>t</sub><sup>⊤</sup>
+  </div>
+  <div class="eq-cap">Gated DeltaNet Eq.10（按列向量约定转写；原文 Eq.10 为行向量写法）</div>
+
+  <p>
+    KDA 把 <code>α<sub>t</sub></code> 从一个标量换成一个向量 <code>α<sub>t</sub> ∈ [0,1]<sup>d<sub>k</sub></sup></code>，并把 <code>Diag(α<sub>t</sub>)</code> 放到 Householder 之前：
+  </p>
+  <div class="eq">
+    S<sub>t</sub> = (I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>) Diag(α<sub>t</sub>) S<sub>t−1</sub> + β<sub>t</sub> k<sub>t</sub> v<sub>t</sub><sup>⊤</sup><br>
+    o<sub>t</sub> = S<sub>t</sub><sup>⊤</sup> q<sub>t</sub>
+  </div>
+  <div class="eq-cap">Kimi Delta Attention Eq.1；<code>α<sub>t</sub></code> 逐通道，<code>β<sub>t</sub></code> 仍是每个 head 一个标量（§4）</div>
+
+  <p>
+    这个顺序不是排版偏好。把 <code>Diag(α<sub>t</sub>)</code> 放在前面，KDA 可以把它和 rank-1 项合并成 DPLR：
+    <code>S<sub>t</sub> = (Diag(α<sub>t</sub>) − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup> Diag(α<sub>t</sub>)) S<sub>t−1</sub> + β<sub>t</sub> k<sub>t</sub> v<sub>t</sub><sup>⊤</sup></code>，
+    对应 <code>D = Diag(α<sub>t</sub>)</code>、<code>a = β<sub>t</sub> k<sub>t</sub></code>、<code>b = k<sub>t</sub> ⊙ α<sub>t</sub></code>（§6.2）。
+    删除方向因此变成 <code>k ⊙ α</code>，而不是单独的 <code>k</code>；这是它和 GDN 标量门的形式差异。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">delta rule 在做什么</span><h4>先投影掉旧值，再写入新值</h4></div>
+    <p>
+      把 <code>(I − β k k<sup>⊤</sup>)S</code> 拆开看：<code>S − β k(k<sup>⊤</sup>S)</code>。第二项是状态在 <code>k</code> 方向上的投影，乘上 β 后从状态里减掉；后面再加 <code>β k v<sup>⊤</sup></code>，把当前 token 的 value 写进同一个方向。
+      因此它不是「再加一条」而是「先擦后写」。β=1 时，旧投影被完全移除；β=0 时，状态不动。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">gate 在做什么</span><h4>乘积形式的记忆半衰期</h4></div>
+    <p>
+      <code>α<sub>t</sub></code> 是乘法衰减。连续多步的累积衰减是 <code>γ<sub>t</sub> = ∏<sub>i≤t</sub> α<sub>i</sub></code>（Kimi Linear §2.1 的 Decay Formulation）。
+      α 越接近 1，旧记忆保留越久；α 越接近 0，越接近清空。KDA 把 α 变成逐通道向量后，每个特征维度可以有独立的衰减率，类似给每个通道一条自己的「位置频率」。
+    </p>
+  </div>
+
+  <p>
+    下面的交互把「固定 α、距离 d 之后还剩多少」单独拿出来。它是一个标量玩具模型，只保留累积乘积，不含 delta 写入。
+  </p>
+
+  <div class="sim" id="decay-sim">
+    <div class="sim-top">
+      <div class="rule-btn active" style="cursor:default">衰减门控 · 保留比例<span class="r-sub">α<sup>d</sup> × 100%</span></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>α <span class="v" id="decay-alpha-val">0.900</span></label>
+        <input id="decay-alpha" type="range" min="0.5" max="0.999" step="0.001" value="0.9">
+      </div>
+      <div class="ctrl">
+        <label>距离 d <span class="v" id="decay-d-val">10</span></label>
+        <input id="decay-d" type="range" min="1" max="200" step="1" value="10">
+      </div>
+    </div>
+
+    <div class="slots s5" id="decay-slots">
+      <div class="slot" id="decay-slot-0">
+        <div class="slot-name">d = 1</div>
+        <div class="slot-val" id="decay-slot-0-val">90.00%</div>
+        <div class="bar"><i class="b1" id="decay-bar-0" style="width:90%"></i></div>
+      </div>
+      <div class="slot" id="decay-slot-1">
+        <div class="slot-name">d = 10</div>
+        <div class="slot-val" id="decay-slot-1-val">34.87%</div>
+        <div class="bar"><i class="b1" id="decay-bar-1" style="width:34.87%"></i></div>
+      </div>
+      <div class="slot" id="decay-slot-2">
+        <div class="slot-name">d = 50</div>
+        <div class="slot-val" id="decay-slot-2-val">0.515%</div>
+        <div class="bar"><i class="b1" id="decay-bar-2" style="width:0.515%"></i></div>
+      </div>
+      <div class="slot" id="decay-slot-3">
+        <div class="slot-name">d = 100</div>
+        <div class="slot-val" id="decay-slot-3-val">0.0027%</div>
+        <div class="bar"><i class="b1" id="decay-bar-3" style="width:0.0027%"></i></div>
+      </div>
+      <div class="slot" id="decay-slot-4">
+        <div class="slot-name">d = 200</div>
+        <div class="slot-val" id="decay-slot-4-val">0.000000%</div>
+        <div class="bar"><i class="b1" id="decay-bar-4" style="width:0%"></i></div>
+      </div>
+    </div>
+
+    <div class="readout" id="decay-msg" data-src="§2.1">
+      <div class="r-head">当前读数</div>
+      <div id="decay-text">α = 0.900，d = 10：保留 34.87%；d = 100：保留 0.0027%。</div>
+    </div>
+  </div>
+  <p class="eq-cap">
+    参数为页面自定，公式 <code>α<sup>d</sup></code> 来自 §2.1 的累积衰减定义；这是<strong>简化模拟</strong>，不是 KDA kernel 的还原。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：两组 (α, d)，JS 与手算同一套幂运算<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A：α = 0.9，d = 10</strong></p>
+      <ol>
+        <li>0.9<sup>2</sup> = 0.81；0.9<sup>4</sup> = 0.6561；0.9<sup>5</sup> = 0.59049。</li>
+        <li>0.9<sup>10</sup> = 0.9<sup>5</sup> × 0.9<sup>5</sup> = 0.59049 × 0.59049 = 0.3486784401。</li>
+        <li>保留比例 = 0.3486784401 × 100 = 34.86784401% → 页面显示 <code>34.87%</code>。</li>
+      </ol>
+      <p><strong>组 B：α = 0.99，d = 100</strong></p>
+      <ol>
+        <li>0.99<sup>100</sup> = 0.3660323413。</li>
+        <li>保留比例 = 0.3660323413 × 100 = 36.60323413% → 页面显示 <code>36.60%</code>。</li>
+      </ol>
+      <p>
+        JS 用 <code>Math.pow(alpha, d) * 100</code>，再按数值大小选择小数位；上面两组都落在两位小数区间，切换参数后与手算逐位相同。
+        α<sup>d</sup> 是常数 α 下的累积乘积，逐通道 α 的完整形式见 §2.1。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">覆盖分支与差异清单</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>常数 α 下的累积衰减 <code>α<sup>d</sup></code>；d = 1/10/50/100/200 的保留比例；滑块与读数的联动。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>α 随输入变化；逐通道不同的 α；归一化项；delta rule 的写入；状态数值范围与低精度误差；真实 KDA kernel 的分块与显存访问。
+      </p>
+      <p>因此它是<strong>简化模拟</strong>，只回答「固定 α 下，距离 d 后的记忆还剩多少」。</p>
+    </div>
+  </details>
+
+  <p>
+    RWKV-7 走的是另一条向量化路线。它把状态更新写成：
+  </p>
+  <div class="eq">
+    S<sub>t</sub> = S<sub>t−1</sub>(diag(w<sub>t</sub>) − κ̂<sub>t</sub><sup>⊤</sup>(a<sub>t</sub> ⊙ κ̂<sub>t</sub>)) + v<sub>t</sub><sup>⊤</sup> k̃<sub>t</sub>
+  </div>
+  <div class="eq-cap">RWKV-7 Eq.17；行向量约定，<code>S<sub>t−1</sub></code> 在左、更新矩阵在右</div>
+
+  <p>
+    这里有三个向量：<code>w<sub>t</sub></code> 是逐通道衰减，<code>a<sub>t</sub></code> 是逐通道 in-context learning rate，<code>κ̂<sub>t</sub></code> 是归一化后的 removal key。
+    <code>k̃<sub>t</sub></code> 是 replacement key，可以写成 <code>k<sub>t</sub> ⊙ lerp(1, a<sub>t</sub>, α)</code>（Eq.7）。
+    删除用的是 <code>κ̂</code>，写入用的是 <code>k̃</code>，两者不必相同；这是 RWKV-7 相对经典 delta rule 多出来的自由度（§3）。
+  </p>
+  <p>
+    转移矩阵 <code>G<sub>t</sub> = diag(w<sub>t</sub>) − κ̂<sub>t</sub><sup>⊤</sup>(a<sub>t</sub> ⊙ κ̂<sub>t</sub>)</code> 不再是标准 Householder，而是带缩放的近似；
+    论文的 Eq.19 把它写成 <code>(I − κ̂<sub>t</sub><sup>⊤</sup>(a<sub>t</sub>/w<sub>t</sub> ⊙ κ̂<sub>t</sub>)) diag(w<sub>t</sub>)</code>，并说明特征值落在 <code>[−1,1]</code>（Appendix C）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">位置信息</span><h4>KDA 的逐通道门同时充当可学习的位置编码</h4></div>
+    <p>
+      Kimi Linear §6.1 把 gated delta rule 的转移矩阵解释为一种数据相关的乘法位置编码：查询和键之间的相对位置，由中间这些转移矩阵的乘积体现。
+      RoPE 用固定频率的旋转矩阵做同样的事；KDA 把频率换成可学习的逐通道衰减，因而能表达更细的 position bias。
+      Kimi Linear 因此在 MLA 层使用 NoPE：位置信息由 KDA 层承担（§4、§6.1）。
+    </p>
+  </div>
+
+  <p>
+    把两条链并排看：KDA 的门是 <code>Diag(α<sub>t</sub>)</code>，β 仍是标量，删除和写入共用 <code>k<sub>t</sub></code>；RWKV-7 的门是 <code>diag(w<sub>t</sub>)</code>，学习率 <code>a<sub>t</sub></code> 也是向量，删除和写入的 key 还可以分开。
+    两者都不是对方的简单特例；它们各自选择把哪一维向量化，以换取表达力和 kernel 效率的平衡。<span class="infer">推断</span>（由两条更新公式的维度差异直接看出）
+  </p>
+</section>
+
+<!-- ================= 04. 怎么算 ================= -->
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>chunked 形式把串行步数从 T 降到 T/C，代价是三角逆与中间量</h2></div>
+  <p class="sec-sub">递推适合 decode，不适合训练；chunked 形式用块内 matmul + 块间状态传递，把序列维的串行长度缩到块数。KDA 的约束 DPLR 正是为了让这套 kernel 跑得快。</p>
+
+  <p>
+    同一个状态更新有三种写法。递推形式每 token 一步，decode 时最省，但训练时不能在序列维并行；并行形式把整段序列的注意力矩阵显式写出来，训练能并行，代价是 <code>O(T²)</code> 的矩阵；chunked 形式取中间：块内用矩阵乘并行，块间只传状态。
+    Gated Linear Attention 的并行形式是 <code>((Q ⊙ Γ)(K/Γ)<sup>⊤</sup> ⊙ M)V</code>（Kimi Linear Table 6 的 GLA 行）；delta rule 则需要 WY 表示来处理那一串 rank-1 更新。
+  </p>
+
+  <p>
+    KDA 的 chunked 算法把每个块内的更新压成 <code>W</code>、<code>U</code> 两个中间量，再用 UT transform 求一个下三角逆（Eq.6–7），块间状态递推是：
+  </p>
+  <div class="eq">
+    S<sub>[t+1]</sub> = Diag(γ<sub>[t]</sub><sup>C</sup>) S<sub>[t]</sub> + (Γ<sub>[t]</sub><sup>1→C</sup> ⊙ K<sub>[t]</sub>)<sup>⊤</sup>(U<sub>[t]</sub> − W<sub>[t]</sub> S<sub>[t]</sub>)
+  </div>
+  <div class="eq-cap">Kimi Linear Eq.8；块内 <code>W = M(Γ ⊙ K)</code>、<code>U = MV</code>，<code>M</code> 由 Eq.6 的三角逆得到（原文 Eq.8 上标为 i→C；同文 Eq.6–7、Eq.9 为 1→C，此处按 1→C 转写）</div>
+
+  <p>
+    输出也分成块间和块内两部分：
+  </p>
+  <div class="eq">
+    O<sub>[t]</sub> = (Γ<sub>[t]</sub><sup>1→C</sup> ⊙ Q<sub>[t]</sub>) S<sub>[t]</sub> + Tril((Γ<sub>[t]</sub><sup>1→C</sup> ⊙ Q<sub>[t]</sub>)(K<sub>[t]</sub>/Γ<sub>[t]</sub><sup>1→C</sup>)<sup>⊤</sup>)(U<sub>[t]</sub> − W<sub>[t]</sub> S<sub>[t]</sub>)
+  </div>
+  <div class="eq-cap">Kimi Linear Eq.9；第一项读块间状态，第二项算块内因果注意力，括号里的 <code>U − WS</code> 是「伪 value」项</div>
+
+  <p>
+    KDA 相对一般 DPLR 的工程优势来自「把 <code>a</code>、<code>b</code> 都绑定到 <code>k</code>」。一般 DPLR 在 chunked 形式里要做二阶分块来处理 <code>1/Γ</code> 的数值问题；KDA 把二级分块从四次降到两次，并去掉约三次额外矩阵乘（§3.2），kernel 速度约为 DPLR 的 <span data-src="§3.2">2×</span>（§6.2 的 Kimi Figure 2 报的是 <span data-src="§6.2">64k</span> 以内接近 <span data-src="§6.2">2×</span>）。
+  </p>
+
+  <p>
+    复杂度上，Kimi Linear §6.3 给出单头、长度 T、块大小 C、head 维 <code>d<sub>h</sub></code> 的 KDA FLOPs：
+  </p>
+  <div class="eq">
+    FLOPs<sub>KDA</sub>(T; C, d<sub>h</sub>) = 6Td<sub>h</sub><sup>2</sup> + 3TCd<sub>h</sub> + TC<sup>2</sup>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    FLOPs<sub>Attn</sub>(T; d<sub>h</sub>) = 2T<sup>2</sup>d<sub>h</sub>
+  </div>
+  <div class="eq-cap">Kimi Linear Eq.13–14；<code>C = 64</code> 见 §6.3</div>
+
+  <p class="eq-cap">表 2 · 单头 FLOPs 公式在 T = 1M、d<sub>h</sub> = 128、C = 64 下的取值（页面按 Eq.13–14 计算，不是实测）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>项</th><th>公式</th><th>取值</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>KDA 状态项</td><td><code>6Td<sub>h</sub>²</code></td><td class="num">9.83×10¹⁰</td></tr>
+        <tr><td>KDA 块内项</td><td><code>3TCd<sub>h</sub></code></td><td class="num">2.46×10¹⁰</td></tr>
+        <tr><td>KDA mask 项</td><td><code>TC²</code></td><td class="num">4.10×10⁹</td></tr>
+        <tr><td>KDA 合计</td><td><code>Eq.13</code></td><td class="num">1.27×10¹¹</td></tr>
+        <tr><td>全注意力</td><td><code>2T²d<sub>h</sub></code></td><td class="num">2.56×10¹⁴</td></tr>
+        <tr class="best"><td>比值</td><td><code>Attn / KDA</code></td><td class="num">≈2016×</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这组数字只比较单头、单层的理论 FLOPs，且全注意力一项是 dense attention 的公式，不是 MLA 的实测。Kimi Linear 的 3:1 混合里只有 1 层是 MLA，不能把 <span data-src="§6.3">2016×</span> 直接当成端到端加速；它说明的是「序列越长，二次项越占主导」这个方向。
+  </p>
+
+  <p>
+    RWKV-7 的 kernel 数据更偏工程实测：在 H100、batch <span data-src="§8">8</span>、head dim <span data-src="§8">64</span>、model dim <span data-src="§8">4096</span>（<span data-src="§8">64</span> 个 wkv head）的条件下，优化后的 RWKV-7 kernel 比官方 RWKV-6 kernel 快约 <span data-src="§8">3×</span>。
+    序列长度 <span data-src="§8">16k</span> 时，forward 不存状态为 <span data-src="§8">7.9 ms</span>，存状态为 <span data-src="§8">11.2 ms</span>，backward 为 <span data-src="§8">22.5 ms</span>，Flash Attention v3 forward 为 <span data-src="§8">33.9 ms</span>。
+    按论文的变量计数，RWKV-7 是 <span data-src="§8">18</span> 个变量当量，FA3 是 <span data-src="§8">10</span> 个（§8）；换来的收益是序列维线性增长。
+  </p>
+
+  <p>
+    下面的交互把 chunked scan 缩成一个标量玩具模型。它只保留 <code>S<sub>t</sub> = α<sub>t</sub>(1−β<sub>t</sub>)S<sub>t−1</sub> + β<sub>t</sub>v<sub>t</sub></code>（即 key 固定为 1 的标量情形），用来对照「逐 token 递推」和「块内闭式 + 块间状态」是否给出同一个状态。
+  </p>
+
+  <div class="sim" id="scan-sim">
+    <div class="sim-top" id="scan-btns">
+      <button type="button" class="rule-btn scan-c active" data-c="3">块大小 C = 3<span class="r-sub">两块，边界 t=3,6</span></button>
+      <button type="button" class="rule-btn scan-c" data-c="2">块大小 C = 2<span class="r-sub">三块，边界 t=2,4,6</span></button>
+      <button type="button" class="rule-btn scan-c" data-c="6">块大小 C = 6<span class="r-sub">一块，边界 t=6</span></button>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>已处理 token 数 t <span class="v" id="scan-t-val">6</span></label>
+        <input id="scan-t" type="range" min="0" max="6" step="1" value="6">
+      </div>
+      <div class="ctrl">
+        <label>当前块边界 <span class="v" id="scan-boundary-val">t = 3, 6</span></label>
+        <div class="slot-val" id="scan-c-note">C = 3，块内并行，块间递推</div>
+      </div>
+    </div>
+
+    <div class="slots" id="scan-slots">
+      <div class="slot" id="scan-slot-0"><div class="slot-name">t = 1</div><div class="slot-val" id="scan-slot-0-val">S = 1.00<br>v 1 · α 0.9 · β 1</div></div>
+      <div class="slot" id="scan-slot-1"><div class="slot-name">t = 2</div><div class="slot-val" id="scan-slot-1-val">S = 1.90<br>v 3 · α 0.8 · β 0.5</div></div>
+      <div class="slot" id="scan-slot-2"><div class="slot-name">t = 3</div><div class="slot-val" id="scan-slot-2-val">S = 1.71<br>v 2 · α 0.9 · β 0</div></div>
+      <div class="slot" id="scan-slot-3"><div class="slot-name">t = 4</div><div class="slot-val" id="scan-slot-3-val">S = 5.00<br>v 5 · α 0.7 · β 1</div></div>
+      <div class="slot" id="scan-slot-4"><div class="slot-name">t = 5</div><div class="slot-val" id="scan-slot-4-val">S = 4.25<br>v 4 · α 0.9 · β 0.5</div></div>
+      <div class="slot" id="scan-slot-5"><div class="slot-name">t = 6</div><div class="slot-val" id="scan-slot-5-val">S = 3.40<br>v 6 · α 0.8 · β 0</div></div>
+    </div>
+
+    <div class="readout" id="scan-msg" data-src="§3.1">
+      <div class="r-head">递归 vs 分块</div>
+      <div id="scan-text">t = 6：递归 S = 3.40；C = 3 的块边界 S = 1.71（t=3）、3.40（t=6）。</div>
+    </div>
+  </div>
+  <p class="eq-cap">
+    序列 <code>v = [1,3,2,5,4,6]</code>、<code>α = [0.9,0.8,0.9,0.7,0.9,0.8]</code>、<code>β = [1,0.5,0,1,0.5,0]</code> 是页面自定的玩具输入，不是论文数据。
+    公式是 §3.1 的标量特例；这是<strong>简化模拟</strong>，不是 KDA kernel 的还原。
+  </p>
+
+  <details class="handcalc">
+    <summary>手算对账：C = 3 与 C = 2 两种分块，块边界状态与递归相同<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A：C = 3，整段序列</strong></p>
+      <ol>
+        <li>记 <code>a<sub>t</sub> = α<sub>t</sub>(1−β<sub>t</sub>)</code>、<code>b<sub>t</sub> = β<sub>t</sub>v<sub>t</sub></code>。t1: a=0, b=1；t2: a=0.4, b=1.5；t3: a=0.9, b=0。</li>
+        <li>递归：S1 = 1.00；S2 = 0.4×1 + 1.5 = 1.90；S3 = 0.9×1.90 + 0 = 1.71。</li>
+        <li>块内闭式：p = 0×0.4×0.9 = 0；S3 = 0×S0 + 0.4×0.9×1 + 0.9×1.5 + 0 = 0.36 + 1.35 = 1.71。</li>
+        <li>第二块：t4 a=0, b=5；t5 a=0.45, b=2；t6 a=0.8, b=0。S4 = 5.00；S5 = 0.45×5 + 2 = 4.25；S6 = 0.8×4.25 = 3.40。</li>
+        <li>块内闭式：p = 0×0.45×0.8 = 0；S6 = 0.45×0.8×5 + 0.8×2 + 0 = 1.8 + 1.6 = 3.40。</li>
+      </ol>
+      <p><strong>组 B：C = 2，同一序列</strong></p>
+      <ol>
+        <li>块 1（t1–t2）：p = 0×0.4 = 0；S2 = 0.4×1 + 1.5 = 1.90。</li>
+        <li>块 2（t3–t4）：p = 0.9×0 = 0；S4 = 0×S2 + 0 + 5 = 5.00。</li>
+        <li>块 3（t5–t6）：p = 0.45×0.8 = 0.36；S6 = 0.36×5 + 0.8×2 + 0 = 1.8 + 1.6 = 3.40。</li>
+      </ol>
+      <p>
+        JS 按同一顺序做乘加，块边界再用闭式重算；两组参数下保留两位小数的结果与手算相同。序列是页面自定的玩具输入，公式来自 §3.1 的 chunkwise 展开。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个模拟覆盖了什么、没覆盖什么<span class="sum-sub">覆盖分支与差异清单</span></summary>
+    <div class="details-body">
+      <p>
+        <strong>覆盖：</strong>标量状态、key 固定为 1 的简化情形；递归更新 <code>S<sub>t</sub> = a<sub>t</sub>S<sub>t−1</sub> + b<sub>t</sub></code>；块内闭式 <code>S<sub>end</sub> = (∏a<sub>i</sub>)S<sub>start</sub> + Σ(∏<sub>i&gt;j</sub>a<sub>i</sub>)b<sub>j</sub></code>；C = 2/3/6 三种分块的块边界对照。
+      </p>
+      <p>
+        <strong>未覆盖：</strong>向量/矩阵状态；delta rule 的 <code>(I−βkk<sup>⊤</sup>)</code> 定向投影；KDA 的对角门 <code>Diag(α)</code>；RWKV-7 的解耦 key；WY/UT 三角逆；<code>1/Γ</code> 的数值精度；真实 CUDA kernel 与显存访问；MLA 与 3:1 混合层。
+      </p>
+      <p>因此它是<strong>简化模拟</strong>，只回答「分块扫描与逐 token 递归在标量情形下是否给出同一个状态」。</p>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05. 架构 / 流程 ================= -->
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>Kimi Linear 的 3:1 层栈：KDA 管位置与记忆，MLA 管全局检索</h2></div>
+  <p class="sec-sub">看一张图：RWKV-7 是单层 time-mix + channel-mix；Kimi Linear 是 3 层 KDA + 1 层 NoPE MLA 的重复块。比例决定显存与检索能力的折中。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 560" role="img" aria-label="RWKV-7 单层与 Kimi Linear 3:1 混合层栈的对照" font-family="Inter,'Noto Sans SC',sans-serif">
+      <defs>
+        <marker id="lr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--border-strong)"></path>
+        </marker>
+      </defs>
+
+      <rect x="20" y="42" width="390" height="470" rx="12" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+      <rect x="450" y="42" width="390" height="470" rx="12" fill="var(--bg-surface)" stroke="var(--border)"></rect>
+      <text x="40" y="28" fill="var(--text)" font-size="14" font-weight="700">RWKV-7 单层</text>
+      <text x="470" y="28" fill="var(--text)" font-size="14" font-weight="700">Kimi Linear 4 层一循环</text>
+
+      <rect x="40" y="62" width="350" height="52" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="55" y="84" fill="var(--c2)" font-size="12.5" font-weight="600">x_t → Token Shift</text>
+      <text x="55" y="102" fill="var(--text-muted)" font-size="10.5">lerp(x_t, x_{t−1}, μ)</text>
+      <line x1="215" y1="114" x2="215" y2="134" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#lr-arrow)"></line>
+
+      <rect x="40" y="138" width="350" height="86" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"></rect>
+      <text x="55" y="160" fill="var(--c2)" font-size="12.5" font-weight="600">Time Mix：WKV 状态</text>
+      <text x="55" y="179" fill="var(--text)" font-size="10.5">S_t = S_{t−1}(diag(w_t) − κ̂_t^T(a_t ⊙ κ̂_t))</text>
+      <text x="55" y="195" fill="var(--text)" font-size="10.5">+ v_t^T k̃_t</text>
+      <text x="55" y="213" fill="var(--text-muted)" font-size="10.5">向量门 w_t、a_t；删除/写入 key 解耦</text>
+      <line x1="215" y1="224" x2="215" y2="244" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#lr-arrow)"></line>
+
+      <rect x="40" y="248" width="350" height="62" rx="8" fill="var(--bg-soft)" stroke="var(--border)"></rect>
+      <text x="55" y="270" fill="var(--text)" font-size="12.5" font-weight="600">Channel Mix：ReLU² MLP</text>
+      <text x="55" y="288" fill="var(--text-muted)" font-size="10.5">隐藏维 4D（§4.2）</text>
+      <line x1="215" y1="310" x2="215" y2="330" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#lr-arrow)"></line>
+
+      <rect x="40" y="334" width="350" height="50" rx="8" fill="var(--bg-soft)" stroke="var(--border)"></rect>
+      <text x="55" y="356" fill="var(--text)" font-size="12" font-weight="600">残差 + LayerNorm → 下一层</text>
+
+      <rect x="40" y="400" width="350" height="92" rx="8" fill="var(--bg-soft)" stroke="var(--border)"></rect>
+      <text x="55" y="422" fill="var(--text)" font-size="10.5" data-src="RWKV-7 Figure 2">每头状态 64×64（RWKV-7 Figure 2 注）</text>
+      <text x="55" y="439" fill="var(--text)" font-size="10.5">decode：固定状态，无 KV cache</text>
+      <text x="55" y="456" fill="var(--text)" font-size="10.5">训练：chunked WKV kernel</text>
+      <text x="55" y="473" fill="var(--text)" font-size="10.5">§8：16k forward 7.9 ms，backward 22.5 ms</text>
+
+      <rect x="470" y="62" width="350" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="485" y="80" fill="var(--accent-deep)" font-size="12" font-weight="600">KDA 层 1 · 固定状态</text>
+      <text x="485" y="94" fill="var(--accent-deep)" font-size="10">每头 128×128（§6.3）</text>
+
+      <rect x="470" y="108" width="350" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="485" y="126" fill="var(--accent-deep)" font-size="12" font-weight="600">KDA 层 2 · 固定状态</text>
+      <text x="485" y="140" fill="var(--accent-deep)" font-size="10">每头 128×128（§6.3）</text>
+
+      <rect x="470" y="154" width="350" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"></rect>
+      <text x="485" y="172" fill="var(--accent-deep)" font-size="12" font-weight="600">KDA 层 3 · 固定状态</text>
+      <text x="485" y="186" fill="var(--accent-deep)" font-size="10">每头 128×128（§6.3）</text>
+
+      <rect x="470" y="200" width="350" height="44" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"></rect>
+      <text x="485" y="218" fill="var(--c1)" font-size="12" font-weight="600">MLA 层 · NoPE</text>
+      <text x="485" y="234" fill="var(--c1)" font-size="10">1 层保留 KV cache，随 T 增长</text>
+
+      <text x="470" y="264" fill="var(--text)" font-size="11.5" font-weight="600">3 : 1 层数比</text>
+      <text x="470" y="280" fill="var(--text-muted)" font-size="10.5">3×KDA + 1×MLA（NoPE）</text>
+      <line x1="790" y1="244" x2="790" y2="296" stroke="var(--border-strong)" stroke-width="1.5" marker-end="url(#lr-arrow)"></line>
+
+      <rect x="470" y="304" width="350" height="54" rx="8" fill="var(--bg-soft)" stroke="var(--border)"></rect>
+      <text x="485" y="324" fill="var(--text)" font-size="11">MoE：256 experts，8 active（含 1 shared）</text>
+      <text x="485" y="341" fill="var(--text-muted)" font-size="10">48B total / 3B active（§5.4）</text>
+
+      <rect x="470" y="374" width="350" height="118" rx="8" fill="var(--bg-soft)" stroke="var(--border)"></rect>
+      <text x="485" y="396" fill="var(--text)" font-size="10.5">prefill：chunk kernel；decode：recurrent</text>
+      <text x="485" y="413" fill="var(--text)" font-size="10.5">KDA 状态不随 T 增长；MLA 层仍存 KV</text>
+      <text x="485" y="430" fill="var(--text)" font-size="10.5">3:1 层数比 → 更少 KV cache</text>
+      <text x="485" y="447" fill="var(--text)" font-size="10.5">128k 起 prefill 快于 MLA（§5.6）</text>
+      <text x="485" y="464" fill="var(--text)" font-size="10.5">1M prefill 2.9×（Kimi Figure 7）</text>
+    </svg>
+    <figcaption>
+      图 1 · RWKV-7 单层与 Kimi Linear 的 3:1 层栈。依据 RWKV-7 Figure 1、Kimi Linear §4 与 Kimi Figure 3 重绘；MoE 路由细节未展开。
+      图中数字分别来自 RWKV-7 Figure 2 注与 §8、Kimi Linear §5.4、§5.6 与 §6.3、Kimi Figure 7。
+    </figcaption>
+  </figure>
+
+  <ol>
+    <li>
+      <strong>RWKV-7 的 token-mix：</strong>输入先做 token shift，生成 <code>r, k, v, d, a, g</code> 六路 token-shifted 表示（其中 d、a、g 与 value residual v 走低秩 MLP）；<code>w<sub>t</sub> = exp(−e<sup>−0.5</sup> sigmoid(d<sub>t</sub>))</code> 限制在 <code>(exp(−e<sup>−0.5</sup>), 1)</code>，<code>a<sub>t</sub></code> 是逐通道 sigmoid，<code>κ<sub>t</sub> = k<sub>t</sub> ⊙ ξ</code>，<code>k̃<sub>t</sub> = k<sub>t</sub> ⊙ lerp(1, a<sub>t</sub>, α)</code>（§4.1）。
+      这些量进入 WKV 递推，输出再过 LayerNorm、bonus 和输出门。
+    </li>
+    <li>
+      <strong>RWKV-7 的 channel-mix：</strong>它不再是 RWKV-4 的门控 channel-mix，而是两层 MLP：<code>ReLU(k′)<sup>2</sup>W<sub>v′</sub></code>，隐藏维 4D（§4.2）。论文同时去掉了 token shift 的数据依赖和 channel-mix 的 receptance gating，以换取训练/推理速度（§3）。
+    </li>
+    <li>
+      <strong>Kimi Linear 的 KDA 层：</strong>q/k/v 走 ShortConv + Swish，q/k 再 L2Norm；<code>α<sub>t</sub></code> 由低秩投影加 decay 函数生成，<code>β<sub>t</sub></code> 是 sigmoid 标量；输出过 head-wise RMSNorm 和数据相关门（§4）。
+      KDA 的 head 维是 <span data-src="§4">128</span>，状态是 <span data-src="§6.3">128×128</span>。
+    </li>
+    <li>
+      <strong>3:1 的层栈：</strong>Kimi Linear 按整层交替，每 3 层 KDA 接 1 层 full MLA；论文说 layerwise 比 headwise 更容易做基础设施、训练也更稳（§4）。
+      MLA 层用 NoPE，推理时可以转成纯 MQA；位置信息由 KDA 层承担（§4、§6.1）。
+    </li>
+    <li>
+      <strong>训练与推理：</strong><span data-src="§5.4.1">1.4T</span> token、<span data-src="§5.4.1">4,096</span> 上下文预训练，最终 checkpoint 扩到 <span data-src="§5.4.1">5.7T</span> token、支持 <span data-src="§5.4.1">1M</span> 上下文（§5.4.1）。
+      prefill 用 chunk kernel，decode 切到 recurrent kernel；这也是 KDA 能同时拿到训练并行和推理常数状态的原因（§6.3）。
+    </li>
+  </ol>
+
+  <p>
+    RWKV-7 和 Kimi Linear 的取舍不同。RWKV-7 把整个模型都做成线性 RNN，单层里没有全局注意力；Kimi Linear 把长上下文检索列为纯线性结构的主要瓶颈，因此在每 4 层里保留 1 层 full MLA 作为全局通路（§4）。
+    这样做的代价是那层 MLA 仍然要存 KV；换来的是全局检索通路。
+  </p>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>长上下文是分水岭：KDA 混合抬分，RWKV-7 用更少 token 追平同尺寸</h2></div>
+  <p class="sec-sub">分开读三组数字：Kimi 的长上下文与效率、RWKV-7 的英文/多语基准、以及两者都没能消除的例外。差异统一用「点」表示，不混用相对百分比。</p>
+
+  <h3>Kimi Linear：长上下文平均分 54.5，MLA 为 52.2</h3>
+  <p>
+    这张表是 Kimi Linear@1.4T 与 full-attention MLA 在 <span data-src="Kimi Table 5">128k</span> 上下文下的对照。两边都是 1.4T token 预训练的模型，评测在同一套 long-context benchmark 上（Kimi Table 5）。
+    差值列是页面用 Kimi − MLA 算的；正数表示 Kimi 高，负数表示 MLA 高。
+  </p>
+
+  <p class="eq-cap">表 3 · Kimi Linear 与 MLA 的长上下文对照（Kimi Table 5；128k 上下文，1.4T token）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Benchmark</th><th>MLA</th><th>Kimi Linear</th><th>差值（点）</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>RULER</td><td class="num">81.3</td><td class="num">84.3</td><td class="num">+3.0</td></tr>
+        <tr><td>MRCR</td><td class="num">22.6</td><td class="num">29.6</td><td class="num">+7.0</td></tr>
+        <tr><td>HELMET-ICL</td><td class="num">88.0</td><td class="num">90.0</td><td class="num">+2.0</td></tr>
+        <tr><td>LongBench V2</td><td class="num">36.1</td><td class="num">35.0</td><td class="num">−1.1</td></tr>
+        <tr><td>Frames</td><td class="num">60.5</td><td class="num">58.8</td><td class="num">−1.7</td></tr>
+        <tr><td>RepoQA</td><td class="num">63.0</td><td class="num">68.5</td><td class="num">+5.5</td></tr>
+        <tr><td>Long Code Arena (Lib)</td><td class="num">32.8</td><td class="num">37.1</td><td class="num">+4.3</td></tr>
+        <tr><td>Long Code Arena (Commit)</td><td class="num">33.2</td><td class="num">32.7</td><td class="num">−0.5</td></tr>
+        <tr class="best"><td>Avg.</td><td class="num">52.2</td><td class="num">54.5</td><td class="num">+2.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    这张表里并非每一项都高：LongBench V2 和 Frames 上 MLA 更高，Long Code Arena 的 Commit 子项也略低。平均分的 <span data-src="Kimi Table 5">+2.3</span> 点主要来自 MRCR（<span data-src="Kimi Table 5">+7.0</span>）、RepoQA（<span data-src="Kimi Table 5">+5.5</span>）和 Long Code Arena (Lib)（<span data-src="Kimi Table 5">+4.3</span>）；RULER 为 <span data-src="Kimi Table 5">+3.0</span>。
+    论文把长上下文检索列为纯线性结构的主要瓶颈，并用 3:1 混合把一部分压力交回给 full MLA（§4）。
+  </p>
+
+  <p>
+    SFT 后的短上下文结果也有类似的结构。Kimi Table 4 里，Kimi Linear 在 GPQA-Diamond（Avg@8）上是 <span data-src="Kimi Table 4">62.1</span>，MLA 是 <span data-src="Kimi Table 4">57.1</span>；MMLU-Pro 是 <span data-src="Kimi Table 4">67.4</span> 对 <span data-src="Kimi Table 4">65.7</span>。
+    但 LiveBench（Pass@1）为 <span data-src="Kimi Table 4">45.2</span>，低于 MLA 的 <span data-src="Kimi Table 4">45.7</span>；MATH500（Acc.）为 <span data-src="Kimi Table 4">81.2</span>，低于 GDN-H 的 <span data-src="Kimi Table 4">83.0</span>；EvalPlus 为 <span data-src="Kimi Table 4">61.0</span>，低于 MLA 的 <span data-src="Kimi Table 4">62.6</span>。
+    预训练 Kimi Table 3 里 EvalPlus 也是 GDN-H 更高：Kimi <span data-src="Kimi Table 3">60.2</span>，GDN-H <span data-src="Kimi Table 3">63.1</span>。
+  </p>
+
+  <p>
+    预训练的短上下文平均趋势则偏向 Kimi：MMLU <span data-src="Kimi Table 3">73.8</span> 对 MLA <span data-src="Kimi Table 3">71.6</span>，BBH <span data-src="Kimi Table 3">72.9</span> 对 <span data-src="Kimi Table 3">71.6</span>。
+    这组差异分别是 +2.2 点和 +1.3 点；它们和上面的负项一起看，才是完整的 Kimi Linear 结果，而不是一句「全面更好」。
+  </p>
+
+  <h3>RWKV-7：用更少的训练 token 追平同尺寸 Qwen2.5</h3>
+  <p>
+    RWKV-7 的对照条件不同：0-shot（MMLU 为 5-shot）、fp32、lm-eval v0.4.8（§7.1）。RWKV-7 Table 3 是英文平均，RWKV-7 Table 4 是多语平均。
+    三行模型的训练 token 数分别是 5.6T、18.0T、15.0T，不能把分数差直接归因于架构。
+  </p>
+
+  <p class="eq-cap">表 4 · RWKV-7 2.9B 与同尺寸 Qwen2.5-3B / Llama3.2-3B 的平均分（英文 RWKV-7 Table 3，多语 RWKV-7 Table 4）</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>训练 token</th><th>英文平均</th><th>多语平均</th></tr>
+      </thead>
+      <tbody>
+        <tr class="best"><td>RWKV7-World3-2.9B</td><td class="num">5.6T</td><td class="num">71.5</td><td class="num">61.1</td></tr>
+        <tr><td>Qwen2.5-3B</td><td class="num">18.0T</td><td class="num">71.4</td><td class="num">55.6</td></tr>
+        <tr><td>Llama3.2-3B</td><td class="num">15.0T</td><td class="num">67.8</td><td class="num">58.1</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    RWKV-7 英文平均 <span data-src="RWKV-7 Table 3">71.5</span>，比 Qwen2.5-3B 的 <span data-src="RWKV-7 Table 3">71.4</span> 高 <span data-src="RWKV-7 Table 3">0.1</span> 点，比 Llama3.2-3B 的 <span data-src="RWKV-7 Table 3">67.8</span> 高 <span data-src="RWKV-7 Table 3">3.7</span> 点；
+    多语平均 <span data-src="RWKV-7 Table 4">61.1</span>，比 Qwen2.5-3B 的 <span data-src="RWKV-7 Table 4">55.6</span> 高 <span data-src="RWKV-7 Table 4">5.5</span> 点，比 Llama3.2-3B 的 <span data-src="RWKV-7 Table 4">58.1</span> 高 <span data-src="RWKV-7 Table 4">3.0</span> 点。
+    英文差 <span data-src="RWKV-7 Table 3">0.1</span> 点，多语差 <span data-src="RWKV-7 Table 4">5.5</span> 点；三行模型的训练数据和 token 数不同，不能把差距单独归因于架构。<span class="infer">推断</span>（由 RWKV-7 Table 3、RWKV-7 Table 4 的 token 数差异推出）
+  </p>
+
+  <h3>效率：prefill 2.9×，decode 的数字原文给了多组口径</h3>
+  <p>
+    Kimi Linear 的 prefill 在 <span data-src="§5.6">512k</span> 时是 MLA 的 <span data-src="§5.6">2.3×</span>，<span data-src="§5.6">1M</span> 时是 <span data-src="§5.6">2.9×</span>；<span data-src="§5.6">4k–16k</span> 区间两者接近（§5.6）。
+    论文报告优势随序列长度增大（§5.6）。
+  </p>
+
+  <p>
+    解码加速在原文有多组不同写法，页面并列，不替作者合并：
+  </p>
+  <ul>
+    <li>§5.6 写：<span data-src="§5.6">1M</span> 上下文解码比 full attention 快 <span data-src="§5.6">6×</span>；§1 和摘要也写 up to <span data-src="§1">6×</span>。</li>
+    <li>§6.3 写：Kimi Figure 7(b) 在 <span data-src="§6.3">1M</span> 上下文实测 <span data-src="§6.3">2.3×</span>（图内标注可见 2.2×/1.8×，与正文 2.3× 不完全一致）；同节又说 Kimi Figure 1(b) 的理论上限是 <span data-src="§6.3">6.3×</span>。</li>
+  </ul>
+  <p>
+    §6.3 给了差异的口径：2.3× 是 batch size = 1 的 I/O-bound 解码（Kimi Figure 7(b)），6.3× 是省下 KV cache 后支持更大 batch 的理论上限（Kimi Figure 1(b)）。但 §1 的 Kimi Figure 1(b) caption 又用 1.84 ms vs 11.48 ms 的实测 TPOT 支持 6.3×，原文自身「理论 vs 实测」的标签并不完全一致。页面保留这些原标签，不合并成一个加速比。
+  </p>
+
+  <h3>对照：GDN 的 S-NIAH 与 RWKV-4 的 LRA</h3>
+  <p>
+    GDN 的实验能说明「门控 + delta」的分工。<span data-src="GDN Table 2">1.3B</span> 模型、<span data-src="GDN Table 2">4K</span> 序列下，S-NIAH-2 上 GDN 为 <span data-src="GDN Table 2">92.2</span>，DeltaNet 为 <span data-src="GDN Table 2">18.6</span>；S-NIAH-3 上 GDN 为 <span data-src="GDN Table 2">27.6</span>，Mamba2 为 <span data-src="GDN Table 2">4.6</span>（GDN Table 2）。
+    前者说明只有 delta、没有门控时，长上下文里的旧信息清不掉；后者说明只有衰减、没有 delta 时，复杂 value 记不牢。
+  </p>
+  <p>
+    RWKV-4 的 LRA 平均分是 <span data-src="RWKV-4 Table 4">72.07</span>，同表 Transformer 是 <span data-src="RWKV-4 Table 4">53.66</span>，S4 是 <span data-src="RWKV-4 Table 4">86.09</span>；Path-X 一栏为 ✗（RWKV-4 Table 4）。
+    它在自然语言类任务上接近 S4，但在 Image、Pathfinder、Path-X 上明显落后，说明固定状态的压缩并不是对所有长序列任务都等价。
+  </p>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>固定状态的边界：检索、精度与混合比例都还在还债</h2></div>
+  <p class="sec-sub">把适用边界写清楚：状态容量有上限；混合模型仍依赖全注意力层；chunked kernel 有数值和实现代价；RWKV-7 的发布模型还有训练阶段的限制。</p>
+
+  <ul>
+    <li>
+      <strong>容量上限是结构性的：</strong>能同时存下的正交 key-value 对受状态维度限制，序列超过维度后就会发生 memory collision（GDN §1）。
+      Kimi Linear §1 也把纯线性结构的 finite-state capacity 列为长序列建模和 in-context retrieval 的根本约束；RWKV-4 §9 则直接说，线性注意力在「非常长的上下文里回忆细节」上不如 full attention。
+    </li>
+    <li>
+      <strong>混合模型不是「零 KV」：</strong>Kimi Linear 的 <span data-src="§1">75%</span> 是相对全注意力基线的 KV cache 用量上限；<span data-src="§4">3:1</span> 的层栈里仍有 <span data-src="§4">1</span> 层 MLA 在存 KV（§1、§4）。
+      序列越长，这一层的 KV 仍在增长；论文把 3:1 描述为 quality–throughput trade-off（§4），它保留全局通路，不是把 KV 消掉。
+    </li>
+    <li>
+      <strong>短序列收益有限：</strong>Kimi Linear 的 prefill 在 <span data-src="§5.6">4k–16k</span> 与 MLA 接近，优势从 <span data-src="§5.6">128k</span> 起才明显（§5.6）。
+      论文没有给出短上下文下的收益数字；如果负载主要落在短上下文，需要自行测量 chunk kernel 的固定开销。
+    </li>
+    <li>
+      <strong>数值精度是 kernel 的一部分：</strong>RWKV-7 §10.1 明确说 WKV7 kernel 对数值精度敏感，训练和部署要小心处理；训练 World 模型时用的是 fp32 kernel，bf16 kernel 更快但精度不同（§8）。
+      KDA 的一般 DPLR 形式也受 <code>1/Γ</code> 的除法精度困扰，GLA 用对数域和二级分块处理；KDA 通过约束 DPLR 减少了二级分块，但 Eq.9 仍保留 K/Γ 的除法，数值问题没有被完全消除。<span class="infer">推断</span>（由 Eq.9 仍在除 Γ 推出；§3.2、§6.2 只给工程收益）
+    </li>
+    <li>
+      <strong>发布模型与任务范围：</strong>RWKV-7 论文发布的是 base model，没有 SFT 和 RLHF；没有 <code>&lt;|endoftext|&gt;</code> 时性能会下降（§10.1）。
+      训练还受 <span data-src="§10.1">96</span> 张 H800 的预算限制，并且是从 RWKV-5/6 checkpoint 继续训练、部分数据重复使用（§10.1）。这些条件限制了「同尺寸对比」能外推的范围。
+    </li>
+    <li>
+      <strong>head 维与 kernel 绑定：</strong>RWKV-7 的 CUDA kernel 针对 head dim <span data-src="§8">64</span> 调优，head dim 更大时效率下降；论文提到 Flash Linear Attention 等实现覆盖更大的 head 维（§8）。
+      论文只报告 <span data-src="§4">128</span> 维的实验（§4、§6.3）；换 head 维是否还能保持同样的常数开销，原文没有数据，不能假设不变。<span class="infer">推断</span>
+    </li>
+    <li>
+      <strong>位置信息与 KDA 耦合：</strong>Kimi Linear 的 MLA 层用 NoPE，位置信息由 KDA 的逐通道衰减承担（§4、§6.1）。
+      MLA 层没有第二套显式位置编码；KDA 层在这个设计里承担位置信号。<span class="infer">推断</span>（由 NoPE 的定义与 §6.1 的职责划分推出）
+    </li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话判据</span><h4>什么时候值得用</h4></div>
+    <p>
+      负载是长上下文、decode 占主导、且能接受「固定状态 + 少量全注意力层」的混合结构时，线性注意力最直接：Kimi Linear 的 3:1 混合在 128k 以上的检索任务上有分数收益，prefill 延迟和 decode 的 KV cache 压力也随序列长度拉开。
+      反过来，如果任务要求在超长上下文中精确回忆每个 token、或者序列本来就很短、或者团队没有对应的 chunk kernel 与训练稳定性经验，纯线性或仓促替换都不划算。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>线性注意力：RWKV-4 → RWKV-7 → KDA</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2305.13048" target="_blank" rel="noopener">RWKV: Reinventing RNNs for the Transformer Era（2305.13048）</a> ·
+    <a href="https://arxiv.org/abs/2503.14456" target="_blank" rel="noopener">RWKV-7 “Goose”（2503.14456）</a><br>
+    <a href="https://arxiv.org/abs/2510.26692" target="_blank" rel="noopener">Kimi Linear: An Expressive, Efficient Attention Architecture（2510.26692）</a> ·
+    <a href="https://arxiv.org/abs/2412.06464" target="_blank" rel="noopener">Gated Delta Networks（2412.06464）</a> ·
+    <a href="https://arxiv.org/abs/2405.21060" target="_blank" rel="noopener">Mamba-2（2405.21060）</a><br>
+    笔记：<a href="/rwkv/">RWKV 笔记</a> ·
+    <a href="/kdakimi-delta-attention/">KDA 笔记</a> ·
+    <a href="/gated-deltanet/">Gated DeltaNet 笔记</a><br>
+    笔记勘误：Gated DeltaNet 笔记所附 arXiv 链接 2412.06458 指向 Pruning All-Rounder，正确编号为 2412.06464；该笔记把 α 归给 DeltaNet，按原文 α 是 GDN 的标量遗忘门，DeltaNet 只有 β（笔记 L30/L37）。<br>
+    版本：本页跨 5 篇论文：RWKV-4 v2、RWKV-7 v2、Kimi Linear v2、Gated DeltaNet v3、Mamba-2 v1；章节号以各文 HTML 版为准。
+  </div>
+  <div class="src" style="margin-top:12px">
+    口径说明：本页的「点」指 benchmark 分数差，不是相对提升百分比；「×」在加速比语境下指论文报告的数值；128×128 是状态维度；2016× 是按 Eq.13–14 计算的单头 FLOPs 比值，不是实测端到端加速。
+    交互中的序列与参数是页面自定的玩具输入，只用于验证递推/分块公式，不是论文实验数据。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('decay-sim');
+  if (!sim) return;
+
+  var alphaInput = document.getElementById('decay-alpha');
+  var dInput = document.getElementById('decay-d');
+  var alphaVal = document.getElementById('decay-alpha-val');
+  var dVal = document.getElementById('decay-d-val');
+  var msg = document.getElementById('decay-text');
+  if (!alphaInput || !dInput || !alphaVal || !dVal || !msg) return;
+
+  var distances = [1, 10, 50, 100, 200];
+
+  function formatPct(x) {
+    if (x >= 1) return x.toFixed(2) + '%';
+    if (x >= 0.01) return x.toFixed(3) + '%';
+    if (x >= 0.0001) return x.toFixed(4) + '%';
+    return x.toFixed(6) + '%';
+  }
+
+  function render() {
+    var alpha = parseFloat(alphaInput.value);
+    var d = parseInt(dInput.value, 10);
+    if (isNaN(alpha)) alpha = 0.9;
+    if (isNaN(d)) d = 10;
+    alpha = Math.min(0.999, Math.max(0.5, alpha));
+    d = Math.min(200, Math.max(1, d));
+    alphaVal.textContent = alpha.toFixed(3);
+    dVal.textContent = String(d);
+
+    for (var i = 0; i < distances.length; i++) {
+      var dist = distances[i];
+      var pct = Math.pow(alpha, dist) * 100;
+      var valEl = document.getElementById('decay-slot-' + i + '-val');
+      var barEl = document.getElementById('decay-bar-' + i);
+      var text = formatPct(pct);
+      if (valEl) valEl.textContent = text;
+      if (barEl) barEl.style.width = Math.min(100, pct) + '%';
+    }
+
+    var current = Math.pow(alpha, d) * 100;
+    var at100 = Math.pow(alpha, 100) * 100;
+    msg.textContent = 'α = ' + alpha.toFixed(3) + '，d = ' + d + '：保留 ' + formatPct(current) +
+      '；d = 100：保留 ' + formatPct(at100) + '。';
+  }
+
+  alphaInput.addEventListener('input', render);
+  dInput.addEventListener('input', render);
+  render();
+})();
+
+(function () {
+  var sim = document.getElementById('scan-sim');
+  if (!sim) return;
+
+  var slider = document.getElementById('scan-t');
+  var tVal = document.getElementById('scan-t-val');
+  var msg = document.getElementById('scan-text');
+  var boundaryVal = document.getElementById('scan-boundary-val');
+  var note = document.getElementById('scan-c-note');
+  var buttons = sim.querySelectorAll('.scan-c');
+  if (!slider || !tVal || !msg || !boundaryVal || !note) return;
+
+  var V = [1, 3, 2, 5, 4, 6];
+  var A = [0.9, 0.8, 0.9, 0.7, 0.9, 0.8];
+  var B = [1, 0.5, 0, 1, 0.5, 0];
+  var C = 3;
+
+  function stateAt(t) {
+    var s = 0;
+    for (var i = 0; i < t; i++) {
+      s = A[i] * (1 - B[i]) * s + B[i] * V[i];
+    }
+    return s;
+  }
+
+  function chunkBoundaries(chunk) {
+    var out = [];
+    var s = 0;
+    var start = 0;
+    while (start < 6) {
+      var end = Math.min(6, start + chunk);
+      var p = 1;
+      var q = 0;
+      for (var i = start; i < end; i++) {
+        p *= A[i] * (1 - B[i]);
+      }
+      for (var j = start; j < end; j++) {
+        var term = B[j] * V[j];
+        for (var k = j + 1; k < end; k++) {
+          term *= A[k] * (1 - B[k]);
+        }
+        q += term;
+      }
+      s = p * s + q;
+      out.push({ t: end, s: s });
+      start = end;
+    }
+    return out;
+  }
+
+  function render() {
+    var t = parseInt(slider.value, 10);
+    if (isNaN(t)) t = 6;
+    t = Math.min(6, Math.max(0, t));
+    tVal.textContent = String(t);
+
+    for (var i = 0; i < 6; i++) {
+      var slot = document.getElementById('scan-slot-' + i);
+      if (!slot) continue;
+      if (i < t) {
+        slot.classList.add('hit');
+      } else {
+        slot.classList.remove('hit');
+      }
+    }
+
+    var bounds = chunkBoundaries(C);
+    var labels = [];
+    for (var b = 0; b < bounds.length; b++) {
+      labels.push(bounds[b].t);
+    }
+    boundaryVal.textContent = 't = ' + labels.join(', ');
+    note.textContent = 'C = ' + C + '，块内并行，块间递推';
+
+    var recursive = stateAt(t);
+    var parts = [];
+    for (var b2 = 0; b2 < bounds.length; b2++) {
+      if (bounds[b2].t <= t) {
+        parts.push('t=' + bounds[b2].t + ' 为 ' + bounds[b2].s.toFixed(2));
+      }
+    }
+    if (parts.length === 0) {
+      msg.textContent = 't = ' + t + '：递归 S = ' + recursive.toFixed(2) + '；C = ' + C + ' 尚未到达任何块边界。';
+    } else {
+      msg.textContent = 't = ' + t + '：递归 S = ' + recursive.toFixed(2) + '；C = ' + C +
+        ' 已完成块边界 ' + parts.join('、') + '。';
+    }
+  }
+
+  function setC(nextC) {
+    var parsed = parseInt(nextC, 10);
+    if (parsed !== 2 && parsed !== 3 && parsed !== 6) return;
+    C = parsed;
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      if (parseInt(btn.getAttribute('data-c'), 10) === C) {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+    }
+    render();
+  }
+
+  for (var i = 0; i < buttons.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        setC(btn.getAttribute('data-c'));
+      });
+    })(buttons[i]);
+  }
+
+  slider.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

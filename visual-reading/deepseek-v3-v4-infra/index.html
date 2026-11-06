@@ -1,0 +1,836 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 2.788 | V3 Table 1 | 2788/1000 |
+| 2788 | V3 Table 1 | 2664+119+5 |
+| 5.576 | V3 Table 1 | 5.328+0.238+0.01 |
+| 768.0 | V4 §3.1 | 6144*125/1000 |
+| 1228.8 | V4 §3.1 | 6144*200/1000 |
+| 15.2 | V3 §3.5.1 | 20/132*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2" data-source-version-v4="v1">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek V3 / V4 Infra：把 all-to-all 藏进计算</title>
+<meta name="description" content="DeepSeek V3 / V4 Infra 精读：DualPipe 的 chunk 级重叠、64-way EP 与 20 个通信 SM、FP8 分块量化、V4 的 fine-grained EP wave、MegaMoE、TileLang、Muon ZeRO、mHC 6.7% 开销、FP4 QAT 与百万上下文 KV cache。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.src-note{font-size:12.5px;color:var(--text-soft);margin-top:14px;line-height:1.7}
+.src-tag{font-size:11px;color:var(--text-soft);white-space:nowrap}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.svg-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.svg-c3{fill:var(--c3-soft);stroke:var(--c3);stroke-width:1.2}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.svg-ln-hot{stroke:var(--accent);stroke-width:1.5;fill:none;stroke-dasharray:5 4}
+.arrow{fill:var(--text-soft)}
+.arrow-hot{fill:var(--accent)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.tbl-wide table{min-width:760px}
+.handcalc summary{font-weight:600}
+.handcalc .details-body strong{color:var(--text)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">DeepSeek V3 / V4 Infra</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">训练账本</a>
+      <a href="#flow">流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Training Infrastructure · 2024–2026 · Technical Report</span>
+  <h1>DeepSeek V3 / V4 Infra：<br>把 all-to-all 藏进计算</h1>
+  <p class="hero-sub">
+    V3 在 2048 张 H800 上训练 671B/37B MoE：16-way PP、64-way EP、ZeRO-1，跨节点 all-to-all 让 compute:communication 接近 1:1。
+    DualPipe 把通信塞进一对 forward/backward chunk，FP8 再把字节压下去。
+    V4 把 MoE 的 Dispatch、Linear-1、Combine、Linear-2 拆成 expert wave，融进单个 pipelined kernel，
+    并围绕百万上下文重做 KV cache、Muon、mHC 与逐位可复现 kernel。
+  </p>
+  <div class="meta">
+    <span>DeepSeek-AI</span>
+    <a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">V3 Technical Report ↗</a>
+    <a href="https://arxiv.org/abs/2606.19348" target="_blank" rel="noopener">V4 Technical Report ↗</a>
+    <a href="https://github.com/deepseek-ai/DeepGEMM/pull/304" target="_blank" rel="noopener">MegaMoE · DeepGEMM PR #304 ↗</a>
+  </div>
+  <p class="src-note">
+    版本锚定：V3 的 Table / Figure / § 均指 arXiv 2412.19437v2（2025-02-18）；V4 的均指 arXiv 2606.19348v1（2026-04-26）。
+    两篇报告的编号各自独立，页面在每处标明 V3 或 V4。V4 的来源类型是 arXiv preview technical report（v1），
+    官方公告与 V4-Pro / V4-Flash 模型卡都链接到该报告；页面数字以报告为准，不以二手解读为准。
+  </p>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    V3 的 671B/37B MoE 不是算不动，而是通信先撞墙：<span data-src="V3 §3.2">64-way EP 跨 8 个节点</span>，
+    跨节点 all-to-all 让 <span data-src="V3 §3.2.1">compute:communication 约 1:1</span>。
+    DualPipe 把 <code>attention</code>、<code>dispatch</code>、<code>MLP</code>、<code>combine</code> 重新排进一对 forward/backward chunk，
+    让 all-to-all 与 PP 通信都藏到计算下面；代价是 <span data-src="V3 Table 2">2× 参数副本、activation 从 PP 变成 PP+1</span>。
+  </p>
+  <p>
+    V4 把重叠粒度再切细：一层 MoE 分成 Dispatch、Linear-1、Combine、Linear-2，expert 按 wave 调度；
+    稳态下当前 wave 计算、下一 wave 传输、已完成 expert 回传同时进行（V4 §3.1）。
+    论文报告相对强非融合基线，<span data-src="V4 §3.1">通用推理 1.50–1.73×、延迟敏感场景最高 1.96×</span>；
+    在 NVIDIA GPU 与华为 Ascend NPU 上都做过验证。
+  </p>
+  <p>
+    V4 的 infra 不止 kernel：TileLang 把 host 校验从数十/数百微秒压到 <span data-src="V4 §3.2">1 微秒以内</span>；
+    Muon 的 ZeRO 分桶 padding 开销 <span data-src="V4 §3.4.1">低于 10%</span>；
+    mHC 的 wall-clock 开销压到重叠 1F1B 阶段的 <span data-src="V4 §3.4.2">6.7%</span>；
+    FP4 QAT 让 top-k selector <span data-src="V4 §5.2.1">快 2×</span>，KV recall <span data-src="V4 §5.2.1">99.7%</span>。
+    这些数字都有条件，页内逐条标。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="V3 Table 1">2.788M<small> H800 GPU-hours</small></div>
+      <div class="k">V3 全量训练：预训练 2664K + 上下文扩展 119K + 后训练 5K<br>不含前期研究、架构/算法/数据消融</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="V4 §3.1">1.96×</div>
+      <div class="k">V4 细粒度 EP 的延迟敏感上限<br>通用推理 1.50–1.73×，相对强非融合基线</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="V4 §1">10%</div>
+      <div class="k">V4-Pro 在 1M 上下文下的 KV cache，相对 V3.2<br>同场景单 token FLOPs 为 27%</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>MoE 一跨节点，all-to-all 就把计算切成两半</h2></div>
+  <p class="sec-sub">V3 的 64-way EP 跨 8 个节点；论文测到 compute:communication 约 1:1，通信不是背景噪声，而是决定 step time 的主项。</p>
+
+  <p>
+    V3 的集群是 <span data-src="V3 §3.1">2048 张 H800，每节点 8 张 GPU</span>：节点内 NVLink + NVSwitch，节点间走 InfiniBand（IB）。
+    模型是 <span data-src="V3 §4.2">671B 总参数、37B 激活的 MoE，61 层、hidden 7168、128 个 attention head</span>；
+    每个 MoE 层 <span data-src="V3 §4.2">1 个 shared expert + 256 个 routed expert，每 token 激活 8 个 routed expert，每个 expert 的 intermediate hidden dimension 是 2048</span>。
+  </p>
+
+  <p>
+    训练并行是 <span data-src="V3 §3.2">16-way PP、64-way EP（跨 8 个节点）、ZeRO-1 DP</span>。
+    论文明确说没有用 Tensor Parallelism（TP）：显存优化做到位之后，TP 的通信开销不划算。
+    代价是 EP 的 all-to-all 要跨节点：每个 MoE 层，token 先按路由送到 64 个 EP rank 上的 expert，算完再 combine 回来。
+    论文在 §3.2.1 给出的测量是：跨节点 EP 带来的 <span data-src="V3 §3.2.1">compute-to-communication ratio 约 1:1</span>。
+  </p>
+
+  <div class="eq">
+    T<sub>step</sub> ≈ max(T<sub>compute</sub>, T<sub>comm</sub>) &nbsp;&nbsp;（通信完全藏住）<br>
+    T<sub>step</sub> ≈ T<sub>compute</sub> + T<sub>comm</sub> &nbsp;&nbsp;（通信串行）
+  </div>
+  <div class="eq-cap">当 T<sub>comm</sub> 与 T<sub>compute</sub> 同量级时，是否重叠决定了 step time 是「一份」还是「两份」；这是 V3 DualPipe 与 V4 wave 调度的共同出发点</div>
+
+  <p>
+    V4 把这个问题放大而不是缩小。V4-Pro 是 <span data-src="V4 §4.2.1">1.6T 总参数、49B 激活，61 层、hidden 7168，
+    1 个 shared expert + 384 个 routed expert，每 token 激活 6 个 routed expert，每个 expert 的 intermediate hidden dimension 是 3072</span>。
+    更重要的是，V4 <span data-src="V4 §2.1">取消了 V3 的节点数限制</span>：V3 每个 token 最多送到 <span data-src="V3 §3.2.2">4 个节点</span>，V4 不再加这个约束。
+    路由目标更多，通信拓扑更自由，但 all-to-all 的潜在压力也更大。
+  </p>
+
+  <p>
+    同时，V4 的目标是 <span data-src="V4 §1">1M token context</span>。长上下文把第二个瓶颈推到前台：attention 的 FLOPs 和 KV cache 随序列增长，
+    即使 EP 通信藏住了，KV cache 的容量与带宽仍会限制吞吐。V3 的答案是 MLA + <span data-src="V3 §4.3">128K YaRN 扩展</span>；V4 的答案是 CSA/HCA 混合 attention
+    加异构 KV cache。两条线必须在同一个 step 里同时成立，Infra 才是完整的。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">瓶颈 A</span><h4>EP all-to-all：跨节点、每层都发生</h4></div>
+      <p>
+        V3 的 <span data-src="V3 §3.2">64-way EP 跨 8 个节点</span>，每 token 最多去 <span data-src="V3 §3.2.2">4 个节点</span>；dispatch 与 combine 都是 all-to-all。
+        论文测到的 compute:communication 约 1:1，意味着不重叠就会让 step time 翻倍。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">瓶颈 B</span><h4>长上下文：KV cache 与 attention 的二次项</h4></div>
+      <p>
+        V3 用 MLA 把 KV 压到 latent，再用 YaRN 扩到 <span data-src="V3 §4.3">128K</span>；V4 用 CSA/HCA 把 KV 按 m 与 m′ 压缩，
+        并设计 state cache + classical KV cache 的异构布局。两条线解决的不是同一个瓶颈。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>1F1B / ZB1P 减少 bubble，但通信仍按 chunk 排队</h2></div>
+  <p class="sec-sub">传统 PP 把 all-to-all 当成 chunk 之间的独立阶段；V3 的 DualPipe 先把它塞进 chunk 对，V4 再拆到 expert wave。</p>
+
+  <p>
+    流水并行的基本单位是 chunk。1F1B 让每个 rank 先做若干个 forward chunk，再交替做 forward 与 backward；
+    它的 bubble 是 <span data-src="V3 Table 2">(PP−1)(F+B)</span>，其中 F 是一个 forward chunk 的执行时间，B 是一个完整 backward chunk 的执行时间。
+    ZB1P 把 backward 拆成「backward for input」和「backward for weights」两部分，bubble 降为
+    <span data-src="V3 Table 2">(PP−1)(F+B−2W)</span>，W 是 backward-for-weights chunk 的时间。
+    两者都只保留 <span data-src="V3 Table 2">1× 参数副本</span>，activation 是 <span data-src="V3 Table 2">PP 个单位</span>。
+  </p>
+
+  <p>
+    这些方法减少的是 pipeline bubble，不是 all-to-all 本身。通信仍以 chunk 或 stage 为单位排队：
+    一个 chunk 的 dispatch 完成，才能开始对应的 expert 计算；combine 完成，才能进入下一个 chunk。
+    当 compute:communication 接近 1:1 时，只减少 bubble 不够，必须让通信与计算在同一段时间里并行。
+  </p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">1F1B / ZB1P</span><h4>把 bubble 压小，但通信仍是整段</h4></div>
+      <p>
+        1F1B 的 bubble 是 <code>(PP−1)(F+B)</code>；ZB1P 拆 backward 后是 <code>(PP−1)(F+B−2W)</code>。
+        两者都把 all-to-all 当成 chunk 内的一个阶段，调度粒度仍是整个 chunk。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Comet</span><h4>两段式重叠：Dispatch↔Linear-1，Linear-2↔Combine</h4></div>
+      <p>
+        V4 在 Figure 5 的对比里把 Comet 作为强基线：Comet 把 Dispatch 与 Linear-1 重叠、Linear-2 与 Combine 重叠。
+        这已经比整段通信前进了一步，但重叠仍发生在 stage 级，而不是 expert wave 级。
+      </p>
+    </div>
+  </div>
+
+  <p>
+    V3 的 DualPipe 和 V4 的 fine-grained EP 都在这个基础上再切一层：前者切 chunk 的内部组件，后者切 expert。
+    下一页的核心方法按这两条线展开。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>V3 重叠 chunk，V4 切 expert wave；目标都是让通信时间小于计算时间</h2></div>
+  <p class="sec-sub">V3 用 DualPipe 把 all-to-all 与 PP 塞进同一对 forward/backward chunk；V4 用 wave 让每个 expert 一完成通信就算，稳态下通信与计算连续。</p>
+
+  <h3>V3 DualPipe：把一对 chunk 拆成四段，再手动排通信与计算的比例</h3>
+
+  <p>
+    DualPipe 的关键不是「更快的 all-to-all」，而是把一对 forward/backward chunk 拆成四个组件：
+    <code>attention</code>、<code>all-to-all dispatch</code>、<code>MLP</code>、<code>all-to-all combine</code>。
+    backward chunk 里的 <code>attention</code> 与 <code>MLP</code> 再各拆成 <code>backward for input</code> 与
+    <code>backward for weights</code>，另有一个 <code>PP communication</code> 组件。
+    这些组件被重新排列，并手动调整「通信 SM / 计算 SM」的比例，目标是在一对 chunk 内同时藏住 all-to-all 与 PP 通信（V3 §3.2.1）。
+  </p>
+
+  <p>
+    DualPipe 用双向流水：从 pipeline 两端同时喂 micro-batch，两个方向的 micro-batch 对称。
+    论文的 Table 2 给出代价：bubble 是 <span data-src="V3 Table 2">(PP/2−1)(F&amp;B+B−3W)</span>，
+    参数副本 <span data-src="V3 Table 2">2×</span>，activation <span data-src="V3 Table 2">PP+1 个单位</span>。
+    论文的说法是：相比 1F1B / ZB1P，DualPipe 的 peak activation memory 只增加 <span data-src="V3 Table 2">1/PP</span>；
+    相比 Chimera，它只要求 pipeline stages 和 micro-batches 能被 2 整除，不要求 micro-batches 能被 pipeline stages 整除。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    V3 Table 2：三种 pipeline 方法的 bubble、参数副本与 activation 单位。F = forward chunk，B = 完整 backward chunk，
+    W = backward-for-weights chunk，F&amp;B = 两个互相重叠的 forward/backward chunk。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>方法</th><th>Bubble</th><th>参数副本</th><th>Activation</th></tr></thead>
+    <tbody>
+      <tr><td>1F1B</td><td class="num">(PP−1)(F+B)</td><td class="num">1×</td><td class="num">PP</td></tr>
+      <tr><td>ZB1P</td><td class="num">(PP−1)(F+B−2W)</td><td class="num">1×</td><td class="num">PP</td></tr>
+      <tr class="best"><td>DualPipe</td><td class="num">(PP/2−1)(F&amp;B+B−3W)</td><td class="num">2×</td><td class="num">PP+1</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    DualPipe 只解决了 chunk 内的重叠。跨节点 all-to-all 还需要一个足够快的 kernel：V3 的 NVLink 带宽是
+    <span data-src="V3 §3.2.2">160 GB/s，IB 是 50 GB/s，NVLink 约为 IB 的 3.2 倍</span>。
+    为了压 IB 流量，V3 限制每个 token 最多送到 <span data-src="V3 §3.2.2">4 个节点</span>，
+    并让每个节点平均承载 <span data-src="V3 §3.2.2">3.2 个 expert</span>。
+    这样每个 token 实际只选 8 个 routed expert，但同样的通信成本下可以扩到
+    <span data-src="V3 §3.2.2">最多 13 个 expert（4 节点 × 3.2 expert/节点）</span>。
+    通信 kernel 只用 <span data-src="V3 §3.2.2">20 个 SM，分成 10 个通信 channel</span>，用 warp specialization 处理 IB 发送、
+    IB-to-NVLink 转发与 NVLink 接收；论文还用了自定义 PTX 与自动调优的 chunk size 来降低 L2 cache 干扰。
+  </p>
+
+  <p>
+    这 20 个 SM 是 H800 的 <span data-src="V3 §3.5.1">132 个 SM 中的 20 个</span>，约 <span data-src="V3 §3.5.1">15.2%</span>。
+    它们不跑 tensor core，只做通信搬运；论文在 <span data-src="V3 §3.5.1">§3.5.1 明确说，这会限制计算吞吐，而且通信时 tensor cores 完全闲置</span>，
+    并建议未来硬件把通信卸载到 GPU co-processor 或 network co-processor。V4 的 fused kernel 也把通信与计算融进一个 pipelined kernel（V4 §3.1）。
+  </p>
+
+  <h3>V4 fine-grained EP：把 expert 切成 wave，让通信与计算连续</h3>
+
+  <p>
+    V4 的一层 MoE 被分成四个 stage：两个通信受限的 <code>Dispatch</code>、<code>Combine</code>，
+    两个计算受限的 <code>Linear-1</code>、<code>Linear-2</code>。
+    论文 profiling 的结论是：在单个 MoE 层内，<span data-src="V4 §3.1">通信总时间小于计算总时间</span>，
+    所以只要把通信藏到计算下面，计算就是主瓶颈，系统可以容忍更低的互联带宽。
+  </p>
+
+  <p>
+    V4 的做法是把 expert 分成若干 <code>wave</code>：每个 wave 只含一小部分 expert。
+    一个 wave 内的所有 expert 通信完成，计算立刻开始，不等其他 wave。
+    稳态下，当前 wave 的计算、下一个 wave 的 token 传输、已完成 expert 的结果回传同时进行。
+    论文在 NVIDIA GPU 与华为 Ascend NPU 上都验证了这套方案：相对强非融合基线，
+    <span data-src="V4 §3.1">通用推理 1.50–1.73×，延迟敏感场景最高 1.96×</span>。
+    CUDA 版的 mega-kernel 叫 <strong>MegaMoE</strong>，已作为 DeepGEMM 的一个组件开源。
+  </p>
+
+  <p>
+    V4 还给出一个可计算的「重叠预算」。设峰值算力为 C、互联带宽为 B，计算量为 V<sub>comp</sub>、通信量为 V<sub>comm</sub>；
+    当 <code>C/B ≤ V<sub>comp</sub>/V<sub>comm</sub></code> 时，通信可以完全藏住。
+    对 V4-Pro，每个 token-expert pair 需要 <span data-src="V4 §3.1">6hd FLOPs</span>（SwiGLU 的 gate、up、down 三个投影），
+    但只有 <span data-src="V4 §3.1">3h bytes</span> 的通信（FP8 Dispatch + BF16 Combine），于是：
+  </p>
+
+  <div class="eq" data-src="V4 §3.1">
+    C / B ≤ 6hd / 3h = <span class="hl-c">2d = 6144 FLOPs/Byte</span>
+  </div>
+  <div class="eq-cap">V4 §3.1，条件为 V4-Pro、FP8 Dispatch + BF16 Combine；论文把它读作「每 GBps 互联带宽足以藏住 <span data-src="V4 §3.1">6.1 TFLOP/s</span> 的计算」</div>
+
+  <p>
+    这里有一个口径要说明：V4 §3.1 写 <code>2d=6144</code>，反推 <code>d=3072</code>；
+    V4 §4.2.1 写 V4-Pro 的 hidden dimension 是 7168、每个专家的 intermediate hidden dimension 是 3072。
+    两处都叫 d，但按 <code>6hd/3h=2d</code> 的结构，公式里的 d 对应 expert 的 intermediate dimension。
+    <span class="infer">推断</span>（依据：<code>2d=6144</code> 得 <code>d=3072</code>，与 §4.2.1 的 expert intermediate hidden dimension 相同）。
+    页面的交互按 6144 使用，不把 7168 代入；换模型或换精度组合要重新算。
+  </p>
+
+  <div class="sim" id="ep-budget-sim">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button" aria-disabled="true">V4-Pro · 重叠预算<span class="r-sub">C/B ≤ 6144 FLOPs/Byte</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">互联带宽 B</div><div class="slot-val" id="ep-b-val">125 GB/s</div></div>
+      <div class="slot"><div class="slot-name">计算吞吐 C</div><div class="slot-val" id="ep-c-val">600 TFLOP/s</div></div>
+      <div class="slot"><div class="slot-name">可隐藏上限 C<sub>max</sub></div><div class="slot-val" id="ep-cmax">768.0 TFLOP/s</div></div>
+      <div class="slot"><div class="slot-name">状态</div><div class="slot-val" id="ep-status">可隐藏</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>带宽 B <span class="v" id="ep-b-label">125</span> GB/s</label>
+        <input type="range" id="ep-b-range" min="10" max="400" step="5" value="125">
+      </div>
+      <div class="ctrl">
+        <label>计算 C <span class="v" id="ep-c-label">600</span> TFLOP/s</label>
+        <input type="range" id="ep-c-range" min="10" max="2000" step="10" value="600">
+      </div>
+    </div>
+
+    <div class="readout" id="ep-readout" data-src="V4 §3.1">
+      <div class="r-head">当前读数</div>
+      <div id="ep-msg">B=125 GB/s → C_max=6144×125/1000=768.0 TFLOP/s；C=600 ≤ 768.0，通信可被计算隐藏。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组带宽 / 计算参数 <span class="sum-sub">与交互逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1（默认）：B=125 GB/s，C=600 TFLOP/s。</strong></p>
+      <ul>
+        <li><code>C_max = 6144 × 125 / 1000 = 768.0 TFLOP/s</code>。</li>
+        <li><code>600 ≤ 768.0</code>，状态为「可隐藏」。</li>
+      </ul>
+      <p><strong>组 2：B=200 GB/s，C=1500 TFLOP/s。</strong></p>
+      <ul>
+        <li><code>C_max = 6144 × 200 / 1000 = 1228.8 TFLOP/s</code>。</li>
+        <li><code>1500 &gt; 1228.8</code>，状态为「暴露」。</li>
+      </ul>
+      <p><strong>这个模型简化了什么：</strong>只实现 V4 §3.1 的 <code>C/B ≤ 2d = 6144 FLOPs/Byte</code> 判定，
+      假设每个 token-expert pair 是 6hd FLOPs、3h bytes（FP8 Dispatch + BF16 Combine）；
+      不模拟 wave 数、kernel 融合效率、网络拥塞、内存带宽和实际 MFU。6144 是 V4-Pro 的值；
+      换模型、换精度组合、换互联拓扑，这个阈值都要重新算。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>V3 用 FP8 省字节，V4 用 Muon / mHC / 确定性 kernel 省时间与返工</h2></div>
+  <p class="sec-sub">训练可行性不是单一精度技巧：V3 的账本是 FP8 分块量化 + BF16 optimizer；V4 的账本是 Muon 的 ZeRO 分桶、mHC 重算、上下文并行和逐位可复现。</p>
+
+  <h3>V3 FP8：1×128 的激活 tile、128×128 的权重 block、每 128 个元素回 FP32 累加</h3>
+
+  <p>
+    V3 的 FP8 不是把整个训练步压到 8 bit，而是「大部分 GEMM 用 FP8 输入、FP32 累加，关键算子留在高精度」。
+    激活按 <span data-src="V3 §3.3.2">1×128 tile</span> 量化（per token per 128 channels），
+    权重按 <span data-src="V3 §3.3.2">128×128 block</span> 量化（per 128 input channels per 128 output channels）。
+    所有张量都用 <span data-src="V3 §3.3.2">E4M3</span>；attention 之后 Linear 的输入是一个例外，用自定义的
+    <span data-src="V3 §3.3.3">E5M6</span> 格式，因为这份激活还要供 attention backward 使用，对精度更敏感。
+  </p>
+
+  <p>
+    H800 的 FP8 Tensor Core 累加精度大约只有 <span data-src="V3 §3.3.2">14 bit</span>。
+    论文用两个 <span data-src="V3 §3.3.2">K=4096</span> 的随机矩阵做初步测试，发现有限累加精度会导致
+    <span data-src="V3 §3.3.2">接近 2% 的最大相对误差</span>。
+    修正方法是每 <span data-src="V3 §3.3.2">N<sub>C</sub>=128 个元素</span>把部分和搬到 CUDA Cores，用 FP32 寄存器继续累加；
+    <span data-src="V3 §3.3.2">128 个元素</span>约等于 <span data-src="V3 §3.3.2">4 个 WGMMA</span>，这是「能明显改善精度、又不引入实质开销」的最小间隔。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    综合 V3 §3.3：FP8 混合精度的量化粒度、累加与低精度存储/通信。表中每个设置都带有模型/算子条件，不能单独外推到其他硬件。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>项目</th><th>V3 设置</th><th>目的 / 代价</th></tr></thead>
+    <tbody>
+      <tr><td>激活量化</td><td><code>1×128</code> tile（per token per 128 channels）</td><td>抑制激活离群值；scale 更细，量化开销更高</td></tr>
+      <tr><td>权重量化</td><td><code>128×128</code> block</td><td>抑制权重离群值；block 内共享 scale</td></tr>
+      <tr><td>累加</td><td>每 <code>N<sub>C</sub>=128</code> 个元素提升到 CUDA Cores，FP32 累加</td><td>弥补 Tensor Core 约 14 bit 的累加精度；约 4 个 WGMMA</td></tr>
+      <tr><td>数据格式</td><td>全部 E4M3；attention 后 Linear 输入用 E5M6</td><td>E4M3 尾数更多；E5M6 给敏感激活更宽范围</td></tr>
+      <tr><td>Optimizer</td><td>AdamW 一阶/二阶矩 BF16；master weights / gradients FP32</td><td>省 optimizer 显存，保更新精度</td></tr>
+      <tr><td>通信</td><td>dispatch 的 MoE up-projection 输入 FP8；combine 保持 BF16</td><td>省 all-to-all 带宽，关键 combine 保精度</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    这套配方在约 <span data-src="V3 Appendix B.1">16B/1.33T 与约 230B/0.9T</span> 两个模型规模上做了 FP8 vs BF16 对照，
+    相对 loss error 保持在 <span data-src="V3 §3.3">0.25% 以下</span>。
+    但边界也很清楚：如果把 Dgrad 的激活梯度也改成 128×128 block-wise 量化，
+    论文在约 <span data-src="V3 Appendix B.2">16B 模型、300B tokens</span> 上观察到模型发散；
+    作者的解释是激活梯度在 token 间高度不平衡，block-wise 量化压不住 token-correlated outliers。
+    这不是「FP8 一定能训」的证据，而是「这套细粒度量化 + 高精度累加能训」的证据。
+  </p>
+
+  <p>
+    显存侧还有三条工程手段：反向重算所有 RMSNorm 与 MLA up-projection，避免持久保存它们的输出激活；
+    EMA 参数放 CPU、每步异步更新；DualPipe 把 embedding 与 output head 放在同一个 PP rank 上，
+    让 MTP 模块与主模型物理共享参数和梯度（V3 §3.2.3）。
+    这些手段合起来，才让 V3 在不用 TP 的情况下把 671B MoE 放进 2048 张 H800。
+  </p>
+
+  <h3>V4 Muon / mHC：把「全矩阵更新」和「更宽的 residual」压进同样的 step time</h3>
+
+  <p>
+    V4 把 optimizer 换成 Muon。Muon 需要完整梯度矩阵来算更新，这和 ZeRO 的「按元素切参数」冲突。
+    论文的解法是混合 ZeRO 分桶：dense 参数限制 ZeRO 并行度，用 knapsack 把参数矩阵分配到各 rank，
+    每个 rank 的 bucket padding 到最大 bucket；在「<span data-src="V4 §3.4.1">每个 rank 最多管 5 个参数矩阵</span>」的设置下，
+    padding 通常带来 <span data-src="V4 §3.4.1">低于 10% 的显存开销</span>。
+    当 DP 规模超过 ZeRO 限制时，额外的 DP group 冗余计算 Muon 更新，用计算换 bucket 显存。
+    MoE 参数按 expert 独立优化：先把所有层的 down projection 展平，再 up projection、gate，
+    最后 padding 到能整除所有 rank；expert 数量大，所以不对 MoE 参数设 ZeRO 并行度上限，padding 开销可以忽略。
+  </p>
+
+  <p>
+    通信侧，V4 观察到 Muon 的 Newton-Schulz 迭代在 BF16 矩阵乘下仍然稳定，于是把跨 DP rank 同步的 MoE 梯度
+    用 stochastic rounding 量化到 BF16，<span data-src="V4 §3.4.1">把通信量减半</span>。
+    为了避免低精度加法器的累积误差，它不用 tree/ring reduce-scatter，而是先 all-to-all 交换本地梯度，
+    每个 rank 再做 FP32 本地求和。这个取舍是「梯度同步精度换带宽」，不是「所有状态都 BF16」。
+  </p>
+
+  <p>
+    mHC 把 residual stream 的宽度扩大到 <code>n<sub>hc</sub>×d</code>（V4 配置 <span data-src="V4 §4.2.1"><code>n<sub>hc</sub>=4</code></span>），
+    增加了 activation 显存与 pipeline stage 之间的通信量。V4 用三件事把开销压住：
+    训练/推理的 mHC fused kernel；选择性 checkpoint（重算层间大部分 hidden states 和所有 normalized layer inputs，
+    但不重算 compute-intensive 操作）；调整 DualPipe 1F1B 的重叠方案，让 mHC 的部分操作并发。
+    最终 mHC 的 wall-clock 开销是重叠 1F1B 阶段的 <span data-src="V4 §3.4.2">6.7%</span>。
+  </p>
+
+  <p>
+    长上下文侧，V4 的 Context Parallelism 不能沿用「每 rank 连续 s 个 token」的朴素切分：
+    CSA/HCA 的压缩需要 m 个连续 KV entry，可能跨 rank 边界；压缩后的长度还可能小于 s/m 且各 rank 不同。
+    论文用两阶段通信：rank i 把自己最后 m 个未压缩 KV entry 发给 rank i+1；rank i+1 与本地 s 个 entry 一起压缩，
+    产生固定长度 <code>s/m+1</code> 的压缩 entry（含 padding）；第二阶段 all-gather，所有 rank 的压缩 entry
+    经 fused select-and-pad 组织成总长度 <code>cp_size·s/m</code> 的完整集合（V4 §3.4.3）。
+  </p>
+
+  <p>
+    Activation checkpointing 也做到了 tensor 级：开发者只写 forward，并标注需要 checkpoint 的 tensor；
+    框架用 TorchFX 追踪完整计算图，为每个标注 tensor 找到重算所需的最小子图，插到对应梯度计算之前。
+    重算通过释放标注 tensor 的 GPU 显存、复用重算 tensor 的 storage pointer 实现，不做显存拷贝；
+    共享 storage 的 tensor（例如 reshape 的输入输出）会自动去重。论文说这套设计与手工实现相比
+    <span data-src="V4 §3.4.4">不引入额外训练开销</span>。
+  </p>
+
+  <h3>V4 后训练：FP4 QAT 把 MoE 权重与 indexer QK 压到 4 bit</h3>
+
+  <p>
+    V4 在 post-training 阶段做 FP4（MXFP4）QAT，对象是两部分：MoE expert weights（显存占用的大头），
+    以及 CSA indexer 的 QK path（QK activations 在长上下文里要被缓存、加载、相乘）。
+    同时把 index scores 从 FP32 量化到 BF16。论文报告 top-k selector
+    <span data-src="V4 §5.2.1">2× 加速</span>，KV entry recall <span data-src="V4 §5.2.1">99.7%</span>。
+  </p>
+
+  <p>
+    FP4→FP8 的反量化被论文称为 lossless：FP8（E4M3）比 FP4（E2M1）多 <span data-src="V4 §5.2.1">2 个 exponent bit</span>，
+    只要每个 FP8 量化 block（<span data-src="V4 §5.2.1">128×128 tile</span>）内、各个 FP4 sub-block（<span data-src="V4 §5.2.1">1×32 tile</span>）的 scale 最大值/最小值之比不超过阈值，
+    FP4 的细粒度 scale 信息就能被 FP8 的动态范围吸收。论文说当前权重满足这个条件，
+    所以整个 QAT 流程可以复用现有 FP8 训练框架；反向传播对前向的同一份 FP8 权重求梯度，
+    直接回传到 FP32 master weights，相当于在量化操作上做 straight-through estimator（STE），也避免了对转置权重重新量化。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    综合 V3 §3.1–§3.4 与 V4 §3.1–§3.5、§4.2.1：两代训练系统的对照。表中「未获取」表示该报告没有给出对应数字，
+    不是「没有这项技术」。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>维度</th><th>V3（671B / 37B）</th><th>V4-Pro（1.6T / 49B）</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr><td>集群</td><td>2048 张 H800；8 GPU/节点；NVLink/NVSwitch + IB</td><td>报告未给集群规模</td><td>V3 §3.1；V4 未获取</td></tr>
+      <tr><td>全局并行</td><td>16-way PP、64-way EP（8 节点）、ZeRO-1 DP；无 TP</td><td>继承 V3 框架；并行策略重新设计（V4 §2.1）；Muon 混合 ZeRO；报告未给全局并行度</td><td>V3 §3.2；V4 §3.4.1 / §2.1</td></tr>
+      <tr><td>通信重叠</td><td>DualPipe：chunk 对重叠 all-to-all 与 PP</td><td>fine-grained EP：expert wave + MegaMoE</td><td>V3 §3.2.1；V4 §3.1</td></tr>
+      <tr><td>低精度训练</td><td>FP8 分块量化；loss error &lt;0.25%</td><td>FP8 训练框架 + FP4 QAT（MoE 专家 + indexer QK）</td><td>V3 §3.3；V4 §5.2.1</td></tr>
+      <tr><td>长上下文</td><td>128K（YaRN 两阶段扩展）</td><td>1M（CSA/HCA + 异构 KV cache）</td><td>V3 §4.3；V4 §2.3 / §3.5</td></tr>
+      <tr><td>确定性</td><td>报告未涉及逐位复现</td><td>batch-invariant + deterministic kernel</td><td>V3 未获取；V4 §3.3</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>时间线：V3 的 chunk 对重叠，V4 的 expert wave 流水</h2></div>
+  <p class="sec-sub">V3 把 forward/backward chunk 拆成 attention、dispatch、MLP、combine；V4 把一层 MoE 拆成 Dispatch、Linear-1、Combine、Linear-2，再把 expert 切成 wave。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 440" role="img" aria-label="V3 DualPipe 与 V4 细粒度 EP 的示意时间线：上排是 V3 一对 forward/backward chunk 的四段重叠，下排是 V4 一层 MoE 的 Dispatch、Linear-1、Combine、Linear-2 按 expert wave 错位流水。">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow"/>
+        </marker>
+        <marker id="arrhot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-hot"/>
+        </marker>
+      </defs>
+
+      <!-- left panel: V3 DualPipe -->
+      <rect x="14" y="14" width="426" height="372" rx="14" class="svg-box"/>
+      <text x="30" y="42" class="svg-t">V3 · DualPipe（chunk 对）</text>
+      <text x="30" y="62" class="svg-s">forward / backward 各拆四段</text>
+
+      <text x="30" y="88" class="svg-s">forward chunk</text>
+      <rect x="30" y="96" width="98" height="42" rx="7" class="svg-hot"/>
+      <text x="79" y="122" text-anchor="middle" class="svg-l">attn</text>
+      <rect x="132" y="96" width="98" height="42" rx="7" class="svg-c1"/>
+      <text x="181" y="122" text-anchor="middle" class="svg-l">dispatch</text>
+      <rect x="234" y="96" width="98" height="42" rx="7" class="svg-hot"/>
+      <text x="283" y="122" text-anchor="middle" class="svg-l">MLP</text>
+      <rect x="336" y="96" width="98" height="42" rx="7" class="svg-c2"/>
+      <text x="385" y="122" text-anchor="middle" class="svg-l">combine</text>
+
+      <text x="30" y="170" class="svg-s">backward chunk</text>
+      <rect x="30" y="178" width="196" height="42" rx="7" class="svg-c3"/>
+      <text x="128" y="204" text-anchor="middle" class="svg-l">B input</text>
+      <rect x="230" y="178" width="204" height="42" rx="7" class="svg-c3"/>
+      <text x="332" y="204" text-anchor="middle" class="svg-l">B weight</text>
+
+      <path d="M 430 96 L 444 96 L 444 220 L 430 220" class="svg-ln-hot" marker-end="url(#arrhot)"/>
+      <text x="228" y="248" text-anchor="middle" class="svg-l">同一对 chunk 内排通信与计算</text>
+      <text x="228" y="266" text-anchor="middle" class="svg-s">all-to-all 与 PP 通信藏在计算下</text>
+
+      <rect x="30" y="286" width="404" height="62" rx="8" class="svg-c1"/>
+      <text x="232" y="310" text-anchor="middle" class="svg-l">代价：2× 参数副本 / activation PP+1</text>
+      <text x="232" y="330" text-anchor="middle" class="svg-s">双向流水：两端同时喂 micro-batch</text>
+
+      <!-- right panel: V4 fine-grained EP -->
+      <rect x="460" y="14" width="426" height="372" rx="14" class="svg-box"/>
+      <text x="476" y="42" class="svg-t">V4 · 细粒度 EP（expert wave）</text>
+      <text x="476" y="62" class="svg-s">一层 MoE 四段，expert 切 wave</text>
+
+      <text x="476" y="96" class="svg-s">Dispatch</text>
+      <text x="476" y="140" class="svg-s">Linear-1</text>
+      <text x="476" y="184" class="svg-s">Combine</text>
+      <text x="476" y="228" class="svg-s">Linear-2</text>
+
+      <!-- wave 0 -->
+      <rect x="552" y="78" width="60" height="26" rx="5" class="svg-c1"/>
+      <text x="582" y="96" text-anchor="middle" class="svg-l">D0</text>
+      <rect x="612" y="122" width="80" height="26" rx="5" class="svg-hot"/>
+      <text x="652" y="140" text-anchor="middle" class="svg-l">L1-0</text>
+      <rect x="692" y="166" width="50" height="26" rx="5" class="svg-c2"/>
+      <text x="717" y="184" text-anchor="middle" class="svg-l">C0</text>
+      <rect x="742" y="210" width="80" height="26" rx="5" class="svg-hot"/>
+      <text x="782" y="228" text-anchor="middle" class="svg-l">L2-0</text>
+
+      <!-- wave 1 -->
+      <rect x="612" y="78" width="60" height="26" rx="5" class="svg-c1"/>
+      <text x="642" y="96" text-anchor="middle" class="svg-l">D1</text>
+      <rect x="672" y="122" width="80" height="26" rx="5" class="svg-hot"/>
+      <text x="712" y="140" text-anchor="middle" class="svg-l">L1-1</text>
+      <rect x="752" y="166" width="50" height="26" rx="5" class="svg-c2"/>
+      <text x="777" y="184" text-anchor="middle" class="svg-l">C1</text>
+      <rect x="802" y="210" width="70" height="26" rx="5" class="svg-hot"/>
+      <text x="837" y="228" text-anchor="middle" class="svg-l">L2-1</text>
+
+      <line x1="612" y1="72" x2="612" y2="246" class="svg-ln-hot"/>
+      <line x1="692" y1="72" x2="692" y2="246" class="svg-ln-hot"/>
+      <text x="612" y="264" text-anchor="middle" class="svg-s">wave 1 开始传输</text>
+      <text x="742" y="282" text-anchor="middle" class="svg-s">wave 0 仍在计算</text>
+
+      <rect x="476" y="300" width="394" height="58" rx="8" class="svg-c3"/>
+      <text x="673" y="322" text-anchor="middle" class="svg-l">1.50–1.73×；延迟敏感 ≤1.96×</text>
+      <text x="673" y="342" text-anchor="middle" class="svg-s">相对强非融合基线；NVIDIA GPU 与 Ascend NPU</text>
+
+      <!-- legend -->
+      <rect x="30" y="402" width="14" height="14" rx="3" class="svg-hot"/>
+      <text x="50" y="414" class="svg-s">计算</text>
+      <rect x="120" y="402" width="14" height="14" rx="3" class="svg-c1"/>
+      <text x="140" y="414" class="svg-s">dispatch</text>
+      <rect x="250" y="402" width="14" height="14" rx="3" class="svg-c2"/>
+      <text x="270" y="414" class="svg-s">combine</text>
+      <rect x="370" y="402" width="14" height="14" rx="3" class="svg-c3"/>
+      <text x="390" y="414" class="svg-s">backward / 回传</text>
+    </svg>
+    <figcaption>
+      示意重绘，不按比例：上排按 V3 Figure 4/5 的 chunk 对重叠，下排按 V4 Figure 5 的 wave 流水；
+      省略 barrier、rank 编号和具体 SM 分配。本图用色不是论文原图配色：橙=计算，青=dispatch，紫=combine，绿=backward/回传。
+      V3 的 forward chunk 拆成 attention、dispatch、MLP、combine；V4 的四行是同一层 MoE 的四个 stage，wave 0 与 wave 1 错位执行。
+    </figcaption>
+  </figure>
+
+  <h3>把流程拆成五步</h3>
+
+  <ol>
+    <li><strong>V3 切 chunk。</strong>forward 与 backward chunk 各拆成 attention、all-to-all dispatch、MLP、all-to-all combine；backward 再拆 input/weights。这样 all-to-all 不再是 chunk 之间的黑盒，而是可以和 attention/MLP 交错排布的组件（V3 §3.2.1）。</li>
+    <li><strong>V3 排双向流水。</strong>从 pipeline 两端同时喂 micro-batch，两个方向对称；一对 forward/backward chunk 内的通信与计算被手动重排，目标是 all-to-all 与 PP 通信都被藏住（V3 Figure 4/5）。</li>
+    <li><strong>V3 用 20 个 SM 跑通信 kernel。</strong>10 个通信 channel，warp specialization 处理 IB 发送、IB-to-NVLink 转发、NVLink 接收；dispatch 与 combine 都走这条路径（V3 §3.2.2）。</li>
+    <li><strong>V4 切 expert wave。</strong>一层 MoE 的 Dispatch / Linear-1 / Combine / Linear-2 四段中，expert 被分成小 wave；一个 wave 通信完成就开始算，不等其他 wave；稳态下当前 wave 计算、下一 wave 传输、已完成 expert 回传并行（V4 §3.1）。</li>
+    <li><strong>V4 管 KV cache。</strong>CSA/HCA 产生多种 KV entry：经典 KV cache 存压缩后的 CSA/HCA entry，state cache 存 SWA 的最近 n<sub>win</sub> 个 entry 和尚未压缩的尾部 token。每个 cache block 覆盖 <span data-src="V4 §3.5.1"><code>lcm(m,m′)</code> 个原始 token，产生 <code>k<sub>1</sub>=lcm(m,m′)/m</code> 个 CSA entry 与 <code>k<sub>2</sub>=lcm(m,m′)/m′</code> 个 HCA entry</span>（V4 §3.5.1）。</li>
+  </ol>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">V3 推理</span><h4>Prefill / Decode 分离，各自一套并行</h4></div>
+      <p>
+        Prefill 最小单元 <span data-src="V3 §3.4.1">4 节点 / 32 GPU</span>：attention 用 TP4 + SP、DP8，MoE 用 EP32，
+        另加 <span data-src="V3 §3.4.1">32 个 redundant expert</span>；<span data-src="V3 §3.4.1">每张 GPU 原本 8 个 expert，再加 1 个冗余 expert</span>。
+        Decode 最小单元 <span data-src="V3 §3.4.2">40 节点 / 320 GPU</span>：<span data-src="V3 §3.4.2">TP4 + SP、DP80、EP320</span>；
+        每张 GPU 只放 1 个 expert，<span data-src="V3 §3.4.2">64 张 GPU</span> 负责 redundant/shared expert；
+        每 token 选 <span data-src="V3 §3.4.2">9 个 expert</span>（shared expert 也算一个），每 expert 的 batch 通常在
+        <span data-src="V3 §3.4.2">256 token 以内</span>。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">V4 推理</span><h4>异构 KV cache + 落盘复用</h4></div>
+      <p>
+        SWA 的 KV entry 不做压缩，体积约为压缩后 CSA/HCA KV 的 <span data-src="V4 §3.5.2">8 倍</span>。
+        论文给三种落盘策略：Full SWA Caching（存全部，计算零冗余，但存储开销大）、
+        Periodic Checkpointing（每 p 个 token 存一次最近 n<sub>win</sub> 个 entry，尾部重算）、
+        Zero SWA Caching（不存 SWA，重算最近 <code>n<sub>win</sub>·L</code> 个 token 来恢复 L 层的 SWA entry）。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>V4 的 1.50–1.73× 来自细粒度 EP；V3 的 2.788M GPU-hours 来自重叠与 FP8</h2></div>
+  <p class="sec-sub">先看条件：V4 的加速比相对强非融合基线，V3 的 GPU-hours 是 2048 张 H800 的官方训练账本。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    V3 Table 1：按 H800 租金 $2/GPU-hour 计算；只含官方训练，不含前期研究、架构/算法/数据消融。
+  </p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>项目</th><th>H800 GPU Hours</th><th>USD</th></tr></thead>
+    <tbody>
+      <tr><td>Pre-Training</td><td class="num">2664K</td><td class="num">$5.328M</td></tr>
+      <tr><td>Context Extension</td><td class="num">119K</td><td class="num">$0.238M</td></tr>
+      <tr><td>Post-Training</td><td class="num">5K</td><td class="num">$0.01M</td></tr>
+      <tr class="best"><td>Total</td><td class="num">2788K</td><td class="num">$5.576M</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    V3 的预训练每 trillion token 需要 <span data-src="V3 §1">180K H800 GPU-hours</span>，
+    在 2048 张 H800 上约 <span data-src="V3 §1">3.7 天</span>；预训练阶段总计 <span data-src="V3 Table 1">2664K GPU-hours</span>，
+    上下文扩展 <span data-src="V3 Table 1">119K</span>，后训练 <span data-src="V3 Table 1">5K</span>，
+    全量 <span data-src="V3 Table 1">2.788M</span>，按 $2/GPU-hour 算是 <span data-src="V3 Table 1">$5.576M</span>。
+    这组数字经常被当作「低成本训练」的引用，但它的条件很具体：2048 张 H800、V3 的 MoE 结构、FP8 + DualPipe、且不含前期研究与消融。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    综合 V3 Table 1 / §3.3 与 V4 §1 / §3.1 / §3.4.2 / §5.2.1：两代 infra 的可比指标。
+    空白「—」表示该报告没有给对应项；「未获取」表示页面没有找到，不等于该项不存在。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>指标</th><th>V3</th><th>V4</th><th>条件 / 口径</th></tr></thead>
+    <tbody>
+      <tr><td>全量训练</td><td>2.788M H800 GPU-hours</td><td>未获取</td><td>V3 Table 1；V4 报告未给全量 GPU-hours</td></tr>
+      <tr><td>重叠收益</td><td>compute:communication ≈ 1:1 的集群上，DualPipe 隐藏 all-to-all 与 PP</td><td>1.50–1.73× 通用推理；≤1.96× 延迟敏感</td><td>V3 §3.2.1；V4 §3.1，相对强非融合基线</td></tr>
+      <tr><td>低精度</td><td>FP8；loss error &lt;0.25%</td><td>FP4 QAT：top-k 2×，KV recall 99.7%</td><td>V3 §3.3；V4 §5.2.1</td></tr>
+      <tr><td>1M context</td><td>—</td><td>Pro 27% FLOPs / 10% KV；Flash 10% / 7%</td><td>V4 §1，相对 V3.2，论文估算</td></tr>
+      <tr><td>mHC overhead</td><td>—</td><td>6.7% of overlapped 1F1B stage</td><td>V4 §3.4.2</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    V4 的 1M 效率数字来自 <span data-src="V4 Figure 1">Figure 1 的估算</span>：在 1M token 上下文下，V4-Pro 的单 token inference FLOPs
+    是 V3.2 的 <span data-src="V4 §1">27%</span>，累计 KV cache 是 <span data-src="V4 §1">10%</span>；
+    V4-Flash 更低，分别是 <span data-src="V4 §1">10%</span> 与 <span data-src="V4 §1">7%</span>。
+    其中 FLOPs 以 equivalent FP8 FLOPs 计，KV cache 是 size 比例；比较对象是 V3.2，不是 V3，也不是端到端延迟。
+  </p>
+
+  <h3>值得注意的三个取舍</h3>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">取舍 1</span><h4>取消节点限制，靠重叠而不是少发</h4></div>
+      <p>
+        V3 限制每 token 最多去 <span data-src="V3 §3.2.2">4 个节点</span>；V4 <span data-src="V4 §2.1">取消了这个约束</span>。
+        通信自由度更高，但 V4 的答案主要不是把 all-to-all 变小，而是把 expert 切 wave、藏进计算。
+        这是一条「用调度换带宽」的路线，前提是通信总时间确实小于计算总时间（V4 §3.1）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">取舍 2</span><h4>为了 batch invariance，先放弃 split-K</h4></div>
+      <p>
+        V4 要求 batch-invariant 与 deterministic：attention 不能用 split-KV，GEMM 不能用 split-k，
+        因为不同的累加顺序会改变逐位结果。论文明确说放弃 split-k 可能带来性能下降，
+        随后用双 kernel、DeepGEMM 和确定性归约把性能补回来（V4 §3.3）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">取舍 3</span><h4>BF16 梯度同步，换一半通信量</h4></div>
+      <p>
+        Muon 的 Newton-Schulz 在 BF16 下稳定，V4 就用 stochastic rounding 把跨 DP rank 的 MoE 梯度压到 BF16，
+        <span data-src="V4 §3.4.1">通信量减半</span>；再用 all-to-all + FP32 本地求和避免低精度加法器的累积误差。
+        这是精度换带宽，不是所有状态都降到 BF16。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>这些数字依赖集群、基线与版本；换一个条件就不成立</h2></div>
+  <p class="sec-sub">V3 的 2.788M 是 2048 张 H800 的官方账本；V4 的加速比是相对非融合基线；1M 上下文效率是相对 V3.2 的估算。</p>
+
+  <h3>V3：集群与并行度是账本的一部分</h3>
+  <p>
+    <span data-src="V3 Table 1">2.788M H800 GPU-hours</span> 的条件是 <span data-src="V3 §3.1">2048 张 H800</span>、
+    <span data-src="V3 §3.2">16-way PP / 64-way EP（8 节点）/ ZeRO-1 DP</span>、FP8 训练和 DualPipe。
+    换成更小的集群、不同的 IB/NVLink 带宽、或不同的 EP/PP 比例，重叠收益和 step time 都会变。
+    V3 的 deployment 也偏大：prefill 最小 <span data-src="V3 §3.4.1">32 GPU</span>，decode 最小
+    <span data-src="V3 §3.4.2">320 GPU</span>；论文在 §6 明确说 "the recommended deployment unit ... is relatively large"，对小型团队可能是负担。
+  </p>
+  <p>
+    FP8 的边界同样具体：H800 的 Tensor Core 累加精度约 <span data-src="V3 §3.3.2">14 bit</span>，
+    论文靠 <span data-src="V3 §3.3.2">N<sub>C</sub>=128</span> 的 CUDA-core 提升来补；
+    如果换成没有同等 FP8 累加能力的硬件，这个配方不能直接搬（<span class="infer">推断</span>，依据：§3.3.2 的 14 bit 是 H800 的测量值）。
+    Dgrad 的 block-wise 量化在 <span data-src="V3 Appendix B.2">16B 模型、300B tokens</span> 上会发散，
+    说明「激活梯度」比「权重/激活」更敏感；这也是为什么 V3 只对部分张量用低精度缓存。
+  </p>
+
+  <h3>V4：加速比是推理、相对非融合基线；1M 效率是估算</h3>
+  <p>
+    <span data-src="V4 §3.1">1.50–1.73× 与 1.96×</span> 都是 inference 的 speedup，比较对象是「strong non-fused baselines」，
+    不是 V3 的 DualPipe，也不是训练吞吐。1.96× 只出现在 latency-sensitive 场景（RL rollout、high-speed agent serving）；
+    通用推理是 1.50–1.73×。论文在 NVIDIA GPU 与华为 Ascend NPU 上都验证过，但开源的 MegaMoE 是 CUDA 版。
+  </p>
+  <p>
+    1M 上下文的 <span data-src="V4 §1">27%/10%（Pro）与 10%/7%（Flash）</span>是论文的估算值，
+    其中 FLOPs 以 equivalent FP8 FLOPs 计、KV cache 是 size 比例；相对 V3.2，不是端到端 latency，也不是相对 V3。V4 报告没有给出全量训练 GPU-hours，页面写「未获取」，
+    不用 V3 的 2.788M 去推算 V4 的成本。
+  </p>
+
+  <h3>训练稳定性：两篇报告给出的是不同模型的观察</h3>
+  <p>
+    V3 在 §1 写：整个训练过程没有出现不可恢复的 loss spike，也没有 rollback。
+    V4 在 §4.2.3 写：训练 trillion-parameter MoE 时遇到了 notable instability，simple rollbacks 只能暂时恢复，
+    最终用 Anticipatory Routing 与 SwiGLU Clamping 处理。
+    这是两个模型、两套训练配方下的报告；V3 的「稳定」不能外推到 V4，V4 的「不稳定」也不能反推 V3。
+    V4 还明确说，这两种技术的底层原理仍未被充分理解（§6），所以它们是工程手段，不是可证明的通用规则。
+  </p>
+
+  <h3>什么时候别用</h3>
+  <ul>
+    <li><strong>集群互联远低于 V3 的 <span data-src="V3 §3.2.2">IB 50 GB/s / NVLink 160 GB/s</span>。</strong>DualPipe 的重叠预算会变；先按 V4 §3.1 的 <code>C/B ≤ 6144</code> 算一遍，再决定是否值得上 EP-heavy 的并行。</li>
+    <li><strong>模型不是 EP-heavy 的 MoE。</strong>DualPipe 的收益来自跨节点 all-to-all；dense 模型或 EP 很小的模型，PP bubble 可能才是主项，1F1B/ZB1P 的性价比更高。</li>
+    <li><strong>需要严格逐位复现，却只照搬 V3 的 FP8 配方。</strong>V3 报告未涉及 batch invariance/determinism；V4 专门做了 batch-invariant + deterministic kernel（§3.3）。如果复现性是硬要求，应该按 V4 的 kernel 设计，而不是只换精度。</li>
+    <li><strong>小团队或小集群。</strong>V3 的 prefill/decode 最小部署单元是 <span data-src="V3 §3.4.1">32 GPU</span> / <span data-src="V3 §3.4.2">320 GPU</span>；V4 的百万上下文服务也需要可观的 KV cache 与落盘带宽。先确认部署单元，再谈单位成本。</li>
+    <li><strong>把 V4 的推理加速当成训练加速。</strong><span data-src="V4 §3.1">1.50–1.73× / 1.96×</span> 是 inference；V4 没有报告全量训练 GPU-hours，不能用它去推算训练成本。</li>
+    <li><strong>把 FP4 QAT 的 2× 当成端到端 2×。</strong><span data-src="V4 §5.2.1">2×</span> 是 top-k selector 的加速，<span data-src="V4 §5.2.1">99.7%</span> 是 KV entry recall；两者都不是整模型吞吐或精度。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>V3 把通信藏进 chunk，V4 把通信长进 wave</h4></div>
+    <p>
+      V3 的关键是「让 all-to-all 与计算在同一对 chunk 里并行」，代价是 2× 参数副本和 FP8 的精度工程；
+      V4 的关键是「把 expert 切细，让通信、计算、回传在稳态下连续」，代价是更复杂的调度、确定性 kernel 和 KV cache 管理。
+      两代的分界线不是某个单点技巧，而是重叠粒度：chunk → expert wave。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>DeepSeek-V3 Technical Report · DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2412.19437">arXiv 2412.19437</a>（V3，v2，2025-02-18） ·
+    <a href="https://arxiv.org/abs/2606.19348">arXiv 2606.19348</a>（V4，v1，2026-04-26）<br>
+    官方：<a href="https://deepseek.com/en/news/v4-preview/">DeepSeek-V4 Preview</a> ·
+    <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">V4-Pro model card</a> ·
+    <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">V4-Flash model card</a> ·
+    <a href="https://github.com/deepseek-ai/DeepGEMM/pull/304">MegaMoE（DeepGEMM PR #304）</a><br>
+    笔记：<a href="/deepseek-v4-infra-4.4-%E8%AE%AD%E7%BB%83%E6%98%BE%E5%AD%98%E7%AE%A1%E7%90%86/">DeepSeek V4 Infra 4.4 - 训练显存管理</a>
+    （第三方 Zhihu 系列，不是官方技术报告；页面未用它作为数字来源）<br>
+    版本：V3 的全部 Table / Figure / § 指 arXiv 2412.19437v2；V4 的全部 Table / Figure / § 指 arXiv 2606.19348v1。
+    两篇报告的编号各自独立。
+  </div>
+  <p class="errata" style="margin-top:16px">
+    <strong>口径说明：</strong>V4 §3.1 写 <code>2d = 6144 FLOPs/Byte</code>；V4 §4.2.1 写 V4-Pro 的 hidden dimension 为 7168、
+    每个专家的 intermediate hidden dimension 为 3072。页面按 §3.1 的 6144 使用，并在正文把「这里的 d 对应 expert intermediate dimension」
+    标为 <span class="infer">推断</span>（依据：<code>2d=6144</code> 得 <code>d=3072</code>，与 §4.2.1 的 expert intermediate hidden dimension 相同）。
+    V4 报告未报告全量训练 GPU-hours，页面写「未获取」。V4 的 1M 上下文 FLOPs / KV cache 数字是论文估算值，相对 V3.2，不是端到端延迟。
+    V3 Table 1 不含前期研究与消融。笔记核对：未发现 `DeepSeek V4 Infra 4.4 - 训练显存管理` 与两篇报告的直接数字冲突；
+    该笔记是第三方解读，页面未把它当作数字来源。
+  </p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('ep-budget-sim');
+  if (!sim) return;
+
+  var bRange = document.getElementById('ep-b-range');
+  var cRange = document.getElementById('ep-c-range');
+  var bLabel = document.getElementById('ep-b-label');
+  var cLabel = document.getElementById('ep-c-label');
+  var bVal = document.getElementById('ep-b-val');
+  var cVal = document.getElementById('ep-c-val');
+  var cmaxEl = document.getElementById('ep-cmax');
+  var statusEl = document.getElementById('ep-status');
+  var msgEl = document.getElementById('ep-msg');
+
+  if (!bRange || !cRange || !bLabel || !cLabel || !bVal || !cVal || !cmaxEl || !statusEl || !msgEl) return;
+
+  function render() {
+    var B = parseFloat(bRange.value);
+    var C = parseFloat(cRange.value);
+    var cmax = 6144 * B / 1000;
+    var hidden = C <= cmax;
+
+    bLabel.textContent = String(B);
+    cLabel.textContent = String(C);
+    bVal.textContent = B + ' GB/s';
+    cVal.textContent = C + ' TFLOP/s';
+    cmaxEl.textContent = cmax.toFixed(1) + ' TFLOP/s';
+    statusEl.textContent = hidden ? '可隐藏' : '暴露';
+
+    msgEl.textContent = 'B=' + B + ' GB/s → C_max=6144×' + B + '/1000=' + cmax.toFixed(1) +
+      ' TFLOP/s；C=' + C + ' ' + (hidden ? '≤' : '＞') + ' ' + cmax.toFixed(1) +
+      '，' + (hidden ? '通信可被计算隐藏。' : '通信时间会露出计算下沿。');
+  }
+
+  bRange.addEventListener('input', render);
+  cRange.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

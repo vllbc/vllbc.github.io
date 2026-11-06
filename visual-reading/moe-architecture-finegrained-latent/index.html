@@ -1,0 +1,568 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+|---|---|---|
+| 27.7 | Mixtral §3 | 13/47*100 |
+| 3.6 | Mixtral §3 | 47/13 |
+| 34 | Mixtral §3 | 47-13 |
+| 634 | V3 §4.2 | 671-37 |
+| 5.5 | V3 §4.2 | 37/671*100 |
+| 4.4 | DeepSeekMoE §3.1 | 4426165368/1000000000 |
+| 120 | DeepSeekMoE §3.1 | 16*15/2 |
+| 4426165368 | DeepSeekMoE §3.1 | 64*63*62*61*60*59*58*57/(8*7*6*5*4*3*2*1) |
+| 28 | OLMoE §4.1.2 | 8*7/2 |
+| 1820 | OLMoE §4.1.2 | 16*15*14*13/(4*3*2*1) |
+| 35960 | OLMoE §4.1.2 | 32*31*30*29/(4*3*2*1) |
+| 4495 | OLMoE §4.1.3 | 31*30*29/(3*2*1) |
+| 0.059 | DeepSeekMoE Table 1 | 1.867-1.808 |
+| 4.3 | DeepSeekMoE Table 1 | 54.8-50.5 |
+| 6.4 | DeepSeekMoE Table 1 | 16.6-10.2 |
+| 1.2 | DeepSeekMoE Table 1 | 4.9-3.7 |
+| 40.5 | DeepSeekMoE Table 3 | 74.4/183.5*100 |
+| 5.65 | LatentMoE Table 3 | 34.91-29.26 |
+| 3.28 | LatentMoE Table 3 | 62.23-58.95 |
+| 1.17 | LatentMoE Table 3 | 41.50-40.33 |
+| 0.49 | LatentMoE Table 3 | 64.88-64.39 |
+| 0.86 | LatentMoE Table 3 | 75.18-74.32 |
+| 0.606 | DeepSeekMoE §4.4 | 2.414-1.808 |
+| 0.004 | V3 Table 5 | 0.656-0.652 |
+| 1.1 | V3 Table 5 | 68.3-67.2 |
+| 3.8 | V3 Table 5 | 74.5-70.7 |
+| 512 | LatentMoE §3 | 128*4 |
+| 24 | LatentMoE §3 | 6*4 |
+| 1024 | LatentMoE §3 | 4096/4 |
+| 17.1 | DeepSeekMoE §5.1.2 | 2.8/16.4*100 |
+| 18.8 | OLMoE §2 | 1.3/6.9*100 |
+| 8.9 | LatentMoE Table 3 | 8.44/94.8*100 |
+| 0.03 | LatentMoE Table 3 | 8.47-8.44 |
+| 94 | Mixtral §3 | 47*2 |
+| 32.8 | DeepSeekMoE §5.1.2 | 16.4*2 |
+| 1342 | V3 §4.2 | 671*2 |
+| 13.8 | OLMoE §2 | 6.9*2 |
+| 189.6 | LatentMoE Table 3 | 94.8*2 |
+| 5.64 | Mixtral Table 1 | 4096*14336*3*32/1000000000 |
+| 2.55 | V3 §4.2 | 7168*2048*3*58/1000000000 |
+| 655.35 | V3 §4.2 | (256+1)*2.55 |
+| 22.95 | V3 §4.2 | (8+1)*2.55 |
+| 45.90 | V3 §4.2 | 2*(8+1)*2.55 |
+| 1310.70 | V3 §4.2 | (256+1)*2.55*2 |
+| 45.12 | Mixtral Table 1 | 8*5.64 |
+| 11.28 | Mixtral Table 1 | 2*5.64 |
+| 22.56 | Mixtral Table 1 | 2*2*5.64 |
+| 90.24 | Mixtral Table 1 | 8*5.64*2 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="Mixtral v1; DeepSeekMoE v1; DeepSeek-V3 v2; OLMoE v1; LatentMoE v1; Switch v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoE 架构：Fine-grained、Shared 与 Latent Experts · 专家越切越细，成本要另外压回来</title>
+<meta name="description" content="对比 Mixtral 的粗粒度 MoE、DeepSeekMoE/DeepSeek-V3 的 fine-grained 与 shared experts、OLMoE 的粒度消融，以及 LatentMoE 的 latent experts；算清总参数、激活参数、BF16 显存、top-k 组合数与通信账。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+details.handcalc{margin-top:12px}
+.table-cap{font-size:12.5px;color:var(--text-soft);margin:22px 0 8px;line-height:1.7}
+.table-note{font-size:12px;color:var(--text-soft);margin:-8px 0 18px;line-height:1.7}
+.infer{font-size:11px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;margin-left:4px;font-family:"JetBrains Mono",monospace}
+p code,li code,td code,.details-body code{overflow-wrap:anywhere}
+footer .src,footer .src a{overflow-wrap:anywhere}
+.figure-svg .box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.4}
+.figure-svg .hot-box{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.figure-svg .cold-box{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.figure-svg .purple-box{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.figure-svg .dash-box{fill:none;stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:6 5}
+.figure-svg .line{stroke:var(--text-soft);stroke-width:1.4;fill:none}
+.figure-svg .line-hot{stroke:var(--accent);stroke-width:1.8;fill:none}
+.figure-svg .arrowhead{fill:var(--text-soft)}
+.figure-svg .arrowhead-hot{fill:var(--accent)}
+.figure-svg .svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.figure-svg .svg-s{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-muted)}
+.figure-svg .svg-l{font-family:"Noto Sans SC",sans-serif;font-size:11px;fill:var(--text-soft)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">MoE · 架构</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#compute">怎么算</a>
+      <a href="#pipeline">数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>MoE 架构 · Fine-grained / Shared / Latent</span>
+  <h1>MoE 架构：专家越切越细，组合数上去，成本要另外压回来</h1>
+  <p class="hero-sub">粗粒度 MoE 用少量大 expert 和 top-2；fine-grained MoE 把每个 expert 切小、把 top-k 调大，在同样的专家参数与计算预算下扩大组合数；shared expert 把公共知识从 routed experts 里剥出来；latent experts 则先把 token 投影到低维潜空间，再在潜空间里放更多 expert 与更大的 top-k。三条路线都在回答同一个问题：总参数、激活参数、显存与通信，哪一笔账可以先动。</p>
+  <div class="meta">
+    <span>Mixtral 8x7B · DeepSeekMoE · DeepSeek-V3 · OLMoE · LatentMoE</span>
+    <a href="https://arxiv.org/abs/2401.04088" target="_blank" rel="noopener">Mixtral v1 ↗</a>
+    <a href="https://arxiv.org/abs/2401.06066" target="_blank" rel="noopener">DeepSeekMoE v1 ↗</a>
+    <a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">DeepSeek-V3 v2 ↗</a>
+    <a href="https://arxiv.org/abs/2601.18089" target="_blank" rel="noopener">LatentMoE v1 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>MoE 把 FFN 换成 <code>E</code> 个 expert，router 为每个 token 选 <code>K</code> 个。总参数看 <code>E</code>，每 token 计算看 <code>K</code>，显存看总参数而不是激活参数。Mixtral 8x7B 是 <span class="mono" data-src="Mixtral §3">47B</span> 总参数、<span class="mono" data-src="Mixtral §3">13B</span> 激活，激活占 <span class="mono" data-src="Mixtral §3">27.7%</span>；DeepSeek-V3 是 <span class="mono" data-src="V3 §4.2">671B</span> 总参数、<span class="mono" data-src="V3 §4.2">37B</span> 激活，激活占 <span class="mono" data-src="V3 §4.2">5.5%</span>。</p>
+  <p><strong>Fine-grained 的核心不是“更多 expert”，而是“同样预算下更多组合”。</strong>把每个 expert 的中间维切成 <code>1/m</code>，expert 数变成 <code>mN</code>，top-k 变成 <code>mK</code>，专家参数与激活计算可以保持不变。DeepSeekMoE 给的例子是 <code data-src="DeepSeekMoE §3.1">C(16,2)=120</code> 对 <code data-src="DeepSeekMoE §3.1">C(64,8)=4,426,165,368</code>；shared expert 则把 <code>K_s</code> 个 expert 设为恒开，routed 的激活数相应减 <code>K_s</code>，把公共知识从 routed experts 中剥离。</p>
+  <p><strong>Latent experts 换的是维度。</strong>LatentMoE 先把 token 从 <code>d</code> 维投影到 <code>ℓ</code> 维，expert 在潜空间里计算；把 expert 数 <code>N</code> 与 top-k <code>K</code> 同时乘 <code>α=d/ℓ</code>（<code>ℓ-MoE_acc</code> 的做法；<code>ℓ-MoE_eff</code> 只扩 <code>N</code>），通信与总专家权重可以保持同一量级。<span data-src="LatentMoE Table 3">95B</span> 模型上，<code>ℓ-MoE_acc</code> 用 <span class="mono" data-src="LatentMoE Table 3">8.44B</span> 激活参数拿到 MMLU Pro <span class="mono" data-src="LatentMoE Table 3">34.91</span>，baseline 是 <span class="mono" data-src="LatentMoE Table 3">29.26</span>。代价是 down/up 投影的额外计算，且 router 与 shared 仍在 d 维；<span data-src="LatentMoE §4.1">α=4</span> 是实验选出来的，不是免费参数。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="DeepSeekMoE §3.1">4.4<small>B</small></div><div class="k">fine-grained 的组合数：DeepSeekMoE 把 <span data-src="DeepSeekMoE §3.1">16</span> 个 expert 切成 <span data-src="DeepSeekMoE §3.1">64</span> 个、<span data-src="DeepSeekMoE §3.1">top-2</span> 变 <span data-src="DeepSeekMoE §3.1">top-8</span>，组合数从 <span data-src="DeepSeekMoE §3.1">120</span> 到 <span data-src="DeepSeekMoE §3.1">4,426,165,368</span>（约 <span data-src="DeepSeekMoE §3.1">4.4B</span>）。</div></div>
+    <div class="metric"><div class="v" data-src="V3 §4.2">5.5<small>%</small></div><div class="k">DeepSeek-V3 每 token 激活参数占总参数的比例（<span data-src="V3 §4.2">37B</span> / <span data-src="V3 §4.2">671B</span>）；显存仍按总参数算。</div></div>
+    <div class="metric"><div class="v" data-src="LatentMoE Table 3">+5.65<small>分</small></div><div class="k">LatentMoE <span data-src="LatentMoE Table 3">95B</span> 的 MMLU Pro 绝对差：baseline <span data-src="LatentMoE Table 3">29.26</span> → ℓ-MoE_acc <span data-src="LatentMoE Table 3">34.91</span>（Table 3 口径）。</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>稀疏激活拆开了参数量与计算量，但没自动决定专家该多细</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么“总参数 / 激活参数 / 显存”是三笔不同的账，以及粗粒度 MoE 为什么会逼每个 expert 学太多东西。</p>
+  <p>dense Transformer 的 FFN 对每个 token 都用同一组权重，参数量、计算量与显存大致同向增长。MoE 把 FFN 换成 <code>E</code> 个 expert，router 只为每个 token 选 <code>K</code> 个，于是总参数按 <code>E</code> 增长，每 token 的激活计算只按 <code>K</code> 增长。Mixtral 8x7B 是这条思路的粗粒度版本：<span class="mono" data-src="Mixtral Table 1">8</span> 个 expert、top-<span class="mono" data-src="Mixtral Table 1">2</span>，总参数 <span class="mono" data-src="Mixtral §3">47B</span>、激活 <span class="mono" data-src="Mixtral §3">13B</span>，总参数约为激活的 <span class="mono" data-src="Mixtral §3">3.6</span> 倍。</p>
+  <div class="eq">
+    P<sub>total</sub> ≈ P<sub>other</sub> + (N + S) · P<sub>expert</sub><br>
+    P<sub>active</sub> ≈ P<sub>other</sub> + (K + S) · P<sub>expert</sub><br>
+    M<sub>BF16</sub> = 2 · P<sub>total</sub> &nbsp;bytes<br>
+    C<sub>token</sub> ≈ 2 · P<sub>active</sub> &nbsp;FLOPs
+  </div>
+  <div class="eq-cap">N 为 routed expert 数，S 为 shared expert 数，K 为 routed top-k，P<sub>other</sub> 为 attention/embedding 等非专家参数。显存取总参数，计算取激活参数；2 FLOPs/参数/token 是常用估算，不是论文实测值。</div>
+  <p>这三条式子给出三个方向：显存看总参数，计算看激活参数，通信看每个 token 要被复制到几个 expert、每个副本有多宽。MoE 让第二项变小，却不会自动让第一项变小。Mixtral §3 写得很直接：13B 激活只决定推理计算成本，<strong>服务 Mixtral 的显存成本按 47B 稀疏参数计</strong>；SMoE 的额外开销来自 routing 与“一张卡上放多个 expert”时的内存读取，更适合有 batch 的工作负载。</p>
+  <p>粗粒度的另一个问题是专家 specialization。DeepSeekMoE §3.1 的观察是：expert 数有限时，分到某个 expert 的 token 更可能覆盖多种知识，这个 expert 就不得不在同一组参数里学差异很大的东西；如果每个 token 能路由到更多 expert，知识才有机会被拆到不同 expert 里分别学习。Mixtral §5 的路由分析则给了一个反例式的提醒：在它的 8 个 expert 上，按主题看没有明显路由模式，连续 token 反而常被分到同一个 expert，这种局部性在 expert parallelism 下容易让某些 expert 过载。</p>
+  <div class="three-col">
+    <div class="card"><span class="pill p1">显存</span><h4>总参数必须有地方放</h4><p>未被选中的 expert 也要常驻。EP/TP 降低的是每卡 expert 权重，不是总权重；attention、embedding 与 KV cache 另算。</p></div>
+    <div class="card"><span class="pill p2">计算</span><h4>每 token 只算 K 个 expert</h4><p>激活 FLOPs 约为 dense FFN 的 <code>K/E</code>；但 decode 的 batch 小，算术强度低，省下的 FLOPs 不一定等比例换成延迟。</p></div>
+    <div class="card"><span class="pill p3">通信</span><h4>token 要去找 expert</h4><p>每个 token 产生 <code>K</code> 份 expert 输入；专家不在本 rank 时，这份输入要跨卡。EP 的 all-to-all 体积与 <code>K</code>、hidden 维度同向。</p></div>
+  </div>
+  <p>所以“专家该多细”不是审美问题，而是预算分配问题：expert 越少，每个 expert 越难专精；expert 越多，路由、负载均衡与跨卡通信越贵。后面的 fine-grained、shared、latent 三条路线，都是在固定“总专家参数 + 激活计算”这件事上做交换。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>从 8 选 2 到 64 选 6：先扩大组合数，再把公共知识拆出去</h2></div>
+  <p class="sec-sub">读完这节你应该知道：粗粒度 MoE、fine-grained MoE、shared expert 各自解决了什么，又留下了什么；以及为什么 OLMoE 的受控实验会给出与 DeepSeekMoE 不完全相同的 shared 结论。</p>
+
+  <h3>2.1 粗粒度：8 个 expert，top-2，组合数 28</h3>
+  <p>Mixtral 的每个 expert 是一个标准 FFN；对每个 token，router 在 <span data-src="Mixtral Table 1">8</span> 个 expert 里选 <span data-src="Mixtral Table 1">2</span> 个，输出按 gate 权重相加（<span class="mono" data-src="Mixtral §2.1">§2.1</span>）。这套配置的组合数是 <code data-src="OLMoE §4.1.2">C(8,2)=28</code>（<span class="mono" data-src="OLMoE §4.1.2">OLMoE §4.1.2</span>）。<span data-src="OLMoE §4.1.2">28</span> 并不大：在 <span data-src="Mixtral Table 1">32</span> 层里每层只有 <span data-src="OLMoE §4.1.2">28</span> 种 expert 组合，模型很难靠“换组合”表达很细的知识分工。Mixtral 的 §5 也报告，按主题看 expert 选择没有明显模式，只有 DM Mathematics 的分布略有不同；连续 token 常选同一个 expert，这种局部性在 EP 下可能造成过载，但也能被缓存利用。</p>
+
+  <h3>2.2 Fine-grained：把 expert 切小，把 top-k 调大</h3>
+  <p>DeepSeekMoE 的做法是把每个 expert FFN 的中间维缩到 <code>1/m</code>，于是 expert 数从 <code>N</code> 变成 <code>mN</code>；为了保持计算不变，激活的 expert 数也从 <code>K</code> 变成 <code>mK</code>（<span class="mono" data-src="DeepSeekMoE §3.1">§3.1</span>）。总专家参数不变，但组合数从 <code>C(N,K)</code> 变成 <code>C(mN,mK)</code>。论文给的例子是 <code data-src="DeepSeekMoE §3.1">N=16</code>、<code data-src="DeepSeekMoE §3.1">K=2</code>：原始 top-2 只有 <span class="mono" data-src="DeepSeekMoE §3.1">120</span> 种组合；每个 expert 切成 <span data-src="DeepSeekMoE §3.1">4</span> 份后，<code data-src="DeepSeekMoE §3.1">64</code> 个 expert 选 <code data-src="DeepSeekMoE §3.1">8</code> 个，组合数为 <span class="mono" data-src="DeepSeekMoE §3.1">4,426,165,368</span>。</p>
+  <p>DeepSeekMoE 的验证模型是 <span data-src="DeepSeekMoE Table 7">1 shared + 63 routed</span>、<span data-src="DeepSeekMoE Table 7">1+7 激活</span>、每个 expert 为 <span data-src="DeepSeekMoE §4.2">0.25</span> 倍标准 FFN（<span class="mono" data-src="DeepSeekMoE Table 7">Table 7</span>、<span class="mono" data-src="DeepSeekMoE §4.2">§4.2</span>）；<span data-src="DeepSeekMoE §5.1.2">16B</span> 模型是 <span data-src="DeepSeekMoE §5.1.2">2 shared + 64 routed</span>、<span data-src="DeepSeekMoE §5.1.2">2+6 激活</span>（<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>）；<span data-src="DeepSeekMoE Table 7">144.6B</span> 模型（论文称 <span data-src="DeepSeekMoE §7">145B</span>）是 <span data-src="DeepSeekMoE Table 7">4 shared + 128 routed</span>、<span data-src="DeepSeekMoE Table 7">4+12 激活</span>（<span class="mono" data-src="DeepSeekMoE Table 7">Table 7</span>）。专家越切越细，但 routed 的 top-k 也在变大，这正是组合数增长与通信/均衡成本同时上升的来源。</p>
+
+  <h3>2.3 Shared：让公共知识不进 router 的 top-k</h3>
+  <p>DeepSeekMoE 在 fine-grained 之外再隔离 <code>K_s</code> 个 shared expert：不管 router 怎么选，每个 token 都确定性地经过这些 shared expert；为了保持计算不变，routed experts 的激活数从 <code>mK</code> 减到 <code>mK−K_s</code>（<span class="mono" data-src="DeepSeekMoE §3.2">§3.2</span>）。直觉是：不同 token 都需要一些共同知识；如果这些知识只能由 routed experts 各自学一遍，就会产生参数冗余。shared expert 把这些公共部分集中起来，routed experts 可以更专注于差异。</p>
+  <p>DeepSeek-V3 沿用这套结构：每个 MoE 层 <span data-src="V3 §4.2">1 个 shared expert + 256 个 routed experts</span>，每个 token 激活 <span data-src="V3 §4.2">8</span> 个 routed（<span class="mono" data-src="V3 §4.2">§4.2</span>）。它的 gating 从 softmax 改成 sigmoid，并在 top-k 选择时给每个 expert 加一个 bias <code>b_i</code>；bias 只参与“选哪些 expert”，实际权重仍用无偏的 <code>s<sub>i,t</sub></code>（<span class="mono" data-src="V3 §2.1.2">§2.1.2</span>）。这是后文 aux-loss-free 均衡的核心。</p>
+  <p>但 shared 不是所有模型的共识。OLMoE 在相同激活/总参数与 FLOPs 下做了受控对比：<span data-src="OLMoE §4.1.3">32 routed、激活 4</span> 的组合数是 <span class="mono" data-src="OLMoE §4.1.3">35,960</span>；改成 <span data-src="OLMoE §4.1.3">31 routed + 1 shared、激活 3</span>，组合数只剩 <span class="mono" data-src="OLMoE §4.1.3">4,495</span>。论文的报告是 shared 版本 <em>“performs slightly worse”</em>，并认为把 <span data-src="OLMoE §4.1.3">1</span> 个 routed 改成 shared 消除了近 <span data-src="OLMoE §4.1.3">90%</span> 的组合（<span class="mono" data-src="OLMoE §4.1.3">§4.1.3</span>）。这与 DeepSeekMoE §4.4 的 shared 消融方向相反，后文会把两边数字并列。</p>
+
+  <h3>2.4 Latent：在低维潜空间里放更多 expert</h3>
+  <p>LatentMoE 把 token 从模型 hidden 维 <code>d</code> 投影到潜维 <code>ℓ</code>：<code>W<sub>↓</sub></code> 做 down-projection，routed experts 在 <code>ℓ</code> 维里计算，最后 <code>W<sub>↑</sub></code> 投回 <code>d</code> 维；shared experts 与 router 仍在原维度（<span class="mono" data-src="LatentMoE §3">§3 Eq.1</span>）。因为 expert 权重与 dispatch 的激活都在 <code>ℓ</code> 维，通信与专家权重按 <code>d/ℓ</code> 缩小；论文把 expert 数 <code>N</code> 乘 <code>α=d/ℓ</code>；<code>ℓ-MoE<sub>acc</sub></code> 再把 top-k <code>K</code> 乘 α，把省下的预算换成更多组合。两个变体：<code>ℓ-MoE<sub>eff</sub></code> 保持 <code>K</code>、降低通信与权重（准确率目标是对齐 baseline）；<code>ℓ-MoE<sub>acc</sub></code> 把 <code>K</code> 也乘 <code>α</code>、保持通信与总专家权重同一量级，用更多组合换准确率（<span class="mono" data-src="LatentMoE §3">§3 Eq.2</span>、<span class="mono" data-src="LatentMoE Table 1">Table 1</span>）。</p>
+
+  <p class="table-cap">表 2-1：五种 MoE 架构的关键配置。Mixtral 行见 <span class="mono" data-src="Mixtral §3">§3</span>/<span class="mono" data-src="Mixtral Table 1">Table 1</span>；DeepSeekMoE 行见 <span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>/<span class="mono" data-src="DeepSeekMoE Table 7">Table 7</span>；DeepSeek-V3 行见 <span class="mono" data-src="V3 §4.2">§4.2</span>/<span class="mono" data-src="V3 §2.1.2">§2.1.2</span>；OLMoE 行见 <span class="mono" data-src="OLMoE §2">§2</span>；LatentMoE 行见 <span class="mono" data-src="LatentMoE Table 2">Table 2</span>/<span class="mono" data-src="LatentMoE Table 3">Table 3</span>/<span class="mono" data-src="LatentMoE §3">§3</span>。激活占比与 BF16 权重由表内参数推算；BF16 权重按总参数×2 的十进制 GB 估算，不含 KV cache、激活与通信缓冲。LatentMoE 的 512/24 由 <code>α=4</code> 与 Table 2 的 128/6 推算（<span class="infer">推断</span>）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th>总参数</th><th>激活参数</th><th>激活占比</th><th>专家（shared+routed）</th><th>routed top-k</th><th>路由 / 均衡</th><th>BF16 权重</th></tr></thead>
+      <tbody>
+        <tr><td>Mixtral 8x7B</td><td class="num">47B</td><td class="num">13B</td><td class="num">27.7%</td><td class="num">0 + 8</td><td class="num">2</td><td>softmax top-k；论文未展开均衡损失；§5 未观察到按主题的明显路由</td><td class="num">94 GB</td></tr>
+        <tr><td>DeepSeekMoE 16B</td><td class="num">16.4B</td><td class="num">2.8B</td><td class="num">17.1%</td><td class="num">2 + 64</td><td class="num">6</td><td>expert-level balance loss（§5.1.2 设 0.001）；训练不 drop token</td><td class="num">32.8 GB</td></tr>
+        <tr><td>DeepSeek-V3</td><td class="num">671B</td><td class="num">37B</td><td class="num">5.5%</td><td class="num">1 + 256</td><td class="num">8</td><td>aux-loss-free bias + 序列级补充损失；不 drop token；每 token 最多 4 个节点</td><td class="num">1342 GB</td></tr>
+        <tr><td>OLMoE-1B-7B</td><td class="num">6.9B</td><td class="num">1.3B</td><td class="num">18.8%</td><td class="num">0 + 64</td><td class="num">8</td><td>dropless token-choice；load balancing loss + router z-loss</td><td class="num">13.8 GB</td></tr>
+        <tr><td>LatentMoE 95B（acc）</td><td class="num">94.8B</td><td class="num">8.44B</td><td class="num">8.9%</td><td class="num">2（d 维）+ 512（潜空间）</td><td class="num">24（潜空间）</td><td>aux-loss-free + load balancing loss；α=4</td><td class="num">189.6 GB</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>这张表里最容易被误读的是“激活占比”。它只说明每 token 计算量的相对大小，不说明显存。DeepSeek-V3 的 5.5% 很低，但 671B 总参数仍要占 <span class="mono" data-src="V3 §4.2">1342 GB</span> 的 BF16 权重；Mixtral 的 27.7% 更高，但 47B 总参数只要 <span class="mono" data-src="Mixtral §3">94 GB</span>。反过来说，LatentMoE 的 8.9% 也不是“显存只要 8.9%”，它仍然要放 94.8B 总参数。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>切细、共享、投影：三条路线都在扩大组合空间</h2></div>
+  <p class="sec-sub">读完这节你应该知道：fine-grained 如何保持计算不变而扩大组合数，shared expert 如何改路由集合，latent experts 如何用低维投影换更多专家与 top-k。</p>
+
+  <h3>3.1 Fine-grained：expert 变小，top-k 变大，组合数爆炸</h3>
+  <p>设原始 MoE 有 <code>N</code> 个 expert、每个 expert 的 FFN 中间维为 <code>m<sub>f</sub></code>，每 token 选 <code>K</code> 个。把每个 expert 的中间维缩到 <code>m<sub>f</sub>/m</code>，就得到 <code>mN</code> 个 fine-grained experts；为了保持激活计算不变，top-k 变成 <code>mK</code>。输出写成：</p>
+  <div class="eq">
+    h<sub>t</sub> = Σ<sub>i=1..mN</sub> g<sub>i,t</sub> · FFN<sub>i</sub>(u<sub>t</sub>) + u<sub>t</sub><br>
+    g<sub>i,t</sub> = s<sub>i,t</sub> &nbsp;if&nbsp; s<sub>i,t</sub> ∈ TopK({s<sub>j,t</sub>}, mK), else 0<br>
+    s<sub>i,t</sub> = Softmax<sub>i</sub>(u<sub>t</sub><sup>T</sup> e<sub>i</sub>)
+  </div>
+  <div class="eq-cap">DeepSeekMoE §3.1 Eq.6–8 的写法。总专家参数等于原 <code>N</code> 个标准 FFN，激活的非零 gate 数从 <code>K</code> 变成 <code>mK</code>。</div>
+  <p>关键不是“expert 数量”本身，而是组合空间：原始 top-2 在 16 个 expert 里只有 <code>C(16,2)=120</code> 种组合；切成 4 份后，64 个 expert 选 8 个，组合数是 <code>C(64,8)=4,426,165,368</code>（<span class="mono" data-src="DeepSeekMoE §3.1">§3.1</span>）。专家参数与 FLOPs 没变，但每个 token 可以调到更细的“知识组合”。这也是为什么 fine-grained 通常伴随更大的 top-k：如果只切小而不增大 top-k，激活计算会下降，但组合数并不会按同样方式扩大。</p>
+  <p>代价也在同一处：top-k 变大意味着每个 token 要复制更多份 expert 输入，routing 与 all-to-all 的 token 数按 <code>K</code> 增长；expert 变小则单 expert 的 GEMM 变小，batch 小时更容易掉进权重读取主导的低算术强度区间。DeepSeekMoE 16B 明确说没有采用更细的粒度，原因是“excessively small expert sizes”可能降低计算效率（<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>）。</p>
+
+  <h3>3.2 Shared：K<sub>s</sub> 个 expert 恒开，routed 的 top-k 减 K<sub>s</sub></h3>
+  <p>在 fine-grained 的基础上，DeepSeekMoE 再隔离 <code>K<sub>s</sub></code> 个 shared experts。每个 token 确定性地经过这 <code>K<sub>s</sub></code> 个 expert；router 只在剩下的 <code>mN−K<sub>s</sub></code> 个 routed experts 里选 <code>mK−K<sub>s</sub></code> 个。输出是：</p>
+  <div class="eq">
+    h<sub>t</sub> = Σ<sub>i=1..K<sub>s</sub></sub> FFN<sub>i</sub>(u<sub>t</sub>) + Σ<sub>i=K<sub>s</sub>+1..mN</sub> g<sub>i,t</sub> · FFN<sub>i</sub>(u<sub>t</sub>) + u<sub>t</sub>
+  </div>
+  <div class="eq-cap">DeepSeekMoE §3.2 Eq.9–11。shared experts 不进 router 的 top-k；总激活的 expert 数仍然是 <code>mK</code>，只是其中 <code>K<sub>s</sub></code> 个固定。</div>
+  <p>DeepSeek-V3 的版本把 gating 改成 sigmoid，并在选择时加 bias：</p>
+  <div class="eq">
+    g<sub>i,t</sub> = g′<sub>i,t</sub> / Σ<sub>j</sub> g′<sub>j,t</sub><br>
+    g′<sub>i,t</sub> = s<sub>i,t</sub> &nbsp;if&nbsp; s<sub>i,t</sub> + b<sub>i</sub> ∈ TopK({s<sub>j,t</sub> + b<sub>j</sub>}, K<sub>r</sub>), else 0<br>
+    s<sub>i,t</sub> = Sigmoid(u<sub>t</sub><sup>T</sup> e<sub>i</sub>)
+  </div>
+  <div class="eq-cap">DeepSeek-V3 §2.1.2 Eq.12–16。bias <code>b<sub>i</sub></code> 只用于路由选择；门控值仍来自无偏的 <code>s<sub>i,t</sub></code>。shared expert 的输出直接加到 routed 输出上。</div>
+  <p>shared expert 的收益在 DeepSeekMoE §4.4 有一个很直接的数字：去掉 shared、改为多激活 1 个 routed expert，Pile loss 从 <span class="mono" data-src="DeepSeekMoE §4.4">1.808</span> 升到 <span class="mono" data-src="DeepSeekMoE §4.4">2.414</span>，计算量不变。论文据此称 shared expert 捕捉了 routed experts 不共享的基础知识。反过来，OLMoE §4.1.3 在相同激活/总参数与 FLOPs 下报告 shared 版本 <em>“performs slightly worse”</em>，并把原因归到组合数减少：35,960 种组合变成 4,495 种。两边的模型、数据与训练预算不同，页面只并列数字，不合并成“shared 一定有用/没用”。</p>
+
+  <h3>3.3 Latent：先在 ℓ 维算 expert，再把 N 与 K 乘 α</h3>
+  <p>LatentMoE 的 routed expert 不在 <code>d</code> 维工作，而是在潜维 <code>ℓ</code> 工作。token <code>x ∈ ℝ<sup>d</sup></code> 先乘 <code>W<sub>↓</sub> ∈ ℝ<sup>ℓ×d</sup></code>，每个 routed expert 的权重是 <code>W<sub>FC1</sub>, W<sub>gate</sub> ∈ ℝ<sup>m×ℓ</sup></code> 与 <code>W<sub>FC2</sub> ∈ ℝ<sup>ℓ×m</sup></code>，输出再乘 <code>W<sub>↑</sub> ∈ ℝ<sup>d×ℓ</sup></code> 投回原维度；shared experts 与 router 仍在 <code>d</code> 维（<span class="mono" data-src="LatentMoE §3">§3 Eq.1</span>）。</p>
+  <div class="eq">
+    ℓ-MoE<sub>acc</sub>(x) = W<sub>↑</sub> · ( Σ<sub>i∈TopK(K′,N′)</sub> p′<sub>i</sub> · E<sub>i</sub>(W<sub>↓</sub>x; ℓ) ) + Σ<sub>j</sub> E<sub>j</sub>(x; d)
+  </div>
+  <div class="eq-cap">LatentMoE §3 Eq.2 的简化写法。<code>N′=αN</code>、<code>K′=αK</code>、<code>α=d/ℓ</code>；shared experts 仍在 <code>d</code> 维。router 的分数 <code>p′=Softmax(W′<sub>r</sub>x)</code> 也在 <code>d</code> 维计算。</div>
+  <p>为什么这能保持成本？routed 的 dispatch 体积与 <code>K·d</code> 同向；把 <code>d</code> 换成 <code>ℓ</code> 后乘 <code>α</code> 倍的 <code>K</code>，得到 <code>K′·ℓ = (αK)·(d/α)=K·d</code>，通信量回到同一量级。专家权重也类似：单个 expert 从 <code>d·m</code> 变成 <code>ℓ·m</code>，但 expert 数乘了 <code>α</code>，总专家权重可以保持同一量级（<span class="mono" data-src="LatentMoE Table 1">Table 1</span>）。<code>ℓ-MoE<sub>eff</sub></code> 不乘 <code>K</code>，所以通信与权重下降到 <code>1/α</code>，目标是对齐 baseline 准确率；<code>ℓ-MoE<sub>acc</sub></code> 乘 <code>K</code>，把省下的预算换成组合数，目标是同成本下更高准确率。</p>
+  <p>实验选的压缩比是 <code>α=4</code>：16B 模型 <code>d=2048</code>、<code>ℓ=512</code>；95B 模型 <code>d=4096</code>、<code>ℓ=1024</code>（<span class="mono" data-src="LatentMoE §4.1">§4.1</span>、<span class="mono" data-src="LatentMoE Figure 5">Figure 5</span>、<span class="mono" data-src="LatentMoE Figure 6">Figure 6</span>）。论文说压缩比 <code>α≤4</code> 时质量保持；<code>α</code> 再大，任务相关的特征秩 <code>r<sub>eff</sub></code> 可能被压掉。这个下界是任务相关的，没有一个通用值。</p>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>显存按总参数，算力按激活参数，通信按 top-k × 维度</h2></div>
+  <p class="sec-sub">读完这节你应该知道：三笔账各自的公式，capacity factor 与 aux-loss-free 各自在哪一侧介入，以及为什么 LatentMoE 要把“专家数、top-k、维度”一起调。</p>
+
+  <h3>4.1 参数账与显存账</h3>
+  <p>表 2-1 已经给出五个模型的总参数、激活参数与 BF16 权重。把它们按同一口径拆开：总参数决定权重显存，激活参数决定每 token 计算，二者之差由 routed expert 中“没被选中”的部分构成。Mixtral 的 <span class="mono" data-src="Mixtral §3">47B</span>/<span class="mono" data-src="Mixtral §3">13B</span> 差 <span class="mono" data-src="Mixtral §3">34B</span>，DeepSeek-V3 的 <span class="mono" data-src="V3 §4.2">671B</span>/<span class="mono" data-src="V3 §4.2">37B</span> 差 <span class="mono" data-src="V3 §4.2">634B</span>；这些差额不是“免费”的，它们仍要占显存。显存估算只乘 2 字节，不含 KV cache、激活、通信缓冲与量化 scale；真实部署还要加上这些。</p>
+  <p>激活占比也不能直接当加速比。DeepSeek-V3 的 <span class="mono" data-src="V3 §4.2">5.5%</span> 说明每 token 只算一小部分参数，但 decode 的 batch 小，expert 权重读取与 all-to-all 固定开销会主导延迟；Mixtral §3 也提醒 SMoE 更适合有 batch 的工作负载。把 <span class="mono" data-src="Mixtral §3">27.7%</span>、<span class="mono" data-src="V3 §4.2">5.5%</span>、<span class="mono" data-src="LatentMoE Table 3">8.9%</span> 放在一起排“谁更高效”，会忽略分母不同（模型规模、batch、序列长度、并行配置）。</p>
+
+  <h3>4.2 通信账：K·d 是主项，latent 把 d 换成 ℓ</h3>
+  <p>EP 下每个 token 的 <code>K</code> 份 expert 输入要送到专家所在 rank；每份输入的宽度是 hidden 维 <code>d</code>。所以 dispatch 体积与 <code>K·d</code> 同向，combine 再来一遍。LatentMoE 的 <code>ℓ-MoE<sub>acc</sub></code> 把 <code>d</code> 换成 <code>ℓ</code>、把 <code>K</code> 乘 <code>α</code>，<code>K′·ℓ=K·d</code>，通信量保持同一量级；<code>ℓ-MoE<sub>eff</sub></code> 不乘 <code>K</code>，通信量降到 <code>1/α</code>，但准确率目标只是对齐 baseline（<span class="mono" data-src="LatentMoE Table 1">Table 1</span>）。</p>
+  <p>DeepSeek-V3 的通信账还有拓扑约束：集群里 NVLink 约 <span class="mono" data-src="V3 §3.2.2">160 GB/s</span>，IB 约 <span class="mono" data-src="V3 §3.2.2">50 GB/s</span>，相差约 <span class="mono" data-src="V3 §3.2.2">3.2</span> 倍；因此每个 token 最多送到 <span class="mono" data-src="V3 §4.2">4</span> 个节点，跨节点走 IB、节点内走 NVLink，并用 <span class="mono" data-src="V3 §3.2.2">20</span> 个 SM 做通信（<span class="mono" data-src="V3 §3.2.2">§3.2.2</span>）。这说明“专家数 × top-k”不是通信账的全部，节点布局与网络带宽同样会改变结论。</p>
+
+  <h3>4.3 均衡账：capacity factor 是训练与推理共用的容量机制，aux-loss-free 改的是路由偏置</h3>
+  <p>Switch 式 MoE 用静态 capacity 控制每个 expert 处理多少 token：</p>
+  <div class="eq">
+    C<sub>expert</sub> = (T<sub>batch</sub> / E) × c
+  </div>
+  <div class="eq-cap">Switch Transformer §2.2 Eq.3。c 为 capacity factor；c&gt;1 提供缓冲，超过容量的 token 跳过该 expert，经残差直接进入下一层。它是训练与推理共用的静态容量机制（§2.2 明确说 routing decisions at training and inference），不是路由规则本身。</div>
+  <p>DeepSeek-V3 走的是另一条路：不 drop token，用 aux-loss-free bias 调负载。每个 step 结束后，如果某个 expert 过载就把 <code>b<sub>i</sub></code> 减 <code>γ</code>，欠载就加 <code>γ</code>；<code>γ</code> 在最初 <span class="mono" data-src="V3 §4.2">14.3T</span> token 取 <span class="mono" data-src="V3 §4.2">0.001</span>，最后 <span class="mono" data-src="V3 §4.2">500B</span> token 取 <span class="mono" data-src="V3 §4.2">0.0</span>。另外还有一个极小的序列级补充损失，<code data-src="V3 §4.2">α=0.0001</code>，只用于防止单条序列内极端不均（<span class="mono" data-src="V3 §2.1.2">§2.1.2</span>、<span class="mono" data-src="V3 §4.2">§4.2</span>）。Table 5 的 228.7B 模型消融里，aux-loss-free 的 Pile BPB 从 <span class="mono" data-src="V3 Table 5">0.656</span> 降到 <span class="mono" data-src="V3 Table 5">0.652</span>，GSM8K 从 <span class="mono" data-src="V3 Table 5">70.7</span> 升到 <span class="mono" data-src="V3 Table 5">74.5</span>，但 MMLU 从 <span class="mono" data-src="V3 Table 5">68.3</span> 降到 <span class="mono" data-src="V3 Table 5">67.2</span>；论文的总结是“most benchmarks”，不是每一项都更好。</p>
+  <p>DeepSeekMoE 用的是显式 balance loss：expert-level 损失按每个 expert 的 token 比例与平均亲和度相乘，device-level 损失按每组设备的负载聚合（<span class="mono" data-src="DeepSeekMoE §3.3">§3.3</span>）。16B 模型因为所有 expert 放在同一设备，device-level 损失不用，expert-level 因子设得很小（<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>）。OLMoE 则用 dropless token-choice、load balancing loss 与 router z-loss（<span class="mono" data-src="OLMoE §2">§2</span>）。三种做法的共同点是：均衡是训练目标或路由偏置的一部分，不是模型架构里自动成立的。</p>
+
+  <div class="sim" id="sim-params">
+    <div class="sim-top">
+      <button type="button" class="rule-btn active">MoE 参数与激活计算器<span class="r-sub">只算专家 FFN · 不含 attention/embedding</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="calc-n">总 routed expert 数 N <span class="v" id="calc-n-val">256</span></label>
+        <input id="calc-n" type="range" min="8" max="256" step="8" value="256">
+      </div>
+      <div class="ctrl">
+        <label for="calc-p">每 expert 参数量 P（B） <span class="v" id="calc-p-val">2.55</span></label>
+        <input id="calc-p" type="range" min="0.10" max="6.00" step="0.01" value="2.55">
+      </div>
+      <div class="ctrl">
+        <label for="calc-k">top-k（routed） <span class="v" id="calc-k-val">8</span></label>
+        <input id="calc-k" type="range" min="1" max="16" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label for="calc-s">shared expert 数 S <span class="v" id="calc-s-val">1</span></label>
+        <input id="calc-s" type="range" min="0" max="4" step="1" value="1">
+      </div>
+    </div>
+    <div class="slots">
+      <div class="slot"><div class="slot-name">总专家参数</div><div class="slot-val" id="calc-total">655.35 B</div></div>
+      <div class="slot"><div class="slot-name">每 token 激活</div><div class="slot-val" id="calc-active">22.95 B</div></div>
+      <div class="slot hit"><div class="slot-name">每 token 计算</div><div class="slot-val" id="calc-flops">45.90 GFLOPs</div></div>
+      <div class="slot"><div class="slot-name">BF16 专家权重</div><div class="slot-val" id="calc-mem">1310.70 GB</div></div>
+    </div>
+    <div class="readout" data-src="V3 §4.2">
+      <div class="r-head">读数</div>
+      <div id="calc-readout">N=256、P=2.55B、top-k=8、S=1：总专家参数 655.35B，每 token 激活 22.95B，计算 45.90 GFLOPs，BF16 权重 1310.70 GB。</div>
+    </div>
+    <p class="sub">默认值来自 DeepSeek-V3 §4.2（<span data-src="V3 §4.2">256</span> routed、<span data-src="V3 §4.2">top-8</span>、<span data-src="V3 §4.2">1</span> shared）；P=<span data-src="V3 §4.2">2.55B</span>（见 LEDGER）由 §4.2 的 hidden <span data-src="V3 §4.2">7168</span>、expert intermediate <span data-src="V3 §4.2">2048</span> 与 MoE 层配置推算。把 N、P、top-k、S 调成 Mixtral 的 <span data-src="Mixtral Table 1">8</span>、<span data-src="Mixtral Table 1">5.64</span>、<span data-src="Mixtral Table 1">2</span>、<span data-src="Mixtral Table 1">0</span>，可得到仅专家 FFN 的 <span data-src="Mixtral Table 1">45.12B</span>/<span data-src="Mixtral Table 1">11.28B</span>/<span data-src="Mixtral Table 1">22.56</span> GFLOPs；与论文 <span data-src="Mixtral §3">47B</span>/<span data-src="Mixtral §3">13B</span> 的差为 attention/embedding 与取整（<span class="infer">推断</span>）。计算量按 2 FLOPs/激活参数/token 的常用估算；读数只算专家 FFN，不含 attention、embedding、LM head、KV cache 与通信缓冲。</p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 <span class="sum-sub">两组参数：DeepSeek-V3 风格与 Mixtral 风格</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：N=256、P=2.55B、top-k=8、S=1。</strong>
+      总专家参数 = <code>(256+1) × 2.55 = 655.35B</code>；
+      每 token 激活 = <code>(8+1) × 2.55 = 22.95B</code>；
+      计算 = <code>2 × 22.95 = 45.90 GFLOPs</code>；
+      BF16 权重 = <code>655.35 × 2 = 1310.70 GB</code>。
+      JS 在同参数下输出 655.35 / 22.95 / 45.90 / 1310.70。</p>
+      <p><strong>组 2：N=8、P=5.64B、top-k=2、S=0。</strong>
+      总专家参数 = <code>8 × 5.64 = 45.12B</code>；
+      激活 = <code>2 × 5.64 = 11.28B</code>；
+      计算 = <code>2 × 11.28 = 22.56 GFLOPs</code>；
+      BF16 权重 = <code>45.12 × 2 = 90.24 GB</code>。
+      JS 输出 45.12 / 11.28 / 22.56 / 90.24。</p>
+      <p><strong>简化与未覆盖。</strong>只算专家 FFN：不含 attention、embedding、LM head、KV cache、router 与通信缓冲；P 是跨所有 MoE 层的单 expert 参数量，假设每层 expert 同构。DeepSeek-V3 的 37B 激活与 671B 总参数还包含 attention/embedding/dense 层，所以 655.35B/22.95B 只对应专家部分，不等于论文的 671B/37B。Mixtral 的 45.12B/11.28B 同理，论文 47B/13B 含 attention/embedding。未覆盖 shared expert 在不同 rank 的放置、EP 的 dispatch/combine、capacity factor 与 token drop。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>三种架构改的是路由集合与投影位置，五步骨架不变</h2></div>
+  <p class="sec-sub">读完这节你应该知道：三种架构在数据流上改的是哪一步，以及 shared / latent 两条支路如何绕开或改变 router 的选择集合。</p>
+
+  <figure>
+    <svg class="figure-svg" viewBox="0 0 640 640" role="img" aria-labelledby="moe-arch-title moe-arch-desc">
+      <title id="moe-arch-title">三种 MoE 架构的 token 流</title>
+      <desc id="moe-arch-desc">上：粗粒度 MoE，token 经 router 选择少量 expert；中：fine-grained MoE，token 在大量 routed experts 中选 top-k，并叠加恒开的 shared experts；下：latent MoE，routed experts 在潜空间计算；router 与 shared 仍在 d 维，最后经 W↑ 投回 d 维。</desc>
+      <defs>
+        <marker id="arr-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="arrowhead"/>
+        </marker>
+        <marker id="arr-hot-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="arrowhead-hot"/>
+        </marker>
+      </defs>
+
+      <rect x="12" y="20" width="616" height="190" rx="10" class="dash-box"/>
+      <text x="28" y="45" class="svg-t">A · 粗粒度：少量大 expert，top-k 小</text>
+      <rect x="30" y="68" width="70" height="34" rx="7" class="box"/>
+      <text x="65" y="90" text-anchor="middle" class="svg-t">token x</text>
+      <rect x="130" y="68" width="86" height="34" rx="7" class="box"/>
+      <text x="173" y="90" text-anchor="middle" class="svg-t">router</text>
+      <path d="M100 85 H130" class="line" marker-end="url(#arr-a)"/>
+      <path d="M216 85 H250" class="line" marker-end="url(#arr-a)"/>
+      <text x="233" y="76" text-anchor="middle" class="svg-s">top-k</text>
+
+      <rect x="250" y="62" width="44" height="30" rx="5" class="cold-box"/>
+      <text x="272" y="82" text-anchor="middle" class="svg-s">E0</text>
+      <rect x="302" y="62" width="44" height="30" rx="5" class="hot-box"/>
+      <text x="324" y="82" text-anchor="middle" class="svg-s">E1</text>
+      <rect x="354" y="62" width="44" height="30" rx="5" class="cold-box"/>
+      <text x="376" y="82" text-anchor="middle" class="svg-s">E2</text>
+      <rect x="406" y="62" width="44" height="30" rx="5" class="cold-box"/>
+      <text x="428" y="82" text-anchor="middle" class="svg-s">E3</text>
+      <rect x="250" y="102" width="44" height="30" rx="5" class="cold-box"/>
+      <text x="272" y="122" text-anchor="middle" class="svg-s">E4</text>
+      <rect x="302" y="102" width="44" height="30" rx="5" class="cold-box"/>
+      <text x="324" y="122" text-anchor="middle" class="svg-s">E5</text>
+      <rect x="354" y="102" width="44" height="30" rx="5" class="hot-box"/>
+      <text x="376" y="122" text-anchor="middle" class="svg-s">E6</text>
+      <rect x="406" y="102" width="44" height="30" rx="5" class="cold-box"/>
+      <text x="428" y="122" text-anchor="middle" class="svg-s">E7</text>
+      <path d="M324 92 C324 96 376 96 376 102" class="line-hot" marker-end="url(#arr-hot-a)"/>
+      <path d="M450 94 H480" class="line" marker-end="url(#arr-a)"/>
+      <rect x="480" y="68" width="120" height="34" rx="7" class="box"/>
+      <text x="540" y="90" text-anchor="middle" class="svg-t">Σ g · E(x)</text>
+      <text x="28" y="165" class="svg-l">每个 token 只走少量 expert；组合数随 expert 数与 top-k 增长。</text>
+      <text x="28" y="188" class="svg-l">expert 少时，单个 expert 更可能覆盖多种知识。</text>
+
+      <rect x="12" y="225" width="616" height="190" rx="10" class="dash-box"/>
+      <text x="28" y="250" class="svg-t">B · fine-grained + shared：多而小的 routed experts，shared 恒开</text>
+      <rect x="30" y="273" width="70" height="34" rx="7" class="box"/>
+      <text x="65" y="295" text-anchor="middle" class="svg-t">token x</text>
+      <rect x="130" y="273" width="86" height="34" rx="7" class="box"/>
+      <text x="173" y="295" text-anchor="middle" class="svg-t">router</text>
+      <path d="M100 290 H130" class="line" marker-end="url(#arr-a)"/>
+      <path d="M216 290 H250" class="line" marker-end="url(#arr-a)"/>
+      <text x="233" y="281" text-anchor="middle" class="svg-s">top-k</text>
+
+      <rect x="250" y="255" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="278" y="255" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="306" y="255" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="334" y="255" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="250" y="283" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="278" y="283" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="306" y="283" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="334" y="283" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="250" y="311" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="278" y="311" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="306" y="311" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="334" y="311" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="250" y="339" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="278" y="339" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="306" y="339" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="334" y="339" width="22" height="22" rx="3" class="cold-box"/>
+      <text x="306" y="376" text-anchor="middle" class="svg-s">routed experts（示意 4×4）</text>
+
+      <rect x="430" y="255" width="120" height="34" rx="7" class="purple-box"/>
+      <text x="490" y="277" text-anchor="middle" class="svg-s">shared experts</text>
+      <path d="M490 289 V315" class="line" marker-end="url(#arr-a)"/>
+      <rect x="430" y="315" width="120" height="34" rx="7" class="box"/>
+      <text x="490" y="337" text-anchor="middle" class="svg-t">加和 + 残差</text>
+      <path d="M356 322 H430" class="line-hot" marker-end="url(#arr-hot-a)"/>
+      <text x="28" y="400" class="svg-l">routed 走 top-k；shared 不进 router 的选择集合，输出直接相加。</text>
+
+      <rect x="12" y="430" width="616" height="190" rx="10" class="dash-box"/>
+      <text x="28" y="455" class="svg-t">C · latent experts：router 在 d 维，routed experts 在 ℓ 维计算</text>
+      <rect x="24" y="480" width="56" height="32" rx="7" class="box"/>
+      <text x="52" y="501" text-anchor="middle" class="svg-t">x</text>
+      <rect x="96" y="480" width="56" height="32" rx="7" class="cold-box"/>
+      <text x="124" y="501" text-anchor="middle" class="svg-t">W↓</text>
+      <path d="M80 496 H96" class="line" marker-end="url(#arr-a)"/>
+      <rect x="168" y="480" width="64" height="32" rx="7" class="hot-box"/>
+      <text x="200" y="501" text-anchor="middle" class="svg-t">latent ℓ</text>
+      <path d="M152 496 H168" class="line-hot" marker-end="url(#arr-hot-a)"/>
+      <rect x="96" y="544" width="80" height="32" rx="7" class="box"/>
+      <text x="136" y="565" text-anchor="middle" class="svg-t">router</text>
+      <text x="184" y="576" class="svg-s">在 d 维</text>
+      <path d="M36 512 V560 H96" class="line" marker-end="url(#arr-a)"/>
+      <path d="M232 496 H330" class="line-hot" marker-end="url(#arr-hot-a)"/>
+      <path d="M176 560 H300 V535 H330" class="line" stroke-dasharray="5 4" marker-end="url(#arr-a)"/>
+
+      <rect x="330" y="468" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="358" y="468" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="386" y="468" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="414" y="468" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="330" y="496" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="358" y="496" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="386" y="496" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="414" y="496" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="330" y="524" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="358" y="524" width="22" height="22" rx="3" class="hot-box"/>
+      <rect x="386" y="524" width="22" height="22" rx="3" class="cold-box"/>
+      <rect x="414" y="524" width="22" height="22" rx="3" class="cold-box"/>
+      <text x="383" y="576" text-anchor="middle" class="svg-s">routed experts in ℓ</text>
+
+      <path d="M436 496 H468" class="line-hot" marker-end="url(#arr-hot-a)"/>
+      <rect x="468" y="480" width="56" height="32" rx="7" class="cold-box"/>
+      <text x="496" y="501" text-anchor="middle" class="svg-t">W↑</text>
+      <path d="M524 496 H540" class="line" marker-end="url(#arr-a)"/>
+      <rect x="540" y="480" width="36" height="32" rx="7" class="box"/>
+      <text x="558" y="501" text-anchor="middle" class="svg-t">y</text>
+
+      <rect x="468" y="540" width="108" height="32" rx="7" class="purple-box"/>
+      <text x="522" y="561" text-anchor="middle" class="svg-s">shared in d</text>
+      <path d="M52 512 C52 545 468 556 468 556" class="line" marker-end="url(#arr-a)"/>
+      <text x="28" y="600" class="svg-l">down/up 投影把 routed 计算压到 ℓ 维；router 与 shared 仍在 d 维。</text>
+    </svg>
+    <figcaption>图 5-1：三种架构的 token 流（示意，省略 attention/embedding）。A 每 token 选 top-2/8（<span class="mono" data-src="Mixtral Table 1">Table 1</span>）；B 在 64 个 routed 中选 6 个并叠加 2 个 shared（<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>）；C 先投影到 ℓ 维，在 d 维路由到 512 个潜空间 routed experts 中的 24 个，shared 与 router 留在 d 维（<span class="mono" data-src="LatentMoE §3">§3</span>、<span class="mono" data-src="LatentMoE Table 2">Table 2</span>，512/24 由 α=4 推算，<span class="infer">推断</span>）。</figcaption>
+  </figure>
+
+  <p>把这张图落到一次前向，可以拆成五步：</p>
+  <ol>
+    <li><strong>算 affinity。</strong>Mixtral 用 softmax 后的 top-k logits（<span class="mono" data-src="Mixtral §2.1">§2.1</span>）；DeepSeekMoE 用 softmax；DeepSeek-V3 用 sigmoid，并在选择时加 bias <code>b<sub>i</sub></code>（<span class="mono" data-src="V3 §2.1.2">§2.1.2</span>）。</li>
+    <li><strong>选 expert。</strong>Mixtral 选 top-2/8；DeepSeekMoE 16B 选 top-6/64 加 2 个 shared；DeepSeek-V3 选 top-8/256 加 1 个 shared；LatentMoE 在潜空间里选 top-24/512 加 2 个 shared（<span class="mono" data-src="Mixtral Table 1">Table 1</span>、<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>、<span class="mono" data-src="V3 §4.2">§4.2</span>、<span class="mono" data-src="LatentMoE §3">§3</span>；24/512 由 <span class="mono" data-src="LatentMoE Table 2">Table 2</span> 的 128/6 乘 α=4 推算，<span class="infer">推断</span>）。</li>
+    <li><strong>走 shared 支路。</strong>shared experts 不看 router，直接对每个 token 计算并加到输出；DeepSeek-V3 的 shared 输出与 routed 输出相加，LatentMoE 的 shared 仍在 <code>d</code> 维。</li>
+    <li><strong>dispatch + expert FFN。</strong>EP 下 token 被送到 expert 所在 rank；每个 expert 是一个 FFN（Mixtral/DeepSeek 用 SwiGLU，LatentMoE 的 95B 模型用 Squared-ReLU，<span class="mono" data-src="LatentMoE Table 2">Table 2</span>）。</li>
+    <li><strong>combine + 残差。</strong>按 gate 权重加权求和，再加回 token 的残差；训练时再更新 balance loss 或 bias。</li>
+  </ol>
+  <p>三种架构改的步骤不同：粗粒度改的是第 1–2 步的 <code>E</code> 与 <code>K</code>；fine-grained 改的是第 2 步的选择集合大小；shared 改的是第 2 步的“哪些 expert 不参与选择”；latent 改的是第 4 步之前插入一次 down-projection、之后插入一次 up-projection。负载均衡则发生在第 5 步之后：DeepSeek-V3 更新 bias，DeepSeekMoE/OLMoE 更新辅助损失。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>组合数上去后，收益出现在固定激活预算的损失与下游任务上</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些数字支持 fine-grained/shared/latent，哪些结果并不一致，以及为什么这些数字不能直接横向排榜。</p>
+
+  <h3>6.1 Fine-grained + shared：同参数、同激活下的 Pile 与下游任务</h3>
+  <p>DeepSeekMoE 的 2B 验证模型把总参数与激活参数对齐到 GShard：两者都是 <span class="mono" data-src="DeepSeekMoE Table 1">2.0B</span> 总参数、<span class="mono" data-src="DeepSeekMoE Table 1">0.3B</span> 激活；DeepSeekMoE 是 <span class="mono" data-src="DeepSeekMoE Table 7">1 shared + 63 routed</span>、<span class="mono" data-src="DeepSeekMoE Table 7">1+7 激活</span>，GShard 是 top-2。Table 1 的结果如下（差值为 DeepSeekMoE − GShard，Pile loss 越低越好，其余越高越好）：</p>
+  <p class="table-cap">表 6-1：DeepSeekMoE 2B 与 GShard 的验证结果，均训练 100B token。数字来自 <span class="mono" data-src="DeepSeekMoE Table 1">Table 1</span>；差值为本页按表内数字计算。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>指标</th><th>GShard</th><th>DeepSeekMoE</th><th>差值</th></tr></thead>
+      <tbody>
+        <tr><td>Pile loss</td><td class="num">1.867</td><td class="num">1.808</td><td class="num">−0.059</td></tr>
+        <tr><td>HellaSwag（0-shot）</td><td class="num">50.5</td><td class="num">54.8</td><td class="num">+4.3</td></tr>
+        <tr><td>TriviaQA（5-shot）</td><td class="num">10.2</td><td class="num">16.6</td><td class="num">+6.4</td></tr>
+        <tr><td>HumanEval（0-shot）</td><td class="num">3.7</td><td class="num">4.9</td><td class="num">+1.2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>这组数支持“同预算下更细的组合可以更好”，但它只覆盖 2B/100B token 的验证规模。16B 模型换了更大的数据与训练预算：总参数 <span class="mono" data-src="DeepSeekMoE §5.1.2">16.4B</span>、激活 <span class="mono" data-src="DeepSeekMoE §5.1.2">2.8B</span>，每 4K token 的 FLOPs 是 <span class="mono" data-src="DeepSeekMoE Table 3">74.4T</span>；DeepSeek 7B dense 是 <span class="mono" data-src="DeepSeekMoE Table 3">6.9B</span> 激活、<span class="mono" data-src="DeepSeekMoE Table 3">183.5T</span>，按 Table 3 的 74.4T/183.5T 计算为 <span class="mono" data-src="DeepSeekMoE Table 3">40.5%</span>（Table 3 标题写 40.5%，正文多处写 about 40%），达到 comparable 性能。Table 3 里 Pile BPB 是 <span class="mono" data-src="DeepSeekMoE Table 3">0.74</span> 对 <span class="mono" data-src="DeepSeekMoE Table 3">0.75</span>，HellaSwag 是 <span class="mono" data-src="DeepSeekMoE Table 3">77.1</span> 对 <span class="mono" data-src="DeepSeekMoE Table 3">75.4</span>；这些是具体任务数字，不是“全面超过”。</p>
+
+  <h3>6.2 Shared：DeepSeekMoE 的消融很强，OLMoE 的受控实验相反</h3>
+  <p>DeepSeekMoE §4.4 的 shared 消融是这页最强的单点数字：去掉 shared、改为多激活 1 个 routed expert，计算量不变，Pile loss 从 <span class="mono" data-src="DeepSeekMoE §4.4">1.808</span> 升到 <span class="mono" data-src="DeepSeekMoE §4.4">2.414</span>（差 <span class="mono" data-src="DeepSeekMoE §4.4">0.606</span>）。这说明在这个 2B 模型里，shared expert 捕捉到的知识不能由多选一个 routed expert 替代。</p>
+  <p>OLMoE §4.1.3 的受控实验给出相反方向：在相同激活/总参数与 FLOPs 下，32 routed、激活 4 与 31 routed + 1 shared、激活 3 的表现相近，shared 版本 <em>“performs slightly worse”</em>；组合数从 <span class="mono" data-src="OLMoE §4.1.3">35,960</span> 降到 <span class="mono" data-src="OLMoE §4.1.3">4,495</span>。论文认为 shared 把 1 个 routed 从选择集合里拿走，消除了近 90% 的组合，这个损失可能抵消了“集中公共知识”的收益。两篇的模型规模、数据、训练预算与 shared 比例都不同，页面并列，不合并成单一结论。</p>
+
+  <h3>6.3 Latent：95B 上每个下游指标都高，但只有一组来源</h3>
+  <p>LatentMoE 在 95B 总参数、8B 激活的模型上比较 baseline 与两个变体；三者的总参数都在 <span class="mono" data-src="LatentMoE Table 3">94.4B–94.8B</span>，<code>ℓ-MoE<sub>acc</sub></code> 的激活参数是 <span class="mono" data-src="LatentMoE Table 3">8.44B</span>，baseline 是 <span class="mono" data-src="LatentMoE Table 3">8.47B</span>。Table 3：</p>
+  <p class="table-cap">表 6-2：LatentMoE 95B 模型在 300B token horizon 的下游准确率。数字转录自 <span class="mono" data-src="LatentMoE Table 3">Table 3</span>；Code 为 HumanEval/HumanEval+/MBPP/MBPP+ 平均，Math 为 GSM8K CoT/MATH-500 平均，Commonsense 为 RACE/ARC-Challenge/HellaSwag/Winogrande 平均（表注）。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>模型</th><th>激活参数</th><th>总参数</th><th>MMLU Pro</th><th>MMLU</th><th>Code</th><th>Math</th><th>Commonsense</th></tr></thead>
+      <tbody>
+        <tr><td>Baseline</td><td class="num">8.47B</td><td class="num">94.4B</td><td class="num">29.26</td><td class="num">58.95</td><td class="num">40.33</td><td class="num">64.39</td><td class="num">74.32</td></tr>
+        <tr><td>ℓ-MoE_acc</td><td class="num">8.44B</td><td class="num">94.8B</td><td class="num">34.91</td><td class="num">62.23</td><td class="num">41.50</td><td class="num">64.88</td><td class="num">75.18</td></tr>
+        <tr><td>ℓ-MoE_eff</td><td class="num">5.62B</td><td class="num">94.8B</td><td class="num">34.75</td><td class="num">61.06</td><td class="num">40.68</td><td class="num">63.61</td><td class="num">73.72</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>相对 baseline，<code>ℓ-MoE<sub>acc</sub></code> 的绝对差是：MMLU Pro <span class="mono" data-src="LatentMoE Table 3">+5.65</span>、MMLU <span class="mono" data-src="LatentMoE Table 3">+3.28</span>、Code <span class="mono" data-src="LatentMoE Table 3">+1.17</span>、Math <span class="mono" data-src="LatentMoE Table 3">+0.49</span>、Commonsense <span class="mono" data-src="LatentMoE Table 3">+0.86</span>。这些是分数点差，不是相对百分比；且 active 参数只差 <span class="mono" data-src="LatentMoE Table 3">0.03B</span>（<span class="mono" data-src="LatentMoE Table 3">8.44</span> 对 <span class="mono" data-src="LatentMoE Table 3">8.47</span>），所以不能把增益归给“激活了更多参数”。<code>ℓ-MoE<sub>eff</sub></code> 用 <span class="mono" data-src="LatentMoE Table 3">5.62B</span> 激活也拿到 MMLU Pro <span class="mono" data-src="LatentMoE Table 3">34.75</span>、MMLU <span class="mono" data-src="LatentMoE Table 3">61.06</span>，说明“降通信/降权重”与“同成本提准确率”是两个不同变体，不能把两者的收益相加。</p>
+
+  <h3>6.4 粒度与特化：OLMoE 的消融和 Mixtral 的路由分析</h3>
+  <p>OLMoE §4.1.2 把 expert 数与 FFN 维一起调，保持激活/总参数与计算不变：8 个 expert、激活 1 个，组合数 <span class="mono" data-src="OLMoE §4.1.2">8</span>；16 个 expert、激活 4 个，组合数 <span class="mono" data-src="OLMoE §4.1.2">1,820</span>；32 个 expert、激活 4 个，组合数 <span class="mono" data-src="OLMoE §4.1.2">35,960</span>；64 个 expert、激活 8 个，组合数 <span class="mono" data-src="OLMoE §4.1.2">4,426,165,368</span>。论文报告 8→32 时 HellaSwag/MMLU 约 <span class="mono" data-src="OLMoE §4.1.2">10%</span> 的改善，32→64 只有 <span class="mono" data-src="OLMoE §4.1.2">1–2%</span>（原文未说明相对/绝对口径），页面照原文并列。这说明粒度有收益，但边际收益递减。</p>
+  <p>特化方面，Mixtral §5 在 8 个 expert 上没有观察到按主题的明显路由模式；OLMoE §5.3 重新分析 Mixtral 也报告“little domain specialization”，而 OLMoE 的 64 个 expert 里有明显高于/低于随机基线的领域专家（例如 arXiv 在第 0 层的第一个 expert 接近 100% 特化）。两篇的模型、专家数与分析方法不同，页面只并列观察，不把“专家更多”直接等同于“特化更强”。</p>
+  <p><strong>不要把 5.65、4.3、10% 放在一起比。</strong><span class="mono" data-src="LatentMoE Table 3">5.65</span> 是 LatentMoE 95B 的 MMLU Pro 点差；<span class="mono" data-src="DeepSeekMoE Table 1">4.3</span> 是 DeepSeekMoE 2B 的 HellaSwag 点差；<span class="mono" data-src="OLMoE §4.1.2">10%</span> 是 OLMoE 在 130B token 附近的改善（原文未说相对/绝对）。三者的模型、数据、指标与训练预算都不同，页面并列是为了说明不同层面的收益，不是排一个加速榜。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>边界：组合数不是免费午餐，latent 也不是通用解</h2></div>
+  <p class="sec-sub">读完这节你应该知道：这些架构在什么条件下会把收益吐回去，以及哪些结论只有单一来源。</p>
+  <div class="three-col">
+    <div class="card"><span class="pill p1">粒度有下限</span><h4>expert 太小会掉计算效率</h4><p>DeepSeekMoE 16B 没有采用更细粒度，原因是“excessively small expert sizes”可能降低计算效率（<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>）。top-k 变大还会增加 dispatch/combine 的 token 数。</p></div>
+    <div class="card"><span class="pill p2">shared 不通用</span><h4>组合数减少可能抵消收益</h4><p>DeepSeekMoE <span class="mono" data-src="DeepSeekMoE §4.4">§4.4</span> 的 shared 消融很强；OLMoE <span class="mono" data-src="OLMoE §4.1.3">§4.1.3</span> 的受控实验里 shared 略差。模型、数据与 shared 比例不同，不能把一边的结论直接搬到另一边。</p></div>
+    <div class="card"><span class="pill p3">latent 证据单一</span><h4>α=4 与 r<sub>eff</sub> 都是任务相关</h4><p>LatentMoE 的 <span class="mono" data-src="LatentMoE Table 2">95B</span> 结果来自一篇 v1 技术报告；<span class="mono" data-src="LatentMoE §4.1">α≤4</span> 是实验结论，潜维下界 r<sub>eff</sub> 取决于任务。摘要称已被 Nemotron-3 Super/Ultra 采用，本页未独立验证这条采用声明。</p></div>
+  </div>
+  <p><strong>latent experts 已纳入，但边界要写清。</strong>本页用 LatentMoE（arXiv 2601.18089 v1）作为“Latent Experts”的一手来源：它的 Eq.1–2 定义了 down-projection、潜空间 routed experts 与 up-projection，Table 1 给出成本口径，Table 3 给出 95B 下游数字。它不是在 Mixtral/DeepSeekMoE 上做的一个小改动，而是另一套参数化；页面没有把它的 95B 数字外推到更小或更大规模。α=4 是论文在 16B 与 95B 上验证的选择，不是所有模型的默认值；若 ℓ 低于任务的特征秩 r_eff（即压缩到 r_eff 以下），压缩会丢信息。</p>
+  <p><strong>capacity factor 与 token drop 是训练与推理共用的容量机制。</strong>Switch §2.2 Eq.3 的静态容量公式按 batch 与 expert 数算出每个 expert 的容量，超出的 token 经残差跳过；§2.2 同时写明 routing decisions 发生在 training and inference，所以这套容量机制不是训练侧独有。是否 drop 取决于具体实现：DeepSeek-V3 明确训练与推理都不 drop token（<span class="mono" data-src="V3 §2.1.2">§2.1.2</span>），DeepSeekMoE 16B 也写训练不 drop（<span class="mono" data-src="DeepSeekMoE §5.1.2">§5.1.2</span>）。不要把 Switch 的容量/丢弃行为直接套到这些模型的推理上，也不要把“不 drop”当成所有 MoE 的默认行为；不同训练框架与并行策略可能不同。</p>
+  <p><strong>显存仍然看总参数。</strong>表 2-1 的 <span class="mono" data-src="V3 §4.2">1342 GB</span>、<span class="mono" data-src="LatentMoE Table 3">189.6 GB</span> 只是 BF16 权重的十进制估算，不含 KV cache、激活、通信缓冲、量化 scale 与冗余 expert。EP/TP 降低每卡权重，但不降低总权重；attention 与 KV cache 不随 expert 数按比例缩小。判断“一张卡能不能放下”时，必须把这几项一起算，不能只看激活参数占比。</p>
+  <p><strong>路由特化的证据并不一致。</strong>Mixtral §5 在 8 个 expert 上未观察到按主题的明显模式；OLMoE <span class="mono" data-src="OLMoE §5.3">§5.3</span> 在 64 个 expert 上报告了明显的领域特化，<span class="mono" data-src="OLMoE §5.4">§5.4</span> 报告了词表特化，并认为 Mixtral 的领域特化较弱。两篇的专家数、训练数据与分析口径不同，页面只并列观察；不能据此断言“fine-grained 一定带来更强特化”，也不能断言“粗粒度一定没有特化”。</p>
+  <p><strong>最后，别把不同表的收益相加。</strong>DeepSeekMoE 的 <span class="mono" data-src="DeepSeekMoE Table 3">40.5%</span> 在 Table 3 标题直接给出，也与 16B/2T token 的 74.4T/183.5T 复算一致；LatentMoE 的 <span class="mono" data-src="LatentMoE Table 3">+5.65</span> 来自 95B/300B token 的 Table 3；OLMoE 的 <span class="mono" data-src="OLMoE §4.1.2">~10%</span> 来自 130B token 的粒度消融；Mixtral 的 <span class="mono" data-src="Mixtral §3">27.7%</span> 只是 13B/47B 的激活占比。它们的分母、模型规模、训练预算与评测协议都不同，页面并列是为了拆账，不是为了横比。</p>
+</section>
+
+<footer>
+  <div>MoE 架构：Fine-grained、Shared 与 Latent Experts · 链接不带版本号；本页按 Mixtral v1、DeepSeekMoE v1、DeepSeek-V3 v2、OLMoE v1、LatentMoE v1、Switch v3 核对。</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2401.04088">Mixtral of Experts（v1）</a> · <a href="https://arxiv.org/abs/2401.06066">DeepSeekMoE（v1）</a> · <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report（v2）</a> · <a href="https://arxiv.org/abs/2409.02060">OLMoE（v1）</a> · <a href="https://arxiv.org/abs/2601.18089">LatentMoE（v1）</a> · <a href="https://arxiv.org/abs/2101.03961">Switch Transformers（v3）</a><br>
+    笔记：<a href="/moe/">MoE</a> · 相邻精读：<a href="/visual-reading/moe-inference-expert-parallel/">MoE 推理与 Expert Parallelism</a> · <a href="/visual-reading/expert-parallel-moe-training/">Expert Parallel · MoE 训练</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var n = document.getElementById('calc-n');
+  var p = document.getElementById('calc-p');
+  var k = document.getElementById('calc-k');
+  var s = document.getElementById('calc-s');
+  if (!n || !p || !k || !s) return;
+
+  function setText(id, txt) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  }
+
+  function update() {
+    var N = parseInt(n.value, 10);
+    var P = parseFloat(p.value);
+    var K = parseInt(k.value, 10);
+    var S = parseInt(s.value, 10);
+    var total = (N + S) * P;
+    var active = (K + S) * P;
+    var flops = 2 * active;
+    var mem = total * 2;
+
+    setText('calc-n-val', String(N));
+    setText('calc-p-val', P.toFixed(2));
+    setText('calc-k-val', String(K));
+    setText('calc-s-val', String(S));
+    setText('calc-total', total.toFixed(2) + ' B');
+    setText('calc-active', active.toFixed(2) + ' B');
+    setText('calc-flops', flops.toFixed(2) + ' GFLOPs');
+    setText('calc-mem', mem.toFixed(2) + ' GB');
+
+    var ro = document.getElementById('calc-readout');
+    if (ro) {
+      var warn = '';
+      if (K > N) {
+        warn = ' <span class="warn">top-k 大于 routed expert 数，配置无效。</span>';
+      }
+      ro.innerHTML = 'N=' + N + '、P=' + P.toFixed(2) + 'B、top-k=' + K + '、S=' + S +
+        '：总专家参数 <strong>' + total.toFixed(2) + 'B</strong>，每 token 激活 <strong>' +
+        active.toFixed(2) + 'B</strong>，计算 <strong>' + flops.toFixed(2) +
+        ' GFLOPs</strong>，BF16 权重 <strong>' + mem.toFixed(2) + ' GB</strong>。' + warn;
+    }
+  }
+
+  n.addEventListener('input', update);
+  p.addEventListener('input', update);
+  k.addEventListener('input', update);
+  s.addEventListener('input', update);
+  update();
+})();
+</script>
+</body>
+</html>

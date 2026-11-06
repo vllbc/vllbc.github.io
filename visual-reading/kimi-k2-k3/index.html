@@ -1,0 +1,836 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 1 | Kimi K2 §2.1 | 100/100 |
+| 0.25 | Kimi K2 §2.1 | 100/400 |
+| 0.0833 | Kimi K2 §2.1 | 100/1200 |
+| 100 | Kimi K2 §2.1 | 400*0.25 |
+| 100 | Kimi K2 §2.1 | 1200*100/1200 |
+| 8.3 | Kimi K2 §2.1 | 100*100/1200 |
+| 33.3 | Kimi K2 §2.1 | 400*100/1200 |
+| 93 | Kimi K3 Table 1 | 69+24 |
+| 2.67 | Kimi K3 Table 1 | 2.78/1.04 |
+| 3.20 | Kimi K3 Table 1 | 104.2/32.6 |
+| 23 | Kimi K3 Table 1 | 69/3 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="Kimi K2 v1 / Kimi K3 v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kimi K2 → K3 · 稀疏 MoE 的两次放大</title>
+<meta name="description" content="Kimi K2 到 K3 精读：1.04T/32.6B 到 2.78T/104.2B，sparsity 48 到 56，MuonClip 的 per-head QK-Clip，3:1 KDA–Gated MLA 混合、AttnRes、Stable LatentMoE 与 1M context。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.2}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-c1{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.2}
+.svg-c2{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.2}
+.svg-c3{fill:var(--c3-soft);stroke:var(--c3);stroke-width:1.2}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.svg-ln-hot{stroke:var(--accent);stroke-width:1.5;fill:none;stroke-dasharray:5 4}
+.arrow{fill:var(--text-soft)}
+.arrow-hot{fill:var(--accent)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:13px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:10.5px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.tbl-wide table{min-width:820px}
+.tbl-xwide table{min-width:760px}
+@media (max-width:560px){.slots.s3{grid-template-columns:1fr}}
+.handcalc summary{font-weight:600}
+.handcalc .details-body strong{color:var(--text)}
+.qk-slot .slot-val{font-size:12px}
+.qk-note{font-size:12.5px;color:var(--text-soft);margin:6px 0 0}
+.errata{font-size:13px;line-height:1.8;color:var(--text-soft)}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Kimi K2 / K3</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">核心方法</a>
+      <a href="#train">怎么训怎么算</a>
+      <a href="#arch">架构或流程</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>MoE · 2025–2026 · arXiv</span>
+  <h1>Kimi K2 → K3：<br>把稀疏 MoE 推到 2.78T，还要让每 token 只算 104.2B</h1>
+  <p class="hero-sub">
+    K2 用 <span data-src="Kimi K2 Table 2">1.04T</span> 总参数、<span data-src="Kimi K2 Table 2">32.6B</span> 激活参数和 MuonClip 跑完 <span data-src="Kimi K2 Abstract">15.5T token</span>；
+    K3 把总参数推到 <span data-src="Kimi K3 Table 1">2.78T</span>、激活参数推到 <span data-src="Kimi K3 Table 1">104.2B</span>，再用 3:1 的 KDA–Gated MLA 混合、AttnRes 和 Stable LatentMoE 处理 <span data-src="Kimi K3 Table 1">1M context</span>。
+    两代方案共同的难点不是参数数量，而是把 attention 成本、专家通信和训练稳定性同时按住。
+  </p>
+  <div class="meta">
+    <span>Kimi Team · Moonshot AI</span>
+    <a href="https://arxiv.org/abs/2507.20534" target="_blank" rel="noopener">Kimi K2 ↗</a>
+    <a href="https://arxiv.org/abs/2607.24653" target="_blank" rel="noopener">Kimi K3 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    K2 的答案是 ultra-sparse MoE + MuonClip：<span data-src="Kimi K2 Table 2">384</span> 个 routed expert、每 token 激活 <span data-src="Kimi K2 Table 2">8</span> 个（sparsity <span data-src="Kimi K2 §2.3">48</span>），
+    <span data-src="Kimi K2 Table 2">61</span> 层、<span data-src="Kimi K2 Table 2">64</span> 个 attention head；MuonClip 用 per-head QK-Clip 把 attention logit 压回 τ=<span data-src="Kimi K2 §2.1">100</span>，
+    <span data-src="Kimi K2 Abstract">15.5T</span> token 训练没有 loss spike。
+  </p>
+  <p>
+    K3 的答案是 3:1 混合 attention + 更宽的稀疏容量：<span data-src="Kimi K3 Table 1">2.78T</span> 总参数、<span data-src="Kimi K3 Table 1">104.2B</span> 激活参数、
+    <span data-src="Kimi K3 Table 1">896</span> 个 routed expert 中每 token 激活 <span data-src="Kimi K3 Table 1">16</span> 个（sparsity <span data-src="Kimi K3 §2.3">56</span>）、
+    <span data-src="Kimi K3 Table 1">69</span> 个 KDA + <span data-src="Kimi K3 Table 1">24</span> 个 Gated MLA、<span data-src="Kimi K3 Table 1">1M</span> context。
+  </p>
+  <p>
+    两代模型都把“总参数”与“每 token 激活”拆开，但拆法不同：K2 在 1T 级把 Muon 稳定下来；K3 在 3T 级把线性 attention 的固定状态、周期性全局 attention、
+    深度方向的 AttnRes 和 latent-space MoE 组合起来。真正的工程增量落在 optimizer、并行度、激活内存和 cache 布局上，而不只是模型结构图。
+  </p>
+  <p>
+    数字的边界要说清：<span data-src="Kimi K3 Figure 7">2.5×</span> 是匹配 loss 的拟合 scaling efficiency，不是端到端加速；K3 的激活参数从 <span data-src="Kimi K3 Table 1">32.6B</span> 升到 <span data-src="Kimi K3 Table 1">104.2B</span>，
+    不能读成每 token 更便宜；在 HLE 和 CritPt 上，K3 仍落后 Claude Fable 5 与 GPT-5.6 Sol。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Kimi K2 Abstract">15.5T</div>
+      <div class="k">K2 预训练 token 数<br>MuonClip 下零 loss spike</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Kimi K3 Table 1">2.78T / 104.2B</div>
+      <div class="k">K3 总参数 / 激活参数<br>896 个 routed expert，每 token 激活 16 个</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Kimi K3 Figure 7">2.5×</div>
+      <div class="k">相对 K2 的拟合 scaling efficiency<br>匹配 loss，不是 wall-clock 加速</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>参数可以堆到 2.8T，但每 token 的算力、注意力和稳定性不能跟着线性涨</h2></div>
+  <p class="sec-sub">先把三个约束拆开：总参数、激活参数、长上下文 attention；它们决定 sparse MoE 能不能真的放大。</p>
+
+  <p>
+    Dense Transformer 的容量和每 token 计算量绑在一起：参数越多，每个 token 的矩阵乘就越大。
+    MoE 把这两件事拆开：总参数决定容量，激活参数决定每 token 计算量。K2 是 <span data-src="Kimi K2 Table 2">1.04T</span> 总参数、<span data-src="Kimi K2 Table 2">32.6B</span> 激活参数；
+    K3 是 <span data-src="Kimi K3 Table 1">2.78T</span> 总参数、<span data-src="Kimi K3 Table 1">104.2B</span> 激活参数。两代模型都走这条路，但比例不同。
+  </p>
+
+  <p>
+    Sparsity 的定义是 routed expert 总数除以每 token 激活的 expert 数。K2 是 <span data-src="Kimi K2 §2.3">384 个 expert、激活 8 个，sparsity 48</span>；
+    K3 是 <span data-src="Kimi K3 §2.3">896 个 routed expert、激活 16 个，sparsity 56</span>。
+    这里有一个容易读错的点：K3 的 sparsity 更高，但它每 token 激活的 expert 绝对数量也更多（16 对 8）。
+    “更稀疏”说的是比例，不是每 token 更省计算。
+  </p>
+
+  <p>
+    K2 的 sparsity scaling law 给了这条路的依据：在固定激活参数（也就是固定 FLOPs）下，增加 routed expert 总数会持续降低训练和验证 loss。
+    在验证 loss 1.5 处，sparsity 48 相对 sparsity 8/16/32 分别把 FLOPs 降低 <span data-src="Kimi K2 §2.3">1.69× / 1.39× / 1.15×</span>。
+    但 sparsity 越高，EP 通信、专家负载均衡和显存碎片越难处理；这不是免费的容量。
+  </p>
+
+  <p>
+    第二条约束是 attention。K2 的对照实验把 attention head 从 64 加到 128：在 128k 序列下，推理 FLOPs 增加 <span data-src="Kimi K2 §2.3">83%</span>，
+    而验证 loss 相对 64-head 配置只改善 <span data-src="Kimi K2 §2.3">0.5%–1.2%</span>。所以 K2 选了 64 个 head，而不是跟 DeepSeek-V3 一样用 128 个。
+    K3 把上下文推到 1M，attention 的成本问题只会更尖锐；混合 linear attention 是为此付出的结构代价。
+  </p>
+
+  <p>
+    第三条约束是稳定性。K2 在 9B activated / 53B total 的 MoE 上放大 vanilla Muon 时，最大 attention logit 很快超过 <span data-src="Kimi K2 §2.1">1000</span>，
+    这种量级的 logit 通常会导致 loss spike，偶尔发散。QK-Norm 又不能直接用在 MLA 上，因为 MLA 的 Key 矩阵在推理时并不完整物化。
+    这是 QK-Clip 出现的直接原因：不去改 attention 的计算图，而是在 optimizer step 之后缩放 Q/K 投影权重。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">三个约束</span><h4>容量、序列、稳定性不是同一个瓶颈</h4></div>
+    <p>
+      <strong>容量</strong>看总参数与 routed expert 数；<strong>每 token 成本</strong>看激活参数、attention 头和序列长度；
+      <strong>稳定性</strong>看 optimizer 与 logit 的动态范围。把三者混在一起，就会把“总参数更大”误读成“每 token 更贵”，
+      或者把“sparsity 更高”误读成“计算更省”。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>DeepSeek-V3 给出 MLA+MoE 模板，K2 把稀疏度和头数改到自己的最优点</h2></div>
+  <p class="sec-sub">K2 不是 V3 的等比放大：它增加专家、减少 attention head；K3 再把 MLA 换成 3:1 混合。</p>
+
+  <p>
+    DeepSeek-V3 的配置是 <span data-src="Kimi K2 Table 2">671B 总参数、37B 激活参数</span>，<span data-src="Kimi K2 Table 2">256 个 expert、每 token 激活 8 个</span>，
+    <span data-src="Kimi K2 Table 2">128 个 attention head、61 层、3 个 dense layer</span>。它证明了 MLA + MoE 可以在开源模型里同时拿到容量和推理效率。
+  </p>
+
+  <p>
+    K2 从这张表出发，做了四处改动：总参数升到 <span data-src="Kimi K2 Table 2">1.04T</span>，expert 增到 <span data-src="Kimi K2 Table 2">384</span>，
+    attention head 降到 <span data-src="Kimi K2 Table 2">64</span>，dense layer 减到 <span data-src="Kimi K2 Table 2">1</span>。
+    表 2 的 Δ 列写的是：总参数 +54%、expert +50%、attention head −50%、dense layer −67%；激活参数 −13% 是这四项的后果，不计入改动数。
+    这些改动不是拍脑袋：sparsity 48 来自 scaling law，64 个 head 来自 128k 下 83% 推理 FLOPs 换 0.5%–1.2% loss 的取舍。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Kimi K2 Table 2 的 DeepSeek-V3 / K2 对照；K3 列来自 Kimi K3 Table 1。K3 的 context 是训练上下文，V3 的 context 未列在同一张表里。
+    K2 的 128K 取自 Kimi K3 Table 1 的 K2 列；K2 §2.5 的上下文课程见 §04。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>项目</th><th>DeepSeek-V3</th><th>Kimi K2</th><th>Kimi K3</th></tr></thead>
+    <tbody>
+      <tr><td>总参数</td><td class="num">671B</td><td class="num">1.04T</td><td class="num">2.78T</td></tr>
+      <tr><td>激活参数</td><td class="num">37B</td><td class="num">32.6B</td><td class="num">104.2B</td></tr>
+      <tr><td>Routed experts</td><td class="num">256</td><td class="num">384</td><td class="num">896</td></tr>
+      <tr><td>每 token 激活</td><td class="num">8</td><td class="num">8</td><td class="num">16</td></tr>
+      <tr><td>Shared experts</td><td class="num">1</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td>层数</td><td class="num">61</td><td class="num">61</td><td class="num">93</td></tr>
+      <tr><td>Attention heads</td><td class="num">128</td><td class="num">64</td><td class="num">96</td></tr>
+      <tr><td>Dense layers</td><td class="num">3</td><td class="num">1</td><td class="num">1</td></tr>
+      <tr><td>Attention</td><td>MLA</td><td>MLA</td><td>69 KDA + 24 Gated MLA</td></tr>
+      <tr><td>Activation</td><td>—</td><td>SwiGLU</td><td>SiTU-GLU</td></tr>
+      <tr><td>训练上下文</td><td>—</td><td class="num">128K</td><td class="num">1M</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    K2 的代价出现在系统侧。Muon 带来 logit 爆炸，需要 QK-Clip；EP 通信要跟 interleaved 1F1B 重叠，并且把 EP 压到 <span data-src="Kimi K2 §2.4.2">16</span>；
+    激活内存靠 selective recomputation、FP8-E4M3 1×128 存储和 CPU offload 才放得下（<span data-src="Kimi K2 §2.4.3">§2.4.3</span>）。
+    这些问题不会因为换一代模型消失，K3 只是把规模又推高了一档。
+  </p>
+
+  <p>
+    K3 的选择不是继续加 MLA 层，而是把 attention 拆成两条路：每个 block 里 <span data-src="Kimi K3 §2.1">3 层 KDA + 1 层 Gated MLA</span>，
+    末尾再补 1 层 Gated MLA，最终是 <span data-src="Kimi K3 Table 1">69 KDA + 24 MLA = 93 层</span>。
+    同时把 routed expert 从 384 增到 896、每 token 激活从 8 增到 16、层数从 61 增到 93。下一节拆这两套机制。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>QK-Clip 只缩放 Q/K 投影；K3 用 3:1 KDA–Gated MLA 把序列与全局检索分开</h2></div>
+  <p class="sec-sub">K2 的关键是让 Muon 的 logit 不炸；K3 的关键是让固定状态的 KDA 与周期性全局 attention 共存。</p>
+
+  <h3>QK-Clip：用上一步的 max logit 决定下一步缩放多少</h3>
+
+  <p>
+    对每个 attention head h，先算这个 batch 里的最大 logit：
+  </p>
+
+  <div class="eq">
+    S<sub>max</sub><sup>h</sup> = (1 / √d) · max<sub>X∈B</sub> max<sub>i,j</sub> Q<sub>i</sub><sup>h</sup> K<sub>j</sub><sup>h⊤</sup>
+  </div>
+  <div class="eq-cap">Kimi K2 §2.1：i、j 是同一个训练样本里的 token 下标；S<sub>max</sub><sup>h</sup> 是 per-head 标量</div>
+
+  <p>
+    如果 S<sub>max</sub><sup>h</sup> 超过阈值 τ，就把这个 head 的 Q/K 投影权重按 γ<sub>h</sub> 缩放：
+  </p>
+
+  <div class="eq">
+    γ<sub>h</sub> = min(1, τ / S<sub>max</sub><sup>h</sup>) &nbsp;&nbsp;&nbsp;
+    W<sub>q</sub><sup>h</sup> ← γ<sub>h</sub><sup>α</sup> W<sub>q</sub><sup>h</sup>, &nbsp;
+    W<sub>k</sub><sup>h</sup> ← γ<sub>h</sub><sup>1−α</sup> W<sub>k</sub><sup>h</sup>
+  </div>
+  <div class="eq-cap">Kimi K2 §2.1：朴素实现用全局 S<sub>max</sub> 和 α=0.5；K2 实际用 per-head γ<sub>h</sub>，只处理超阈值的 head</div>
+
+  <p>
+    这个操作不改当步的前向和反向：S<sub>max</sub><sup>h</sup> 只作为“下一步该缩多少”的信号，真正的缩放发生在 optimizer step 之后。
+    对 MLA，缩放要拆到分量上：q<sup>C</sup> 和 k<sup>C</sup>（head-specific）各乘 √γ<sub>h</sub>，q<sup>R</sup>（head-specific rotary）乘 γ<sub>h</sub>，
+    k<sup>R</sup>（shared rotary）保持不动，避免影响其他 head。K2 取 <span data-src="Kimi K2 §2.1">τ = 100</span>。
+  </p>
+
+  <p>
+    论文还报告了 QK-Clip 的“自关闭”行为：在 K2 的前 <span data-src="Kimi K2 Appendix D">70,000</span> 步里，只有 <span data-src="Kimi K2 Appendix D">12.7%</span> 的 attention head
+    至少触发过一次；训练稳定后 QK-Clip 基本停用（deactivated）。小规模消融用 τ=30 训练 0.5B activated / 3B total 的 MoE，loss 曲线没有明显退化（<span data-src="Kimi K2 Appendix D">Appendix D</span>）。
+  </p>
+
+  <div class="sim" id="qkclip-sim">
+    <div class="sim-top" id="qkclip-modes">
+      <button class="rule-btn active" data-mode="perhead">per-head<span class="r-sub">每个 head 自己的 γ</span></button>
+      <button class="rule-btn" data-mode="allheads">all-heads<span class="r-sub">全局 S_max，统一 γ</span></button>
+    </div>
+
+    <div class="slots s3">
+      <div class="slot qk-slot" id="qk-slot-a">
+        <div class="slot-name">Head A · S_max 100</div>
+        <div class="slot-val" id="qk-a">γ 1.0000<br>post 100.0</div>
+      </div>
+      <div class="slot qk-slot" id="qk-slot-b">
+        <div class="slot-name">Head B · S_max 400</div>
+        <div class="slot-val" id="qk-b">γ 0.2500<br>post 100.0</div>
+      </div>
+      <div class="slot qk-slot" id="qk-slot-c">
+        <div class="slot-name">Head C · S_max 1200</div>
+        <div class="slot-val" id="qk-c">γ 0.0833<br>post 100.0</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>阈值 τ <span class="v" id="qk-tau-v">100</span></label>
+        <input type="range" id="qk-tau" min="50" max="200" step="10" value="100">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="act primary" id="qk-reset">重置为 τ=100 / per-head</button>
+    </div>
+
+    <p class="qk-note">三个 head 的 S_max 是示例输入；τ=100 与 γ=min(1, τ/S_max) 的规则取自 Kimi K2 §2.1。all-heads 是论文所说的朴素实现：用全局 max<sub>h</sub> S_max<sup>h</sup> 算一个 γ，所有 head 一起缩放。</p>
+
+    <div class="readout" id="qkclip-readout" data-src="Kimi K2 §2.1">
+      <div class="r-head">当前读数</div>
+      <div id="qkclip-msg">per-head，τ=100：Head A 未触发（γ=1.0000，post=100.0）；Head B γ=0.2500、Head C γ=0.0833，post 都是 100.0。只有 S_max &gt; τ 的 head 被缩放。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：per-head 与 all-heads 的两组结果 <span class="sum-sub">与上面的交互逐位一致</span></summary>
+    <div class="details-body">
+      <p><strong>组 1：per-head，τ=100，三个 head 的 S_max 分别为 100 / 400 / 1200。</strong></p>
+      <ul>
+        <li><strong>Head A：</strong><code>γ = min(1, 100/100) = 1.0000</code>；<code>post = 100×1.0000 = 100.0</code>；S_max = τ，不触发裁剪。</li>
+        <li><strong>Head B：</strong><code>γ = min(1, 100/400) = 0.2500</code>；<code>post = 400×0.2500 = 100.0</code>。</li>
+        <li><strong>Head C：</strong><code>γ = min(1, 100/1200) = 0.0833</code>；<code>post = 1200×0.0833 = 100.0</code>。</li>
+      </ul>
+      <p><strong>组 2：all-heads，τ=100，同一组 head。</strong></p>
+      <ul>
+        <li>全局 <code>S_max = max(100, 400, 1200) = 1200</code>；<code>γ = min(1, 100/1200) = 0.0833</code>。</li>
+        <li><strong>Head A：</strong><code>post = 100×0.0833 = 8.3</code>；<strong>Head B：</strong><code>post = 400×0.0833 = 33.3</code>；<strong>Head C：</strong><code>post = 1200×0.0833 = 100.0</code>。</li>
+        <li>all-heads 只看全局最大值 1200，所以本来健康的 Head A/B 也被压到 8.3/33.3；这正是论文改成 per-head 的原因。</li>
+      </ul>
+      <p><strong>这个模拟覆盖了什么、没覆盖什么：</strong>覆盖 Kimi K2 §2.1 的 <code>γ=min(1, τ/S_max)</code>，以及由该缩放规则推得的 <code>post≈γ·S_max</code><span class="infer">推断</span>；
+      没覆盖 MLA 的 q<sup>C</sup>/k<sup>C</sup>/q<sup>R</sup>/k<sup>R</sup> 分量缩放、Newton–Schulz 更新、真实 kernel 的数值路径和 per-head 之外的并行细节。
+      也就是说，这里是按公式做的简化模拟，不是对 K2 训练代码的复现。</p>
+    </div>
+  </details>
+
+  <h3>K3 的 3:1 混合：KDA 管常量状态，Gated MLA 管全局检索</h3>
+
+  <p>
+    K3 的 backbone 每个 block 是 <span data-src="Kimi K3 §2.1">3 层 KDA 后接 1 层 Gated MLA</span>，比例 3:1。
+    这个模式重复 23 个 block（69/3，由 Table 1 推得），末尾再额外放 1 层 Gated MLA，保证最后一层一定是全局 attention；因此总数是
+    <span data-src="Kimi K3 Table 1">69 KDA + 24 Gated MLA = 93 层</span>。
+  </p>
+
+  <p>
+    KDA 是带 channel-wise forget gate 的 delta-rule recurrence。每个 head 维护一个固定大小的状态 S ∈ R<sup>d<sub>k</sub>×d<sub>v</sub></sup>，
+    先做 channel-wise decay，再做 delta-rule 写入：
+  </p>
+
+  <div class="eq">
+    S<sub>t</sub> = (I − β<sub>t</sub> k<sub>t</sub> k<sub>t</sub><sup>⊤</sup>) Diag(α<sub>t</sub>) S<sub>t−1</sub> + β<sub>t</sub> k<sub>t</sub> v<sub>t</sub><sup>⊤</sup>, &nbsp;&nbsp; õ<sub>t</sub> = S<sub>t</sub><sup>⊤</sup> q<sub>t</sub>
+  </div>
+  <div class="eq-cap">Kimi K3 §2.1.1 Eq.1：α<sub>t</sub> ∈ (0,1)<sup>d<sub>k</sub></sup> 是 channel-wise retention，β<sub>t</sub> 是 delta-rule 写入强度</div>
+
+  <p>
+    K3 相对 Kimi Linear 改了两处数值细节。第一，把 log-decay 从无下界的 negative-Softplus 换成 scaled sigmoid：
+    g<sub>min</sub> = <span data-src="Kimi K3 §2.1.1">−5</span>，每个 retention factor α<sub>t,j</sub> &gt; e<sup>−5</sup> ≈ 6.7×10<sup>−3</sup>；
+    16-token tile 的累计 log-decay 落在 <span data-src="Kimi K3 §2.1.1">(−80, 0)</span>，倒数重标定小于 e<sup>80</sup>，留在 BF16 动态范围内。
+    这样 diagonal tile 也能走 dense Tensor Core 矩阵乘，不必单独做 position-pair 计算。第二，输出 gate 从低秩改成 full-rank（Eq.6）。
+  </p>
+
+  <p>
+    Gated MLA 负责周期性全局检索。它沿用 MLA 的 latent KV cache，但对所有 MLA 层使用 NoPE：KDA 层提供位置敏感和 recency-aware 的混合，
+    MLA 层只做无位置约束的全局内容交互。这样扩到 1M context 时不需要改 RoPE frequency、也不需要 YaRN 插值；论文把 8K→64K 放在预训练，
+    256K→1M 放在 cooldown（<span data-src="Kimi K3 §3.4">§3.4</span>）。
+  </p>
+
+  <h3>Stable LatentMoE：把 routed expert 放进 3584 维 latent</h3>
+
+  <p>
+    K3 的 routed expert 不在 7168 维 hidden space 里工作，而是先投影到 <span data-src="Kimi K3 Table 1">3584</span> 维 latent（hidden 的 0.5×），
+    在那里做 896 选 16 的稀疏 channel mixing。shared expert 保留全宽路径，每层 <span data-src="Kimi K3 Table 1">2</span> 个；
+    routed 侧是 <span data-src="Kimi K3 Table 1">896</span> 个 expert、每 token 激活 <span data-src="Kimi K3 Table 1">16</span> 个，sparsity <span data-src="Kimi K3 §2.3">56</span>。
+  </p>
+
+  <p>
+    极端 sparsity 带来两个失败模式：routed branch 里连续的矩阵乘会让内部激活爆炸；896 个 expert 的负载均衡也超出普通 aux-loss-free bias 的舒适区。
+    Stable LatentMoE 用三件事处理：expert 聚合后、up-projection 前加 RMSNorm；用 SiTU-GLU 给 gate 和 up branch 同时加软上限；
+    用 Quantile Balancing（QB）按 router score 的分位数更新 expert bias。SiTU-GLU 的参数是
+    <span data-src="Kimi K3 Figure 4">β<sub>1</sub>=4、β<sub>2</sub>=25</span>，输出上界 <span data-src="Kimi K3 Figure 4">100</span>；SwiGLU 没有这个上界。
+  </p>
+
+  <h3>AttnRes：在深度方向再做一次 attention</h3>
+
+  <p>
+    标准残差把所有前层信息压进一个状态 h<sub>l</sub>，深层只能按固定方式累加。AttnRes 给每层一个可学习的 pseudo-query q<sub>l</sub>=w<sub>l</sub>，
+    对 embedding 和之前各层的输出做 softmax 加权，再求和。完整版要对所有前层做 attention，显存是 O(Ld)；K3 用 block 版：
+    把层分成 8 个 block、每块 12 层，block 内先求和，block 间再做 attention，显存降到 O(Nd)，N≈8 就能恢复大部分收益。
+    K3 的最后一块不满 12 层，加上 embedding 一共 9 个 block（<span data-src="Kimi K3 §2.2">§2.2</span>）。
+  </p>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>K2 用 15.5T token 和 PP16/EP16 跑完；K3 把 1M 上下文、MoonEP 和 MXFP4 一起上</h2></div>
+  <p class="sec-sub">这一节只算系统账：并行度、激活内存、上下文课程和部署量化。</p>
+
+  <h3>K2：15.5T token 的 WSD 课程</h3>
+
+  <p>
+    K2 先用 4,096 token 的上下文预训练：前 <span data-src="Kimi K2 §2.5">10T</span> token 在 500 步 warm-up 后保持 <span data-src="Kimi K2 §2.5">2e-4</span> 的常数学习率，
+    后 <span data-src="Kimi K2 §2.5">5.5T</span> token 用 cosine 从 2e-4 降到 2e-5；weight decay 0.1，global batch 67M token。
+    收尾的 annealing 用 <span data-src="Kimi K2 §2.5">400B</span> token、4k 序列，再用 <span data-src="Kimi K2 §2.5">60B</span> token、32k 序列；
+    最后用 YaRN 把上下文拉到 128k。
+  </p>
+
+  <p>
+    集群是 NVIDIA H800，每节点 2 TB RAM、8 张 GPU，节点间 8×400 Gbps RoCE（<span data-src="Kimi K2 §2.4.1">§2.4.1</span>）。
+    并行策略是 <span data-src="Kimi K2 §2.4.2">16-way PP + EP16 + ZeRO-1</span>；BF16 参数加 FP32 梯度累积缓冲约 <span data-src="Kimi K2 §2.4.2">6 TB</span>，
+    分布在 256 张 GPU 的 model-parallel group 上，每张卡为所有状态留约 <span data-src="Kimi K2 §2.4.2">30 GB</span>。
+    K2 没有用 DualPipe：DualPipe 会把参数和梯度的显存翻倍，需要更高并行度来补，反而增加 PP bubble 和 EP 开销。
+  </p>
+
+  <p>
+    激活内存靠三层处理：LayerNorm、SwiGLU、MLA up-projection 和 MoE down-projection 做 selective recomputation；
+    MoE up-projection 和 SwiGLU 的输入压到 FP8-E4M3 的 1×128 tile（FP32 scale）只用于存储，不进入计算；
+    剩余激活 offload 到 CPU，copy engine 与计算/通信重叠（<span data-src="Kimi K2 §2.4.3">§2.4.3</span>）。
+  </p>
+
+  <h3>K3：8K→1M 的上下文课程</h3>
+
+  <p>
+    K3 的上下文不是一步到 1M：预训练从 8K 到 64K，cooldown 从 256K 到 1M；MLA 层用 NoPE，位置信息由 KDA 的 gating 和 decay 隐式提供
+    （<span data-src="Kimi K3 §3.4">§3.4</span>）。这让长上下文扩展不需要改 positional encoding 的参数。
+  </p>
+
+  <p>
+    3T 级 MoE 的 EP 负载均衡用 MoonEP：它要求每个 rank 收到恰好 S×K 个 token，靠动态冗余 expert 做到完美平衡；
+    理论上每个 rank 最多需要 E/R 个冗余 expert，且这个界基本是紧的（essentially tight）。完美平衡还让计算形状静态化，省掉逐层 host 同步；
+    通信缓冲从最坏情况的 S×K×R 降到固定的 S×K（<span data-src="Kimi K3 §5.2.1">§5.2.1</span>）。
+  </p>
+
+  <p>
+    长上下文推理侧，K3 把 KDA 的固定状态和 MLA 的 KV cache 放进同一个 paged pool，统一 page 字节大小；
+    KDA prefix cache 的 block 粒度被迫落在 1,024–6,144 token（<span data-src="Kimi K3 §5.4.1">§5.4.1</span>）。
+    部署侧从 SFT 开始做 QAT：routed expert 权重用 MXFP4，激活用 MXFP8，attention projection、latent MoE projection、shared expert 和 router 保持更高精度；
+    RL 的 rollout 和 training 共用同一套量化方案，避免 train–inference mismatch（<span data-src="Kimi K3 §4.1.4">§4.1.4</span>）。
+  </p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Kimi K2 §2.4–2.5；Kimi K3 §3.4、§4.1.4、§5.2.1、§5.2.2、§5.4.1。K3 的总预训练 token 数本页未获取；K2 的部署量化方案本页未获取。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>项目</th><th>Kimi K2</th><th>Kimi K3</th></tr></thead>
+    <tbody>
+      <tr><td>预训练 token</td><td class="num">15.5T</td><td>未获取</td></tr>
+      <tr><td>上下文课程</td><td>4k → 32k → 128k（YaRN）</td><td>8K → 64K → 256K → 1M</td></tr>
+      <tr><td>并行</td><td>PP16 + EP16 + ZeRO-1</td><td>PP + VP、EP（MoonEP）、ZeRO-1/2、CP</td></tr>
+      <tr><td>激活内存</td><td>recompute + FP8 1×128 存储 + CPU offload</td><td>unified activation manager + offload / quantization</td></tr>
+      <tr><td>训练稳定性</td><td>MuonClip，τ=100</td><td>Per-Head Muon + K2 的 weight clipping</td></tr>
+      <tr><td>部署精度</td><td>未获取</td><td>MXFP4 专家权重 / MXFP8 激活</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>K3 的 93 层不是 93 层 MLA：每 4 层里 3 层 KDA，末尾再补 1 层 Gated MLA</h2></div>
+  <p class="sec-sub">看 block 结构：KDA 管常量状态的长序列混合，Gated MLA 管周期性全局检索；AttnRes 在深度方向再做一次选择。</p>
+
+  <figure>
+    <svg viewBox="0 0 900 430" role="img" aria-label="Kimi K3 架构：每个 block 三层 KDA 加一层 Gated MLA，后接 Stable LatentMoE；23 个 block 后额外接一层 Gated MLA。AttnRes 从 embedding 和之前 block 的输出读取表示。">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow"/>
+        </marker>
+        <marker id="arrhot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="arrow-hot"/>
+        </marker>
+      </defs>
+
+      <text x="20" y="26" class="svg-t">Kimi K3：3 KDA + 1 Gated MLA / block，末尾再补 1 层 Gated MLA</text>
+      <text x="20" y="48" class="svg-s">AttnRes：每个 block 读取 embedding 与之前 block 的输出（8 blocks × 12 layers）</text>
+      <line x1="20" y1="62" x2="860" y2="62" class="svg-ln-hot"/>
+      <line x1="260" y1="62" x2="260" y2="96" class="svg-ln-hot" marker-end="url(#arrhot)"/>
+      <line x1="560" y1="62" x2="560" y2="96" class="svg-ln-hot" marker-end="url(#arrhot)"/>
+
+      <rect x="20" y="180" width="90" height="60" rx="8" class="svg-box"/>
+      <text x="65" y="207" text-anchor="middle" class="svg-t">Embedding</text>
+      <text x="65" y="224" text-anchor="middle" class="svg-s">token + vision</text>
+
+      <line x1="110" y1="210" x2="136" y2="210" class="svg-ln" marker-end="url(#arr)"/>
+
+      <rect x="140" y="100" width="240" height="200" rx="10" class="svg-box"/>
+      <text x="260" y="122" text-anchor="middle" class="svg-t">Block 1</text>
+
+      <rect x="152" y="140" width="48" height="52" rx="7" class="svg-hot"/>
+      <text x="176" y="171" text-anchor="middle" class="svg-t">KDA</text>
+      <rect x="208" y="140" width="48" height="52" rx="7" class="svg-hot"/>
+      <text x="232" y="171" text-anchor="middle" class="svg-t">KDA</text>
+      <rect x="264" y="140" width="48" height="52" rx="7" class="svg-hot"/>
+      <text x="288" y="171" text-anchor="middle" class="svg-t">KDA</text>
+      <rect x="320" y="140" width="48" height="52" rx="7" class="svg-c2"/>
+      <text x="344" y="171" text-anchor="middle" class="svg-t">GMLA</text>
+
+      <text x="260" y="220" text-anchor="middle" class="svg-t">Stable LatentMoE</text>
+      <text x="260" y="238" text-anchor="middle" class="svg-s">16 / 896 routed experts</text>
+      <text x="260" y="258" text-anchor="middle" class="svg-l">3 : 1 hybrid</text>
+
+      <line x1="380" y1="210" x2="436" y2="210" class="svg-ln" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+      <text x="408" y="200" text-anchor="middle" class="svg-t">…</text>
+      <text x="408" y="232" text-anchor="middle" class="svg-s">×23 blocks</text>
+
+      <rect x="440" y="100" width="240" height="200" rx="10" class="svg-box"/>
+      <text x="560" y="122" text-anchor="middle" class="svg-t">Block 23</text>
+
+      <rect x="452" y="140" width="48" height="52" rx="7" class="svg-hot"/>
+      <text x="476" y="171" text-anchor="middle" class="svg-t">KDA</text>
+      <rect x="508" y="140" width="48" height="52" rx="7" class="svg-hot"/>
+      <text x="532" y="171" text-anchor="middle" class="svg-t">KDA</text>
+      <rect x="564" y="140" width="48" height="52" rx="7" class="svg-hot"/>
+      <text x="588" y="171" text-anchor="middle" class="svg-t">KDA</text>
+      <rect x="620" y="140" width="48" height="52" rx="7" class="svg-c2"/>
+      <text x="644" y="171" text-anchor="middle" class="svg-t">GMLA</text>
+
+      <text x="560" y="220" text-anchor="middle" class="svg-t">Stable LatentMoE</text>
+      <text x="560" y="238" text-anchor="middle" class="svg-s">16 / 896 routed experts</text>
+      <text x="560" y="258" text-anchor="middle" class="svg-l">3 : 1 hybrid</text>
+
+      <line x1="680" y1="210" x2="706" y2="210" class="svg-ln" marker-end="url(#arr)"/>
+
+      <rect x="710" y="175" width="90" height="50" rx="8" class="svg-c2"/>
+      <text x="755" y="205" text-anchor="middle" class="svg-t">Final GMLA</text>
+      <text x="755" y="245" text-anchor="middle" class="svg-s">额外 1 层</text>
+
+      <line x1="800" y1="205" x2="826" y2="205" class="svg-ln" marker-end="url(#arr)"/>
+
+      <rect x="830" y="180" width="55" height="60" rx="8" class="svg-box"/>
+      <text x="857" y="215" text-anchor="middle" class="svg-t">Output</text>
+
+      <text x="20" y="348" class="svg-l">69 KDA + 24 Gated MLA = 93 layers</text>
+      <text x="20" y="372" class="svg-l">K2：61 层 MLA + SwiGLU MoE，训练上下文 128K</text>
+      <text x="20" y="396" class="svg-l">K3：1M context；MLA 层用 NoPE；KDA 状态固定大小</text>
+    </svg>
+    <figcaption>
+      每个 K3 block 是 3 层 KDA + 1 层 Gated MLA，后接 Stable LatentMoE；23 个 block（69/3，由 Table 1 推得）之后额外接 1 层 Gated MLA，所以是 69 KDA + 24 Gated MLA = 93 层。
+      图中每个 block 只画一组 attention + MoE 代表；实际每个 attention 层后都接一个 Stable LatentMoE（Kimi K3 §2.1、§2.3）。AttnRes 从 embedding 和之前 block 的输出读取表示，
+      走的是 block 级的 8×12 划分，不是每层一次（Kimi K3 §2.2）。
+    </figcaption>
+  </figure>
+
+  <h3>读图：四种“选择”各管一段</h3>
+
+  <ol>
+    <li><strong>KDA 选择保留/写入。</strong> channel-wise decay α<sub>t</sub> 决定旧状态保留多少，β<sub>t</sub> 决定 delta-rule 写入多强；状态大小固定，不随序列长度增长。</li>
+    <li><strong>Gated MLA 选择全局检索。</strong> 每 4 层做一次全局 attention，用 latent KV cache 保留 token 级内容交互；NoPE 让 1M 扩展不需要改位置编码。</li>
+    <li><strong>Stable LatentMoE 选择容量。</strong> 896 个 routed expert 中每 token 选 16 个，在 3584 维 latent 里计算；2 个 shared expert 走全宽路径。</li>
+    <li><strong>AttnRes 选择深度。</strong> 每个 block 用 pseudo-query 对 embedding 和之前 block 的输出做 softmax 加权，让当前层能选择性读取更早的表示（Kimi K3 §2.2）。</li>
+  </ol>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Kimi K2 Table 2；Kimi K3 Table 1、§2.1、§2.2、§2.3、§5.4.1。K2 的 128K 取自 Kimi K3 Table 1 的 K2 列；K2 §2.5 的上下文课程见 §04。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>组件</th><th>Kimi K2</th><th>Kimi K3</th></tr></thead>
+    <tbody>
+      <tr><td>Attention</td><td>61 层 MLA</td><td>69 层 KDA + 24 层 Gated MLA</td></tr>
+      <tr><td>FFN</td><td>SwiGLU MoE</td><td>Stable LatentMoE + SiTU-GLU</td></tr>
+      <tr><td>Depth residual</td><td>标准残差</td><td>AttnRes（8 blocks × 12 layers）</td></tr>
+      <tr><td>KV cache</td><td>MLA latent KV</td><td>KDA 固定状态 + MLA latent KV</td></tr>
+      <tr><td>训练上下文</td><td class="num">128K</td><td class="num">1M</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>2.5× 是匹配 loss 的拟合效率，不是端到端加速；K3 的分数仍落后 Fable 5 和 GPT-5.6 Sol</h2></div>
+  <p class="sec-sub">先看条件再看数字：K2 是 non-thinking（长上下文任务按 128K 评测，K2 §4.1.1）；K3 是 max effort、temperature 1.0（K3 §6.1.3）；两套 benchmark 不能逐项横比。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:0">
+    Kimi K3 Table 1：K2 与 K3 的架构对照；Δ 列是表内给出的相对变化。K2 的 128K 取自 Kimi K3 Table 1 的 K2 列；K2 §2.5 的上下文课程见 §04。
+  </p>
+  <div class="tbl-scroll tbl-wide">
+  <table>
+    <thead><tr><th>项目</th><th>Kimi K2</th><th>Kimi K3</th><th>Δ</th></tr></thead>
+    <tbody>
+      <tr><td>层数</td><td class="num">61</td><td class="num">93</td><td class="num">+52%</td></tr>
+      <tr><td>总参数</td><td class="num">1.04T</td><td class="num">2.78T</td><td class="num">+167%</td></tr>
+      <tr><td>激活参数</td><td class="num">32.6B</td><td class="num">104.2B</td><td class="num">+220%</td></tr>
+      <tr><td>Routed experts</td><td class="num">384</td><td class="num">896</td><td class="num">+133%</td></tr>
+      <tr><td>每 token 激活</td><td class="num">8</td><td class="num">16</td><td class="num">+100%</td></tr>
+      <tr><td>Shared experts</td><td class="num">1</td><td class="num">2</td><td class="num">+100%</td></tr>
+      <tr><td>Attention heads</td><td class="num">64</td><td class="num">96</td><td class="num">+50%</td></tr>
+      <tr><td>MoE hidden / expert</td><td class="num">2,048</td><td class="num">3,072</td><td class="num">+50%</td></tr>
+      <tr><td>Latent MoE dim</td><td>—</td><td class="num">3,584（0.5×）</td><td>—</td></tr>
+      <tr><td>训练上下文</td><td class="num">128K</td><td class="num">1M</td><td class="num">8×</td></tr>
+      <tr><td>Attention</td><td>61 MLA</td><td>69 KDA + 24 MLA</td><td>—</td></tr>
+      <tr><td>Activation</td><td>SwiGLU</td><td>SiTU-GLU</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    先看 2.5× 的口径。K3 论文用拟合的 scaling-law 曲线报告：在 held-out OOD 验证数据上，K3 相对 K2 有约
+    <span data-src="Kimi K3 Figure 7">2.5×</span> 的 overall scaling efficiency；这是“达到同样 loss 需要多少 FLOPs”的比较，
+    不是某个 benchmark 的分数提升，也不是 wall-clock 训练时间。K2 的 15.5T token 零 loss spike 同样是训练稳定性结果，不是能力分数。
+  </p>
+
+  <p>
+    再看参数账。K3 的总参数是 K2 的 <span data-src="Kimi K3 Table 1">2.67×</span>（2.78/1.04），激活参数是
+    <span data-src="Kimi K3 Table 1">3.20×</span>（104.2/32.6）。K3 的 sparsity 从 48 升到 56，但每 token 激活的 expert 从 8 个变成 16 个，
+    激活参数规模也翻了三倍多。因此“更稀疏”只描述 896/16 的比例，不能读成每 token 更省算力。
+    <span class="infer">推断</span>（依据：激活参数 104.2B vs 32.6B，Kimi K3 Table 1；K3 的 2.5× 是匹配 loss 口径）。
+  </p>
+
+  <p class="eq-cap" style="text-align:left">
+    Kimi K2 Table 3：non-thinking 设置；输出上限 8192 token（SWE-bench Verified Agentless 为 16384）；Avg@k 见表头。
+  </p>
+  <div class="tbl-scroll tbl-xwide">
+  <table>
+    <thead><tr><th>Benchmark</th><th>Kimi K2</th><th>条件</th></tr></thead>
+    <tbody>
+      <tr><td>SWE-bench Verified（agentic，single attempt）</td><td class="num">65.8</td><td>Pass@1</td></tr>
+      <tr><td>SWE-bench Verified（agentic，multi-attempt）</td><td class="num">71.6</td><td>Pass@1，best-of-N</td></tr>
+      <tr><td>SWE-bench Multilingual</td><td class="num">47.3</td><td>Pass@1</td></tr>
+      <tr><td>LiveCodeBench v6</td><td class="num">53.7</td><td>Pass@1</td></tr>
+      <tr><td>OJBench</td><td class="num">27.1</td><td>Pass@1</td></tr>
+      <tr><td>Tau2 retail</td><td class="num">70.6</td><td>Avg@4</td></tr>
+      <tr><td>Tau2 airline</td><td class="num">56.5</td><td>Avg@4</td></tr>
+      <tr><td>Tau2 telecom</td><td class="num">65.8</td><td>Avg@4</td></tr>
+      <tr><td>AceBench</td><td class="num">76.5</td><td>Acc</td></tr>
+      <tr><td>AIME 2025</td><td class="num">49.5</td><td>Avg@64</td></tr>
+      <tr><td>GPQA-Diamond</td><td class="num">75.1</td><td>Avg@8</td></tr>
+      <tr><td>MMLU</td><td class="num">89.5</td><td>EM</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="eq-cap" style="text-align:left">
+    Kimi K3 Table 2：max reasoning effort、temperature 1.0；HLE-Full 的单元格是 no-tools / with-tools。
+  </p>
+  <div class="tbl-scroll tbl-xwide">
+  <table>
+    <thead><tr><th>Benchmark</th><th>Kimi K3</th><th>对照（Claude Fable 5 / GPT-5.6 Sol）</th></tr></thead>
+    <tbody>
+      <tr><td>GPQA Diamond</td><td class="num">93.5</td><td class="num">92.6 / 94.1</td></tr>
+      <tr><td>DeepSWE</td><td class="num">67.5</td><td class="num">70.0 / 73.0</td></tr>
+      <tr><td>ProgramBench</td><td class="num">77.8</td><td class="num">76.8 / 77.6</td></tr>
+      <tr><td>Terminal-Bench 2.1</td><td class="num">88.3</td><td class="num">88.0 / 88.8</td></tr>
+      <tr><td>FrontierSWE</td><td class="num">81.2</td><td class="num">86.6 / 71.3</td></tr>
+      <tr><td>SWE-Marathon</td><td class="num">42.0</td><td class="num">35.0 / 39.0</td></tr>
+      <tr><td>BrowseComp</td><td class="num">91.2</td><td class="num">88.0 / 90.4</td></tr>
+      <tr><td>MCPMark-Verified</td><td class="num">94.5</td><td class="num">87.4 / 92.9</td></tr>
+      <tr><td>HLE-Full（no tools / with tools）</td><td class="num">43.5 / 56.0</td><td class="num">53.3 / 63.0 vs 44.5 / 58.0</td></tr>
+      <tr><td>CritPt</td><td class="num">23.4</td><td class="num">28.6 / 32.3</td></tr>
+      <tr><td>GDPval-AA v2（Elo）</td><td class="num">1686</td><td class="num">1747 / 1736</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>
+    K3 的领先不是全表：在 ProgramBench（<span data-src="Kimi K3 Table 2">77.8</span> 对 76.8 / 77.6）、
+    SWE-Marathon（<span data-src="Kimi K3 Table 2">42.0</span> 对 35.0 / 39.0）、BrowseComp（<span data-src="Kimi K3 Table 2">91.2</span> 对 88.0 / GPT-5.6 Sol 的 90.4；K3 的 91.2 采用 300K 触发的 context compaction，全 1M 无管理为 K3 的 90.4，K3 §6.1.3）和
+    MCPMark（<span data-src="Kimi K3 Table 2">94.5</span> 对 87.4 / 92.9）上领先；在 HLE-Full（<span data-src="Kimi K3 Table 2">43.5 / 56.0</span> 对 53.3 / 63.0）和
+    CritPt（<span data-src="Kimi K3 Table 2">23.4</span> 对 28.6 / 32.3）上落后。论文自己的结论也是 overall 仍落后 Fable 5 和 GPT-5.6 Sol，
+    但在评测套件里持续领先其他 open 和 proprietary 模型（<span data-src="Kimi K3 §6.1.4">§6.1.4</span>）。
+  </p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">反直觉</span><h4>“更稀疏”和“每 token 更便宜”不是一回事</h4></div>
+    <p>
+      K3 的 routed sparsity 是 56（896/16），高于 K2 的 48（384/8）；但 K3 每 token 激活 16 个 expert，K2 只激活 8 个，
+      激活参数也从 32.6B 升到 104.2B。sparsity 是“routed expert 总数 / 激活 expert 数”的比值，
+      它描述的是容量在专家维度上的摊薄程度，不是每 token 的计算量。把 56 &gt; 48 直接读成“K3 每 token 更省”，方向就反了。
+    </p>
+  </div>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>K3 解决的是容量与长上下文，不是所有 benchmark；2.5× 也不能当成推理加速</h2></div>
+  <p class="sec-sub">把论文没覆盖的部分写清楚：研究级推理、端到端成本、预训练 token 数、以及 K2/K3 各自的失败模式。</p>
+
+  <h3>分数边界：HLE 与 CritPt 仍是短板</h3>
+  <p>
+    K3 在 GPQA Diamond 上到 <span data-src="Kimi K3 Table 2">93.5</span>，与 Fable 5 的 92.6、GPT-5.6 Sol 的 94.1 接近；
+    但 HLE-Full 是 <span data-src="Kimi K3 Table 2">43.5 / 56.0</span>（no tools / with tools），低于 Fable 5 的 53.3 / 63.0 和 GPT-5.6 Sol 的 44.5 / 58.0；
+    CritPt 是 <span data-src="Kimi K3 Table 2">23.4</span>，低于 28.6 / 32.3。论文在结论里也写明，与最强 proprietary 模型的差距仍然存在
+    （<span data-src="Kimi K3 §8">§8</span>）。这些是研究级推理的缺口，不是靠 1M context 或 MoE 容量自动补上的。
+  </p>
+
+  <h3>效率边界：2.5× 是拟合曲线，不是 wall-clock</h3>
+  <p>
+    K3 的 2.5× 来自 held-out OOD 验证数据上的拟合 scaling-law 曲线（<span data-src="Kimi K3 Figure 7">Figure 7</span>），
+    比较的是达到同样 loss 所需的 FLOPs。它没有给出端到端训练时长、GPU 成本或推理吞吐的 2.5× 加速；
+    本页未获取这些系统数字。K2 的 15.5T token 零 loss spike 也一样：它说明 MuonClip 把训练稳定性跑通，不说明 K2 在每项 benchmark 上更强。
+  </p>
+
+  <h3>数据边界：K3 的总预训练 token 数未获取</h3>
+  <p>
+    K2 明确写了 15.5T token（<span data-src="Kimi K2 Abstract">Abstract</span>），K3 报告本页读到的是数据域、上下文课程和 scaling-law 设置，
+    总预训练 token 数<b>未获取</b>。因此本页不把两代模型的 token efficiency 直接换算成“每个 token 提升多少”。
+    K3 的 1M context 是训练上下文长度；本页也没有获取与 K2 Table 3 的 MRCR（128K 下 55.0）同口径的 K3 长上下文检索分数，
+    所以不把 1M 直接写成“长上下文能力 8×”。
+  </p>
+
+  <h3>训练边界：QK-Clip 是临时介入，不是万能稳定器</h3>
+  <p>
+    QK-Clip 只约束 attention logit 的增长，不改当步的前向/反向；K2 的统计是前 70,000 步里 12.7% 的 head 至少触发一次，
+    之后训练稳定、QK-Clip 基本停用（deactivated，<span data-src="Kimi K2 Appendix D">Appendix D</span>）。它没有覆盖所有训练不稳定来源：
+    MoE 负载均衡、EP 通信、激活溢出仍然要靠系统侧手段。K3 延续了 K2 的 weight clipping，同时换成 Per-Head Muon，
+    并加 RMSNorm、SiTU-GLU 和 Quantile Balancing，但这些都是针对特定失败模式的组合，不是通用的“稳定训练”保证。
+  </p>
+
+  <h3>架构边界：KDA 丢信息，AttnRes 有显存开销</h3>
+  <p>
+    KDA 把历史压进固定大小的 recurrent state，decode 成本不随序列增长，但容量固定意味着信息会被覆盖或衰减；
+    K3 用周期性 Gated MLA 补回 token 级全局检索（<span data-src="Kimi K3 §2.1">§2.1</span>）。
+    AttnRes 完整版要对所有前层输出做 attention，显存是 O(Ld)；K3 用 8 个 block、每块 12 层的 block 版把显存降到 O(Nd)，
+    代价是 block 内部的细粒度选择被求和压平（<span data-src="Kimi K3 §2.2">§2.2</span>）。这两种都是有意的取舍，不是免费收益。
+  </p>
+
+  <h3>什么时候别用</h3>
+  <ul>
+    <li><strong>需要每 token 更低推理成本。</strong>K3 的激活参数是 <span data-src="Kimi K3 Table 1">104.2B</span>，K2 是 <span data-src="Kimi K3 Table 1">32.6B</span>；K3 的 sparsity 更高，但每 token 激活的 expert 从 8 个变成 16 个。要更低的 per-token 计算，应该看更小的激活参数，而不是只看总参数或 sparsity。</li>
+    <li><strong>需要每一层都能精确回看所有 token。</strong>KDA 用固定状态换长序列效率，K3 只在 <span data-src="Kimi K3 §2.1">每 4 层插入 1 层 Gated MLA</span>。对逐层精确检索要求很高的任务，这种混合结构是折中，不是 full attention 的等价替代。</li>
+    <li><strong>需要可复现的长上下文分数。</strong>K3 的 <span data-src="Kimi K3 Table 1">1M</span> 是训练上下文长度；本页未获取与 K2 MRCR 同口径的 K3 检索分数。上线前要在自己的长上下文任务上复测，而不是把 1M 当成质量保证。</li>
+    <li><strong>需要完整的训练成本模型。</strong>K3 的总预训练 token 数未获取，<span data-src="Kimi K3 Figure 7">2.5×</span> 又是匹配 loss 的拟合效率；没有端到端时长和成本，不能直接把它当成“训练便宜 2.5×”。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>K2 把 1T 级 MoE 的稳定训练跑通，K3 把 3T 级 MoE 的容量与长上下文推进一步</h4></div>
+    <p>
+      两代模型的核心都是“总参数”与“每 token 激活”的解耦，但解耦之后，真正的难点转移到 optimizer 的数值范围、attention 的序列成本、
+      expert 的通信与负载均衡，以及长上下文的状态管理。读 K2/K3 的数字时，先把这些条件与口径对齐，再比较分数和效率。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>Kimi K2: Open Agentic Intelligence · Kimi K3: Open Frontier Intelligence</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2507.20534">arXiv 2507.20534</a>（K2，v1） ·
+    <a href="https://arxiv.org/abs/2607.24653">arXiv 2607.24653</a>（K3，v2）<br>
+    官方：<a href="https://huggingface.co/moonshotai/Kimi-K2-Instruct">Kimi-K2-Instruct</a> ·
+    <a href="https://huggingface.co/moonshotai/Kimi-K3">Kimi-K3</a> ·
+    <a href="https://www.kimi.com/en/blog/kimi-k3">Kimi K3 blog</a><br>
+    笔记：<a href="/k2/">K2</a> ·
+    <a href="/kimi-系列/">Kimi 系列（K2 / K2 Thinking / Kimi Linear）</a> ·
+    <a href="/从gpt-2到kimi-k3/">从 GPT-2 到 Kimi K3</a>
+  </div>
+  <p class="errata" style="margin-top:16px">
+    <strong>版本与口径：</strong>K2 以 arXiv 2507.20534v1 为准，K3 以 arXiv 2607.24653v2 为准。
+    K2 的吞吐/显存数字带 PP16、EP16、micro batch 等条件；K3 的 benchmark 数字默认 max reasoning effort、temperature 1.0，
+    HLE-Full 与视觉 benchmark 的“/”前后分别是 no-tools 与 with-tools。2.5× 是 held-out OOD 上匹配 loss 的拟合 scaling efficiency，
+    不是端到端加速；K2 的 15.5T token 零 loss spike 是训练稳定性结果。
+  </p>
+  <p class="errata">
+    <strong>笔记差异（只记录，不改原笔记）：</strong>
+    ① K2 笔记把 QK-Clip 概括为“裁剪权重”；原文是对每个 head 的 Q/K 投影按 γ 缩放，且只在 S<sub>max</sub> &gt; τ 时触发（Kimi K2 §2.1）。
+    ② 《Kimi 系列》笔记称「首次在 1T 量级使用 Muon」；K2 报告只说明使用 Muon 并提出 MuonClip，没有主张「首次」。
+    ③ 《从 GPT-2 到 Kimi K3》笔记写 23 个四层 macrocycle 共 92 层；K3 Table 1 是 93 层（69 KDA + 24 MLA），§2.1 说明 backbone 末尾额外加了 1 层 Gated MLA。
+    ④ 该笔记里的“AttnRes 约增加 2% 推理延迟”“约 1.25 倍 compute advantage”来自其引用的 X 文章；K3 技术报告本页未获取对应数字，页面未采用。
+  </p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('qkclip-sim');
+  if (!sim) return;
+
+  var tauRange = document.getElementById('qk-tau');
+  var tauVal = document.getElementById('qk-tau-v');
+  var modeBox = document.getElementById('qkclip-modes');
+  var msg = document.getElementById('qkclip-msg');
+  var reset = document.getElementById('qk-reset');
+  if (!tauRange || !tauVal || !modeBox || !msg || !reset) return;
+
+  var heads = [
+    { name: 'A', s: 100, val: document.getElementById('qk-a'), slot: document.getElementById('qk-slot-a') },
+    { name: 'B', s: 400, val: document.getElementById('qk-b'), slot: document.getElementById('qk-slot-b') },
+    { name: 'C', s: 1200, val: document.getElementById('qk-c'), slot: document.getElementById('qk-slot-c') }
+  ];
+  for (var i = 0; i < heads.length; i++) {
+    if (!heads[i].val || !heads[i].slot) return;
+  }
+
+  var mode = 'perhead';
+
+  function gammaOf(tau, s) {
+    return Math.min(1, tau / s);
+  }
+
+  function fmt4(x) {
+    return x.toFixed(4);
+  }
+
+  function fmt1(x) {
+    return x.toFixed(1);
+  }
+
+  function maxHead() {
+    var m = heads[0].s;
+    for (var i = 1; i < heads.length; i++) {
+      if (heads[i].s > m) m = heads[i].s;
+    }
+    return m;
+  }
+
+  function render() {
+    var tau = parseInt(tauRange.value, 10);
+    tauVal.textContent = String(tau);
+
+    var globalGamma = gammaOf(tau, maxHead());
+    var parts = [];
+
+    for (var i = 0; i < heads.length; i++) {
+      var h = heads[i];
+      var g = (mode === 'perhead') ? gammaOf(tau, h.s) : globalGamma;
+      var post = h.s * g;
+      h.val.innerHTML = 'γ ' + fmt4(g) + '<br>post ' + fmt1(post);
+      h.slot.classList.toggle('hit', g < 1);
+      parts.push('Head ' + h.name + '：γ=' + fmt4(g) + '，post=' + fmt1(post));
+    }
+
+    if (mode === 'perhead') {
+      msg.textContent = 'per-head，τ=' + tau + '：' + parts.join('；') +
+        '。只有 S_max > τ 的 head 被缩放；S_max ≤ τ 的 head 不触发（如 τ=100 时的 Head A）。';
+    } else {
+      msg.textContent = 'all-heads，τ=' + tau + '：全局 S_max=' + maxHead() + '，γ=' + fmt4(globalGamma) +
+        '；' + parts.join('；') + '。健康 head 也被一起缩放，这是论文改成 per-head 的原因。';
+    }
+  }
+
+  var btns = modeBox.querySelectorAll('.rule-btn');
+  for (var j = 0; j < btns.length; j++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        mode = btn.getAttribute('data-mode');
+        for (var k = 0; k < btns.length; k++) {
+          btns[k].classList.toggle('active', btns[k] === btn);
+        }
+        render();
+      });
+    })(btns[j]);
+  }
+
+  tauRange.addEventListener('input', render);
+
+  reset.addEventListener('click', function () {
+    tauRange.value = '100';
+    mode = 'perhead';
+    for (var k = 0; k < btns.length; k++) {
+      btns[k].classList.toggle('active', btns[k].getAttribute('data-mode') === 'perhead');
+    }
+    render();
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>

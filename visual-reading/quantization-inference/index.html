@@ -1,0 +1,898 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 140 | §04 表 2 | 70*2 |
+| 70 | §04 表 2 | 70*1 |
+| 35 | §04 表 2 | 70*0.5 |
+| 140 | §04 表 2 | 140/1000*1000 |
+| 35 | §04 表 2 | 35/1000*1000 |
+| 26.25 | §04 表 2 | 70*0.375 |
+| 0.156 | §03 | 20/128 |
+| 0.25 | §03 | 32/128 |
+| 128 | FP8 Formats Table 1 | 57344/448 |
+| 163840 | §04 表 3 | 2*80*8*128 |
+| 327680 | §04 表 3 | 2*80*8*128*2 |
+| 163840 | §04 表 3 | 2*80*8*128*1 |
+| 320 | §04 表 3 | 2*80*8*128*2/1024 |
+| 160 | §04 表 3 | 2*80*8*128*1/1024 |
+| 1342177280 | §04 表 3 | 2*80*8*128*2*4096 |
+| 671088640 | §04 表 3 | 2*80*8*128*1*4096 |
+| 1.34 | §04 表 3 | 2*80*8*128*2*4096/1000000000 |
+| 0.67 | §04 表 3 | 2*80*8*128*1*4096/1000000000 |
+| 1.342 | §04 表 3 | 2*80*8*128*2*4096/1000000000 |
+| 0.671 | §04 表 3 | 2*80*8*128*1*4096/1000000000 |
+| 10.74 | §04 表 3 | 2*80*8*128*2*32768/1000000000 |
+| 5.37 | §04 表 3 | 2*80*8*128*1*32768/1000000000 |
+| 42.95 | §04 表 3 | 2*80*8*128*2*131072/1000000000 |
+| 21.47 | §04 表 3 | 2*80*8*128*1*131072/1000000000 |
+| 0.67 | §04 表 3 | 1.34217728-0.67108864 |
+| 5.37 | §04 表 3 | 10.73741824-5.36870912 |
+| 21.47 | §04 表 3 | 42.94967296-21.47483648 |
+| 141.34 | §04 表 3 | 140+1.34217728 |
+| 70.67 | §04 表 3 | 70+0.67108864 |
+| 141.34217728 | §04 表 3 | 140+1.34217728 |
+| 70.67108864 | §04 表 3 | 70+0.67108864 |
+| 0.03 | GPTQ Table 3 | 8.37-8.34 |
+| 0.77 | AWQ Table 4 | 6.24-5.47 |
+| 0.09 | AWQ Table 4 | 3.41-3.32 |
+| 0.18 | SmoothQuant Table 3 | 11.17-10.99 |
+| 0.1 | SmoothQuant Table 3 | 66.9-66.8 |
+| 2 | §04 表 3 | 16/8 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v6">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM 推理量化 · 权重、激活与 KV cache 的三本账</title>
+<meta name="description" content="weight-only、W8A8 与 FP8 的分工：per-tensor/per-channel/group-wise 粒度、AWQ 激活感知缩放、GPTQ 逐层误差补偿、KV cache 量化的显存与精度代价。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.tbl-cap{font-size:12.5px;color:var(--text-soft);margin:20px 0 6px;line-height:1.6}
+.tbl-cap strong{color:var(--text);font-weight:600}
+.note{font-size:13px;color:var(--text-soft);line-height:1.75;margin:10px 0 18px}
+.sim .ctrl label{font-family:"JetBrains Mono",monospace}
+.sim-note{font-size:12.5px;color:var(--text-soft);line-height:1.7;margin:8px 0 0}
+details.handcalc summary{font-weight:600}
+.handcalc .details-body strong{color:var(--text)}
+.handcalc ol{margin:8px 0 14px;padding-left:22px}
+.handcalc li{margin-bottom:8px}
+.svg-label{font-family:"JetBrains Mono",monospace;font-size:10px;fill:var(--text-soft)}
+.svg-title{font-size:12px;font-weight:600;fill:var(--text)}
+.svg-sub{font-size:9.5px;fill:var(--text-muted)}
+.svg-note{font-size:9.5px;fill:var(--text-soft)}
+p code, li code, td code, .note code, .details-body code{overflow-wrap:anywhere}
+footer a{overflow-wrap:anywhere}
+.infer{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10px;line-height:1.5;color:var(--c2);background:var(--c2-soft);border-radius:100px;padding:1px 7px;margin-right:4px;vertical-align:1px}
+@media (max-width:560px){
+  .sim{padding:16px}
+  .tbl-cap{font-size:12px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Quantization</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#roads">路线</a>
+      <a href="#method">方法</a>
+      <a href="#memory">显存账</a>
+      <a href="#flow">数据流</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>推理优化 · 2022–2026 · vLLM e740bad</span>
+  <h1>LLM 推理量化：权重、激活与 KV cache 的三本账</h1>
+  <p class="hero-sub">
+    解码阶段每生成一个 token，都要把权重从显存搬到计算单元；瓶颈常常是带宽，不是 FLOPs。
+    <strong>weight-only</strong> 只压权重，<strong>W8A8</strong> 连激活一起压，<strong>FP8</strong> 用指数位在 8 bit 内保留比 INT8 更大的动态范围。
+    压到几位不是关键，<strong>粒度、scale 和校准集</strong>才决定压完还能不能答对。
+  </p>
+  <div class="meta">
+    <span>AWQ · GPTQ · FP8 Formats · SmoothQuant</span>
+    <a href="https://arxiv.org/abs/2306.00978" target="_blank" rel="noopener">AWQ ↗</a>
+    <a href="https://arxiv.org/abs/2210.17323" target="_blank" rel="noopener">GPTQ ↗</a>
+    <a href="https://arxiv.org/abs/2209.05433" target="_blank" rel="noopener">FP8 ↗</a>
+    <a href="https://arxiv.org/abs/2211.10438" target="_blank" rel="noopener">SmoothQuant ↗</a>
+    <a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f" target="_blank" rel="noopener">vLLM @ e740bad ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    <strong>weight-only（W4A16）</strong>只量化权重，激活仍是 FP16。解码是 memory-bound，所以它能直接减少每 token 的权重读取量；
+    但 GEMM 仍是 FP16，KV cache 也不受益。AWQ 和 GPTQ 都属于这一类。
+  </p>
+  <p>
+    <strong>W8A8</strong>把激活也压到 INT8 或 FP8，才能用整数/FP8 tensor core。难点是激活离群值：SmoothQuant 用 per-channel 缩放把离群值从激活迁移到权重；
+    FP8 用 E4M3 的 3 位尾数和 448 的最大值，再配 per-tensor、per-channel 或 block scale。
+  </p>
+  <p>
+    <strong>AWQ</strong>按激活幅度挑关键通道，做等价缩放；<strong>GPTQ</strong>用校准输入的 Hessian 做逐层误差补偿。
+    两者都不训练，但都需要校准数据，且默认只改权重。
+  </p>
+  <p>
+    <strong>KV cache 量化是另一笔账</strong>：FP16 到 FP8 直接把每 token 的 KV 字节减半，长上下文和高并发 batch 的收益比权重更直接；
+    代价是 scale 校准与 attention kernel 支持。
+  </p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="FP8 Formats Table 1">448</div><div class="k">E4M3 的最大正规数<br>E5M2 到 57344，但尾数只有 2 位</div></div>
+    <div class="metric"><div class="v" data-src="AWQ Table 4">6.24</div><div class="k">Llama-2-7B INT3-g128 的 WikiText2 PPL<br>同表 FP16 为 5.47，GPTQ 为 6.43</div></div>
+    <div class="metric"><div class="v" data-src="GPTQ Table 3">0.03<small>PPL</small></div><div class="k">OPT-175B 4-bit GPTQ 与 FP16 的 WikiText2 差<br>8.37 − 8.34</div></div>
+  </div>
+</div>
+
+<!-- ================= 01. 问题 ================= -->
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>解码先搬 140 GB 权重，再谈算力</h2></div>
+  <p class="sec-sub">先分清两类瓶颈：权重读取和 KV cache 读取；量化动的是字节数，不是 FLOPs。</p>
+
+  <p>
+    自回归解码每次只生成一个 token，batch=1 时矩阵乘法的右侧只有一行向量。AWQ 在 RTX 4090 上做的 roofline 分析指出，
+    这个阶段的算术强度约为 1 FLOP/byte，而 4090 的峰值算力与带宽之比是 165 FLOP/byte，因此生成阶段是<strong>内存带宽受限</strong>，
+    权重访问量比激活访问量高几个数量级（AWQ §4.1，Figure 3）。
+  </p>
+
+  <p>
+    以 70B 参数、FP16 权重为例：70 × 10<sup>9</sup> × 2 B = 140 GB（十进制）。若显存带宽为 1 TB/s，
+    单次读取全部权重的理论时间下界是 140 GB ÷ 1000 GB/s = 140 ms；换成 INT4 权重则是 35 GB，下界 35 ms。
+    这还没算 KV cache、计算和 kernel 开销，但它说明了为什么量化首先是一种<strong>显存与带宽手段</strong>。
+  </p>
+
+  <div class="eq">
+    解码时间下界 ≈ <span class="hl-a">每 token 读取的权重字节</span> ÷ <span class="hl-b">显存带宽</span>
+  </div>
+  <div class="eq-cap">batch=1、忽略计算与 KV 时的粗略下界；真实延迟由 kernel、并行度和缓存共同决定</div>
+
+  <p>
+    KV cache 是第二本账。GPTQ 论文给过一个具体数字：OPT-175B 在 3-bit 权重下约 63 GB（含保持 FP16 的 embedding 与输出层），
+    若把 2048 个 token 的全部 K/V 历史存下来，还要再加约 9 GB（GPTQ §5）。长上下文或大 batch 时，
+    KV cache 会从“附带开销”变成主要占用。
+  </p>
+
+  <p>
+    第三个问题是<strong>量化误差</strong>。均匀量化的步长 Δ 由张量（或通道/组）的最大绝对值决定；
+    激活里只要少数通道的离群值达到普通值的约 100 倍，Δ 就会被它们撑大，其余通道只剩很少的有效量化级
+    （SmoothQuant §3，Figure 2）。SmoothQuant 在 OPT-175B 上报告：在 WinoGrande、HellaSwag、PIQA、LAMBADA 四个零样本任务上，
+    FP16 的平均准确率是 71.6%，而朴素的 INT8 per-tensor / per-token 激活量化分别只有 32.3% / 31.7%
+    （SmoothQuant Table 1；§06 表 6 的 7 任务平均是另一组数字）。
+    SmoothQuant 也指出权重分布更平坦，激活才是量化难点（SmoothQuant §3）。
+  </p>
+
+  <p>
+    所以问题不是“压到 8 bit 还是 4 bit”，而是：<strong>压哪些张量、用多细的粒度、scale 怎么定、在哪里反量化</strong>。
+    这四件事决定了精度、显存和吞吐的三角关系。
+  </p>
+</section>
+
+<!-- ================= 02. 已有方案 ================= -->
+<section class="block" id="roads">
+  <div class="sec-head"><span class="sec-num">02</span><h2>三条路线：只压权重、压权重加激活、用 FP8 压两者</h2></div>
+  <p class="sec-sub">三条路线的字节数、kernel 和精度风险不同，不能只看 bit 数。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">W4A16</span><h4>weight-only</h4></div>
+      <p class="sub">AWQ / GPTQ</p>
+      <p>
+        权重 4-bit（也有 3-bit），激活保持 FP16/BF16。checkpoint 里存 packed 整数、每组的 scale 和可选的 zero-point；
+        kernel 在 GEMM 主循环里把权重反量化成 FP16/BF16，再与同精度激活相乘。
+      </p>
+      <p>
+        vLLM 的 <code>AutoAWQConfig</code> 暴露 <code>weight_bits</code>、<code>group_size</code>、<code>zero_point</code>
+        （<code>auto_awq.py:188-202</code>）；<code>AutoGPTQConfig</code> 暴露 <code>weight_bits</code>、<code>group_size</code>、
+        <code>desc_act</code>、<code>is_sym</code>（<code>auto_gptq.py:112-156</code>）。两者都可走 Marlin 等 WNA16 kernel。
+      </p>
+      <p><strong>收益：</strong>权重显存约降为 1/4；解码的权重读取量同步下降。<strong>不改变：</strong>激活与 KV cache 的字节数；GEMM 仍按 FP16/BF16 计算（权重本身已有量化误差）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">W8A8</span><h4>INT8 权重 + 激活</h4></div>
+      <p class="sub">SmoothQuant 等</p>
+      <p>
+        权重和激活都量化到 INT8，才能用整数 GEMM。激活的难点是离群值：per-tensor 和 per-token 的 scale
+        都会被少数大通道支配，而非离群通道的有效量化级可能只剩 2–3 个（SmoothQuant §3）。
+      </p>
+      <p>
+        SmoothQuant 的观察是：离群值固定在少数通道上，且同一通道在不同 token 间幅度相近。它用一个 per-channel
+        缩放 <code>s</code> 把激活除以 <code>s</code>、权重乘以 <code>s</code>，数学上等价，却把量化难度从激活迁移到权重。
+      </p>
+      <p><strong>收益：</strong>权重和激活都减半；在支持 INT8 GEMM 的硬件上，整数 GEMM 吞吐更高。<strong>代价：</strong>静态激活 scale 需要校准集，动态 per-token 要在运行时统计；per-channel 激活量化本身与 INT8 GEMM 不兼容。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">FP8</span><h4>W8A8 浮点</h4></div>
+      <p class="sub">E4M3 / E5M2</p>
+      <p>
+        FP8 用 8 位浮点表示，权重和激活都可以是 FP8。E4M3 有 4 位指数、3 位尾数，最大正规数 448；
+        E5M2 有 5 位指数、2 位尾数，最大 57344，动态范围更大但精度更粗（FP8 Formats Table 1）。
+      </p>
+      <p>
+        vLLM 文档推荐的 FP8 W8A8 配方是<strong>权重 static per-channel、激活 dynamic per-token</strong>，
+        简单的 RTN 即可，不需要校准数据（<code>docs/features/quantization/llm_compressor/fp8.md:79-84</code>）。
+        其线性层目前只支持 <code>float8_e4m3fn</code>（<code>fp8.py:226-228</code>）。
+      </p>
+      <p><strong>收益：</strong>权重显存减半，FP8 tensor core 可用；vLLM 文档称在 H100/MI300x 上可让显存需求约减半，并带来最高 1.6× 吞吐提升（<code>docs/features/quantization/llm_compressor/fp8.md:3-6</code>）。<strong>代价：</strong>需要 Ada/Hopper 及以上。</p>
+    </div>
+  </div>
+
+  <p class="note">
+    三条路线的“8 bit”不是同一件事：W4A16 的 4 bit 只作用于权重；INT8 W8A8 的 8 bit 同时作用于权重和激活；
+    FP8 的 8 bit 是浮点编码，scale 只负责把张量搬进可表示区间，尾数位数由格式决定。比较时先看量化对象，再看 bit 数。
+  </p>
+</section>
+
+<!-- ================= 03. 核心方法 ================= -->
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>粒度决定误差，scale 决定动态范围</h2></div>
+  <p class="sec-sub">per-tensor 最省，group-wise 最准；AWQ 调缩放，GPTQ 补误差，FP8 选指数位。</p>
+
+  <h3>3.1 三种粒度：一个 scale、每通道一个、每组一个</h3>
+  <p>
+    对称均匀量化的基本式是 <code>q = round(w / Δ)</code>，反量化是 <code>ŵ = q · Δ</code>；
+    非对称量化再加 zero-point <code>z</code>。步长 <code>Δ</code> 由量化范围决定：
+  </p>
+  <div class="eq">
+    <span class="hl-a">Δ<sub>sym</sub></span> = max|w| / (2<sup>N−1</sup> − 1)&nbsp;&nbsp;&nbsp;&nbsp;
+    <span class="hl-b">Δ<sub>asym</sub></span> = (max(w) − min(w)) / (2<sup>N</sup> − 1)
+  </div>
+  <div class="eq-cap">N 是位宽；对称量化常配 zero-point=0，非对称量化用整数零点平移</div>
+
+  <ul>
+    <li><strong>per-tensor：</strong>整个张量共用一个 <code>Δ</code>。元数据最少，kernel 最简单；一个离群值会抬高所有通道的误差。</li>
+    <li><strong>per-channel：</strong>每个输出通道（权重）或每个输入通道一个 <code>Δ</code>。权重上的 per-channel 很常见；激活上的 per-channel 精度好，但需要在内层维度上缩放，整数 GEMM 的 kernel 通常不支持（SmoothQuant §2）。</li>
+    <li><strong>group-wise：</strong>把输入维度切成大小 <code>G</code> 的组，每组一个 <code>Δ</code>（以及可选 zero-point）。<code>G=128</code> 是 AWQ/GPTQ 的常用设置；组越小误差越低，但 scale/zero 的元数据和反量化开销越大。</li>
+  </ul>
+
+  <p>
+    粒度不是免费的。以 INT4、<code>G=128</code>、FP16 scale、4-bit zero 为例，每组 128 个权重额外带 16 + 4 = 20 bit，
+    平均每权重多 0.156 bit；若 zero-point 用 FP16 存，则多 0.25 bit。组再小，元数据占比继续上升。
+    这部分在 §04 的显存表里没有计入，后文会单独说明。
+  </p>
+
+  <h3>3.2 AWQ：按激活幅度保护关键通道，用等价缩放降低误差</h3>
+  <p>
+    AWQ 的起点是一个实验观察：LLM 的权重不是同等重要，少量<strong>关键权重</strong>对输出影响很大；
+    而“关键”应由激活分布判断，不是权重范数。AWQ Table 1 在 OPT-6.7B、INT3-g128 上比较了保留 1% 通道为 FP16 的效果：
+    按激活选，PPL 从 RTN 的 23.54 降到 11.39；按权重选是 22.37，随机选是 24.23。
+  </p>
+  <p>
+    直接保留 FP16 通道会破坏硬件友好的规则矩阵，AWQ 改用<strong>等价缩放</strong>：对输入通道乘 <code>s</code>，
+    同时把激活除以 <code>s</code>：
+  </p>
+  <div class="eq">
+    <span class="hl-a">W′</span> = W · diag(s)&nbsp;&nbsp;&nbsp;&nbsp;
+    <span class="hl-b">X′</span> = diag(s)<sup>−1</sup> · X&nbsp;&nbsp;&nbsp;&nbsp;
+    W′X′ = WX
+  </div>
+  <div class="eq-cap">逐通道缩放不改变线性层输出；缩放可以融合进前一个算子，不增加运行时 kernel</div>
+
+  <p>
+    缩放因子不是任意搜的。AWQ 把搜索空间压成一个参数 <code>α</code>：<code>s = s<sub>X</sub><sup>α</sup></code>，
+    其中 <code>s<sub>X</sub></code> 是校准集上每个输入通道的平均激活幅度；然后最小化量化后的输出误差：
+  </p>
+  <div class="eq">
+    s<sup>*</sup> = arg min<sub>s</sub> ‖ Q(W · diag(s)) · (diag(s)<sup>−1</sup>X) − WX ‖<sub>2</sub><sup>2</sup>
+  </div>
+  <div class="eq-cap">Q 是权重量化函数；α 在 [0,1] 上网格搜索，按模型选最优值（AWQ §3.2，Eq.5）</div>
+
+  <p>
+    AWQ 的缩放因子只依赖激活的平均幅度，不做回归或反向传播，因此校准集可以很小；代价是它仍然需要一小批能代表部署分布的校准样本。
+    vLLM 的 AWQ checkpoint 把 <code>qweight</code>、<code>qzeros</code>、<code>scales</code> 分开存，
+    <code>pack_factor = 32 / weight_bits</code>，加载后先转成 GPTQ-like 标准布局，再交给 Marlin 等 kernel
+    （<code>auto_awq.py:198,424-461,512-525</code>）。
+  </p>
+
+  <h3>3.3 GPTQ：逐层量化，用剩余权重的更新补偿舍入误差</h3>
+  <p>
+    GPTQ 把问题写成逐层的输出重建：给定一层权重 <code>W</code> 和校准输入 <code>X</code>，找量化权重 <code>Ŵ</code> 使
+    <code>‖WX − ŴX‖<sub>2</sub><sup>2</sup></code> 最小（GPTQ Eq.1）。它沿用 OBQ 的思路：一次量化一个权重，
+    然后更新所有尚未量化的权重，以补偿当前舍入造成的误差。
+  </p>
+  <div class="eq">
+    δ<sub>F</sub> = − (w<sub>q</sub> − quant(w<sub>q</sub>)) · (H<sup>−1</sup>)<sub>:,q</sub> / [H<sup>−1</sup>]<sub>qq</sub>&nbsp;&nbsp;&nbsp;&nbsp;
+    H = 2XX<sup>ᵀ</sup>
+  </div>
+  <div class="eq-cap">F 是尚未量化的权重集合；H 是校准输入的二阶信息，δ<sub>F</sub> 是对剩余权重的补偿更新（GPTQ Eq.2）</div>
+
+  <p>
+    原始 OBQ 的复杂度是 <code>O(d<sub>row</sub> · d<sub>col</sub><sup>3</sup>)</code>，无法扩展到十亿参数。
+    GPTQ 做了三处工程化：所有权重行使用<strong>同一固定顺序</strong>，把逆 Hessian 的更新从每权重一次降到每列一次；
+    以 <code>B=128</code> 列为一组做<strong>lazy batch-update</strong>；用 Cholesky 分解提高数值稳定性（GPTQ §4）。
+    最终它把 175B 模型的量化时间压到约 4 GPU 小时（GPTQ §1）。
+  </p>
+  <p>
+    和 AWQ 的区别：GPTQ 不改变激活，也不显式保护关键通道；它用校准输入的 Hessian 做<strong>误差补偿</strong>。
+    AWQ 则用激活幅度做<strong>等价缩放</strong>，让敏感通道在量化网格上更不容易被舍入。两者可以叠加，AWQ 论文 Table 9
+    报告了 AWQ 与 GPTQ 组合在更低 bit 下的结果。
+  </p>
+
+  <h3>3.4 FP8：指数位换动态范围，尾数位换精度</h3>
+  <p>
+    FP8 不是整数网格，它由符号位、指数位、尾数位组成。E4M3 的指数偏置是 7，最大正规数 448，最小正规数 2<sup>−6</sup>；
+    E5M2 的偏置是 15，最大 57344，最小正规数 2<sup>−14</sup>。E5M2 的最大正规数是 E4M3 的 128 倍（57,344 ÷ 448 = 128），即高 7 个 binade，总 binade 数也更多（论文称 E5M2 有 32 个，E4M3 调整后 18 个），
+    但尾数只有 2 位，表示同样数量级时的相对误差更大（FP8 Formats Table 1 与 §3.1）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>属性</th><th>E4M3</th><th>E5M2</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>符号 / 指数 / 尾数</td><td class="num">1 / 4 / 3</td><td class="num">1 / 5 / 2</td></tr>
+        <tr><td>指数偏置</td><td class="num">7</td><td class="num">15</td></tr>
+        <tr><td>最大正规数</td><td class="num">448</td><td class="num">57,344</td></tr>
+        <tr><td>最小正规数</td><td class="num">2<sup>−6</sup></td><td class="num">2<sup>−14</sup></td></tr>
+        <tr><td>无穷 / NaN</td><td>无无穷，单一 NaN 编码</td><td>有 ±inf 与多个 NaN 编码</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-cap"><strong>表 1</strong> · FP8 两种编码的可表示范围（FP8 Formats Table 1；数值按原表转录）</div>
+
+  <p>
+    把一个 FP16/BF16 张量搬进 FP8，需要一个 scale：<code>scale = amax / max<sub>FP8</sub></code>（<code>amax = max|w|</code>），
+    然后 <code>w<sub>FP8</sub> = clamp(w / scale, −max<sub>FP8</sub>, max<sub>FP8</sub>)</code>。
+    E4M3 的 <code>max<sub>FP8</sub></code> 是 448，E5M2 是 57344。scale 可以是 per-tensor、per-channel，
+    也可以是 per-block；粒度越细，越能适配局部动态范围，但元数据越多。
+  </p>
+  <p>
+    vLLM 的 <code>Fp8Config</code> 支持 static/dynamic 两种激活方案，以及可选的 <code>weight_block_size</code>
+    （<code>fp8.py:92-135</code>）。非 block 路径下，权重用 static per-tensor scale；动态激活在 CUTLASS 上走
+    per-token scale，否则走 per-tensor scale（<code>fp8.py:266-274</code>）。FP8 的线性层只支持
+    <code>float8_e4m3fn</code>，这是 <code>torch._scaled_mm</code> 的限制（<code>fp8.py:226-228</code>）。
+    E5M2 的动态范围更大，但 vLLM 的 FP8 线性层不走 E5M2；在 vLLM 里它主要出现在 KV cache 的 dtype 选项里
+    （<code>docs/features/quantization/quantized_kvcache.md:39-41</code>）。
+  </p>
+</section>
+
+<!-- ================= 04. 显存与带宽 ================= -->
+<section class="block" id="memory">
+  <div class="sec-head"><span class="sec-num">04</span><h2>权重账和 KV 账要分开算</h2></div>
+  <p class="sec-sub">70B 权重 FP16 是 140 GB；KV cache 每 token 只占几百 KiB，但会随上下文和 batch 线性增长。</p>
+
+  <p>
+    权重显存的公式很直接：<code>bytes = P × b<sub>w</sub> / 8</code>，<code>P</code> 是参数量，<code>b<sub>w</sub></code> 是每权重位数。
+    表 2 按 70B 参数、十进制 GB 计算，不计 scale、zero-point、embedding 和 lm_head。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>权重格式</th><th>bits / param</th><th>70B 权重显存</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>FP16 / BF16</td><td class="num">16</td><td class="num">140 GB</td><td>未量化基线</td></tr>
+        <tr><td>FP8 E4M3</td><td class="num">8</td><td class="num">70 GB</td><td>W8A8 或 W8A16</td></tr>
+        <tr><td>INT4</td><td class="num">4</td><td class="num">35 GB</td><td>weight-only，group scale</td></tr>
+        <tr><td>INT3</td><td class="num">3</td><td class="num">26.25 GB</td><td>AWQ 论文的极端设置；packing 与 kernel 支持更窄</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-cap"><strong>表 2</strong> · 70B 参数模型在不同权重格式下的理论显存（十进制 GB；未计 scale、zero-point、embedding、lm_head）</div>
+
+  <p>
+    KV cache 的公式是 <code>bytes/token = 2 × L × H<sub>kv</sub> × d<sub>head</sub> × b<sub>kv</sub></code>：
+    2 表示 K 和 V，<code>L</code> 是层数，<code>H<sub>kv</sub></code> 是 KV head 数，<code>d<sub>head</sub></code> 是每头维度，
+    <code>b<sub>kv</sub></code> 是每个元素的字节数。Llama-2-70B 的公开配置是 80 层、8 个 KV head、<code>d<sub>head</sub></code>=128
+    （<code>config.json</code>；GQA 让 KV head 数远小于 64 个 query head）。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>上下文长度（batch=1）</th><th>FP16 KV</th><th>FP8 KV</th><th>节省</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>4,096 token</td><td class="num">1.34 GB</td><td class="num">0.67 GB</td><td class="num">0.67 GB</td></tr>
+        <tr><td>32,768 token</td><td class="num">10.74 GB</td><td class="num">5.37 GB</td><td class="num">5.37 GB</td></tr>
+        <tr><td>131,072 token</td><td class="num">42.95 GB</td><td class="num">21.47 GB</td><td class="num">21.47 GB</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-cap"><strong>表 3</strong> · Llama-2-70B 的 KV cache 手算（80 层、8 个 KV head、head_dim 128、batch=1；十进制 GB）</div>
+
+  <p>
+    长上下文时，KV 量化的绝对节省更大：4k 上下文下，FP16 KV 只有 1.34 GB，相比 140 GB 权重是零头；
+    到 128k，FP16 KV 已经到 42.95 GB，FP8 把它压到 21.47 GB。若 batch=16，所有 KV 数字再乘 16。
+  </p>
+
+  <div class="sim" id="mem-sim">
+    <div class="sim-top" id="wfmt">
+      <button class="rule-btn active" type="button" data-wbytes="2">FP16 / BF16<span class="r-sub">2 B / param</span></button>
+      <button class="rule-btn" type="button" data-wbytes="1">FP8<span class="r-sub">1 B / param</span></button>
+      <button class="rule-btn" type="button" data-wbytes="0.5">INT4<span class="r-sub">0.5 B / param</span></button>
+    </div>
+    <div class="sim-top" id="kvfmt">
+      <button class="rule-btn active" type="button" data-kvbytes="2">KV FP16<span class="r-sub">2 B / element</span></button>
+      <button class="rule-btn" type="button" data-kvbytes="1">KV FP8<span class="r-sub">1 B / element</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>上下文长度 <span class="v" id="ctx-val">4096</span></label>
+        <input type="range" id="ctx-range" min="512" max="131072" step="512" value="4096">
+      </div>
+      <div class="ctrl">
+        <label>batch size <span class="v" id="batch-val">1</span></label>
+        <input type="range" id="batch-range" min="1" max="32" step="1" value="1">
+      </div>
+    </div>
+    <div class="slots s4">
+      <div class="slot"><div class="slot-name">70B 权重</div><div class="slot-val" id="w-gb">140.00 GB</div></div>
+      <div class="slot"><div class="slot-name">KV cache</div><div class="slot-val" id="kv-gb">1.34 GB</div></div>
+      <div class="slot"><div class="slot-name">合计</div><div class="slot-val" id="total-gb">141.34 GB</div></div>
+      <div class="slot"><div class="slot-name">KV / token</div><div class="slot-val" id="kv-token">320 KiB</div></div>
+    </div>
+    <div class="bar"><i class="b1" id="bar-w"></i><i class="b2" id="bar-kv"></i></div>
+    <div class="readout" id="mem-readout" data-src="§04 表 2–3">
+      <div class="r-head">当前组合</div>
+      <div id="mem-msg">FP16 权重 140.00 GB + FP16 KV 1.34 GB；合计 141.34 GB。KV 每 token 320 KiB。</div>
+    </div>
+    <p class="sim-note">
+      权重固定按 70B 参数计算；KV 固定按 Llama-2-70B 的 80 层、8 个 KV head、head_dim=128 计算。
+      两个按钮组独立：weight-only 的 INT4 权重通常仍配 FP16 KV，FP8 W8A8 才可能同时用 FP8 KV。
+    </p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账：两组参数，JS 与手算同一套公式<span class="sum-sub">点开看每一步</span></summary>
+    <div class="details-body">
+      <p><strong>组 A：70B 权重，FP16 / FP8 / INT4</strong></p>
+      <ol>
+        <li>FP16：<code>70 × 10<sup>9</sup> × 2 B = 140 × 10<sup>9</sup> B = 140 GB</code>。</li>
+        <li>FP8：<code>70 × 10<sup>9</sup> × 1 B = 70 GB</code>。</li>
+        <li>INT4：<code>70 × 10<sup>9</sup> × 0.5 B = 35 GB</code>；不计 group scale 与 zero-point。</li>
+      </ol>
+
+      <p><strong>组 B：Llama-2-70B 的 KV cache，4096 token，batch=1</strong></p>
+      <ol>
+        <li>每 token 元素数：<code>2 × 80 × 8 × 128 = 163,840</code> 个元素（K 和 V 各一半）。</li>
+        <li>FP16 每 token：<code>163,840 × 2 B = 327,680 B = 320 KiB</code>。</li>
+        <li>4096 token：<code>327,680 × 4096 = 1,342,177,280 B ≈ 1.34 GB</code>；JS 也显示 1.34 GB。</li>
+        <li>FP8 每 token：<code>163,840 × 1 B = 163,840 B = 160 KiB</code>；4096 token 为 <code>671,088,640 B ≈ 0.67 GB</code>，JS 也显示 0.67 GB。</li>
+        <li>合计：FP16 权重 + FP16 KV = <code>140 + 1.34217728 ≈ 141.34 GB</code>；
+            FP8 权重 + FP8 KV = <code>70 + 0.67108864 ≈ 70.67 GB</code>；JS 分别显示 141.34 GB / 70.67 GB。</li>
+      </ol>
+      <p>
+        页面里的 JS 只做基本算术和 <code>toFixed(2)</code>，没有随机数；上面显示的 1.34、0.67、141.34、70.67 GB 都能在模拟里逐位复现。
+        表 3 的 32k / 128k 行只是把 4096 换成对应上下文长度。
+      </p>
+    </div>
+  </details>
+
+  <details>
+    <summary>这个计算器没算什么<span class="sum-sub">简化与未覆盖分支</span></summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>scale 与 zero-point 开销：</strong>INT4/INT3 的 group scale（通常 FP16）和 zero-point 会额外占显存；组越小，占比越高。表 2 与滑块只算纯权重位。</li>
+        <li><strong>KV scale 与 block 元数据：</strong>per-tensor/per-head 的 k/v scale 和 block table 也占少量显存；这里只算 K/V 元素本身的字节。</li>
+        <li><strong>非权重参数：</strong>embedding、lm_head、norm 参数、bias 没有计入；它们可能保持 FP16。</li>
+        <li><strong>激活与临时缓冲：</strong>prefill 的激活、attention workspace、CUDA graph 捕获的缓冲没有计入。</li>
+        <li><strong>KV 分配粒度：</strong>真实 vLLM 按 block 分配 KV，存在块内碎片和预留；这里按连续 token 数计算。</li>
+        <li><strong>kernel 融合：</strong>weight-only 的反量化、scale 乘法、GEMM 是否融合，会改变实际吞吐；这里只算字节数，不预测延迟。</li>
+        <li><strong>并行与量化误差：</strong>tensor parallel、pipeline parallel 会切分权重和 KV；量化误差对 PPL 的影响也不在计算器里。</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ================= 05. 数据流 ================= -->
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>反量化发生在 kernel 里，不在显存里</h2></div>
+  <p class="sec-sub">weight-only 在 GEMM 主循环反量化权重；W8A8 先量化激活再进 tensor core；KV 在写入和读取 cache 时转换。</p>
+
+  <figure>
+    <svg viewBox="0 0 920 420" role="img" aria-label="量化与反量化的三条数据流：权重、激活、KV cache">
+      <defs>
+        <marker id="arw" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--text-soft)"/>
+        </marker>
+      </defs>
+
+      <text x="16" y="18" class="svg-label">① 权重路径（weight-only）</text>
+      <rect x="16" y="30" width="150" height="50" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"/>
+      <text x="28" y="51" class="svg-title">FP16 权重</text>
+      <text x="28" y="67" class="svg-sub">checkpoint</text>
+
+      <rect x="196" y="30" width="150" height="50" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="208" y="51" class="svg-title">离线量化</text>
+      <text x="208" y="67" class="svg-sub">AWQ / GPTQ / FP8</text>
+
+      <rect x="376" y="30" width="160" height="50" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="388" y="51" class="svg-title">INT4 / FP8 权重</text>
+      <text x="388" y="67" class="svg-sub">+ scales / zeros</text>
+
+      <rect x="566" y="30" width="160" height="50" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="578" y="51" class="svg-title">kernel 内反量化</text>
+      <text x="578" y="67" class="svg-sub">unpack / cast → FP16</text>
+
+      <rect x="756" y="30" width="148" height="50" rx="8" fill="var(--c3-soft)" stroke="var(--c3)"/>
+      <text x="768" y="51" class="svg-title">FP16 GEMM</text>
+      <text x="768" y="67" class="svg-sub">权重不回写 DRAM</text>
+
+      <line x1="166" y1="55" x2="190" y2="55" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="346" y1="55" x2="370" y2="55" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="536" y1="55" x2="560" y2="55" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="726" y1="55" x2="750" y2="55" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+
+      <text x="16" y="112" class="svg-label">② 激活路径（W8A8）</text>
+      <rect x="16" y="124" width="150" height="50" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"/>
+      <text x="28" y="145" class="svg-title">激活 X（FP16）</text>
+      <text x="28" y="161" class="svg-sub">per-token 统计</text>
+
+      <rect x="196" y="124" width="150" height="50" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="208" y="145" class="svg-title">动态量化 X</text>
+      <text x="208" y="161" class="svg-sub">INT8 / FP8 + scale</text>
+
+      <rect x="376" y="124" width="160" height="50" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"/>
+      <text x="388" y="145" class="svg-title">INT8 / FP8 GEMM</text>
+      <text x="388" y="161" class="svg-sub">tensor core</text>
+
+      <rect x="566" y="124" width="160" height="50" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="578" y="145" class="svg-title">输出反量化</text>
+      <text x="578" y="161" class="svg-sub">× x_scale × w_scale</text>
+
+      <rect x="756" y="124" width="148" height="50" rx="8" fill="var(--c3-soft)" stroke="var(--c3)"/>
+      <text x="768" y="145" class="svg-title">FP16 输出</text>
+      <text x="768" y="161" class="svg-sub">residual / norm</text>
+
+      <line x1="166" y1="149" x2="190" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="346" y1="149" x2="370" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="536" y1="149" x2="560" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="726" y1="149" x2="750" y2="149" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+
+      <text x="16" y="214" class="svg-label">③ KV cache 路径</text>
+      <rect x="16" y="226" width="150" height="50" rx="8" fill="var(--c1-soft)" stroke="var(--c1)"/>
+      <text x="28" y="247" class="svg-title">K/V 投影</text>
+      <text x="28" y="263" class="svg-sub">FP16</text>
+
+      <rect x="196" y="226" width="150" height="50" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="208" y="247" class="svg-title">写入时量化</text>
+      <text x="208" y="263" class="svg-sub">k_scale / v_scale</text>
+
+      <rect x="376" y="226" width="160" height="50" rx="8" fill="var(--c2-soft)" stroke="var(--c2)"/>
+      <text x="388" y="247" class="svg-title">FP8 KV cache</text>
+      <text x="388" y="263" class="svg-sub">E4M3 或 E5M2</text>
+
+      <rect x="566" y="226" width="160" height="50" rx="8" fill="var(--bg-soft)" stroke="var(--border-strong)"/>
+      <text x="578" y="247" class="svg-title">读取时反量化</text>
+      <text x="578" y="263" class="svg-sub">或 FA3 保持 FP8</text>
+
+      <rect x="756" y="226" width="148" height="50" rx="8" fill="var(--c3-soft)" stroke="var(--c3)"/>
+      <text x="768" y="247" class="svg-title">Attention</text>
+      <text x="768" y="263" class="svg-sub">softmax(QKᵀ)V</text>
+
+      <line x1="166" y1="251" x2="190" y2="251" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="346" y1="251" x2="370" y2="251" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="536" y1="251" x2="560" y2="251" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+      <line x1="726" y1="251" x2="750" y2="251" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#arw)"/>
+
+      <text x="16" y="306" class="svg-label">关键位置</text>
+      <text x="16" y="326" class="svg-note">weight-only：反量化在 kernel 内完成，低精度权重留在显存；激活不量化，GEMM 走 FP16/BF16。</text>
+      <text x="16" y="344" class="svg-note">W8A8：图示为动态方案，激活在每次前向量化；静态方案用校准 scale；输出用 x_scale 与 w_scale 反量化。</text>
+      <text x="16" y="362" class="svg-note">KV：K/V 写入 cache 时量化，读取时反量化；FA3 可在 FP8 域做 attention（docs/features/quantization/quantized_kvcache.md:7）。</text>
+      <text x="16" y="386" class="svg-note">图中实线是数据流；未画 scale 广播、zero-point 和 kernel 融合的细节。</text>
+    </svg>
+    <figcaption>
+      图 1 · 量化/反量化发生在哪里。权重路径是离线量化 + 在线反量化；激活路径只有 W8A8 才需要；
+      KV 路径在 cache 写入和读取两端各做一次转换。示意图，不是某个 kernel 的逐指令还原。
+    </figcaption>
+  </figure>
+
+  <p>
+    三条路径的共同点是：<strong>反量化尽量不把高精度权重/激活写回 DRAM</strong>。
+    AWQ 的 TinyChat 把反量化与矩阵乘法融合，避免中间结果来回搬（AWQ §4.1）；GPTQ 也实现了一个
+    “量化矩阵 × 全精度向量”的 kernel，在需要时动态反量化权重（GPTQ §5）。vLLM 则按 checkpoint 和硬件选择
+    Marlin、CUTLASS、DeepGEMM 等后端（<code>docs/features/quantization/llm_compressor/fp8.md:19-25</code>）。
+  </p>
+  <p>
+    vLLM 的两个入口参数值得对照：<code>vllm/config/model.py:271-275</code> 的 <code>quantization</code> 默认是
+    <code>None</code>，此时先读模型 config 里的 <code>quantization_config</code>，没有再按 <code>dtype</code> 加载；
+    <code>vllm/config/cache.py:238-250</code> 的 <code>cache_dtype</code> 默认是 <code>"auto"</code>，也就是 KV cache
+    跟随模型 dtype。要量化 KV，必须在 <code>kv_cache_dtype</code> 里显式指定 <code>fp8_e4m3</code> 或 <code>fp8_e5m2</code>
+    （<code>docs/features/quantization/quantized_kvcache.md:39-41</code>）。
+  </p>
+
+  <p>
+    KV 路径的粒度限制更明显：<code>kv_cache.py</code> 的 <code>BaseKVCacheMethod</code> 在 checkpoint 加载路径上只接受 per-tensor 的
+    k/v scale（<code>kv_cache.py:135-138</code>）；per-attention-head 的 scale 需要 Flash Attention 后端和
+    llm-compressor 的校准流程（<code>docs/features/quantization/quantized_kvcache.md:15-19</code>）。默认不校准时，vLLM 把 scale 设为 1.0
+    （<code>docs/features/quantization/quantized_kvcache.md:25-30</code>），并在 FP8 E4M3 的 scale 仍为 1.0 时给出警告
+    （<code>kv_cache.py:157-162</code>）。
+  </p>
+</section>
+
+<!-- ================= 06. 效果 ================= -->
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>同一张表内可比，跨论文不可比</h2></div>
+  <p class="sec-sub">三组实验的模型、数据集、基线和指标不同；只在自己的表内比较，不把不同论文的数字拼成一条曲线。</p>
+
+  <p>
+    先看 weight-only。表 4 汇总了 AWQ 在 Llama-2-7B / 70B 上的 WikiText2 perplexity（PPL，越低越好），
+    同一张表里同时跑 FP16、RTN、GPTQ、GPTQ-R 和 AWQ；INT3/INT4 的 group size 都是 128。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>精度</th><th>FP16</th><th>RTN</th><th>GPTQ</th><th>GPTQ-R</th><th>AWQ</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Llama-2-7B</td><td>INT3-g128</td><td class="num">5.47</td><td class="num">6.66</td><td class="num">6.43</td><td class="num">6.42</td><td class="num">6.24</td></tr>
+        <tr><td>Llama-2-7B</td><td>INT4-g128</td><td class="num">5.47</td><td class="num">5.73</td><td class="num">5.69</td><td class="num">5.63</td><td class="num">5.60</td></tr>
+        <tr><td>Llama-2-70B</td><td>INT3-g128</td><td class="num">3.32</td><td class="num">3.98</td><td class="num">3.88</td><td class="num">3.86</td><td class="num">3.74</td></tr>
+        <tr><td>Llama-2-70B</td><td>INT4-g128</td><td class="num">3.32</td><td class="num">3.46</td><td class="num">3.42</td><td class="num">3.43</td><td class="num">3.41</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-cap"><strong>表 4</strong> · AWQ Table 4：Llama-2 的 WikiText2 PPL（INT3/INT4，group size 128；同一模型同一数据集内比较）</div>
+
+  <p>
+    表 4 里，Llama-2-7B INT3 的 AWQ 是 6.24，比 FP16 的 5.47 高 0.77；Llama-2-70B INT4 的 AWQ 是 3.41，
+    比 FP16 的 3.32 高 0.09。这里的 0.77 和 0.09 都是 PPL 绝对差。
+  </p>
+
+  <p>
+    再看 GPTQ。它在 OPT 系列上报告 WikiText2 PPL，表 5 取 13B 和 175B 两档，保留 FP16、RTN、GPTQ 的 4-bit 与 3-bit 结果。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>方法</th><th>bits</th><th>WikiText2 PPL</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>OPT-13B</td><td>FP16</td><td class="num">16</td><td class="num">10.13</td></tr>
+        <tr><td>OPT-13B</td><td>RTN</td><td class="num">4</td><td class="num">11.32</td></tr>
+        <tr><td>OPT-13B</td><td>GPTQ</td><td class="num">4</td><td class="num">10.31</td></tr>
+        <tr><td>OPT-13B</td><td>RTN</td><td class="num">3</td><td class="num">3,400</td></tr>
+        <tr><td>OPT-13B</td><td>GPTQ</td><td class="num">3</td><td class="num">11.61</td></tr>
+        <tr><td>OPT-175B</td><td>FP16</td><td class="num">16</td><td class="num">8.34</td></tr>
+        <tr><td>OPT-175B</td><td>RTN</td><td class="num">4</td><td class="num">10.54</td></tr>
+        <tr><td>OPT-175B</td><td>GPTQ</td><td class="num">4</td><td class="num">8.37</td></tr>
+        <tr><td>OPT-175B</td><td>RTN</td><td class="num">3</td><td class="num">7,300</td></tr>
+        <tr><td>OPT-175B</td><td>GPTQ</td><td class="num">3</td><td class="num">8.68</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-cap"><strong>表 5</strong> · GPTQ Table 3：OPT-13B 与 OPT-175B 的 WikiText2 PPL（RTN 与 GPTQ 同表比较；3-bit RTN 在 13B/175B 上分别为 3,400/7,300）</div>
+
+  <p>
+    GPTQ 在 4-bit 上把 OPT-175B 从 8.34 拉到 8.37，只差 0.03；3-bit RTN 直接崩到 7,300，
+    而 GPTQ 3-bit 仍是 8.68。论文还指出一个反直觉趋势：更大的模型通常更容易量化，
+    但 OPT-66B 是例外，作者把原因归于该模型早期层存在大量 dead units（GPTQ §5 与脚注 2）。
+  </p>
+
+  <p>
+    最后看 W8A8。表 6 汇总了 SmoothQuant 在 OPT-175B 上的 7 个零样本任务平均准确率和 WikiText2 PPL；
+    朴素的 W8A8、ZeroQuant、LLM.int8() 与 SmoothQuant-O3 都在同一张表里。
+  </p>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>方法</th><th>平均准确率（7 任务）</th><th>WikiText2 PPL</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>FP16</td><td class="num">66.9%</td><td class="num">10.99</td></tr>
+        <tr><td>W8A8（naive）</td><td class="num">35.5%</td><td class="num">93,080</td></tr>
+        <tr><td>ZeroQuant</td><td class="num">35.8%</td><td class="num">84,648</td></tr>
+        <tr><td>LLM.int8()</td><td class="num">66.7%</td><td class="num">11.10</td></tr>
+        <tr><td>SmoothQuant-O3</td><td class="num">66.8%</td><td class="num">11.17</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl-cap"><strong>表 6</strong> · SmoothQuant Table 3：OPT-175B 的 7 任务平均准确率与 WikiText2 PPL（W8A8 为朴素 per-tensor 基线；准确率越高越好，PPL 越低越好）</div>
+
+  <p>
+    表 6 说明 W8A8 的难点不在权重，而在激活：朴素 W8A8 的平均准确率从 66.9% 掉到 35.5%，
+    SmoothQuant-O3 回到 66.8%，差 0.1 个百分点；PPL 从 10.99 变成 11.17，差 0.18。
+    LLM.int8() 也能保持精度，但它用 FP16 表示离群值，混合精度路径的开销另算。
+  </p>
+
+  <p>
+    吞吐方面，三篇论文/文档的口径不同，不能把数字直接横向比较：
+  </p>
+  <ul>
+    <li>vLLM 文档称 FP8 W8A8 在 H100/MI300x 上可让显存需求约减半，并带来最高 1.6× 吞吐提升，条件是硬件支持 FP8 tensor core（<code>docs/features/quantization/llm_compressor/fp8.md:3-6</code>）。</li>
+    <li>AWQ 的 TinyChat 在 RTX 4090 和 Jetson Orin 上，相对 HuggingFace FP16 实现最高 3.9× / 3.5× 加速；这是“AWQ + TinyChat 系统”的结果，不是单独一个量化 kernel 的加速比（AWQ Figure 9）。</li>
+    <li>GPTQ 的 3-bit OPT-175B 在单张 A100 上约比 FP16 版本（5 张 A100）快 3.25×；FP16 在 8 张 A6000 上每 token 延迟为 589 ms，3-bit GPTQ 在 2 张 A6000 上为 130 ms，约 4.5×（GPTQ §5 / Table 6）。硬件数量和基线都不同。</li>
+  </ul>
+  <p>
+    weight-only 的收益前提是<strong>解码阶段 memory-bound</strong>。如果 batch 很大、prefill 很长，GEMM 变成 compute-bound，
+    weight-only 的收益会被摊薄；W8A8/FP8 则还能利用 tensor core 的计算吞吐。精度损失也不是一个固定值：
+    它取决于模型、数据集、bit 数、group size 和校准集，表 4–6 只代表各自的实验设置。
+  </p>
+</section>
+
+<!-- ================= 07. 边界 ================= -->
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>能压不等于该压：离群值、校准集和 kernel 支持</h2></div>
+  <p class="sec-sub">量化失败通常不是 bit 数不够，而是粒度、校准分布或 kernel 不支持。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">精度边界</span><h4>离群值与校准集</h4></div>
+      <p>
+        激活离群值固定在少数通道，per-tensor/per-token 会被它们支配；per-channel 激活量化虽然准，
+        但与 INT8 GEMM 不兼容。SmoothQuant 的迁移强度 <code>α</code> 需要按模型调：论文在 OPT/BLOOM 上用 0.5，
+        GLM-130B 因为离群值更多而用 0.75（SmoothQuant §5.1）。
+      </p>
+      <p>
+        AWQ 只需要统计激活幅度，校准集可以小；GPTQ 需要校准输入来估 Hessian。两者都对校准分布敏感，
+        但 AWQ 明显更鲁棒：分布偏移时 AWQ 的 PPL 仅升 0.5–0.6，GPTQ 升 2.3–4.9（AWQ Figure 8）。
+        校准集与部署分布偏离时，量化误差会上升。vLLM 的 KV cache 在不校准的时候把 scale 设为 1.0，
+        FP8 E4M3 下可能出问题（<code>docs/features/quantization/quantized_kvcache.md:25-30</code>；<code>kv_cache.py:157-162</code>）。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">系统边界</span><h4>kernel 与硬件</h4></div>
+      <p>
+        FP8 计算需要 NVIDIA compute capability ≥ 8.9（Ada/Hopper/Blackwell）；Turing/Ampere 只能走
+        weight-only W8A16 的 FP8 Marlin（<code>docs/features/quantization/llm_compressor/fp8.md:15-17,24-25</code>）。INT8 W8A8 在 Blackwell（≥10.0）上不支持，
+        文档建议改用 FP8（<code>docs/features/quantization/llm_compressor/int8_w8a8.md:11-13</code>）。
+      </p>
+      <p>
+        KV 的 per-head scale 只在 Flash Attention 后端可用，且需要 llm-compressor 校准；
+        <code>BaseKVCacheMethod</code> 的 checkpoint 加载路径只接受 per-tensor 的 k/v scale（<code>docs/features/quantization/quantized_kvcache.md:15-19</code>；
+        <code>kv_cache.py:135-138</code>）。group size、bit 数、packing 顺序也都受 kernel 限制。
+      </p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">KV 边界</span><h4>KV 量化省的是另一块显存</h4></div>
+      <p>
+        KV 量化不减少权重显存，只减少 cache；它也不会让 GEMM 变快。它的收益在长上下文、大 batch 或高并发时最明显，
+        因为 KV 随 token 数和 batch 线性增长。FP8 KV 的 E4M3 只有 3 位尾数，K/V 的分布、scale 粒度和
+        attention 后端都会影响误差；per-tensor 是每个 K/V 张量各用一个 scale；per-head 粒度则走另一条路径（<code>docs/features/quantization/quantized_kvcache.md:15-19</code>）。
+      </p>
+      <p>
+        反过来，weight-only 不减少 KV cache；KV 占满时需要单独处理 KV。
+        两类量化解决的是不同的账。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">使用边界</span><h4>什么时候别用</h4></div>
+      <p>
+        需要严格可复现的数值、或模型对激活离群值特别敏感时，先做小规模评测再上线；不要假设某个 bit 数“通用”。
+        <span class="infer">推断</span>计算密集的 prefill、很大的 batch、或 kernel 不支持的 group size/bit 数下，量化的吞吐收益可能消失，
+        甚至因为反量化开销变慢。
+      </p>
+      <p>
+        表 4–6 都是特定模型、数据集和基线下的 PPL/准确率；换模型、换数据或换 kernel，数字可能不同，不能当成普遍保证。不同论文的基线和指标也不同，不能拼在一起比较。
+      </p>
+    </div>
+  </div>
+
+  <p class="note">
+    一句话总结：weight-only 用 4-bit 权重换显存和带宽，W8A8/FP8 用 8-bit 权重加激活换 tensor core 吞吐，
+    KV 量化用 8-bit cache 换长上下文容量。三者的收益来源不同，失败模式也不同；先确认瓶颈在哪一本账，再选量化对象。
+  </p>
+</section>
+
+<footer>
+  <div>LLM 推理量化 · weight-only、W8A8 与 FP8 KV cache</div>
+  <div class="src">
+    论文：<a href="https://arxiv.org/abs/2306.00978">AWQ</a> ·
+    <a href="https://arxiv.org/abs/2210.17323">GPTQ</a> ·
+    <a href="https://arxiv.org/abs/2209.05433">FP8 Formats</a> ·
+    <a href="https://arxiv.org/abs/2211.10438">SmoothQuant</a><br>
+    源码：<a href="https://github.com/vllm-project/vllm/tree/e740badc2e3df13a5c2abfca04ed0ac917985c5f">vLLM @ e740bad</a>；
+    文档：<code>docs/features/quantization/llm_compressor/fp8.md</code>、<code>docs/features/quantization/quantized_kvcache.md</code><br>
+    版本：AWQ v6、GPTQ v2、FP8 Formats v2、SmoothQuant v7；正文表号按这些版本核对。本页无对应博客笔记，直接读原文与源码。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('mem-sim');
+  if (!root) return;
+
+  var wButtons = root.querySelectorAll('#wfmt [data-wbytes]');
+  var kvButtons = root.querySelectorAll('#kvfmt [data-kvbytes]');
+  var ctxRange = document.getElementById('ctx-range');
+  var batchRange = document.getElementById('batch-range');
+  var ctxVal = document.getElementById('ctx-val');
+  var batchVal = document.getElementById('batch-val');
+  var wEl = document.getElementById('w-gb');
+  var kvEl = document.getElementById('kv-gb');
+  var totalEl = document.getElementById('total-gb');
+  var tokenEl = document.getElementById('kv-token');
+  var barW = document.getElementById('bar-w');
+  var barKV = document.getElementById('bar-kv');
+  var msgEl = document.getElementById('mem-msg');
+
+  if (!wButtons.length || !kvButtons.length || !ctxRange || !batchRange ||
+      !ctxVal || !batchVal || !wEl || !kvEl || !totalEl || !tokenEl ||
+      !barW || !barKV || !msgEl) return;
+
+  var wBytes = 2;
+  var kvBytes = 2;
+  var layers = 80;
+  var kvHeads = 8;
+  var headDim = 128;
+  var paramsB = 70;
+
+  function num(el) {
+    var n = parseInt(el.value, 10);
+    return isNaN(n) ? 0 : n;
+  }
+
+  function setActive(buttons, attr, value) {
+    for (var i = 0; i < buttons.length; i++) {
+      var on = parseFloat(buttons[i].getAttribute(attr)) === value;
+      buttons[i].classList.toggle('active', on);
+    }
+  }
+
+  function render() {
+    var ctx = num(ctxRange);
+    var batch = num(batchRange);
+    var wGB = paramsB * wBytes;
+    var kvPerToken = 2 * layers * kvHeads * headDim * kvBytes;
+    var kvGB = kvPerToken * ctx * batch / 1000000000;
+    var totalGB = wGB + kvGB;
+
+    ctxVal.textContent = String(ctx);
+    batchVal.textContent = String(batch);
+    wEl.textContent = wGB.toFixed(2) + ' GB';
+    kvEl.textContent = kvGB.toFixed(2) + ' GB';
+    totalEl.textContent = totalGB.toFixed(2) + ' GB';
+    tokenEl.textContent = (kvPerToken / 1024).toFixed(0) + ' KiB';
+
+    var wPct = totalGB > 0 ? wGB / totalGB * 100 : 0;
+    var kvPct = totalGB > 0 ? kvGB / totalGB * 100 : 0;
+    barW.style.width = wPct.toFixed(2) + '%';
+    barKV.style.width = kvPct.toFixed(2) + '%';
+
+    var parts = [];
+    parts.push('权重 ' + wGB.toFixed(2) + ' GB（' + paramsB + 'B × ' + wBytes + ' B/param）');
+    parts.push('KV ' + kvGB.toFixed(2) + ' GB（每 token ' + (kvPerToken / 1024).toFixed(0) + ' KiB × ' + ctx + ' token × batch ' + batch + '）');
+    parts.push('合计 ' + totalGB.toFixed(2) + ' GB');
+    if (kvBytes === 2 && wBytes < 2) {
+      parts.push('注意：weight-only 不会缩小 KV；若要同时压 KV，需要单独选择 KV FP8 或做 KV 量化');
+    }
+    msgEl.textContent = parts.join('；') + '。';
+  }
+
+  for (var i = 0; i < wButtons.length; i++) {
+    wButtons[i].addEventListener('click', function () {
+      wBytes = parseFloat(this.getAttribute('data-wbytes'));
+      setActive(wButtons, 'data-wbytes', wBytes);
+      render();
+    });
+  }
+
+  for (var j = 0; j < kvButtons.length; j++) {
+    kvButtons[j].addEventListener('click', function () {
+      kvBytes = parseFloat(this.getAttribute('data-kvbytes'));
+      setActive(kvButtons, 'data-kvbytes', kvBytes);
+      render();
+    });
+  }
+
+  ctxRange.addEventListener('input', render);
+  batchRange.addEventListener('input', render);
+
+  setActive(wButtons, 'data-wbytes', wBytes);
+  setActive(kvButtons, 'data-kvbytes', kvBytes);
+  render();
+})();
+</script>
+</body>
+</html>

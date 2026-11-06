@@ -1,0 +1,533 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 20 | Table 1 | 50-30 |
+| 6 | Table 1 | 36-30 |
+| 2 | Table 1 | 38-36 |
+| 3 | Table 1 | 41-38 |
+| 1 | Table 1 | 42-41 |
+| 8 | Table 1 | 50-42 |
+| 18.53 | §4.1 | (0.9**16+0.1**16)*100 |
+| 18.53 | §4.1 | 0.9**16*100 |
+| 0.0000 | §4.1 | 0.1**16*100 |
+| 417.1 | §4.1 | 512*(1-(0.9**16+0.1**16)) |
+| 10.01 | §4.1 | (0.75**8+0.25**8)*100 |
+| 10.01 | §4.1 | 0.75**8*100 |
+| 0.0015 | §4.1 | 0.25**8*100 |
+| 460.7 | §4.1 | 512*(1-(0.75**8+0.25**8)) |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v3">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GRPO 训练排查 · 策略坍塌与训练崩溃的分界</title>
+<meta name="description" content="GRPO 训练排查：区分策略坍塌与训练崩溃，给出 entropy、advantage、grad norm、NaN、KL、OOM 的判据与 verl@7de8f2e 的代码路径。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.tbl-scroll table{min-width:760px}
+.diag table{min-width:900px}
+.defaults table{min-width:780px}
+.dapo-tbl table{min-width:640px}
+.settings table{min-width:620px}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.3}
+.svg-main{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-collapse{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.5}
+.svg-signal{fill:var(--c3-soft);stroke:var(--c3);stroke-width:1.5}
+.svg-crash{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.5}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.arrow-head{fill:var(--text-soft)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:14px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-muted)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text-soft)}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">GRPO 训练排查</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">判据</a>
+      <a href="#compute">verl</a>
+      <a href="#pipeline">流程</a>
+      <a href="#results">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>RL 训练 · 2024–2025 · 排查手册</span>
+  <h1>GRPO 训练排查：<br>先分清策略坍塌与训练崩溃，再决定改哪一层</h1>
+  <p class="hero-sub">
+    同一个 reward 断崖，可能来自算法层的分布变窄，也可能来自工程层的概率口径、数值或显存故障。DAPO §3.1 直接描述了 entropy collapse；verl 的代码把非有限梯度和零方差组暴露在不同的位置。<strong>先做 0/1 的工程检查，再谈裁剪、采样和学习率。</strong>
+  </p>
+  <div class="meta">
+    <span>DeepSeekMath · DAPO · verl@7de8f2e</span>
+    <a href="https://arxiv.org/abs/2402.03300" target="_blank" rel="noopener">DeepSeekMath arXiv 2402.03300v3 ↗</a>
+    <a href="https://arxiv.org/abs/2503.14476" target="_blank" rel="noopener">DAPO arXiv 2503.14476v2 ↗</a>
+    <a href="https://github.com/volcengine/verl/commit/7de8f2e61f7011679d56c74677ef7bea87d24946" target="_blank" rel="noopener">verl @7de8f2e ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    GRPO 没有 critic，学习信号来自同一 prompt 的一组回答。组内 reward 全同时，advantage 的分子为 0（<code>core_algos.py:326</code>）；这是<strong>没有信号</strong>，不是崩溃。策略坍塌是分布逐步变窄：DAPO §3.1 写的是 entropy 快速下降、组内回答趋同；训练崩溃是某个 step 的工程/数值事故：非有限梯度、KL 爆炸、OOM、训练侧与推理侧的概率口径对不上。
+  </p>
+  <p>
+    两类会互相转化：坍塌的末端可能以 reward 断崖出现；崩溃也可能渐进 <span class="infer">工程判断</span>。所以不要用「渐进 vs 突发」直接定性，先读 rollout，再做概率一致性、mask、数值路径这些 0/1 检查。<strong>前一层不通过，后一层的曲线没有解释意义。</strong>
+  </p>
+  <p>
+    DAPO 的处置是 Clip-Higher、Dynamic Sampling、Token-Level Loss、Overlong Shaping；verl 的 <code>filter_groups</code> 默认关闭（<code>algorithm.py:57</code>），<code>rollout.n</code> 默认 1（<code>rollout.yaml:135</code>），<code>actor/entropy</code> 来自更新前的 <code>old_log_prob</code> 前向（<code>ray_trainer.py:1300</code>）。这些默认值会改变你看到的曲线。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Table 1">50</div>
+      <div class="k">DAPO 的 AIME24 avg@32<br>同表 naive GRPO 30</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4.1">16</div>
+      <div class="k">DAPO 每 prompt 采样数<br>组大小决定零方差组占比</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="verl/trainer/ppo/core_algos.py:326">0</div>
+      <div class="k">组内 reward 全同时的 advantage<br>没有信号，不是崩溃</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>同一个 reward 断崖，可能死在不同层</h2></div>
+  <p class="sec-sub">先建立共同认知：坍塌是分布变窄，崩溃是某一步的工程/数值事故；两者的证据不在同一张曲线上。</p>
+
+  <p>GRPO 用同一 prompt 的一组回答做基线，而不是训练一个 critic。对第 <code>i</code> 条回答，组内 advantage 是：</p>
+  <div class="eq">
+    A<sub>i</sub> = (r<sub>i</sub> − mean(r<sub>1..G</sub>)) / std(r<sub>1..G</sub>)
+  </div>
+  <div class="eq-cap">DeepSeekMath §4.1.2 与 DAPO Eq.9（两处公式均无 <code>ε</code>）；verl 的实现见 <code>verl/trainer/ppo/core_algos.py:308-326</code>，分母另加 <code>ε</code>，默认 <code>1e-6</code>（<code>:272</code>）</div>
+
+  <p>减均值决定「谁比同组平均更好」，除以 <code>std</code> 决定「这组差异按多大音量进入训练」。两个操作合起来有一个硬边界：<strong>组内所有 reward 相同，分子就是 0</strong>，不管 <code>std</code> 是不是 0，advantage 都是 0（<code>core_algos.py:326</code>）。这时这一组没有任务梯度；它既可能是「模型已经全对」，也可能是「模型已经全错」。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">先分类</span><h4>策略坍塌：分布逐步变窄，reward 可能还在涨</h4></div>
+    <p>DAPO §3.1 的原文术语是 <strong>entropy collapse</strong>：训练推进时 entropy 快速下降，某些组的采样回答「tend to be nearly identical」，原文把这种状态描述为有限的探索和过早确定的策略。本页沿用笔记的「策略坍塌」指这一类算法层故障，但判据只用原文能支持的部分：entropy 持续下降 + 组内回答趋同。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">另一类</span><h4>训练崩溃：某个 step 之后，工程或数值先坏了</h4></div>
+    <p>「训练崩溃」是笔记的工程分类，不是 verl 的代码术语。它对应的是可定位的 0/1 故障：两侧 logprob 对不上、loss mask 写错、log-ratio 溢出、非有限 grad、OOM。表现为 reward 断崖、输出乱码/复读、KL 或 grad norm 突然跳高。它没有「更合适的学习率」，只有写对和写错。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p1">为什么曲线不够</span><h4>entropy 低和 entropy 高，原文都当成问题</h4></div>
+    <p>DAPO §3.1 处理的是 entropy 快速下降，做法是放宽上界 <code>ε<sub>high</sub></code>；§4.3 同时写「excessively low entropy」会失去探索能力，「excessively high entropy」常伴随 gibberish 和 repetitive generation。两处并列：低和高的处置方向不同，原文没有给一个统一阈值。DeepSeekMath §5.2.2 也只报告 RL 提升 Maj@K、没有提升 Pass@K（Figure 7）——单看一条准确率上涨，不能证明分布没有变窄。</p>
+  </div>
+
+  <p>还有一个容易混淆的配置边界：<code>rollout.n</code> 默认是 1（<code>verl/trainer/config/rollout/rollout.yaml:135</code>）。当一组只有一条样本时，verl 把该组的 mean 设为 0、std 设为 1（<code>core_algos.py:316-317</code>），advantage 退化成原始 reward，组内基线消失。这不是策略坍塌，也不是数值崩溃，而是<strong>配置错误</strong>：你以为在跑 GRPO，实际没有组内比较。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>DAPO 盯熵与采样，verl 盯概率与数值：两条路线各覆盖一半</h2></div>
+  <p class="sec-sub">已有工作给的是两种镜头：一种解释算法层为什么会变窄，一种暴露工程层具体哪个张量坏了；两者都不能单独完成诊断。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">算法层</span><h4>DAPO / DeepSeekMath：从目标函数和采样看</h4></div>
+      <p>DeepSeekMath 给出 GRPO 的目标、组内归一化 advantage 和原始训练设置：G=64、KL 系数 0.04、max length 1024、batch 1024、每个探索阶段只更新一次（§4.2）。DAPO 在 naive GRPO 上直接观察到 entropy collapse（§3.1），并给出四件套：Clip-Higher（§3.1）、Dynamic Sampling（§3.2）、Token-Level Policy Gradient Loss（§3.3）、Overlong Reward Shaping（§3.4）。</p>
+      <p><strong>卡在：</strong>它能解释「分布为什么变窄」，但不能告诉你 loss mask 哪一位写错、推理引擎和训练框架的 logprob 差在哪、显存为什么爆。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">工程层</span><h4>verl：从代码路径和指标看</h4></div>
+      <p>verl 把关键故障点拆成了可检查的代码：log-ratio 在 exp 前 clamp 到 [-20,20]（<code>core_algos.py:1256</code>）；非有限 grad norm 会跳过 optimizer step（<code>workers/engine/fsdp/transformer_impl.py:765-769</code>）；KL 有 reward 和 loss 两条路径；零方差组过滤是 <code>algorithm.filter_groups</code>，默认关闭；OOM 有 micro-batch 配置。</p>
+      <p><strong>卡在：</strong>代码能告诉你「这个值坏了」，不能告诉你 reward 是否在测对的东西，也不能替你判断「全对组变多」是数据太简单还是策略已经变窄。</p>
+    </div>
+  </div>
+
+  <p>所以顺序不是二选一，而是<strong>先工程、后算法</strong>：工程层是 0/1，能被穷尽排除；算法层是目标函数的倾向，只能设计上缓解。这个顺序来自笔记的工程实践，原论文没有把它写成流程；本页把它和代码里的实际故障点对齐。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>先看 advantage 是否还有信号，再定位信号在哪一步坏掉</h2></div>
+  <p class="sec-sub">GRPO 的 advantage 公式给出一个硬边界；其余症状要沿 rollout → logprob → advantage → update 的信号链分层。</p>
+
+  <p>把「策略坍塌」和「训练崩溃」落到可操作判据，先记住三件事：</p>
+  <ul>
+    <li><strong>组内全同 → advantage 0。</strong>这是数学结果，不是故障类型。它说明这一组没有比较信号；要判断是坍塌还是数据太简单，得看它随时间怎么变、以及全对/全错各占多少。</li>
+    <li><strong>单样本组 → 没有组基线。</strong><code>rollout.n=1</code> 时 verl 走 <code>len(id2score[idx]) == 1</code> 分支，mean=0、std=1（<code>core_algos.py:316-317</code>），advantage 就是原始 reward。GRPO 文档明确要求把 <code>rollout.n</code> 设成大于 1（<code>docs/algo/grpo.md:29</code>）。</li>
+    <li><strong>σ 归一化可以关。</strong><code>norm_adv_by_std_in_grpo</code> 默认 True（<code>verl/trainer/config/algorithm.py:737</code>）；Dr. GRPO 把它设为 False（<code>docs/algo/grpo.md:62</code>）。关掉只减均值，advantage 落在原始 reward 差的范围内；这不是「修复」，是换一种权重结构。</li>
+  </ul>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">表 1（本页归纳，不是论文表格）：症状到类别的映射。「坍塌 / 崩溃」是笔记的工程分类；每一行的判据都指向可查的原文或源码，不把分类本身当成论文结论。</p>
+  <div class="tbl-scroll diag">
+  <table>
+    <thead><tr><th>症状</th><th>先归到哪类</th><th>判据（原文 / 代码）</th><th>先做什么</th></tr></thead>
+    <tbody>
+      <tr><td>entropy 持续下降，组内多条回答几乎相同</td><td>策略坍塌（算法层）</td><td>DAPO §3.1：entropy decreases quickly；sampled responses of certain groups tend to be nearly identical；Figure 2(b)</td><td>查 upper clip 和数据多样性；不要先降 lr（本页建议）</td></tr>
+      <tr><td>组内 reward 全同 / 方差=0 / advantage=0</td><td>信号消失，不是崩溃</td><td><code>core_algos.py:326</code>：分子为 0；DAPO §3.2：advantage zero → zero policy gradients</td><td>统计全对 / 全错构成；需要时开 <code>algorithm.filter_groups</code>（默认关，<code>algorithm.py:57-58</code>）</td></tr>
+      <tr><td>reward 断崖到 0，输出乱码 / 复读</td><td>训练崩溃优先（工程 / 数值）</td><td>先读 rollout；非有限 grad 的跳过逻辑 <code>transformer_impl.py:765-769</code>；log-ratio clamp <code>core_algos.py:1256</code></td><td>锁第一个异常 step；查概率口径、mask、数值</td></tr>
+      <tr><td>grad norm 尖刺</td><td>训练崩溃优先</td><td>verl 记录的是裁剪前 norm（<code>transformer_impl.py:735、748-752</code>）；指标入口 <code>ray_trainer.py:1788</code></td><td>重放该 batch；看 pre/post clip、advantage 尺度、loss 分母</td></tr>
+      <tr><td>KL 爆炸</td><td>训练崩溃优先（口径 / 更新）</td><td>KL 来自 <code>old_log_probs</code> vs <code>ref_log_prob</code>（<code>ray_trainer.py:100-104</code>）；<code>actor/ppo_kl</code> 来自 <code>log_prob - old_log_prob</code>（<code>core_algos.py:1254-1258</code>）</td><td>先查两侧 logprob 一致性；确认 KL 走 reward 还是 loss</td></tr>
+      <tr><td>NaN / Inf</td><td>训练崩溃（数值）</td><td>log-ratio 在 exp 前 clamp 到 [-20,20]（<code>core_algos.py:1256-1257</code>）；k3 KL 也 clamp（<code>:2239-2245</code>）；非有限 grad 跳过更新（<code>transformer_impl.py:765-769</code>）</td><td>沿计算图找第一个非有限值；先修上游</td></tr>
+      <tr><td>显存 OOM</td><td>工程 / 基础设施（不是算法坍塌）</td><td><code>docs/start/quickstart.rst:157-162</code>；<code>docs/algo/grpo.md:23</code>：micro batch 配置不应改变算法 / 收敛行为</td><td>降 <code>ppo_micro_batch_size_per_gpu</code>；查 rollout 显存</td></tr>
+      <tr><td>指标 NaN（score / reward / advantage）</td><td>工程 / 数据（可能是全 abort）</td><td><code>metric_utils.py:468-499</code>：全 abort 时 score/reward 在 468-488、advantage 在 490-499 返回 NaN；<code>response/aborted_ratio</code> 在 <code>:511、587</code></td><td>先看 <code>aborted_ratio</code> 和 rollout stop reason，不要先怀疑 exp 爆炸</td></tr>
+      <tr><td><code>rollout.n=1</code> 但以为在跑 GRPO</td><td>配置错误（无组基线）</td><td><code>rollout.yaml:135</code> 默认 1；<code>core_algos.py:316-317</code> 单样本组 mean=0、std=1 → advantage=raw score</td><td>设 <code>n&gt;1</code>（<code>docs/algo/grpo.md:29</code>）；确认 group index 正确</td></tr>
+      <tr><td>全同组在某个 step 后突然出现</td><td>先按崩溃查权重同步 / 概率口径</td><td>actor update 后才执行 <code>update_weights</code>（<code>ray_trainer.py:1715-1716</code>）；同步失败时 rollout 仍是旧策略 <span class="infer">推断</span></td><td>抽层 checksum / 首 token logits；记录 policy version</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">表里的 <code>§</code> 指 DAPO / DeepSeekMath 章节；代码行号对应 <code>verl@7de8f2e</code>。最后一行的因果链是工程推断，不是原文结论。</p>
+
+  <h3>自己动手：G 和 p 怎么改变「零方差组」的自然占比</h3>
+  <p>DAPO §3.2 要过滤 accuracy 为 0/1 的组（Eq.11）；全对组 advantage 为 0 是原文点名的例子，全错组由同一公式同样为 0。§4.1 用 G=16、每批 512 个 prompt。把二值 reward 近似成「每条回答独立、以概率 p 正确」，一组全同的概率就是 <code>p<sup>G</sup> + (1−p)<sup>G</sup></code>。默认 <code>G=16、p=0.90</code> 时：全对组 <span data-src="§4.1">18.53%</span>，全错组 0.0000%，零方差合计 <span data-src="§4.1">18.53%</span>；512 个 prompt 中约 <span data-src="§4.1">417.1</span> 个仍有组内比较信号。</p>
+
+  <div class="sim" id="zv-sim">
+    <div class="slots">
+      <div class="slot"><div class="slot-name">零方差组</div><div class="slot-val" id="zv-total">18.53%</div></div>
+      <div class="slot"><div class="slot-name">其中全对</div><div class="slot-val" id="zv-correct">18.53%</div></div>
+      <div class="slot"><div class="slot-name">其中全错</div><div class="slot-val" id="zv-wrong">0.0000%</div></div>
+      <div class="slot"><div class="slot-name">有效 prompts / 512</div><div class="slot-val" id="zv-eff">417.1</div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label>G 组大小 <span class="v" id="zv-gv">16</span></label>
+        <input type="range" id="zv-g" min="2" max="64" step="1" value="16">
+      </div>
+      <div class="ctrl">
+        <label>p 单条正确率 (%) <span class="v" id="zv-pv">90</span></label>
+        <input type="range" id="zv-p" min="1" max="99" step="1" value="90">
+      </div>
+    </div>
+    <div class="readout" id="zv-readout" data-src="§4.1">
+      <div class="r-head">当前读数</div>
+      <div id="zv-msg">G=16，p=0.90：全对 18.53%，全错 0.0000%，零方差合计 18.53%；512 个 prompt 中约 417.1 个仍有组内比较信号。</div>
+    </div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组参数 <span class="sum-sub">与 JS 显示值一致；中间量按数学值写；二值独立模型</span></summary>
+    <div class="details-body">
+      <p>公式：全对 <code>p<sup>G</sup></code>，全错 <code>(1−p)<sup>G</sup></code>，零方差为两者之和；有效 prompts = <code>512 × (1 − 零方差)</code>。512 是 DAPO §4.1 的 prompt batch size；G=16 也来自 §4.1。</p>
+      <p><strong>组 1：G=16，p=0.90。</strong></p>
+      <ul>
+        <li>全对：<code>0.9<sup>16</sup> = 0.1853020189</code> → <code>18.53%</code></li>
+        <li>全错：<code>0.1<sup>16</sup> = 0.0000000000000001</code> → <code>0.0000%</code></li>
+        <li>零方差：<code>0.1853020189 + 0.0000000000000001 = 0.1853020189</code> → <code>18.53%</code></li>
+        <li>有效 prompts：<code>512 × (1 − 0.1853020189) = 417.125366</code> → <code>417.1</code></li>
+      </ul>
+      <p><strong>组 2：G=8，p=0.75。</strong></p>
+      <ul>
+        <li>全对：<code>0.75<sup>8</sup> = 0.1001129150</code> → <code>10.01%</code></li>
+        <li>全错：<code>0.25<sup>8</sup> = 0.0000152588</code> → <code>0.0015%</code></li>
+        <li>零方差：<code>0.1001129150 + 0.0000152588 = 0.1001281738</code> → <code>10.01%</code></li>
+        <li>有效 prompts：<code>512 × (1 − 0.1001281738) = 460.734375</code> → <code>460.7</code></li>
+      </ul>
+      <p><strong>覆盖与未覆盖：</strong>这个模型覆盖「二值 reward、同组独立同分布」下的零方差比例；它不覆盖连续 reward 的近似相等、同组回答之间的相关性、题目难度异质，也不模拟动态采样后的分布变化。它是本页的概率模型，不是论文测量；真实训练要以自己的题集难度分布做基线。分项按四舍五入显示、合计按未舍入值计算，所以显示的分项相加可能与合计差 0.01 个百分点。</p>
+      <p><strong>为什么不是固定 50%：</strong>同一个 p，G 从 8 变到 16，零方差占比会变；同一个 G，p 从 0.9 变到 0.99，全对组会明显变多。固定百分比无法跨 G、跨题集使用。verl 的过滤条件是精确 <code>std==0</code>（<code>verl/trainer/ppo/v1/replay_buffer.py:312</code>），不是百分比阈值。</p>
+    </div>
+  </details>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">别误读</span><h4>指标 NaN 不一定来自 exp 爆炸</h4></div>
+      <p><code>compute_data_metrics</code> 在整批样本都 abort（response length 为 0）时，会把 score、reward、advantage 直接设成 <code>NaN</code> 并打 warning（score/reward：<code>metric_utils.py:468-488</code>；advantage：<code>:490-499</code>）。看到 NaN 先看 <code>response/aborted_ratio</code>，再沿计算图找第一个非有限值；不要一上来就收紧 log-ratio clamp。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">顺序</span><h4>先问「这一组还有没有比较信号」</h4></div>
+      <p>全对组和全错组的 advantage 都是 0，但处置方向不同：全对多说明数据对当前模型太简单；全错多可能是验证器过严或模型能力不够。DAPO §3.2 的动态采样把两类都过滤；实际排查要先拆构成，再决定换数据、查 verifier，还是开过滤。</p>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="compute">
+  <div class="sec-head"><span class="sec-num">04</span><h2>verl 的曲线有明确来源：先确认你看的是哪个前向、哪个默认值</h2></div>
+  <p class="sec-sub"><code>actor/entropy</code>、<code>actor/ppo_kl</code>、<code>actor/grad_norm</code> 各自来自不同阶段；默认配置还会让某些检查静默失效。</p>
+
+  <p>verl 一个 step 的顺序是：rollout 生成（<code>ray_trainer.py:1508-1526</code>）→ reward（<code>:1560-1567</code>）→ old_log_prob 前向并算 entropy（<code>:1584-1600</code>）→ ref_log_prob（<code>:1620-1622</code>）→ advantage（<code>:1627-1667</code>）→ update_actor（<code>:1689-1690</code>）→ update_weights（<code>:1715-1716</code>）。这决定了每个指标对应哪一版策略。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">容易读错</span><h4><code>actor/entropy</code> 是更新前旧策略的熵</h4></div>
+    <p>在默认 recompute 路径下，<code>_compute_old_log_prob</code> 把 <code>calculate_entropy=True</code> 固定传给 worker（<code>ray_trainer.py:1300</code>），返回值在 <code>:1590-1600</code> 聚合成 <code>actor/entropy</code>。它衡量的是这一批 rollout 所对应的<strong>旧策略</strong>，不是 update 之后的新策略。<code>actor.calculate_entropy</code> 默认 <code>false</code>（<code>actor.yaml:96</code>）只控制 update 前向是否返回 entropy（<code>ray_trainer.py:1336-1338</code>），不影响上面这条曲线。注意 <code>algorithm.rollout_correction.bypass_mode=True</code> 时 <code>_compute_old_log_prob</code> 会被跳过（<code>ray_trainer.py:1571-1584</code>），该曲线不产生。</p>
+  </div>
+
+  <p><code>actor/ppo_kl</code> 不是到 reference 的 KL：它是 <code>mean(-(log_prob - old_log_prob))</code>，且 log-ratio 在 exp 前被 clamp 到 [-20,20]（<code>core_algos.py:1254-1258</code>）。到 reference 的 KL 有两条路：<code>algorithm.use_kl_in_reward=True</code> 时记 <code>actor/reward_kl_penalty</code>（<code>ray_trainer.py:100-115</code>）；<code>actor.use_kl_loss=True</code> 时记 <code>kl_loss</code>（<code>verl/workers/utils/losses.py:181-182</code>）。三个名字不能混着读。</p>
+
+  <p><code>actor/grad_norm</code> 是裁剪前的 norm（<code>transformer_impl.py:735</code> 的 docstring；<code>:748-752</code> 调 clip 函数并拿到返回值），由 trainer 在 <code>ray_trainer.py:1788</code> 读取。非有限时 FSDP engine 会 <code>zero_grad</code> 并跳过 <code>optimizer.step</code>（<code>:765-769</code>）——进程不一定挂，但这一步没有更新。日志里只出现一次 WARN 和连续出现 WARN，含义完全不同。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">表 2（本页归纳）：verl@7de8f2e 的指标与代码位置；不是论文表格。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>指标</th><th>实际含义</th><th>代码位置</th></tr></thead>
+    <tbody>
+      <tr><td><code>actor/entropy</code></td><td>old_log_prob 前向的 token 熵（更新前旧策略）</td><td><code>ray_trainer.py:1290-1318、1590-1600</code></td></tr>
+      <tr><td><code>actor/ppo_kl</code></td><td><code>mean(-(log_prob-old_log_prob))</code>，log-ratio 先 clamp [-20,20]</td><td><code>core_algos.py:1254-1258、1372-1374</code></td></tr>
+      <tr><td><code>actor/pg_clipfrac</code> / <code>_lower</code></td><td>上界 / 下界 clip 命中比例</td><td><code>core_algos.py:1271-1277、1372-1374</code></td></tr>
+      <tr><td><code>actor/grad_norm</code></td><td>裁剪前的梯度 norm；非有限则跳过更新</td><td><code>transformer_impl.py:735、748-752、765-769</code>；<code>ray_trainer.py:1788</code></td></tr>
+      <tr><td><code>critic/score|rewards|advantages</code></td><td>批次统计（mean / max / min）；全 abort 时 NaN</td><td><code>metric_utils.py:554-565、468-499</code></td></tr>
+      <tr><td><code>response_length/clip_ratio</code>、<code>response/aborted_ratio</code></td><td>撞 max length 的比例 / 空回答比例</td><td><code>metric_utils.py:576、511、587</code></td></tr>
+      <tr><td><code>actor/reward_kl_penalty</code> / <code>kl_loss</code></td><td>KL 在 reward 路径 / loss 路径的两种记录</td><td><code>ray_trainer.py:100-115</code>；<code>verl/workers/utils/losses.py:181-182</code></td></tr>
+      <tr><td><code>training/filter_groups/filtered_reward_counts</code></td><td>被过滤组的 reward 值分布（要开 filter_groups）</td><td><code>utils/tracking.py:939</code>；<code>replay_buffer.py:312</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="eq-cap" style="text-align:left;margin-top:24px">表 3（本页归纳）：会改变诊断结论的默认值；行号对应 <code>verl@7de8f2e</code>。</p>
+  <div class="tbl-scroll defaults">
+  <table>
+    <thead><tr><th>配置</th><th>默认</th><th>代码 / 文档</th><th>对排查的影响</th></tr></thead>
+    <tbody>
+      <tr><td><code>rollout.n</code></td><td>1</td><td><code>rollout.yaml:135</code>；<code>docs/algo/grpo.md:29</code></td><td>GRPO 要 &gt;1；n=1 时单样本组 advantage 退化为原始 reward（<code>core_algos.py:316-317</code>）</td></tr>
+      <tr><td><code>clip_ratio</code></td><td>0.2</td><td><code>actor.yaml:36</code></td><td>DAPO 用 <code>ε<sub>low</sub>=0.2、ε<sub>high</sub>=0.28</code>（§4.1）</td></tr>
+      <tr><td><code>entropy_coeff</code></td><td>0</td><td><code>actor.yaml:93</code></td><td>默认没有 entropy bonus；不要把它当成熵坍塌的修复开关</td></tr>
+      <tr><td><code>calculate_entropy</code></td><td>false</td><td><code>actor.yaml:96</code></td><td>只影响 update 前向；old_log_prob 的 <code>actor/entropy</code> 仍会记录</td></tr>
+      <tr><td><code>use_kl_loss</code> / <code>kl_loss_coef</code></td><td>false / 0.001</td><td><code>actor.yaml:103、113</code>；<code>docs/algo/grpo.md:45、47</code></td><td>GRPO 文档要求设 True；DAPO 则直接移除 KL（§2.3）</td></tr>
+      <tr><td><code>norm_adv_by_std_in_grpo</code></td><td>true</td><td><code>algorithm.py:737</code></td><td>Dr. GRPO 设 False（<code>docs/algo/grpo.md:62</code>）</td></tr>
+      <tr><td><code>filter_groups.enable</code> / <code>metric</code></td><td>false / None</td><td><code>algorithm.py:57-58</code></td><td>DAPO 动态采样默认没开；过滤条件是精确 <code>std==0</code>（<code>replay_buffer.py:312</code>）</td></tr>
+      <tr><td><code>loss_agg_mode</code></td><td>token-mean</td><td><code>actor.yaml:86</code>；<code>docs/algo/grpo.md:41</code></td><td>原 GRPO 用 sample-level；文档提示长 CoT 下可能不稳定</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>诊断本身也有算力代价。<code>actor/entropy</code> 不需要额外采样：它和 old_log_prob 在同一个前向里算（<code>ray_trainer.py:1300</code>）。动态采样则要额外生成：DAPO §3.2 说每批的采样成本是动态的，要一直采样到 batch 被非 0/1 正确率的组填满；verl 的 <code>filter_groups</code> 需要 <code>refill_fn</code> 替换被淘汰的组（<code>replay_buffer.py:178-179</code>），不是免费的开关。DAPO §4.2 / Figure 6 报告在其设置下总训练时间没有显著受影响、收敛所需 step 更少；这个结论依赖「生成被长尾样本主导、同步、非流水线」等条件，不能直接搬到所有异步系统。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill p2">工程起手</span><h4>先保存三态，再谈任何曲线</h4></div>
+    <p>最后一个正常 step、第一个异常 step、异常之后的一个 step。每个 step 落盘 rollout 原文、reward 分项、old/current logprob、ratio 分位数、attention/loss mask、clip fraction、裁剪前后 grad norm、batch ID 与随机种子。没有这个最小故障窗口，后面的「改一个变量重放」都是噪音。这是笔记的工程流程，不是论文实验设计。</p>
+  </div>
+</section>
+
+<section class="block" id="pipeline">
+  <div class="sec-head"><span class="sec-num">05</span><h2>先工程后算法：前一层不通过，后一层的曲线没有解释意义</h2></div>
+  <p class="sec-sub">一张图把症状分流：先读 rollout 原文，再验概率一致性与数值路径，最后才动 clip、采样和学习率。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 560" role="img" aria-label="GRPO 训练排查流程：reward 异常后先读 rollout，再分到策略坍塌、信号消失、训练崩溃三条路径">
+      <defs>
+        <marker id="dgc-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="arrow-head" d="M0 0 L8 4 L0 8 Z"/></marker>
+      </defs>
+
+      <rect class="svg-main" x="300" y="16" width="280" height="46" rx="9"/>
+      <text x="440" y="44" text-anchor="middle" class="svg-t">reward 异常 / loss 异常 / 输出异常</text>
+
+      <path class="svg-ln" d="M440 62 L440 92" marker-end="url(#dgc-ar)"/>
+      <rect class="svg-box" x="280" y="92" width="320" height="46" rx="9"/>
+      <text x="440" y="120" text-anchor="middle" class="svg-t">先读一批 rollout 原文</text>
+
+      <path class="svg-ln" d="M440 138 L440 154 L150 154 L150 168" marker-end="url(#dgc-ar)"/>
+      <path class="svg-ln" d="M440 138 L440 168" marker-end="url(#dgc-ar)"/>
+      <path class="svg-ln" d="M440 138 L440 154 L730 154 L730 168" marker-end="url(#dgc-ar)"/>
+
+      <rect class="svg-collapse" x="30" y="168" width="240" height="54" rx="9"/>
+      <text x="150" y="192" text-anchor="middle" class="svg-t">输出连贯但组内趋同</text>
+      <text x="150" y="211" text-anchor="middle" class="svg-s">entropy 持续下降</text>
+
+      <rect class="svg-signal" x="320" y="168" width="240" height="54" rx="9"/>
+      <text x="440" y="192" text-anchor="middle" class="svg-t">组内 reward 全同</text>
+      <text x="440" y="211" text-anchor="middle" class="svg-s">advantage = 0</text>
+
+      <rect class="svg-crash" x="610" y="168" width="240" height="54" rx="9"/>
+      <text x="730" y="192" text-anchor="middle" class="svg-t">乱码 / 复读 / NaN</text>
+      <text x="730" y="211" text-anchor="middle" class="svg-s">grad 尖峰 / OOM</text>
+
+      <path class="svg-ln" d="M150 222 L150 252" marker-end="url(#dgc-ar)"/>
+      <path class="svg-ln" d="M440 222 L440 252" marker-end="url(#dgc-ar)"/>
+      <path class="svg-ln" d="M730 222 L730 252" marker-end="url(#dgc-ar)"/>
+
+      <rect class="svg-box" x="30" y="252" width="240" height="78" rx="9"/>
+      <text x="150" y="276" text-anchor="middle" class="svg-t">策略坍塌（算法层）</text>
+      <text x="150" y="296" text-anchor="middle" class="svg-s">查 upper clip / 数据多样性</text>
+      <text x="150" y="315" text-anchor="middle" class="svg-s">DAPO §3.1</text>
+
+      <rect class="svg-box" x="320" y="252" width="240" height="78" rx="9"/>
+      <text x="440" y="276" text-anchor="middle" class="svg-t">信号消失，不是崩溃</text>
+      <text x="440" y="296" text-anchor="middle" class="svg-s">统计全对 / 全错构成</text>
+      <text x="440" y="315" text-anchor="middle" class="svg-s">filter_groups（默认关）</text>
+
+      <rect class="svg-box" x="610" y="252" width="240" height="78" rx="9"/>
+      <text x="730" y="276" text-anchor="middle" class="svg-t">训练崩溃（工程层）</text>
+      <text x="730" y="296" text-anchor="middle" class="svg-s">概率一致性 → mask → 数值</text>
+      <text x="730" y="315" text-anchor="middle" class="svg-s">→ 优化器 / reward</text>
+
+      <path class="svg-ln" d="M150 330 L150 356 L440 356" marker-end="url(#dgc-ar)"/>
+      <path class="svg-ln" d="M730 330 L730 356 L440 356" marker-end="url(#dgc-ar)"/>
+
+      <rect class="svg-main" x="110" y="366" width="660" height="58" rx="10"/>
+      <text x="440" y="390" text-anchor="middle" class="svg-t">顺序：先做 0/1 工程检查，再动算法层；两类会互相转化</text>
+      <text x="440" y="410" text-anchor="middle" class="svg-s">前一层不通过，后一层的曲线没有解释意义</text>
+
+      <text x="440" y="456" text-anchor="middle" class="svg-l">本图是笔记分类的工程化整理；DAPO §3.1 只直接定义 entropy collapse，</text>
+      <text x="440" y="476" text-anchor="middle" class="svg-l">原论文没有 training crash 这个术语。</text>
+      <text x="440" y="508" text-anchor="middle" class="svg-s">青：算法层 · 绿：信号条件 · 紫：工程层 · 红：总原则</text>
+    </svg>
+    <figcaption>图 1（本页绘制）：先读 rollout，再按「输出是否趋同 / 组内是否全同 / 是否出现乱码或 NaN」分流。图里的三条分支不是互斥诊断；同一轮训练可能同时出现坍塌和崩溃，顺序是先工程、后算法。原论文只直接定义 entropy collapse（DAPO §3.1），没有 training crash 这个术语。</figcaption>
+  </figure>
+
+  <p>图上的 0/1 检查顺序可以展开成：概率一致性（同一批 token 在训练侧两次、推理侧一次）→ 梯度累积等价性 → 逐 token mask → 数值路径的第一个 NaN/Inf → optimizer / reward。这个顺序的关键不是「优雅」，而是每一层都有通过条件：ratio 的分子分母不是同一套概率口径时，后面的 clip fraction、KL、lr 扫描都失去原义。</p>
+
+  <p>如果只能做一件事，先做<strong>权重没变时的 ratio 检查</strong>（笔记的 A/B/C 检查）：冻结权重、关 dropout、固定 RNG，同一批 token 在训练侧前向两次、在推理侧前向一次。训练侧两次不一致，查训练框架自身的可重复性；训练侧和推理侧不一致，查两套实现的概率口径。权重没动但大量 token 已经撞 PPO clip，说明训练目标把实现差异误读成了策略更新 <span class="infer">工程判断</span>——这时应先停训修口径，而不是调 clip。</p>
+</section>
+
+<section class="block" id="results">
+  <div class="sec-head"><span class="sec-num">06</span><h2>DAPO 的 AIME 从 30 到 50；但累计表不能当成单项因果</h2></div>
+  <p class="sec-sub">Table 1 是逐项叠加的结果，能说明这些处置改变了训练，不说明每一项都独立有效；DeepSeekMath 的 Maj@K / Pass@K 则说明单看一条准确率不够。</p>
+
+  <p class="eq-cap" style="text-align:left">表 4（本页转录 DAPO Table 1）：AIME24 avg@32。原文的 progressive techniques 按行叠加；「较上一行」是本页按相邻两行算的差值，不是原文的独立消融。</p>
+  <div class="tbl-scroll dapo-tbl">
+  <table>
+    <thead><tr><th>设置</th><th>AIME24 avg@32</th><th>较上一行</th></tr></thead>
+    <tbody>
+      <tr><td>DeepSeek-R1-Zero-Qwen-32B（参考行，不属于叠加序列）</td><td class="num">47</td><td class="num">—</td></tr>
+      <tr><td>Naive GRPO</td><td class="num">30</td><td class="num">—</td></tr>
+      <tr><td>+ Overlong Filtering</td><td class="num">36</td><td class="num">+6</td></tr>
+      <tr><td>+ Clip-Higher</td><td class="num">38</td><td class="num">+2</td></tr>
+      <tr><td>+ Soft Overlong Punishment</td><td class="num">41</td><td class="num">+3</td></tr>
+      <tr><td>+ Token-level Loss</td><td class="num">42</td><td class="num">+1</td></tr>
+      <tr class="best"><td>+ Dynamic Sampling（DAPO）</td><td class="num">50</td><td class="num">+8</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">Naive GRPO → DAPO 共 <span data-src="Table 1">+20</span> 分（50 − 30）。每一行是在前一行基础上加一项，所以「+2」是 Clip-Higher 在这个顺序、这组数据上的边际结果，不是它单独的因果效应 <span class="infer">推断</span>（依据：Table 1 的 progressive 叠加结构）。</p>
+
+  <p>原文的主结果是 DAPO 50 对 DeepSeek-R1-Zero-Qwen-32B 47（§1、§4.2、Figure 1），但 47 来自另一套 R1 配方，50 来自 DAPO 的叠加配方，两者不是同一组控制变量。Table 1 内部是 progressive 叠加：naive GRPO 30 → 最终 50；50 与 47 的跨配方比较不能当成受控消融。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:24px">表 5（本页转录 DAPO §4.1）：复现实验设置。这些条件不能从数字里拆掉。</p>
+  <div class="tbl-scroll settings">
+  <table>
+    <thead><tr><th>项</th><th>值</th></tr></thead>
+    <tbody>
+      <tr><td>prompt batch size</td><td class="num">512</td></tr>
+      <tr><td>每 prompt 采样数 G</td><td class="num">16</td></tr>
+      <tr><td>训练 mini-batch size</td><td class="num">512</td></tr>
+      <tr><td>每 rollout step 的梯度更新数</td><td class="num">16</td></tr>
+      <tr><td>最大生成长度</td><td class="num">20,480（16,384 + 4,096 cache）</td></tr>
+      <tr><td>学习率</td><td class="num">1e-6</td></tr>
+      <tr><td>clip 参数</td><td class="num">ε<sub>low</sub>=0.2，ε<sub>high</sub>=0.28</td></tr>
+      <tr><td>评测</td><td class="num">AIME24 avg@32，temperature 1.0，top_p 0.7</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">DeepSeekMath</span><h4>RL 提升 Maj@K，但没有提升 Pass@K</h4></div>
+      <p>DeepSeekMath §5.2.2 / Figure 7 报告：RL 后的模型在 GSM8K 和 MATH 上 Maj@K 提升，Pass@K 没有提升（原文措辞是 not Pass@K）。原文的解释是 RL 让输出分布更稳、把正确回答从 TopK 里抬出来，而不是提升基础能力。对排查的含义是：<strong>训练 reward 或 Maj@K 上涨，不能单独证明分布没有变窄</strong>；如果 Pass@K 相对基线变差，才更像坍塌方向的证据（这是本页对 Figure 7 的延伸解读，不是原文的 collapse 判据）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">DAPO</span><h4>entropy 要维持在合适区间，不是越低越好</h4></div>
+      <p>DAPO §4.3 把 response length、reward、generation entropy、mean probability 列为监控指标：entropy 过低表示分布过尖、失去探索；过高常伴随 gibberish 和重复生成。Figure 7(c) 是 generation entropy，Figure 7(d) 是 mean probability。原文没有给一个跨模型通用的 entropy 数值，只给了方向性判断。</p>
+    </div>
+  </div>
+
+  <p>代码侧还有两个反直觉的「效果」：<strong>非有限 grad 不一定让训练挂掉</strong>——FSDP engine 会跳过这一步的 optimizer update（<code>transformer_impl.py:765-769</code>），所以日志里可能只有一行 WARN，曲线表现为「少更新了一步」；<strong>指标 NaN 不一定是数值爆炸</strong>——整批 abort 时 <code>compute_data_metrics</code> 会主动返回 NaN（score/reward：<code>metric_utils.py:468-488</code>；advantage：<code>:490-499</code>）。这两种情况都应该先看原始日志和 aborted ratio，再决定是否改算法。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>判据能分流，不能确诊：没有通用阈值，症状还会互相转化</h2></div>
+  <p class="sec-sub">什么时候别用这套二分：只有一条曲线、无法重放、或者把 OOM / 全 abort 当成算法坍塌。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">适用</span><h4>能读 rollout、能重放、能对齐概率口径</h4></div>
+      <p>你有原始 rollout 和 reward 分项，能保存最后正常/首个异常/异常后一步，能在冻结权重下重放同一批 token。此时二分法能快速决定先查工程还是先查算法，零方差计算能给出题集难度的自然基线。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">不适用</span><h4>只有看板截图，或 reward 本身就不可验证</h4></div>
+      <p>只有 reward / entropy 两条曲线、没有 rollout 原文，无法区分「输出变窄」和「验证器坏了」；reward 是学习出来的 RM 且没有独立复核时，reward 上涨可能只是 hacking。多轮 agent 的工具 token / loss mask 也是高发点，不能只用 GRPO 的组内公式解释。</p>
+    </div>
+  </div>
+
+  <ul>
+    <li><strong>没有通用的 entropy / 零方差百分比阈值。</strong>DAPO §4.3 只说 entropy 要维持在合适区间；verl 的过滤条件是精确 <code>std==0</code>（<code>replay_buffer.py:312</code>），不是「超过多少就报警」。先在自己的干净配置上量 baseline，再比较故障 run。</li>
+    <li><strong>DAPO 的四件套有明确条件。</strong>Qwen2.5-32B、长 CoT 数学、规则 reward、G=16、无 KL、prompt batch 512、<code>ε<sub>low</sub>=0.2 / ε<sub>high</sub>=0.28</code>（§4.1；无 KL 见 §2.3；规则 reward 见 §2.4）。搬到 RLHF、agent 或不同模型规模前，要重新验证；Table 1 的 +8 也不是「开动态采样就一定 +8」。</li>
+    <li><strong>DeepSeekMath 的设置不同。</strong>G=64、KL 系数 0.04、max length 1024、batch 1024、每个探索阶段只更新一次（§4.2）。它的 Figure 7 是 Maj@K / Pass@K 的诊断，不是 collapse 的判定表；两篇论文的数字不能直接拼成同一组对照。</li>
+    <li><strong>OOM 不是算法坍塌。</strong>verl 文档把 micro batch 配置描述为「避免 GPU OOM」且「不应改变算法 / 收敛行为」（<code>docs/algo/grpo.md:23</code>；<code>docs/start/quickstart.rst:157-162</code>）。修 OOM 是恢复可训练性，不会修掉分布变窄。<span class="infer">工程判断</span></li>
+    <li><strong>全同组不一定是病。</strong>全对组通常说明这批题对当前模型太简单，或采样温度太低<span class="infer">推断</span>；DAPO §3.2 的动态采样会过滤它，代价是额外生成；过滤还会改变有效 prompt 分布（笔记的工程观察，不是 §3.2 原文结论）<span class="infer">工程判断</span>。DAPO 在其设置下报告收敛更快（Figure 6），这不等于所有数据分布都免费。</li>
+    <li><strong>跳过 NaN 步不是修复。</strong><code>transformer_impl.py:765-769</code> 的 <code>zero_grad</code> 只是防止坏更新写进参数；如果 WARN 连续出现，根因仍在概率口径、mask 或数值路径上。</li>
+    <li><strong>两类会互相转化。</strong>Entropy collapse 的末端可能表现为 reward 断崖；训练崩溃也可能渐进（例如异步数据陈旧）。二分法是工作分类，不是定理；复杂情况按信号链一层层过 <span class="infer">推断</span>（依据：DAPO §3.1 的 collapse 现象与 verl 的工程故障点并不共享同一个时间尺度）。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>先找第一个坏掉的张量，再解释最后一条异常的曲线</h4></div>
+    <p>如果组内还有 reward 方差，就先看 advantage 和 clip；如果组内已经全同，就先统计全对/全错；如果出现 NaN / Inf / 非有限 grad，就先沿计算图找第一个非有限值。顺序对了，降 lr 才不会变成把 bug 推迟到视野之外的稀释手段。</p>
+  </div>
+</section>
+
+<footer>
+  <div>DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models · DAPO: An Open-Source LLM Reinforcement Learning System at Scale</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2402.03300">arXiv 2402.03300v3</a> ·
+    <a href="https://arxiv.org/abs/2503.14476">arXiv 2503.14476v2</a><br>
+    代码：<a href="https://github.com/volcengine/verl/commit/7de8f2e61f7011679d56c74677ef7bea87d24946">verl @7de8f2e</a><br>
+    笔记：<a href="/grpo训练排查策略坍塌-vs-训练崩溃/">GRPO 训练排查：策略坍塌 vs 训练崩溃</a>
+  </div>
+  <p class="errata" style="margin-top:16px"><strong>与笔记的差异（不改原笔记，只在本页说明）：</strong></p>
+  <ul class="errata">
+    <li>笔记把「pass@1 微涨、pass@k 明显掉」列为坍塌曲线特征；DeepSeekMath §5.2.2 的措辞是 RL 提升 Maj@K、但 not Pass@K（没有提升，Figure 7），没有把「明显下降」写成结论。本页不把「下降」写成论文结论。</li>
+    <li>「策略坍塌 / 训练崩溃」是笔记的工程分类，不是 DAPO / DeepSeekMath 的术语；原文直接使用的是 entropy collapse（DAPO §3.1）。本页保留笔记的框架，但每个判据都落到原文或代码。</li>
+    <li>笔记明确否定了固定百分比报警线（零方差占比随 G 与题集难度变化）；本页因此只给 G×p 自然基线模型和代码里的精确条件（<code>std==0</code>），不使用固定阈值。笔记里的 logprob 差阈值（mean&lt;0.001 / &gt;0.01）是工程经验；本页没有在 DAPO / DeepSeekMath / verl 中找到对应常数，未把它写成判据。</li>
+  </ul>
+  <p class="errata">本页以 DeepSeekMath arXiv 2402.03300v3、DAPO arXiv 2503.14476v2、<code>verl@7de8f2e</code> 为准；交互是二值独立概率模型，不是实测。</p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var gRange = document.getElementById('zv-g');
+  var pRange = document.getElementById('zv-p');
+  var gVal = document.getElementById('zv-gv');
+  var pVal = document.getElementById('zv-pv');
+  var totalEl = document.getElementById('zv-total');
+  var correctEl = document.getElementById('zv-correct');
+  var wrongEl = document.getElementById('zv-wrong');
+  var effEl = document.getElementById('zv-eff');
+  var msg = document.getElementById('zv-msg');
+  if (!gRange || !pRange || !gVal || !pVal || !totalEl || !correctEl || !wrongEl || !effEl || !msg) return;
+
+  var BATCH = 512;
+
+  function fmtPct(x) {
+    return (x * 100).toFixed(2);
+  }
+  function fmtWrong(x) {
+    return x < 0.0000005 ? '0.0000' : (x * 100).toFixed(4);
+  }
+  function render() {
+    var G = parseInt(gRange.value, 10);
+    var p = parseInt(pRange.value, 10) / 100;
+    var allCorrect = Math.pow(p, G);
+    var allWrong = Math.pow(1 - p, G);
+    var zero = allCorrect + allWrong;
+    var effective = BATCH * (1 - zero);
+
+    gVal.textContent = String(G);
+    pVal.textContent = String(parseInt(pRange.value, 10));
+    totalEl.textContent = fmtPct(zero) + '%';
+    correctEl.textContent = fmtPct(allCorrect) + '%';
+    wrongEl.textContent = fmtWrong(allWrong) + '%';
+    effEl.textContent = effective.toFixed(1);
+
+    msg.textContent = 'G=' + G + '，p=' + p.toFixed(2) + '：全对 ' + fmtPct(allCorrect) +
+      '%，全错 ' + fmtWrong(allWrong) + '%，零方差合计 ' + fmtPct(zero) +
+      '%；512 个 prompt 中约 ' + effective.toFixed(1) + ' 个仍有组内比较信号。';
+  }
+
+  gRange.addEventListener('input', render);
+  pRange.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

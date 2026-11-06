@@ -1,0 +1,689 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 41 | Abstract | 48-7 |
+| 85.4 | Abstract | (48-7)/48*100 |
+| 33.3 | §4.3 | 1/(1+2)*100 |
+| 41.7 | §4.3 | (1-7/12)*100 |
+| 63 | §4.3 | 2*1000**0.5 |
+| 956 | Table 1 | 956301312/1000000 |
+| 912 | Table 1 | 956301312/1024/1024 |
+| 30.6 | Table 1 | 32*956301312/1000000000 |
+| 28.5 | Table 1 | 32*956301312/1024/1024/1024 |
+| 70.18 | Table 1 | 5*2048*2048*32/956301312*100 |
+| 9.65 | Table 1 | 11*2048*4096/956301312*100 |
+| 20.18 | Table 1 | (19+4)*2048*4096/956301312*100 |
+| 7.69 | Table 1 | 4*2048*2048*4096/(24*2048*4096*4096+4*2048*2048*4096)*100 |
+| 30.77 | Table 1 | 8*2048*4096*4096/(24*2048*4096*4096+4*2048*2048*4096)*100 |
+| 61.54 | Table 1 | 16*2048*4096*4096/(24*2048*4096*4096+4*2048*2048*4096)*100 |
+| 0.701754 | Table 1 | 40/57 |
+| 0.076923 | Table 1 | 1/13 |
+| 11.5 | §4.3 | (8+4)*956/1000 |
+| 29.2 | §4.3 | 32*912/1000 |
+| 10.9 | §4.3 | (8+4)*912/1000 |
+| 17.964912 | §4.3 | 32*(1-40/57)+(8+4)*40/57 |
+| 16.4 | §4.3 | (32*(1-40/57)+(8+4)*40/57)*912/1000 |
+| 62.5 | §4.3 | (1-(8+4)/32)*100 |
+| 43.9 | §4.3 | (1-(32*(1-40/57)+(8+4)*40/57)/32)*100 |
+| 7.7 | §4.3 | 4*2048*2048*4096/(24*2048*4096*4096+4*2048*2048*4096)*100 |
+| 2.6 | §4.3 | (4*2048*2048*4096/(24*2048*4096*4096+4*2048*2048*4096)*100)/3 |
+| 2.461538 | §4.3 | (1/13)*32 |
+| 24.6 | §4.3 | 48*512/1000 |
+| 7.2 | §4.3 | (8+6)*512/1000 |
+| 24.140351 | §4.3 | 48*(1-40/57)+(8+6)*40/57 |
+| 12.4 | §4.3 | (48*(1-40/57)+(8+6)*40/57)*512/1000 |
+| 70.8 | §4.3 | (1-(8+6)/48)*100 |
+| 49.7 | §4.3 | (1-(48*(1-40/57)+(8+6)*40/57)/48)*100 |
+| 3.692308 | §4.3 | (1/13)*48 |
+| 0.70 | Table 1 | 40/57 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Activation Checkpointing · 用重算换显存，把激活峰值压到 O(√L)</title>
+<meta name="description" content="Activation Checkpointing 把激活显存从 O(L) 压到 O(√L)，代价是一次额外前向。含 full/selective 交互、PyTorch use_reentrant 语义、FSDP 与 DeepSpeed 封装。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.infer{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;color:var(--accent-deep);background:var(--accent-soft);border-radius:4px;padding:1px 5px;vertical-align:1px;white-space:nowrap}
+code{overflow-wrap:anywhere}
+.svg-box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1.3}
+.svg-hot{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.svg-drop{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.2;stroke-dasharray:4 3}
+.svg-cp{fill:var(--accent);stroke:var(--accent)}
+.svg-ln{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+.svg-ln-hot{stroke:var(--accent);stroke-width:1.6;fill:none;stroke-dasharray:5 4}
+.arrow-head{fill:var(--text-soft)}
+.arrow-head-hot{fill:var(--accent)}
+.svg-t{font-family:"Noto Sans SC",sans-serif;font-size:14px;font-weight:600;fill:var(--text)}
+.svg-s{font-family:"JetBrains Mono",monospace;font-size:11px;fill:var(--text-soft)}
+.svg-l{font-family:"JetBrains Mono",monospace;font-size:12px;fill:var(--text-muted)}
+.memwrap{margin:14px 0 4px}
+.membar{display:flex;height:18px;border-radius:6px;overflow:hidden;background:var(--bg-soft);border:1px solid var(--border)}
+.memseg{height:100%;transition:width .35s ease}
+.memlegend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-muted);margin-top:6px}
+.memlegend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+.controls{grid-template-columns:repeat(3,1fr)}
+@media (max-width:880px){.controls{grid-template-columns:1fr}}
+.tbl-scroll table{min-width:820px}
+.errata{font-size:13px;color:var(--text-muted);line-height:1.75}
+.errata li{margin-bottom:7px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Activation Checkpointing</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#roads">三种粒度</a>
+      <a href="#method">核心公式</a>
+      <a href="#train">PyTorch</a>
+      <a href="#arch">流程图</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>Infra · 2016 · arXiv v2</span>
+  <h1>Activation Checkpointing：<br>丢掉激活，反向再算一遍</h1>
+  <p class="hero-sub">
+    训练显存里最先爆的往往不是参数，而是每层都要留到反向的<strong>激活</strong>。论文把 n 层切成若干段，只保存段边界，反向时从边界重放前向——峰值从 O(n) 降到 O(n/k + k)，代价是每步多一次前向。
+    PyTorch 的 <code>use_reentrant</code> 又决定这次重放是<strong>整段执行</strong>还是<strong>算够即停</strong>。
+  </p>
+  <div class="meta">
+    <span>Tianqi Chen, Bing Xu, Chiyuan Zhang, Carlos Guestrin</span>
+    <a href="https://arxiv.org/abs/1604.06174v2" target="_blank" rel="noopener">arXiv 1604.06174v2 ↗</a>
+    <a href="https://github.com/pytorch/pytorch/blob/2ee7a63/torch/utils/checkpoint.py" target="_blank" rel="noopener">PyTorch 源码 @2ee7a63 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    反向要用的输入张量必须活到反向。矩阵乘 <code>y = Wx</code> 算 <code>∂L/∂W</code> 要用 <code>x</code>，所以每层至少留一份激活；层数、batch 线性增长，seq 的 attention 项按 s² 增长（<code>5bs²a</code>），而参数和优化器状态不随 batch 变。
+  </p>
+  <p>
+    <strong>Full checkpointing</strong> 只保存每个段的入口，段内激活全部丢掉；反向从入口重算。段数 <code>s</code>、段长 <code>k</code>，峰值约为 <code>(s + k)·A</code>；<code>k ≈ √L</code> 时最小，约 <code>2√L·A</code>，代价是一次额外前向。
+  </p>
+  <p>
+    <strong>Selective checkpointing</strong> 只重算计算便宜的算子。Transformer 里典型做法是保留 MLP 激活、重算 attention 的 <code>s²</code> 矩阵（本页类比，<span class="infer">推断</span>）：显存省得比 full 少一点，算力几乎不涨。PyTorch 的 SAC（selective activation checkpointing）只支持 <code>use_reentrant=False</code>。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Abstract">7 GB</div>
+      <div class="k">1000 层 ResNet 训练显存<br>论文原话：48G → 7G</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="Abstract">85.4<small>%</small></div>
+      <div class="k">训练显存降幅（48→7 GB）<br>派生值，LEDGER 有算式</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="§4.3">+33.3<small>%</small></div>
+      <div class="k">一次额外前向的训练算力<br>按 backward≈2×forward；实测 <span data-src="§5.4">+30%</span></div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>激活不是参数：层数、batch 线性涨，attention 项按 seq² 涨</h2></div>
+  <p class="sec-sub">先算清楚反向到底要留什么，才知道 checkpoint 能省哪一块。</p>
+
+  <p>参数、梯度、优化器状态的大小只跟模型参数量有关；激活不一样。以最普通的矩阵乘为例：</p>
+
+  <div class="eq">
+    y = W·x &nbsp;&nbsp;→&nbsp;&nbsp;
+    ∂L/∂W = (∂L/∂y)·x<sup>⊤</sup> &nbsp;&nbsp;&nbsp;
+    ∂L/∂x = (∂L/∂y)·W<sup>⊤</sup>
+  </div>
+  <div class="eq-cap">算 W 的梯度要用输入 x，算 x 的梯度要用 W；x 必须留到反向。这就是激活显存的来源</div>
+
+  <p>所以每层的输入不能算完就释放。序列越长、batch 越大，这份“留给反向的张量”就越大。按 Transformer 的逐项估算，每层激活可以写成：</p>
+
+  <div class="eq">
+    m<sub>act</sub> ≈ L · seq · bs · h · (34 + 5 · n<sub>heads</sub> · seq / h) <span class="hl-a">bytes</span>
+  </div>
+  <div class="eq-cap">按笔记《显存占用计算》§训练时的逐项相加：attention 11bsh + 5bs²a，MLP 19bsh，两层 LayerNorm 4bsh；表中单位是 bytes</div>
+
+  <p>取一个参考配置：<code>bs=1</code>、<code>seq=2048</code>、<code>h=4096</code>、<code>heads=32</code>。代入 Table 1（本页推导）后每层约 <span data-src="Table 1">956 MB</span>（≈912 MiB），32 层约 <span data-src="Table 1">30.6 GB</span>（28.5 GiB）——还没算参数、梯度和优化器状态。长上下文训练里，激活经常先于参数把显存吃满。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">核心矛盾</span><h4>反向要的是“每层的输入”，而不是“每层的输出”</h4></div>
+    <p>如果只是把输出丢掉，反向就算不出梯度；如果把每层输入都留着，显存就是 O(L)。checkpoint 的做法是：<strong>只留少数几个入口，其他输入在反向时重新算出来</strong>。它不是减少计算，而是把“存”换成“再算一遍”。</p>
+  </div>
+
+  <p>论文给出的数量级是：1000 层 ResNet 从 48G 降到 7G，运行时间多 30%（Abstract、§5.4）。这两个数字是本页后面所有讨论的锚点，但它们有明确条件——ImageNet、batch 32、224×224、Titan X（§5.1、§5.2、§5.4）。</p>
+</section>
+
+<section class="block" id="roads">
+  <div class="sec-head"><span class="sec-num">02</span><h2>全存、全查、查一部分：三种 checkpoint 粒度</h2></div>
+  <p class="sec-sub">Full 把整段丢掉，selective 只丢重算便宜的那部分；两者的显存下限不一样。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">none</span><h4>全部保留</h4></div>
+      <p>每层输入都留到反向。显存 <code>M = L·A</code>，没有重算，训练最快，但 O(L) 随层数线性涨。</p>
+      <p><strong>卡在：</strong>长上下文、大 batch 时直接 OOM；加模型并行或 offload 又会引入通信/PCIe 开销。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">full</span><h4>按段丢弃</h4></div>
+      <p>每 <code>k</code> 层为一段，只存段入口。反向从入口重放整段，峰值约 <code>(s + k)·A</code>，<code>s = ceil(L/k)</code>。</p>
+      <p><strong>卡在：</strong>重算粒度粗。段内每个算子都被重放，哪怕其中很多算子的激活又小又便宜。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill pa">selective</span><h4>按算子丢弃</h4></div>
+      <p>保留重算昂贵的算子（MLP），只丢重算便宜的算子（attention 的 <code>s²</code> 矩阵）。显存有下限，但算力开销小（本页对 Transformer 的类比，<span class="infer">推断</span>）。</p>
+      <p><strong>卡在：</strong>要先知道哪些算子值得丢；策略错了会既没省多少显存、又增加重算。</p>
+    </div>
+  </div>
+
+  <p>粒度还可以再分一层：<code>checkpoint(fn, ...)</code> 由调用者手写边界；<code>checkpoint_sequential</code> 按层数均分成 <code>segments</code> 段；<code>checkpoint_wrapper</code> 以 module 为单位；<code>apply_activation_checkpointing</code> 用谓词选子模块；SAC 则细到 ATen 算子。粒度越细，越能贴近“只丢便宜货”，但实现和调参也越复杂。</p>
+
+  <p>论文的 §4.2 给的是同一原则：<strong>保留计算昂贵的算子，丢掉计算便宜的算子</strong>。原文的例子是 Conv-BatchNorm-Activation：保留 convolution 的结果，丢掉 batch norm、activation、pooling 的结果。把它套到 Transformer 上，就是保留 MLP、重算 attention——这是本页的类比，论文没有给 Transformer 的这张表（<span class="infer">推断</span>，依据 §4.2 的原则）。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>切成 s 段，峰值从 L 降到 s + k</h2></div>
+  <p class="sec-sub">论文 Eq.1 的全部内容；<code>k ≈ √L</code> 时最优，两端都退化到 <code>L + 1</code> 个单位。</p>
+
+  <p>论文把 n 层网络切成 k 段，每段只保留段输出，段内激活丢掉。用本页的记号重写（<code>L</code> 层、段长 <code>k</code>、段数 <code>s = ceil(L/k)</code>）：</p>
+
+  <div class="eq">
+    cost-total = max<sub>i=1…s</sub> cost-of-segment(i) + O(s)
+    &nbsp;=&nbsp; <span class="hl-a">O(k)</span> + <span class="hl-b">O(s)</span>
+    &nbsp;&nbsp;→&nbsp;&nbsp; k ≈ √L 时 <span class="hl-c">O(2√L)</span>
+  </div>
+  <div class="eq-cap">论文 §4.3 Eq.1。原文的 n 是本页的 L，原文的 k（段数）是本页的 s；段内激活 O(L/s)≈O(k)，段边界 O(s)</div>
+
+  <p>把常数项也写出来：峰值约为 <code>(s + k)·A</code>，其中 <code>A</code> 是每层一份激活的字节数。对 <code>s + k</code> 求最小，<code>s = L/k</code> 时得到 <code>k = √L</code>，峰值 <code>2√L·A</code>。这是论文 Eq.1 的计法：段输出和段内激活分开算；精确到单个张量时，段输出会在两边各算一次，差 1 个单位，不影响 O(√L)。两端的退化也值得记住：</p>
+
+  <ul>
+    <li><code>k = 1</code>：每层一段，<code>s = L</code>，按论文计法峰值 <code>L + 1</code> 个单位；精确计法减掉重叠后就是 <code>L</code>。两种计法都说明：逐层 checkpoint 不比全存省。</li>
+    <li><code>k = L</code>：只有一段，<code>s = 1</code>，论文计法 <code>1 + L</code>；精确计法同样是 <code>L</code>。没有边界可省，只剩重算。</li>
+    <li><code>k ≈ √L</code>：段数和段长平衡，峰值最小。<code>L=1000</code> 时是 <code>2√1000 ≈ 63</code> 个单位，而不是 1000。</li>
+  </ul>
+
+  <p>计算侧：每个段在反向被重放一次，段长合计 <code>L</code> 层，所以额外计算约等于<strong>一次完整前向</strong>。论文说 backward 本身接近 forward 的两倍，因此总训练算力的增量约为 <code>1/(1+2) = 33.3%</code>；实测运行时间多 <span data-src="§5.4">30%</span>（§5.4）。这两个口径不同：33.3% 是按 §4.3 的时间比例折算（本页估算），30% 是论文的实测 runtime。</p>
+
+  <p class="eq-cap" style="text-align:left;margin-top:26px">Table 1（本页推导，不是论文表格）：参考配置 <code>b=1、seq=2048、h=4096、heads=32</code>。激活公式按笔记《显存占用计算》§训练时；FLOPs 按每个矩阵乘 2×乘加数估算。Attention 的 <code>s²</code> 矩阵占激活 70.18%，但其 core FLOPs 只占前向 7.69%；投影 <code>8sh²</code> 另占 30.77%，MLP 占 61.54%——这正是 selective 只丢 <code>s²</code> 矩阵、只重算 core 的原因。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>组成</th><th>公式</th><th>字节 / 层</th><th>占每层激活</th><th>占每层前向 FLOPs</th></tr></thead>
+    <tbody>
+      <tr><td>Attention s² 矩阵</td><td><code>5bs²a</code></td><td class="num">671,088,640</td><td class="num">70.18%</td><td class="num">—</td></tr>
+      <tr><td>Attention 其余激活（QKV/输出等）</td><td><code>11bsh</code></td><td class="num">92,274,688</td><td class="num">9.65%</td><td class="num">—</td></tr>
+      <tr><td>MLP + LayerNorm 激活</td><td><code>19bsh + 4bsh</code></td><td class="num">192,937,984</td><td class="num">20.18%</td><td class="num">—</td></tr>
+      <tr class="best"><td>每层激活合计</td><td><code>34bsh + 5bs²a</code></td><td class="num">956,301,312</td><td class="num">100%</td><td class="num">—</td></tr>
+      <tr><td>Attention core FLOPs</td><td><code>4s²h</code></td><td class="num">—</td><td class="num">—</td><td class="num">7.69%</td></tr>
+      <tr><td>Attention 投影 FLOPs</td><td><code>8sh²</code></td><td class="num">—</td><td class="num">—</td><td class="num">30.77%</td></tr>
+      <tr><td>MLP FLOPs</td><td><code>16sh²</code></td><td class="num">—</td><td class="num">—</td><td class="num">61.54%</td></tr>
+      <tr class="best"><td>每层前向 FLOPs 合计</td><td><code>24sh² + 4s²h</code></td><td class="num">—</td><td class="num">—</td><td class="num">100%</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="eq-cap">956,301,312 B ≈ 956 MB（≈912 MiB，1 MiB=1,048,576 B）；表里的 70.18% 和 7.69% 就是下面 selective 模式用的 <code>m</code> 和 <code>f</code>：<code>m=5bs²a/(34bsh+5bs²a)</code>，<code>f=4s²h/(24sh²+4s²h)</code>。分项百分比四舍五入，合计按未舍入值计；换 seq/h 这两个比例会变。本页 GB 一律按 1 GB=1000 MB 换算。</p>
+
+  <h3>自己动手：拖 L、A、k，切换 none / selective / full</h3>
+  <p>模型只算激活的峰值，不含参数、梯度、优化器状态和通信。<code>A</code> 是每层激活总量（MB），假设各层相同；<code>k</code> 是每段层数，<code>s = ceil(L/k)</code>。selective 只丢 attention 的 <code>s²</code> 矩阵，按 Table 1 的 <code>m=5bs²a/(34bsh+5bs²a)=70.18%</code>、<code>f=4s²h/(24sh²+4s²h)=7.69%</code> 计算。默认 <code>A=956 MB</code> 对应 Table 1 的 956,301,312 B（≈956.3 MB；912 MiB≈956 MB）；所有 GB 按 1 GB=1000 MB 换算。</p>
+
+  <div class="sim" id="ac-sim">
+    <div class="sim-top" id="ac-modes">
+      <button class="rule-btn" data-mode="none">none<span class="r-sub">全部保留</span></button>
+      <button class="rule-btn" data-mode="selective">selective<span class="r-sub">保留 MLP，重算 attention</span></button>
+      <button class="rule-btn active" data-mode="full">full<span class="r-sub">每 k 层一段</span></button>
+    </div>
+
+    <div class="slots">
+      <div class="slot"><div class="slot-name">峰值激活</div><div class="slot-val" id="ac-mem">11.5 GB</div></div>
+      <div class="slot"><div class="slot-name">显存节省</div><div class="slot-val" id="ac-save">62.5%</div></div>
+      <div class="slot"><div class="slot-name">额外前向</div><div class="slot-val" id="ac-fwd">100%</div></div>
+      <div class="slot"><div class="slot-name">额外总算力</div><div class="slot-val" id="ac-total">+33.3%</div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctrl">
+        <label>L 层数 <span class="v" id="ac-Lv">32</span></label>
+        <input type="range" id="ac-Lrange" min="8" max="64" step="1" value="32">
+      </div>
+      <div class="ctrl">
+        <label>A 每层激活 (MB) <span class="v" id="ac-Av">956</span></label>
+        <input type="range" id="ac-Arange" min="64" max="2048" step="4" value="956">
+      </div>
+      <div class="ctrl">
+        <label>k 段长 (层/段) <span class="v" id="ac-kv">4</span></label>
+        <input type="range" id="ac-krange" min="1" max="32" step="1" value="4">
+      </div>
+    </div>
+
+    <div class="memwrap">
+      <div class="membar" id="ac-bar">
+        <div class="memseg" id="ac-b1" style="width:25%;background:var(--accent)"></div>
+        <div class="memseg" id="ac-b2" style="width:12.5%;background:var(--c1)"></div>
+        <div class="memseg" id="ac-b3" style="width:0%;background:var(--c2)"></div>
+      </div>
+      <div class="memlegend">
+        <span><i style="background:var(--accent)"></i>检查点</span>
+        <span><i style="background:var(--c1)"></i>段内重算</span>
+        <span><i style="background:var(--c2)"></i>保留的激活（selective 下为 MLP）</span>
+        <span>条长按 <code>L</code> 个单位归一</span>
+      </div>
+    </div>
+
+    <div class="readout" id="ac-readout" data-src="§4.3">
+      <div class="r-head">当前读数</div>
+      <div id="ac-msg">s=8，M=(8+4)×956 MB=11,472 MB=11.5 GB；额外前向 32 层=1 次，总算力 +33.3%。</div>
+    </div>
+  </div>
+
+  <p class="eq-cap" style="text-align:left">k=L 时两种模式都没有显存收益：按本页段模型，full 是 <code>L+1</code> 个单位，selective 是 <code>L+m≈L+0.70</code> 个单位（<code>m≈0.7018</code>）。</p>
+
+  <details>
+    <summary>手算：两组参数，三种模式 <span class="sum-sub">与 JS 输出逐位一致</span></summary>
+    <div class="details-body">
+      <p>Table 1 的参考 A 是 956 MB（912 MiB）；下面两组改用 A=912/512 MB 的整数示例，<code>m</code>、<code>f</code> 与 A 的取值无关。</p>
+      <p><strong>组 1：L=32，A=912 MB，k=4。</strong> <code>s=ceil(32/4)=8</code>。</p>
+      <ul>
+        <li><strong>none：</strong><code>M=32×912=29,184 MB=29.2 GB</code>；无重算。</li>
+        <li><strong>full：</strong><code>M=(8+4)×912=10,944 MB=10.9 GB</code>；<code>1−12/32=62.5%</code> 的激活显存被省掉；额外前向 <code>32/32=100%</code>；总算力 <code>(32)/(32+64)=33.3%</code>。</li>
+        <li><strong>selective：</strong><code>M<sub>units</sub>=32×(1−40/57)+(8+4)×(40/57)=544/57+480/57=1024/57=17.964912</code>；<code>M=17.964912×912=16,384.0 MB=16.4 GB</code>；显存节省 <code>1−17.964912/32=43.9%</code>；额外前向 <code>(1/13)×32=2.461538</code> 层，即 <code>7.7%</code> 次前向；总算力 <code>2.461538/(3×32)=2.6%</code>。</li>
+      </ul>
+      <p><strong>组 2：L=48，A=512 MB，k=6。</strong> <code>s=ceil(48/6)=8</code>。</p>
+      <ul>
+        <li><strong>none：</strong><code>M=48×512=24,576 MB=24.6 GB</code>；无重算。</li>
+        <li><strong>full：</strong><code>M=(8+6)×512=7,168 MB=7.2 GB</code>；显存节省 <code>1−14/48=70.8%</code>；额外前向 <code>100%</code>；总算力 <code>33.3%</code>。</li>
+        <li><strong>selective：</strong><code>M<sub>units</sub>=48×(1−40/57)+(8+6)×(40/57)=816/57+560/57=1376/57=24.140351</code>；<code>M=24.140351×512=12,359.9 MB=12.4 GB</code>；显存节省 <code>1−24.140351/48=49.7%</code>；额外前向 <code>(1/13)×48=3.692308</code> 层，即 <code>7.7%</code> 次前向；总算力 <code>3.692308/(3×48)=2.6%</code>。</li>
+      </ul>
+      <p><strong>selective 的常数怎么来的：</strong><code>m=5·2048²·32/(34·2048·4096+5·2048²·32)=40/57=0.701754</code>，<code>f=4·2048²·4096/(24·2048·4096²+4·2048²·4096)=2/26=1/13=0.076923</code>。这组数字对应 Table 1 的参考配置；换 seq/h 要重算。</p>
+      <p><strong>这个模型简化了什么：</strong>它按论文 Eq.1 的段模型计账，假设各层激活相同、每个段都被完整重放；段输出和段内激活分开计数，精确到张量时会重叠 1 个单位（<code>k=1</code> 或 <code>k=L</code> 时正好等于全存）。没有计入参数/梯度/优化器状态、显存碎片、通信和 allocator 开销。PyTorch non-reentrant 的 <code>early_stop</code> 可能让重算提前停止，<code>checkpoint_sequential</code> 又会让最后一段不做 checkpoint——真实值会和这里略有出入。selective 的“只丢 <code>s²</code> 矩阵、只重算 attention core”是按 §4.2 原则做的类比，不是论文测量。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="train">
+  <div class="sec-head"><span class="sec-num">04</span><h2>PyTorch 里真正要选的是 reentrant 还是 non-reentrant</h2></div>
+  <p class="sec-sub">两者不是性能开关，而是 autograd 语义不同；选错会直接报错，或者得不到想要的梯度。</p>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">容易写错</span><h4>直接调 <code>checkpoint()</code> 时，省略 <code>use_reentrant</code> 仍会走 True</h4></div>
+    <p>在 <code>pytorch@2ee7a63</code> 里，<code>use_reentrant=None</code> 会先发 warning，然后赋值 <code>True</code>（<code>torch/utils/checkpoint.py:650-660</code>）。所以“推荐 False”不等于“默认 False”：要么显式传 <code>False</code>，要么用 <code>checkpoint_wrapper</code>（它默认 <code>NO_REENTRANT</code>，见 <code>checkpoint_wrapper.py:120-135</code>）。源码还说明未来会对省略参数直接报错。</p>
+  </div>
+
+  <p class="eq-cap" style="text-align:left">Table 2（本页归纳）：checkpoint 的几种粒度，行号对应 <code>pytorch@2ee7a63</code>。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>API</th><th>粒度</th><th>关键行为</th></tr></thead>
+    <tbody>
+      <tr><td><code>checkpoint(fn, *args)</code></td><td>一次调用包住的 region</td><td>边界手写；推荐显式 <code>use_reentrant=False</code>（<code>checkpoint.py:397-631</code>）</td></tr>
+      <tr><td><code>checkpoint_sequential(model, segments, input)</code></td><td>按层数均分 <code>segments</code> 段</td><td><code>use_reentrant=None</code> 同样 warning 后取 <code>True</code>（<code>:764-774</code>）；除最后一段外都 checkpoint，最后一段正常前向（<code>:716-805</code>）</td></tr>
+      <tr><td><code>checkpoint_wrapper(module)</code></td><td>单个 module</td><td>默认 <code>NO_REENTRANT</code>；包住 module 的 forward（<code>checkpoint_wrapper.py:196-236</code>）</td></tr>
+      <tr><td><code>apply_activation_checkpointing(model, check_fn=...)</code></td><td>谓词选中的子模块</td><td>递归替换选中的 module（<code>checkpoint_wrapper.py:239-313</code>）</td></tr>
+      <tr><td><code>create_selective_checkpoint_contexts(policy)</code></td><td>ATen 算子</td><td>按 policy 返回 <code>MUST_SAVE</code> / <code>PREFER_RECOMPUTE</code>；仅 non-reentrant（<code>checkpoint.py:1755-1794</code>）</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="eq-cap" style="text-align:left;margin-top:24px">Table 3（本页归纳）：<code>use_reentrant=True/False</code> 的语义差异。内容来自 <code>torch/utils/checkpoint.py:480-520</code> 的 note，不是凭经验补的。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>行为</th><th><code>use_reentrant=True</code></th><th><code>use_reentrant=False</code></th></tr></thead>
+    <tbody>
+      <tr><td>前向 autograd 图</td><td>不记录，forward 在 <code>torch.no_grad()</code> 下跑</td><td>记录</td></tr>
+      <tr><td>反向重算范围</td><td>整个 function 全量重算</td><td>需要的张量算完即停（<code>early_stop=True</code> 默认）</td></tr>
+      <tr><td>反向 API</td><td>只支持不带 <code>inputs</code> 的 <code>torch.autograd.backward</code></td><td>支持全部，包括 <code>torch.autograd.grad</code></td></tr>
+      <tr><td>requires_grad 要求</td><td>至少一个输入/输出需要梯度</td><td>无此要求</td></tr>
+      <tr><td>嵌套结构</td><td>不把 list/dict 里的张量当作参与 autograd</td><td>支持</td></tr>
+      <tr><td>detach 张量</td><td>段内含 detach 会报错</td><td>支持</td></tr>
+      <tr><td>kwargs / <code>context_fn</code></td><td>kwargs 不支持；<code>context_fn</code> 只支持 <code>False</code></td><td>支持</td></tr>
+      <tr><td><code>determinism_check</code> / <code>early_stop</code></td><td><code>determinism_check</code> 在 True 下始终关闭；<code>early_stop</code> 在 True 下被忽略</td><td>均支持</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">early_stop</span><h4>non-reentrant 不会把整段无条件重算完</h4></div>
+      <p>non-reentrant 的重算钩子在“反向需要的张量都已重建”时抛出 <code>_StopRecomputationError</code>（<code>checkpoint.py:1328-1331</code>）。所以论文的“一次额外前向”是段级模型的上界；PyTorch 的实际重算量取决于这段反向到底要多少中间张量。reentrant 没有这个早停，<code>early_stop</code> 参数在 True 下被忽略（<code>checkpoint.py:563-567</code>）。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">RNG</span><h4>dropout 的重放要回到原来的随机状态</h4></div>
+      <p><code>preserve_rng_state</code> 默认 True：重算前恢复 forward 时的 CPU/device RNG 状态（<code>checkpoint.py:1975-2018</code>）。否则 dropout 的 mask 会变，重算出的激活和原来不一致，梯度就错了。源码还注明：在 <code>torch.compile</code> 下这个 flag 不生效，始终保留 RNG 状态（<code>checkpoint.py:533-535</code>）。</p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p2">FSDP</span><h4>重算的 forward 不能再触发一次 unshard/reshard</h4></div>
+      <p>FSDP 在 <code>HandleTrainingState.BACKWARD_PRE</code> 状态下直接跳过 <code>_pre_forward</code> 的 unshard/注册逻辑（<code>fsdp/_runtime_utils.py:373-380</code>），<code>_post_forward</code> 也跳过 reshard/注册（<code>:468-471</code>）。反向重算发生在这个状态里，参数已经 unshard，跳过才能避免把同一套 forward 逻辑再走一遍。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p3">DeepSpeed</span><h4>自己的 CheckpointFunction，多了分区和 CPU offload</h4></div>
+      <p>DeepSpeed 的 <code>CheckpointFunction</code> 是从 <code>torch.utils.checkpoint</code> 改的，docstring 列了额外能力：RNG tracker、model parallel tracker、activation partitioning、contiguous memory、CPU checkpointing（<code>deepspeed/runtime/activation_checkpointing/checkpointing.py:568-575</code>）。配置键包括 <code>partition_activations</code>、<code>number_checkpoints</code>、<code>contiguous_memory_optimization</code>、<code>cpu_checkpointing</code>（<code>config.py:27-43</code>）；<code>partition_activations</code> 把激活按模型并行 rank 切开（<code>checkpointing.py:1171-1175</code>）。它在 <code>torch.no_grad()</code> 下跑前向（<code>:626-627</code>），不要把它和 PyTorch 的 non-reentrant 语义混为一谈。</p>
+    </div>
+  </div>
+
+  <p>还有一个实现细节：<code>checkpoint_sequential</code> 的 docstring 写明“除最后一段外都不保存中间激活”（<code>checkpoint.py:720-723</code>），代码里最后一段确实直接跑普通前向（<code>:795-805</code>）。最后一段不 checkpoint 不会增加峰值——反正反向第一步就要用它的激活——但会少一次重算。这也是为什么真实框架的“额外一次前向”通常略小于论文的段级上界。</p>
+</section>
+
+<section class="block" id="arch">
+  <div class="sec-head"><span class="sec-num">05</span><h2>前向只留段边界，反向从边界重放</h2></div>
+  <p class="sec-sub">12 层、每 4 层一段的例子：3 个检查点 + 4 层段内激活 = 7 个单位，而不是 12 个。</p>
+
+  <figure>
+    <svg viewBox="0 0 880 470" role="img" aria-label="Activation checkpointing 的段划分：前向只保存每段最后一个输出，反向从最近检查点重放该段">
+      <defs>
+        <marker id="ac-ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="arrow-head" d="M0 0 L8 4 L0 8 Z"/></marker>
+        <marker id="ac-ar-hot" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path class="arrow-head-hot" d="M0 0 L8 4 L0 8 Z"/></marker>
+      </defs>
+
+      <text x="20" y="74" class="svg-l">前向</text>
+
+      <g>
+        <text x="202" y="26" text-anchor="middle" class="svg-s">S1 · L1–L4</text>
+        <text x="434" y="26" text-anchor="middle" class="svg-s">S2 · L5–L8</text>
+        <text x="666" y="26" text-anchor="middle" class="svg-s">S3 · L9–L12</text>
+        <path class="svg-ln" d="M90 34 L90 44 M314 34 L314 44 M90 38 L314 38"/>
+        <path class="svg-ln" d="M322 34 L322 44 M546 34 L546 44 M322 38 L546 38"/>
+        <path class="svg-ln" d="M554 34 L554 44 M778 34 L778 44 M554 38 L778 38"/>
+      </g>
+
+      <g>
+        <rect class="svg-drop" x="90" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="148" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="206" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="264" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="322" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="380" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="438" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="496" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="554" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="612" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-drop" x="670" y="58" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="728" y="58" width="50" height="42" rx="7"/>
+        <text x="115" y="84" text-anchor="middle" class="svg-t">L1</text>
+        <text x="173" y="84" text-anchor="middle" class="svg-t">L2</text>
+        <text x="231" y="84" text-anchor="middle" class="svg-t">L3</text>
+        <text x="289" y="84" text-anchor="middle" class="svg-t">L4</text>
+        <text x="347" y="84" text-anchor="middle" class="svg-t">L5</text>
+        <text x="405" y="84" text-anchor="middle" class="svg-t">L6</text>
+        <text x="463" y="84" text-anchor="middle" class="svg-t">L7</text>
+        <text x="521" y="84" text-anchor="middle" class="svg-t">L8</text>
+        <text x="579" y="84" text-anchor="middle" class="svg-t">L9</text>
+        <text x="637" y="84" text-anchor="middle" class="svg-t">L10</text>
+        <text x="695" y="84" text-anchor="middle" class="svg-t">L11</text>
+        <text x="753" y="84" text-anchor="middle" class="svg-t">L12</text>
+      </g>
+
+      <g>
+        <rect class="svg-cp" x="284" y="108" width="10" height="10" rx="2"/>
+        <rect class="svg-cp" x="516" y="108" width="10" height="10" rx="2"/>
+        <rect class="svg-cp" x="748" y="108" width="10" height="10" rx="2"/>
+        <text x="289" y="136" text-anchor="middle" class="svg-s">c1 保存</text>
+        <text x="535" y="118" text-anchor="start" class="svg-s">c2 保存</text>
+        <text x="753" y="136" text-anchor="middle" class="svg-s">c3 保存</text>
+      </g>
+
+      <path class="svg-ln" d="M90 158 L778 158" marker-end="url(#ac-ar)"/>
+      <text x="434" y="178" text-anchor="middle" class="svg-s">段内激活（虚线框）在 forward 后丢弃；只留 c1–c3</text>
+
+      <text x="20" y="300" class="svg-l">反向</text>
+
+      <g>
+        <rect class="svg-box" x="90" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="148" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="206" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="264" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="322" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="380" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="438" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-box" x="496" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-hot" x="554" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-hot" x="612" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-hot" x="670" y="272" width="50" height="42" rx="7"/>
+        <rect class="svg-hot" x="728" y="272" width="50" height="42" rx="7"/>
+        <text x="115" y="298" text-anchor="middle" class="svg-t">L1</text>
+        <text x="173" y="298" text-anchor="middle" class="svg-t">L2</text>
+        <text x="231" y="298" text-anchor="middle" class="svg-t">L3</text>
+        <text x="289" y="298" text-anchor="middle" class="svg-t">L4</text>
+        <text x="347" y="298" text-anchor="middle" class="svg-t">L5</text>
+        <text x="405" y="298" text-anchor="middle" class="svg-t">L6</text>
+        <text x="463" y="298" text-anchor="middle" class="svg-t">L7</text>
+        <text x="521" y="298" text-anchor="middle" class="svg-t">L8</text>
+        <text x="579" y="298" text-anchor="middle" class="svg-t">L9</text>
+        <text x="637" y="298" text-anchor="middle" class="svg-t">L10</text>
+        <text x="695" y="298" text-anchor="middle" class="svg-t">L11</text>
+        <text x="753" y="298" text-anchor="middle" class="svg-t">L12</text>
+      </g>
+
+      <path class="svg-ln-hot" d="M521 120 L521 214 L579 214 L579 272" marker-end="url(#ac-ar-hot)"/>
+      <text x="600" y="222" class="svg-s">从 c2 重放 L9 → L12</text>
+      <path class="svg-ln" d="M778 350 L90 350" marker-end="url(#ac-ar)"/>
+      <text x="434" y="370" text-anchor="middle" class="svg-s">反向从 L12 走到 L1；每段只重放一次</text>
+
+      <text x="90" y="412" class="svg-l">峰值 = 3 个检查点 + 4 层段内激活 = 7 个单位</text>
+      <text x="90" y="434" class="svg-l">全存 = 12 个单位；本例少 41.7%</text>
+      <text x="90" y="456" class="svg-l">重算 12 层 = 1 次额外前向 → 总算力 +33.3%（按 backward≈2×forward）</text>
+    </svg>
+    <figcaption>图 1（本页绘制）：12 层、<code>k=4</code> 的段划分。前向只保留 c1–c3 三个段输出；反向从 c2 重放 L9–L12。峰值按论文 Eq.1 的段模型计为 <code>s+k=3+4=7</code> 个单位（段输出与段内激活各算一次；精确计法减 1 个重叠单位），不 checkpoint 是 12 个单位（少 41.7%）。图中省略了参数 unshard、通信和 allocator 细节。</figcaption>
+  </figure>
+
+  <p>这张图也解释了为什么 <code>k</code> 不能随便取：段太长，段内激活 <code>k</code> 变大；段太短，检查点数量 <code>s</code> 变大。两者相加在 <code>k≈√L</code> 处最小。图里 <code>L=12</code>，<code>√12≈3.46</code>，所以 <code>k=4</code> 已经接近最优；<code>k=3</code> 或 <code>k=4</code> 都是 7 个单位。</p>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>1000 层 ResNet：48 GB → 7 GB；sublinear 方案整体约 +30%（§5.4，ResNet/LSTM）</h2></div>
+  <p class="sec-sub">论文的实测条件是 ImageNet、batch 32、224×224、Titan X；这些比例不能直接搬到别的模型。</p>
+
+  <p class="eq-cap" style="text-align:left">Table 4：论文报告的结果。48G、7G、30% 来自 Abstract / §5.2 / §5.4；LSTM 的 4× 是相对“已做系统优化但不做重算”的方案，不是相对未优化的基线（§5.3）。</p>
+  <div class="tbl-scroll">
+  <table>
+    <thead><tr><th>设置</th><th>结果</th><th>出处</th></tr></thead>
+    <tbody>
+      <tr class="best"><td>1000 层 ResNet，ImageNet</td><td>训练显存 48G → 7G</td><td>Abstract</td></tr>
+      <tr><td>同设置，batch 32，输入 224×224</td><td>不到 7GB 即可训练 1000 层</td><td>§5.2</td></tr>
+      <tr><td>运行时间（sublinear 方案整体）</td><td>约多 30%</td><td>§5.4</td></tr>
+      <tr><td>4 层 LSTM，1024 hidden，unroll 64，batch 64</td><td>相对“优化但不重算”的方案，显存降到 1/4 以下（&gt;4× reduction）</td><td>§5.3</td></tr>
+      <tr><td>只做系统优化、不重算</td><td>200 层 ResNet 已是当时 GPU 的上限</td><td>§5.2</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>反直觉的地方在于“多一次前向”并没有让运行时间翻倍：论文的解释是 backward 本身接近 forward 的两倍，所以多一次 forward 只多约 <code>1/3</code> 的算力，实测是 <span data-src="§5.4">30%</span>。这也是为什么在显存受限的 GPU 上，重算常常比“省显存但增加 memory traffic”的方案更划算——但论文只报告了 ResNet/LSTM 的这组设置，不能把它当成所有模型的固定比例。</p>
+
+  <p>论文的另一半贡献是计算图层面的 in-place 与内存共享（§3）。Table 4 里的 48G→7G 是这些系统优化和 checkpoint 计划共同作用的结果；不要把它全部归给“每 k 层切一段”。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>它只省激活；参数、优化器状态和通信一分不少</h2></div>
+  <p class="sec-sub">什么时候别用：激活不是瓶颈、前向不可重复、或者框架已经把 attention 重算掉了。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p3">适合</span><h4>激活是主瓶颈，前向可重复</h4></div>
+      <p>长上下文、大 batch、深层网络；参数/优化器状态已经通过 ZeRO、FSDP 或量化处理过，剩下的显存大头是激活；前向没有不可重放的副作用，或者 RNG 状态能被正确恢复。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">不适合</span><h4>激活很小，或算力已经卡死</h4></div>
+      <p>短序列、小 batch、浅层模型：激活本来就不是大头，重算只会白花时间。训练已经 compute-bound、GPU 利用率打满时，再增加一次前向会直接拖慢吞吐。</p>
+    </div>
+  </div>
+
+  <ul>
+    <li><strong>不省参数和优化器状态。</strong>checkpoint 只处理“留给反向的激活”。7B 模型的 bf16 参数、fp32 master weights、Adam 的 m/v 仍然照占；参数显存要靠 ZeRO/FSDP/量化，不是 checkpoint。</li>
+    <li><strong>前向必须可重复。</strong>源码明确警告：如果反向时的 function 调用和 forward 不同（比如依赖全局变量），checkpoint 版本可能不等价，轻则报错，重则静默给出错误梯度（<code>checkpoint.py:466-471</code>）。dropout 的 RNG 由 <code>preserve_rng_state</code> 处理，但自定义随机源、数据依赖的全局状态不在保护范围内。</li>
+    <li><strong>reentrant 的限制是硬限制。</strong><code>use_reentrant=True</code> 不记录 autograd 图、只支持不带 <code>inputs</code> 的 <code>torch.autograd.backward</code>、要求至少一个输入/输出有梯度、不处理嵌套结构、段内不能有 detach 张量。需要 <code>autograd.grad</code>、kwargs、嵌套结构或 selective 策略时，必须用 <code>False</code>。</li>
+    <li><strong>SAC 需要策略，不是免费开关。</strong><code>create_selective_checkpoint_contexts</code> 要给出每个算子的 <code>MUST_SAVE</code> / <code>PREFER_RECOMPUTE</code> 决策；策略错了可能既没省多少显存，又把重算成本加上去。而且 SAC 通过 <code>context_fn</code> 实现，<code>context_fn</code> 仅在 <code>use_reentrant=False</code> 下支持（<code>checkpoint.py:550、674-675、1829</code>）。</li>
+    <li><strong>FSDP/DeepSpeed 的封装各有前提。</strong>FSDP 在重算时跳过 pre/post forward 的 unshard/reshard（<code>fsdp/_runtime_utils.py:373-380、468-471</code>）；DeepSpeed 的 <code>partition_activations</code> 依赖模型并行，<code>cpu_checkpointing</code> 则把激活挪到 CPU，换来 PCIe 传输。两者都不是“打开就变快”。</li>
+    <li><strong>最后一段和 early_stop 会让真实值偏离公式。</strong><code>checkpoint_sequential</code> 不 checkpoint 最后一段（<code>checkpoint.py:720-723、795-805</code>）；non-reentrant 的 <code>early_stop</code> 可能提前停止重算（<code>:1328-1331</code>）。本页的 <code>(s+k)·A</code> 是论文 Eq.1 的段模型，不是每个框架的精确记账。</li>
+    <li><strong>FlashAttention 已经在做一部分。</strong>笔记提到 FlashAttention 的反向会重算 attention 矩阵，而不是存下来；对同一段再套 full checkpoint 可能重复劳动。这一点论文没有讨论，使用前先确认框架的 attention 实现是否已经内置重算（<span class="infer">工程判断</span>，不是论文结论）。</li>
+    <li><strong>offload 是另一条路。</strong>PyTorch 有 <code>offload_wrapper</code>（<code>checkpoint_wrapper.py:106-109、174-193</code>），DeepSpeed 有 <code>cpu_checkpointing</code>（<code>config.py:42-43</code>）。它把激活放到 CPU，省 HBM 但吃 PCIe 带宽；和重算是正交的取舍，不是谁替代谁。</li>
+  </ul>
+
+  <div class="card">
+    <div class="card-head"><span class="pill pa">一句话</span><h4>checkpoint 是显存换时间，不是显存变魔术</h4></div>
+    <p>当激活是主瓶颈、前向可重复、算力还有余量时，它是把 O(L) 压到 O(√L) 的最直接手段。先算清楚 <code>(s+k)·A</code> 和 <code>1/(1+2)</code> 这两个数，再决定 <code>k</code> 取多少、要不要上 selective——不要先打开开关再找原因。</p>
+  </div>
+</section>
+
+<footer>
+  <div>Training Deep Nets with Sublinear Memory Cost · Tianqi Chen, Bing Xu, Chiyuan Zhang, Carlos Guestrin</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/1604.06174v2">arXiv 1604.06174v2</a><br>
+    源码：<a href="https://github.com/pytorch/pytorch/blob/2ee7a63/torch/utils/checkpoint.py">torch/utils/checkpoint.py @2ee7a63</a> ·
+    <a href="https://github.com/pytorch/pytorch/blob/2ee7a63/torch/distributed/algorithms/_checkpoint/checkpoint_wrapper.py">checkpoint_wrapper.py</a> ·
+    <a href="https://github.com/pytorch/pytorch/blob/2ee7a63/torch/distributed/fsdp/_runtime_utils.py">FSDP _runtime_utils.py</a> ·
+    <a href="https://github.com/deepspeedai/DeepSpeed/blob/f47dc3e/deepspeed/runtime/activation_checkpointing/checkpointing.py">DeepSpeed checkpointing.py @f47dc3e</a><br>
+    笔记：<a href="/activation-checkpointing/">Activation checkpointing</a>
+  </div>
+  <p class="errata" style="margin-top:16px"><strong>与笔记的差异（不改原笔记，只在本页说明）：</strong></p>
+  <ul class="errata">
+    <li>笔记说 full checkpointing 后“内存占用量与模型的层数基本无关”。论文 Eq.1 是 <code>O(n/k)+O(k)</code>，仍随层数亚线性增长；<code>k=√n</code> 时是 <code>O(√n)</code>，不是常数。</li>
+    <li>笔记写“通常增加 30–40%”，后文又写“30%–50% 甚至更高”。论文只报告了实测 30%（§5.4）；本页把论文的实测 30% 和按 §4.3 时间比例折算的 <code>1/(1+2)=33.3%</code>（本页估算）分开写。</li>
+    <li>笔记引用 GPT-3 175B “显存减少 70%、计算只增 2.7%”。这组数字来自笔记所引的 Determined AI 博客，本页没有在 1604.06174 中找到对应表格，因此不把它当作论文结果。</li>
+    <li>笔记说 full 策略“每个被 checkpoint 的段（除了最后一个）都会被重新计算一次”。“除了最后一个”是 <code>checkpoint_sequential</code> 的实现细节（最后一段不 checkpoint，源码 <code>checkpoint.py:720-723、795-805</code>），不是论文 Alg.1 的段模型；本页把两者分开写。</li>
+  </ul>
+  <p class="errata">本页以 arXiv 1604.06174v2 和 <code>pytorch@2ee7a63</code> 为准；交互是公式模型，不是实测。</p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('ac-sim');
+  if (!sim) return;
+
+  var Lrange = document.getElementById('ac-Lrange');
+  var Arange = document.getElementById('ac-Arange');
+  var krange = document.getElementById('ac-krange');
+  var Lv = document.getElementById('ac-Lv');
+  var Av = document.getElementById('ac-Av');
+  var kv = document.getElementById('ac-kv');
+  var memEl = document.getElementById('ac-mem');
+  var saveEl = document.getElementById('ac-save');
+  var fwdEl = document.getElementById('ac-fwd');
+  var totalEl = document.getElementById('ac-total');
+  var msg = document.getElementById('ac-msg');
+  var bar1 = document.getElementById('ac-b1');
+  var bar2 = document.getElementById('ac-b2');
+  var bar3 = document.getElementById('ac-b3');
+  var modes = document.getElementById('ac-modes');
+  if (!Lrange || !Arange || !krange || !Lv || !Av || !kv || !memEl || !saveEl || !fwdEl || !totalEl || !msg || !bar1 || !bar2 || !bar3 || !modes) return;
+
+  // 参考配置：b=1, seq=2048, h=4096, heads=32
+  var REF = {b: 1, s: 2048, h: 4096, a: 32};
+  var DROP_MEM = 5 * REF.b * REF.s * REF.s * REF.a;
+  var MLP_MEM = 19 * REF.b * REF.s * REF.h;
+  var LN_MEM = 4 * REF.b * REF.s * REF.h;
+  var TOTAL_MEM = 11 * REF.b * REF.s * REF.h + DROP_MEM + MLP_MEM + LN_MEM;
+  var M_SHARE = DROP_MEM / TOTAL_MEM;
+  var ATT_FLOP = 4 * REF.s * REF.s * REF.h;
+  var PROJ_FLOP = 8 * REF.s * REF.h * REF.h;
+  var MLP_FLOP = 16 * REF.s * REF.h * REF.h;
+  var F_SHARE = ATT_FLOP / (ATT_FLOP + PROJ_FLOP + MLP_FLOP);
+
+  var mode = 'full';
+
+  function fmtGB(mb) {
+    return (mb / 1000).toFixed(1);
+  }
+  function fmtMB1(mb) {
+    return mb.toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1});
+  }
+  function fmtPct(x) {
+    return (x * 100).toFixed(1);
+  }
+  function unitsFor(L, k, m) {
+    var s = Math.ceil(L / k);
+    if (m === 'none') return {units: L, s: s, checkpoints: 0, segment: 0, kept: L};
+    if (m === 'full') return {units: s + k, s: s, checkpoints: s, segment: k, kept: 0};
+    return {
+      units: L * (1 - M_SHARE) + (s + k) * M_SHARE,
+      s: s,
+      checkpoints: s * M_SHARE,
+      segment: k * M_SHARE,
+      kept: L * (1 - M_SHARE)
+    };
+  }
+  function render() {
+    var L = parseInt(Lrange.value, 10);
+    var A = parseInt(Arange.value, 10);
+    var k = Math.min(parseInt(krange.value, 10), L);
+    if (parseInt(krange.value, 10) > L) krange.value = String(L);
+    if (parseInt(krange.max, 10) !== L) krange.max = String(L);
+    Lv.textContent = String(L);
+    Av.textContent = String(A);
+    kv.textContent = String(k);
+
+    var u = unitsFor(L, k, mode);
+    var memMB = u.units * A;
+    var saved = 1 - u.units / L;
+    var forwardRatio;
+    var totalRatio;
+    if (mode === 'none') {
+      forwardRatio = 0;
+      totalRatio = 0;
+    } else if (mode === 'full') {
+      forwardRatio = 1;
+      totalRatio = 1 / 3;
+    } else {
+      forwardRatio = F_SHARE;
+      totalRatio = F_SHARE / 3;
+    }
+
+    memEl.textContent = fmtGB(memMB) + ' GB';
+    saveEl.textContent = fmtPct(saved) + '%';
+    fwdEl.textContent = fmtPct(forwardRatio) + '%';
+    totalEl.textContent = (mode === 'none' ? '' : '+') + fmtPct(totalRatio) + '%';
+
+    bar1.style.width = (u.checkpoints / L * 100).toFixed(2) + '%';
+    bar2.style.width = (u.segment / L * 100).toFixed(2) + '%';
+    bar3.style.width = (u.kept / L * 100).toFixed(2) + '%';
+
+    var unitsTxt = u.units.toFixed(6);
+    if (mode === 'none') {
+      msg.textContent = 'L=' + L + '，M=' + L + '×' + A + '=' + (L * A).toLocaleString('en-US') +
+        ' MB=' + fmtGB(memMB) + ' GB；没有重算，k 不起作用。';
+    } else if (mode === 'full') {
+      msg.textContent = 's=ceil(' + L + '/' + k + ')=' + u.s + '，M=(' + u.s + '+' + k + ')×' + A + '=' +
+        ((u.s + k) * A).toLocaleString('en-US') + ' MB=' + fmtGB(memMB) + ' GB；额外前向 ' + L +
+        ' 层=1 次，总算力 +' + fmtPct(totalRatio) + '%。';
+    } else {
+      msg.textContent = 's=ceil(' + L + '/' + k + ')=' + u.s + '，M=[' + L + '×(1−' + M_SHARE.toFixed(6) + ')+(' +
+        u.s + '+' + k + ')×' + M_SHARE.toFixed(6) + ']×' + A + '=' + unitsTxt + '×' + A + '=' +
+        fmtMB1(memMB) + ' MB=' + fmtGB(memMB) + ' GB；额外前向 ' +
+        fmtPct(forwardRatio) + '%（只重算 attention core），总算力 +' + fmtPct(totalRatio) + '%。';
+    }
+    if (saved <= 0 && mode !== 'none') {
+      var extra = u.units - L;
+      msg.textContent += ' 注意：当前 k 没有显存收益（论文计法比全存多 ' + extra.toFixed(2) + ' 个单位）；k 取 √L 附近才有意义。';
+    }
+  }
+
+  var btns = modes.querySelectorAll('.rule-btn');
+  for (var i = 0; i < btns.length; i++) {
+    (function (btn) {
+      btn.addEventListener('click', function () {
+        mode = btn.getAttribute('data-mode');
+        for (var j = 0; j < btns.length; j++) {
+          btns[j].classList.toggle('active', btns[j] === btn);
+        }
+        render();
+      });
+    })(btns[i]);
+  }
+  Lrange.addEventListener('input', render);
+  Arange.addEventListener('input', render);
+  krange.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,690 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 0.54 | Table 4 | 0.68-0.14 |
+| 4.86 | Table 4 | 0.68/0.14 |
+| 0.28 | Table 4 | 1.04-0.76 |
+| 1.37 | Table 4 | 1.04/0.76 |
+| 1.48 | Table 4 | 5.38-3.90 |
+| 1.38 | Table 4 | 5.38/3.90 |
+| 0.23 | Table 4 | 0.76-0.53 |
+| 0.12 | Table 4 | 3.90-3.78 |
+| 1920 | §04 手算 | 2048-128 |
+| 1024 | §04 手算 | 2048-1024 |
+| 1408 | §04 手算 | 2048-128-512 |
+| 9 | §04 手算 | (5000-392)/512 |
+| 10 | §04 手算 | (5000-392)/512+1 |
+| 392 | §04 手算 | 5000-9*512 |
+| 4 | §04 手算 | (5000-904)/1024 |
+| 5 | §04 手算 | (5000-904)/1024+1 |
+| 904 | §04 手算 | 5000-4*1024 |
+| 11.3 | §05 手算 | 1.13*10 |
+| 90.4 | §05 手算 | 11.3*8 |
+| 4.52 | §05 手算 | 1.13*4 |
+| 22.6 | §05 手算 | 4.52*5 |
+| 180.8 | §05 手算 | 22.6*8 |
+| 3.62 | §3.3 | 90.4/25 |
+| 11.30 | §3.3 | 90.4/800*100 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="vllm-e740bad / Sarathi-Serve 2403.02310v3 / DistServe 2401.09670v3 / Splitwise 2311.18677v2">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chunked Prefill 与 PD 分离 · 切片混批，还是拆开两个池</title>
+<meta name="description" content="从 prefill/decode 的资源差异讲到 chunked prefill 的 token budget、Sarathi-Serve 的 stall-free batching、DistServe/Splitwise 的 KV 传输与部署拓扑，并分开记录论文结论与 vLLM V1 的默认实现。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+blockquote{
+  border-left:3px solid var(--accent); background:var(--bg-surface);
+  border-radius:0 var(--radius) var(--radius) 0; padding:14px 18px;
+  margin:18px 0; color:var(--text-muted); font-size:14px;
+}
+blockquote p{margin:0 0 8px}
+blockquote p:last-child{margin-bottom:0}
+.quote-en{font-size:13px;line-height:1.75}
+.quote-src{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--text-soft)}
+p code, li code{overflow-wrap:anywhere}
+td code{overflow-wrap:break-word}
+.tbl-scroll table{min-width:640px}
+.knob-table{min-width:760px}
+.knob-table th:nth-child(1){width:230px}
+.knob-table th:nth-child(2){width:110px;white-space:nowrap}
+details.handcalc{margin-top:12px}
+.pd-box{fill:var(--bg-soft);stroke:var(--border-strong);stroke-width:1.2}
+.pd-a{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+.pd-b{fill:var(--c1-soft);stroke:var(--c1);stroke-width:1.4}
+.pd-c{fill:var(--c2-soft);stroke:var(--c2);stroke-width:1.4}
+.pd-t{font-family:"Inter","Noto Sans SC",sans-serif;font-size:12px;font-weight:600;fill:var(--text)}
+.pd-s{font-family:"Inter","Noto Sans SC",sans-serif;font-size:9.5px;fill:var(--text-muted)}
+.pd-h{font-family:"JetBrains Mono",monospace;font-size:10.5px;font-weight:600;fill:var(--text-muted)}
+.pd-l{stroke:var(--text-soft);stroke-width:1.3;fill:none}
+@media (max-width:560px){
+  .sim{padding:16px}
+  blockquote{padding:12px 14px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Chunked Prefill / PD</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#budget">预算与开销</a>
+      <a href="#flow">数据流</a>
+      <a href="#result">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>LLM Serving · Sarathi-Serve / DistServe / Splitwise · vLLM V1</span>
+  <h1>Chunked Prefill 与 PD 分离：切片混批，还是拆开两个池</h1>
+  <p class="hero-sub">
+    prefill 吃算力，decode 吃带宽。长 prompt 一旦混进 decode 批，尾延迟就被拉出尖峰。
+    <strong>chunked prefill</strong> 把 prompt 切片塞进 decode 的空档；<strong>PD 分离</strong> 则把两个阶段放到不同 GPU 池。
+    前者省掉 KV 传输，后者省掉相互干扰，代价各自不同。
+  </p>
+  <div class="meta">
+    <span>Sarathi-Serve v3 · DistServe v3 · Splitwise v2 · vLLM V1 commit e740bad</span>
+    <a href="https://arxiv.org/abs/2403.02310" target="_blank" rel="noopener">Sarathi-Serve v3 ↗</a>
+    <a href="https://arxiv.org/abs/2401.09670" target="_blank" rel="noopener">DistServe v3 ↗</a>
+    <a href="https://arxiv.org/abs/2311.18677" target="_blank" rel="noopener">Splitwise v2 ↗</a>
+    <a href="https://github.com/vllm-project/vllm/tree/e740bad" target="_blank" rel="noopener">vLLM @ e740bad ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>
+    两个阶段的资源曲线不同：prefill 一次并行处理整段 prompt，是 <strong>compute-bound</strong>；decode 每步每请求只处理 1 个 token，却要读权重与全部 KV，是 <strong>memory-bound</strong>。
+    把它们塞进同一个 batch，长 prefill 会把 decode 的迭代时间顶长 <span class="mono" data-src="Sarathi-Serve Figure 7">Figure 7</span>，尾延迟出现尖峰 <span class="mono" data-src="Sarathi-Serve Figure 1">Figure 1</span>。
+  </p>
+  <p>
+    chunked prefill 的关键不是「切片」本身，而是 <strong>token budget</strong>：每步先装 decode，再用剩余预算切 prefill。Sarathi-Serve 用预先选定的 token budget 做到 stall-free；vLLM V1 则是所有请求共享 <code>max_num_batched_tokens</code>，先跑 running、再跑 waiting，另有 <code>long_prefill_token_threshold</code> 等实现细节，<em>两者不能互相冒充</em>。
+  </p>
+  <p>
+    PD 分离用 KV 传输换掉相互干扰：prefill 池与 decode 池可以各自选 TP/PP，代价是 KV 必须过网络。DistServe 的算例是 512-token、OPT-66B 请求约 <strong>1.13 GB</strong> KV；10 req/s 就需要 11.3 GB/s，即 90 Gbps <span class="mono" data-src="DistServe §3.3">DistServe §3.3</span>。
+    vLLM 文档明确写着：disaggregated prefill <strong>不提升吞吐</strong> <span class="mono" data-src="docs/features/disagg_prefill.md:16">docs/features/disagg_prefill.md:16</span>，它是用来分别调 TTFT 与 ITL 的 <span class="mono" data-src="docs/features/disagg_prefill.md:12">docs/features/disagg_prefill.md:12</span>。
+  </p>
+  <div class="metrics">
+    <div class="metric">
+      <div class="v" data-src="Sarathi-Serve §1">2.6<small>×</small></div>
+      <div class="k">Sarathi-Serve 在 Mistral-7B、单 A100 上的 serving capacity，相对 vLLM；条件见 §5.1</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="DistServe §1">7.4<small>×</small></div>
+      <div class="k">DistServe 在 90% SLO 达成下的请求率上限，相对 DeepSpeed-MII 的 chatbot 基线（1.6–7.4×）；<span data-src="DistServe §6.2">12.6×</span> 是相对 vLLM 的 summarization/OPT-66B 结果</div>
+    </div>
+    <div class="metric">
+      <div class="v" data-src="源码 vllm/config/scheduler.py:41">2048</div>
+      <div class="k">max_num_batched_tokens 的代码默认值；真实服务由 EngineArgs 按 GPU 与 UsageContext 覆写</div>
+    </div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>长 prompt 的 prefill 一进批，decode 的尾延迟就失去上界</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么 prefill 与 decode 混批会互相伤害，以及为什么单纯加大 batch 不解决。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Prefill</span><h4>一次并行处理整段 prompt</h4></div>
+      <p>矩阵乘的 token 维度大，算术强度高，GPU 计算单元接近饱和。Sarathi-Serve 的测量显示，prefill 吞吐在序列长度约 512 token 时就已接近饱和 <span class="mono" data-src="Sarathi-Serve §4.1">§4.1</span>；继续加长 prompt 主要增加计算时间，而不是提高效率。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">Decode</span><h4>每步只前进一个 token</h4></div>
+      <p>每个请求每步只处理 1 个 token，但要读一遍模型权重和全部 KV。batch 增大能提高 decode 的 GPU 利用率 <span class="mono" data-src="Sarathi-Serve Figure 3">Figure 3</span>；但单条请求的算术强度很低，属于 memory-bound。</p>
+    </div>
+  </div>
+
+  <p>
+    这两条曲线放在一张 GPU 上就会冲突。Sarathi-Serve 的 Figure 1 记录了 Yi-34B 在两张 A100 上服务 128 条 arxiv 请求时持续数秒的 generation stall：vLLM 把 prefill 插在连续 decode 之间，decode 的 token 间隔被整段 prefill 拉长 <span class="mono" data-src="Sarathi-Serve Figure 1">Figure 1</span>。
+    Figure 7 把机制画得更清楚：vLLM 会尽量多排 prefill，再恢复 decode；Orca 虽然支持 hybrid batch，但一整段长 prefill 仍在一次迭代里执行，batch 时间依旧很长 <span class="mono" data-src="Sarathi-Serve Figure 7">Figure 7</span>。
+  </p>
+  <p>
+    Sarathi-Serve 量化的代价是：把完整 prefill 与 decode 混在一起，TBT 相比 decode-only batch 最多增加到 <strong>28.3 倍</strong>（Mistral-7B / 1×A100 / budget 256；LLaMA2-70B / 4×A100 / budget 512） <span class="mono" data-src="Sarathi-Serve Figure 9">Figure 9</span>。
+    DistServe 从另一个角度给出同样的结论：向 decode batch 里加入 prefill 会延长整批执行时间，prefill 越长越明显；向已经饱和的 prefill batch 里加入 decode 也会延长执行时间 <span class="mono" data-src="DistServe Figure 2">Figure 2</span>。
+  </p>
+
+  <p>
+    硬件趋势让问题更尖锐。Splitwise 的 Table I 对比 A100 与 H100：H100 的 TFLOPs 是 A100 的 <strong>3.43 倍</strong>，HBM 带宽只增加到 <strong>1.64 倍</strong>，HBM 容量仍是 <strong>1.00 倍</strong>，功耗是 <strong>1.75 倍</strong> <span class="mono" data-src="Splitwise Table I">Table I</span>。
+    decode 受带宽与容量约束，prefill 受算力约束；同一代 GPU 的缩放比例不同，于是「用不同硬件跑两个阶段」开始有吸引力。这正是 PD 分离的出发点。
+  </p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>已有方案在两个极端之间选边，长 prompt 把中间地带挤没了</h2></div>
+  <p class="sec-sub">读完这节你应该知道：prefill 优先、decode 优先、chunked prefill、PD 分离各自优化什么，又把代价留在哪里。</p>
+
+  <p><strong>表 1 · 四条路线的调度顺序与代价（本页整理，证据列在末列）</strong></p>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>路线</th><th>每一步先排什么</th><th>长 prompt 的影响</th><th>主要代价</th><th>代表与出处</th></tr></thead>
+      <tbody>
+        <tr><td>prefill 优先</td><td>尽量多排 prefill，再恢复 decode</td><td>长 prefill 占满一步，decode 被推迟</td><td>TBT 尾延迟出现尖峰</td><td>vLLM；Sarathi-Serve §2.5 / Figure 2</td></tr>
+        <tr><td>decode 优先</td><td>清空进行中的 decode，再排新 prefill</td><td>decode 稳定，但 prefill 等待</td><td>decode-only batch 小，吞吐低</td><td>FasterTransformer；Sarathi-Serve Figure 2</td></tr>
+        <tr><td>chunked prefill</td><td>decode + 一个或多个 prefill chunk</td><td>chunk 被 token budget 截断</td><td>chunk 开销；仍在同一池内竞争</td><td>Sarathi-Serve §4；vLLM V1 默认开启</td></tr>
+        <tr><td>PD 分离</td><td>prefill 池与 decode 池各自调度</td><td>两阶段互不干扰</td><td>KV 传输；池子碎片与额外资源</td><td>DistServe §1；Splitwise §IV</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    Sarathi-Serve 在 §2.5 把当时的调度器分成 prefill-prioritizing 与 decode-prioritizing 两类：前者优化吞吐但牺牲 TBT 尾延迟，后者保护 TBT 但 decode batch 小、吞吐上不去 <span class="mono" data-src="Sarathi-Serve §2.5">§2.5</span>。
+    Orca 的 iteration-level batching 已经能在一个 batch 里混合 prefill 和 decode，但它没有把长 prefill 切成受 token budget 约束的 chunk；只要 prompt 够长，这一批的执行时间仍然会被拉长，generation stall 没有被消除 <span class="mono" data-src="Sarathi-Serve §3.2">§3.2</span>。
+  </p>
+  <p>
+    chunked prefill 与 PD 分离是两条不同的补救路线。chunked prefill 保留单池，把长 prefill 拆成多步，用预算约束每一步的计算量；它不引入 KV 迁移，但 chunk 本身有开销，而且 decode 仍与 prefill 共享 GPU。PD 分离则把两个阶段放到不同 GPU，彻底消除同池干扰，并把「每个阶段用多少 GPU、用什么并行策略」变成独立变量；代价是每个请求的 KV 必须从 prefill 实例传到 decode 实例 <span class="mono" data-src="DistServe §1">§1</span>。
+  </p>
+  <p>
+    Splitwise 把这一思路扩展成三个机器池：prompt 池、token 池，以及随负载扩缩的 mixed 池；mixed 池里的机器仍保留原身份，空闲后再回到原来的池子 <span class="mono" data-src="Splitwise §IV-A">§IV-A</span>。
+    mixed 池用于降低 prompt 池与 token 池之间的碎片，并在负载升高时维持 SLO <span class="mono" data-src="Splitwise §IV-A">§IV-A</span>。
+  </p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Sarathi-Serve 先把 decode 装满，再用剩余预算切 prefill</h2></div>
+  <p class="sec-sub">读完这节你应该知道：stall-free batching 的顺序约束是什么，chunk 大小由谁决定，以及 vLLM V1 的共享预算与它差在哪里。</p>
+
+  <h3>3.1 Algorithm 3 的顺序：decode → 进行中的 chunk → 新请求</h3>
+  <p>
+    Sarathi-Serve 的调度器是 iteration-level 的。每个迭代先装入所有正在运行的 decode（Algorithm 3 lines 6–8），再装入任何尚未完成的 prefill chunk（lines 10–12），最后才在剩余 token budget 内接纳新请求（lines 13–20） <span class="mono" data-src="Sarathi-Serve Algorithm 3">Algorithm 3</span>。
+    关键在于：新 prefill 只能使用「decode 装完之后剩下的预算」，所以它不会把已经在跑的 decode 暂停或推迟到下一迭代。论文把这一点称为 stall-free batching。
+  </p>
+  <blockquote>
+    <p class="quote-en">“By restricting the computational load in every iteration, stall-free batching ensures that decodes never experience a generation stall due to a co-running prefill chunk.”</p>
+    <p class="quote-src">Sarathi-Serve §4.2</p>
+  </blockquote>
+
+  <p>把上述顺序写成简化式，每一步给 prefill 的空间是：</p>
+  <div class="eq">
+    <span class="hl-c">chunk<sub>t</sub></span> = min( <span class="hl-a">P<sub>left</sub></span>, <span class="hl-b">B − D<sub>t</sub></span> )
+  </div>
+  <p class="eq-cap">简化式，不是 Algorithm 3 的逐行还原。B 是每迭代 token budget，D<sub>t</sub> 是该步已装入的 decode token 数，P<sub>left</sub> 是尚未计算的 prompt token 数；论文还会把新请求和进行中的 chunk 一起装，最后一块通常短于前面的块。</p>
+
+  <p>
+    论文没有把 B 写死。B 由 TBT SLO、chunk 开销、tile quantization 和 pipeline bubble 共同决定，作者用 Vidur 做一次性 profiling，选「在不违反 TBT SLO 的前提下能装下的最大 token 数」<span class="mono" data-src="Sarathi-Serve §4.3">§4.3</span>。
+    评测里，宽松 SLO 用 2048，严格 SLO 用 512；LLaMA2-70B 的宽松配置用 1536 以减少 pipeline bubble <span class="mono" data-src="Sarathi-Serve §5.1">§5.1</span>。
+  </p>
+
+  <h3>3.2 vLLM V1 的实现：共享预算，不是 Sarathi 的 stall-free 证明</h3>
+  <p>
+    vLLM V1 的调度器没有独立的 prefill / decode 队列。每个请求只记 <code>num_computed_tokens</code> 与总 token 数，调度器每步把它「补齐」；所有请求共享一个 token budget。源码里 <code>token_budget = self.max_num_scheduled_tokens</code>、<code>input_budget = max_num_batched_tokens</code>，先遍历 running，再遍历 waiting <span class="mono" data-src="源码 vllm/v1/core/sched/scheduler.py:741">源码 vllm/v1/core/sched/scheduler.py:741</span>。
+  </p>
+  <p>每个 running 请求本步可拿到的 token 数，按下面的顺序被逐步截断：</p>
+  <div class="eq">
+    <code>num_new_tokens = num_tokens_with_spec + placeholders − num_computed_tokens</code><br>
+    <code>if 0 &lt; long_prefill_token_threshold &lt; num_new_tokens: num_new_tokens = threshold</code><br>
+    <code>num_new_tokens = min(num_new_tokens, token_budget, input_budget − draft_slots)</code>
+  </div>
+  <p class="eq-cap">源码 vllm/v1/core/sched/scheduler.py:861-870 的简化转录；随后还有 max_model_len、Mamba 块对齐、encoder 预算等截断，未全部列出。</p>
+  <p>
+    调度成功后，<code>num_scheduled_tokens[request_id] = num_new_tokens</code>，并从两个预算里扣减 <span class="mono" data-src="源码 vllm/v1/core/sched/scheduler.py:1023">源码 vllm/v1/core/sched/scheduler.py:1023</span>。
+    这一步的输出由 <code>SchedulerOutput.num_scheduled_tokens</code> 带到 worker <span class="mono" data-src="源码 vllm/v1/core/sched/output.py:250">源码 vllm/v1/core/sched/output.py:250</span>；请求的 <code>num_computed_tokens</code>、<code>num_output_tokens</code> 也在 <code>CachedRequestData</code> 里回传 <span class="mono" data-src="源码 vllm/v1/core/sched/output.py:157">源码 vllm/v1/core/sched/output.py:157</span>，<code>is_context_phase</code> 以 <code>num_output_tokens == 0</code> 判定 prefill 阶段 <span class="mono" data-src="源码 vllm/v1/core/sched/output.py:195">源码 vllm/v1/core/sched/output.py:195</span>。
+  </p>
+  <div class="card">
+    <div class="card-head"><span class="pill pa">论文</span><span class="pill p1">vLLM V1</span><h4>相同的「预算」词，不同的保证</h4></div>
+    <p><strong>Sarathi-Serve：</strong>token budget 是按 TBT SLO 预先选定的；调度顺序把 decode 放在最前，目标是让 co-running 的 prefill chunk 不造成 generation stall（§4.2–§4.3）。</p>
+    <p><strong>vLLM V1：</strong>预算默认由硬件与 UsageContext 选择，调度器仍先 running 后 waiting。公开调度参数里没有以毫秒为单位的 TBT 上限，尾延迟由 decode 优先、token budget 与 chunk cap 间接控制；KV 不足时会抢占并 RECOMPUTE <span class="mono" data-src="docs/configuration/optimization.md:47">docs/configuration/optimization.md:47</span>，prefix cache 会让 <code>num_computed_tokens</code> 先跳到命中块边界 <span class="mono" data-src="源码 vllm/v1/core/sched/scheduler.py:1262">源码 vllm/v1/core/sched/scheduler.py:1262</span>，Mamba 模型还要按块对齐切 chunk <span class="mono" data-src="源码 vllm/v1/core/sched/scheduler.py:883">源码 vllm/v1/core/sched/scheduler.py:883</span>。</p>
+    <p>因此，页面不把 vLLM 的 chunked prefill 写成 Sarathi-Serve 的复现：两者的共同点是「一步只算一段 token」，差别在预算怎么来、尾延迟有没有硬约束、以及是否允许抢占和 prefix-cache 跳转。</p>
+  </div>
+</section>
+
+<section class="block" id="budget">
+  <div class="sec-head"><span class="sec-num">04</span><h2>token budget 是延迟与吞吐的旋钮，chunk 越小开销越大</h2></div>
+  <p class="sec-sub">读完这节你应该知道：预算变小为什么改善 TBT、却增加额外开销，以及 vLLM 的三个相关开关各自做什么。</p>
+
+  <p>
+    预算 B 的两端很清楚：B 小，单步 prefill 少，decode 等待短，TBT 更好；但同样的 prompt 被切成更多块，每块都要重新读前面所有块的 KV，固定开销与 HBM 读放大。B 大，prefill 更快完成、TTFT 更好，但单步变长，decode 的尾延迟更容易被顶起来。
+    Sarathi-Serve 的 §4.3 用一个具体例子描述读放大：prompt 被切成 N 块，第一块的 KV 会被后续块读 N−1 次，第二块读 N−2 次，依此类推；不过即使 chunk 很小，attention prefill 仍是 compute-bound，额外开销主要来自 kernel launch 等固定成本 <span class="mono" data-src="Sarathi-Serve §4.3">§4.3</span>。
+  </p>
+  <p>
+    Figure 14 给出 Yi-34B 上的实测：chunk 512 时，prefill 计算开销最高约 <strong>25%</strong>；chunk 2048 时几乎可以忽略 <span class="mono" data-src="Sarathi-Serve Figure 14">Figure 14</span>。
+    还有 tile quantization：矩阵维度不整除 tile 时，部分 thread block 做无效计算；论文报告在某些情况下 chunk size 257 相比 256 可让 prefill 时间多 32% <span class="mono" data-src="Sarathi-Serve §4.3">§4.3</span>。Figure 14 的评测配置用的就是 512、1024、2048 这类 2 的幂。
+  </p>
+
+  <p><strong>表 2 · vLLM V1 中与 chunked prefill 直接相关的开关（commit e740bad）</strong></p>
+  <div class="tbl-scroll">
+    <table class="knob-table">
+      <thead><tr><th>开关</th><th>代码默认</th><th>行为与出处</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>enable_chunked_prefill</code></td>
+          <td><code>True</code></td>
+          <td>config 里的默认值；EngineArgs 在用户未显式设置时按 <code>model_config.is_chunked_prefill_supported</code> 决定。encoder-decoder 模型在 <code>__post_init__</code> 强制关闭 chunked prefill；同一段日志声明同时关闭 prefix caching。来源：<code>vllm/config/scheduler.py:147</code>、<code>vllm/engine/arg_utils.py:3078</code>、<code>vllm/config/scheduler.py:335</code>。</td>
+        </tr>
+        <tr>
+          <td><code>max_num_batched_tokens</code></td>
+          <td><code>2048</code></td>
+          <td>SchedulerConfig 的代码默认；EngineArgs 会按 GPU 显存与 UsageContext 覆写。API server 在默认档（含 A100 与 &lt;70 GiB）为 2048，H100/H200 档为 8192，≥160 GiB 档为 16384；offline LLM 类对应 8192 / 16384。throughput 模式还会在用户未设置时翻倍。来源：<code>vllm/config/scheduler.py:41</code>、<code>vllm/engine/arg_utils.py:3004</code>、<code>vllm/engine/arg_utils.py:3215</code>。</td>
+        </tr>
+        <tr>
+          <td><code>long_prefill_token_threshold</code></td>
+          <td><code>0</code></td>
+          <td>0 表示不设单请求 cap。非 0 时，若本步该请求的 <code>num_new_tokens</code> 超过它，就截到该值；仅当 chunked prefill 开启且运行中 + 等待中的请求数超过 1 时生效。请求是唯一一条时，阈值被忽略，因为它没有别人可饿。来源：<code>vllm/config/scheduler.py:91</code>、<code>vllm/v1/core/sched/scheduler.py:781</code>。</td>
+        </tr>
+        <tr>
+          <td><code>long_prefill_token_threshold_adaptive</code></td>
+          <td><code>False</code></td>
+          <td>开启后，把有效阈值抬到「max_num_batched_tokens / 可调度请求数」的公平份额，避免阈值把单个请求压到公平份额以下；仅在 threshold 非 0 时生效。来源：<code>vllm/config/scheduler.py:99</code>、<code>vllm/v1/core/sched/scheduler.py:786</code>。</td>
+        </tr>
+        <tr>
+          <td><code>max_num_scheduled_tokens</code></td>
+          <td><code>None</code></td>
+          <td>调度器单步最多发出的 token 数；默认等于 <code>max_num_batched_tokens</code>，speculative decoding 可能让它更小，以便给 draft token 留位置。来源：<code>vllm/config/scheduler.py:55</code>、<code>vllm/v1/core/sched/scheduler.py:139</code>。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    关闭 chunked prefill 有一个硬约束：代码在 <code>max_num_batched_tokens &lt; max_model_len</code> 时抛 <code>ValueError</code>，即禁止 max_num_batched_tokens 小于 max_model_len <span class="mono" data-src="vllm/config/scheduler.py:358">vllm/config/scheduler.py:358</span>；文档的措辞是 <code>must be greater than max_model_len</code>，并警告更小会在启动时崩溃 <span class="mono" data-src="docs/configuration/optimization.md:70">docs/configuration/optimization.md:70</span>。
+    默认开启的说明在 optimization 文档里写得很直接：V1 在模型支持时默认启用 chunked prefill，调度先排 decode，再用剩余预算排 prefill，装不下就自动切块 <span class="mono" data-src="docs/configuration/optimization.md:53">docs/configuration/optimization.md:53</span>。
+  </p>
+
+  <div class="sim" id="sim-budget">
+    <div class="sim-top">
+      <button class="rule-btn active" id="bf-reset" type="button">恢复手算算例 A<span class="r-sub">5000 / 128 / 2048 / 512</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl"><label for="bf-p">prompt tokens <span class="v" id="bf-pv">5000</span></label><input type="range" id="bf-p" min="512" max="16384" step="1" value="5000"></div>
+      <div class="ctrl"><label for="bf-d">decode tokens <span class="v" id="bf-dv">128</span></label><input type="range" id="bf-d" min="0" max="2048" step="64" value="128"></div>
+      <div class="ctrl"><label for="bf-b">token budget B <span class="v" id="bf-bv">2048</span></label><input type="range" id="bf-b" min="512" max="16384" step="512" value="2048"></div>
+      <div class="ctrl"><label for="bf-c">chunk cap C（0 = 不设） <span class="v" id="bf-cv">512</span></label><input type="range" id="bf-c" min="0" max="4096" step="1" value="512"></div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">decode</div><div class="slot-val" id="bf-dec">128</div><div class="bar"><i class="b2" id="bf-dec-bar"></i></div></div>
+      <div class="slot"><div class="slot-name">prefill chunk</div><div class="slot-val" id="bf-chunk">512</div><div class="bar"><i class="b1" id="bf-chunk-bar"></i></div></div>
+      <div class="slot"><div class="slot-name">剩余预算</div><div class="slot-val" id="bf-left">1408</div><div class="bar"><i class="b3" id="bf-left-bar"></i></div></div>
+    </div>
+    <div class="readout" data-src="Sarathi-Serve Algorithm 3" id="bf-out">
+      <div class="r-head">本步预算</div>
+      decode <strong>128</strong> tokens，prefill 每步 <strong>512</strong> tokens，预算 <strong>2048</strong>；prefill 需 <strong>10</strong> 步，最后一步 <strong>392</strong> tokens。
+    </div>
+    <p class="sub">5000/128/2048/512 为页面算例；B=2048/512 可对照 Sarathi-Serve §5.1。交互是简化模拟，不是源码还原。它只算「固定预算、单请求、无抢占」的静态切片；未覆盖 CUDA Graph、KV 传输、优先级调度、prefix cache、speculative decoding 与 DP 负载均衡。</p>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算对账 <span class="sum-sub">两组参数，同时覆盖 chunk 步数与 KV 带宽</span></summary>
+    <div class="details-body">
+      <p><strong>算例 A（§04 交互 + §05 交互）：</strong>chunk 侧取 P=5000、D=128、B=2048、C=512。剩余预算 <code>2048 − 128 = 1920</code>；每步 <code>min(512, 1920) = 512</code>；<code>5000 = 9 × 512 + 392</code>，所以 <code>10</code> 步，最后一步 <code>392</code> tokens。JS 在同参数下输出 chunk=512、steps=10、last=392。KV 侧取 P=512、R=10：<code>1.13 × 512 / 512 = 1.13 GB</code>，<code>1.13 × 10 = 11.3 GB/s</code>，<code>11.3 × 8 = 90.4 Gbps</code>；JS 输出 1.13、11.3、90.4。</p>
+      <p><strong>算例 B（§04 交互 + §05 交互）：</strong>chunk 侧取 P=5000、D=1024、B=2048、C=1024。剩余预算 <code>2048 − 1024 = 1024</code>；每步 <code>min(1024, 1024) = 1024</code>；<code>5000 = 4 × 1024 + 904</code>，所以 <code>5</code> 步，最后一步 <code>904</code> tokens。JS 输出 chunk=1024、steps=5、last=904。KV 侧取 P=2048、R=5：<code>1.13 × 2048 / 512 = 4.52 GB</code>，<code>4.52 × 5 = 22.6 GB/s</code>，<code>22.6 × 8 = 180.8 Gbps</code>；JS 输出 4.52、22.6、180.8。</p>
+      <p><strong>未覆盖分支：</strong>§04 模拟不建模 KV 不足时的抢占、Mamba 块对齐、encoder 输入预算、<code>max_num_scheduled_tokens</code> 与 <code>max_num_batched_tokens</code> 的差异，也不建模 CUDA Graph、prefix cache 命中、speculative decoding、优先级调度和 DP prefill balancing。§05 模拟假设 KV 随 token 数线性、请求率恒定；不建模分块/分层传输、压缩、量化、链路竞争、connector 协议开销与排队。</p>
+    </div>
+  </details>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>混批把两种 token 塞进同一步，PD 分离把 KV 推过网络</h2></div>
+  <p class="sec-sub">读完这节你应该知道：混批一步里到底装了什么，PD 分离的 KV 传输门槛有多大，以及部署拓扑为什么必须围着带宽设计。</p>
+
+  <p>
+    同池混批的一步可以用一句话概括：<code>decode tokens + prefill chunk ≤ token budget</code>。decode 部分每请求只贡献 1 个 token（speculative decoding 下更多），prefill 部分贡献一个 chunk；两者的和不能超过预算。chunk 装不下就留到下一步，prompt 因此被摊到多个迭代里完成。
+    PD 分离则把这一步拆开：prefill 实例只做 prefill，生成首 token 和 KV；decode 实例接着做自回归生成。两个实例之间没有共享的 batch，也就不存在「prefill 把 decode 顶慢」的问题，但 KV 必须跨实例搬运。
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 860 420" role="img" aria-label="同池混批与 PD 分离的数据流对比">
+      <defs>
+        <marker id="pdArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" style="fill:var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <text x="0" y="18" class="pd-h">① 同池混批：一步 = decode + prefill chunk</text>
+      <rect x="0" y="32" width="250" height="78" rx="10" class="pd-a"></rect>
+      <text x="125" y="57" text-anchor="middle" class="pd-t">Decode 请求</text>
+      <text x="125" y="74" text-anchor="middle" class="pd-s">d 条请求 × 1 token</text>
+      <text x="125" y="91" text-anchor="middle" class="pd-s">占 d 个 token 预算</text>
+
+      <line x1="258" y1="71" x2="292" y2="71" class="pd-l" marker-end="url(#pdArrow)"></line>
+
+      <rect x="300" y="32" width="260" height="78" rx="10" class="pd-b"></rect>
+      <text x="430" y="57" text-anchor="middle" class="pd-t">Prefill chunk</text>
+      <text x="430" y="74" text-anchor="middle" class="pd-s">≤ B − d tokens</text>
+      <text x="430" y="91" text-anchor="middle" class="pd-s">compute-bound</text>
+
+      <line x1="568" y1="71" x2="602" y2="71" class="pd-l" marker-end="url(#pdArrow)"></line>
+
+      <rect x="610" y="32" width="250" height="78" rx="10" class="pd-box"></rect>
+      <text x="735" y="57" text-anchor="middle" class="pd-t">下一步继续</text>
+      <text x="735" y="74" text-anchor="middle" class="pd-s">直到 prompt 完成</text>
+      <text x="735" y="91" text-anchor="middle" class="pd-s">budget 每步重置</text>
+
+      <text x="0" y="155" class="pd-h">② PD 分离：KV 从 prefill 实例推到 decode 实例</text>
+
+      <rect x="0" y="170" width="230" height="96" rx="10" class="pd-a"></rect>
+      <text x="115" y="196" text-anchor="middle" class="pd-t">Prefill pool</text>
+      <text x="115" y="214" text-anchor="middle" class="pd-s">整段或 chunked prefill</text>
+      <text x="115" y="231" text-anchor="middle" class="pd-s">生成首 token + KV</text>
+      <text x="115" y="248" text-anchor="middle" class="pd-s">TP / PP 可单独选</text>
+
+      <line x1="238" y1="218" x2="300" y2="218" class="pd-l" marker-end="url(#pdArrow)"></line>
+      <text x="269" y="205" text-anchor="middle" class="pd-s">KV cache</text>
+      <text x="269" y="240" text-anchor="middle" class="pd-s">connector</text>
+
+      <rect x="310" y="170" width="220" height="96" rx="10" class="pd-c"></rect>
+      <text x="420" y="196" text-anchor="middle" class="pd-t">KV transfer</text>
+      <text x="420" y="214" text-anchor="middle" class="pd-s">NIXL / Mooncake / LMCache</text>
+      <text x="420" y="231" text-anchor="middle" class="pd-s">按层或按块传输</text>
+      <text x="420" y="248" text-anchor="middle" class="pd-s">带宽决定放哪里</text>
+
+      <line x1="538" y1="218" x2="600" y2="218" class="pd-l" marker-end="url(#pdArrow)"></line>
+
+      <rect x="610" y="170" width="250" height="96" rx="10" class="pd-b"></rect>
+      <text x="735" y="196" text-anchor="middle" class="pd-t">Decode pool</text>
+      <text x="735" y="214" text-anchor="middle" class="pd-s">continuous batching</text>
+      <text x="735" y="231" text-anchor="middle" class="pd-s">按 token 自回归生成</text>
+      <text x="735" y="248" text-anchor="middle" class="pd-s">TP / PP 另一套配置</text>
+
+      <rect x="0" y="300" width="860" height="100" rx="10" class="pd-box"></rect>
+      <text x="18" y="326" class="pd-t">放置决定传输走哪条路</text>
+      <text x="18" y="348" class="pd-s">同节点：NVLink（A100 峰值 600 GB/s）；跨节点：InfiniBand（论文举例 800 Gbps）；DistServe 测试床跨节点只有 25 Gbps</text>
+      <text x="18" y="368" class="pd-s">Splitwise 另设 prompt pool / token pool / mixed pool；mixed pool 随负载扩缩，降低两池碎片</text>
+      <text x="18" y="388" class="pd-s">DistServe Table 3：OPT-66B 的 prefill 用 TP4/PP1，decode 用 TP2/PP2，两个阶段独立选并行策略</text>
+    </svg>
+    <figcaption>图 1 · 上：同池混批把 decode token 与 prefill chunk 装进同一步；下：PD 分离把两阶段拆到不同实例，KV 经 connector 传输。图中数值与拓扑来自 Sarathi-Serve §4.2、DistServe §3.3/§6.1/Table 3、Splitwise §IV-A。</figcaption>
+  </figure>
+
+  <p>
+    DistServe 的测试床是 4 个节点、32 张 A100-80GB，节点内 NVLink，跨节点带宽只有 25 Gbps <span class="mono" data-src="DistServe §6.1">§6.1</span>。
+    在这个约束下，它采用低节点亲和的放置算法，尽量让配对的 prefill / decode 实例落在同一节点内，让 KV 走 NVLink；只有当跨节点带宽足够时，才把两阶段随意放到不同节点 <span class="mono" data-src="DistServe §4.2">§4.2</span>。
+    这不是实现细节，而是 PD 分离能否成立的前提：KV 传输不是免费的，拓扑必须围着带宽设计。
+  </p>
+  <p>
+    DistServe 给出的 KV 账本很具体：OPT-66B 上一条 512-token 请求的 KV 约 <strong>1.13 GB</strong>；若平均到达率 10 req/s，需要搬运 <strong>11.3 GB/s</strong>，等价于 <strong>90 Gbps</strong> <span class="mono" data-src="DistServe §3.3">§3.3</span>。
+    90.4 Gbps 是测试床 25 Gbps 跨节点链路的 <strong>3.62 倍</strong>，但只占论文举例的 800 Gbps InfiniBand 的 <strong>11.3%</strong>；A100 节点内 NVLink 峰值 600 GB/s。三个数字对应三种放置：跨节点低带宽、跨节点高带宽、同节点。
+    也正因如此，OPT-175B 的延迟拆分里，KV 传输只占总延迟的 <strong>不到 0.1%</strong> <span class="mono" data-src="DistServe §6.3">§6.3</span>；在 Figure 10(b) 三个 OPT 模型的 CDF 中，<strong>95%</strong> 以上的请求传输延迟低于 <strong>30 ms</strong> <span class="mono" data-src="DistServe Figure 10">Figure 10</span>——前提是放置算法把传输留在 NVLink 上。
+  </p>
+  <p>
+    DistServe 的另一半是「每个阶段独立选并行策略」。Table 3 里，OPT-66B 的 prefill 用 TP4/PP1，decode 用 TP2/PP2；OPT-175B 的 prefill 用 TP3/PP3，decode 用 TP4/PP3 <span class="mono" data-src="DistServe Table 3">Table 3</span>。
+    同池部署做不到这一点：一套 TP/PP 同时服务两个阶段，prefill 需要的算力并行与 decode 需要的带宽/容量并行被绑在一起。
+  </p>
+  <p>
+    vLLM 的 PD 分离走的是另一条工程路线：起两个 vLLM 实例，一个 prefill、一个 decode，用 connector 把 prefill 实例的 KV cache 与结果传到 decode 实例 <span class="mono" data-src="docs/features/disagg_prefill.md:90">docs/features/disagg_prefill.md:90</span>。
+    文档列出 NixlConnector、MooncakeConnector、LMCacheConnectorV1、OffloadingConnector 等多种 connector <span class="mono" data-src="docs/features/disagg_prefill.md:20">docs/features/disagg_prefill.md:20</span>；scheduler 进程里的 connector 负责调度传输 <span class="mono" data-src="docs/features/disagg_prefill.md:115">docs/features/disagg_prefill.md:115</span>，worker 进程里的 connector 负责执行 <span class="mono" data-src="docs/features/disagg_prefill.md:116">docs/features/disagg_prefill.md:116</span>。
+    但文档同时把话说死：该特性是 experimental <span class="mono" data-src="docs/features/disagg_prefill.md:6">docs/features/disagg_prefill.md:6</span>，且 <strong>disaggregated prefill 不提升吞吐</strong> <span class="mono" data-src="docs/features/disagg_prefill.md:16">docs/features/disagg_prefill.md:16</span>；它的用途是分别调 TTFT 与 ITL <span class="mono" data-src="docs/features/disagg_prefill.md:12">docs/features/disagg_prefill.md:12</span>、控制尾 ITL <span class="mono" data-src="docs/features/disagg_prefill.md:13">docs/features/disagg_prefill.md:13</span>。
+  </p>
+
+  <div class="sim" id="sim-kv">
+    <div class="sim-top">
+      <button class="rule-btn active" id="kv-reset" type="button">恢复手算算例 A<span class="r-sub">512 tokens / 10 req/s</span></button>
+    </div>
+    <div class="controls">
+      <div class="ctrl"><label for="kv-p">prompt tokens <span class="v" id="kv-pv">512</span></label><input type="range" id="kv-p" min="128" max="8192" step="128" value="512"></div>
+      <div class="ctrl"><label for="kv-r">请求率 req/s <span class="v" id="kv-rv">10.0</span></label><input type="range" id="kv-r" min="0.5" max="20" step="0.5" value="10"></div>
+    </div>
+    <div class="slots s3">
+      <div class="slot"><div class="slot-name">KV 大小</div><div class="slot-val" id="kv-size">1.13 GB</div><div class="bar"><i class="b1" id="kv-size-bar"></i></div></div>
+      <div class="slot"><div class="slot-name">所需带宽</div><div class="slot-val" id="kv-bw">11.3 GB/s</div><div class="bar"><i class="b2" id="kv-bw-bar"></i></div></div>
+      <div class="slot"><div class="slot-name">折合 Gbps</div><div class="slot-val" id="kv-gbps">90.4</div><div class="bar"><i class="b3" id="kv-gbps-bar"></i></div></div>
+    </div>
+    <div class="readout" data-src="DistServe §3.3" id="kv-out">
+      <div class="r-head">KV 传输账本</div>
+      512 tokens → <strong>1.13 GB</strong> KV；10.0 req/s → <strong>11.3 GB/s</strong> = <strong>90.4 Gbps</strong>。
+    </div>
+    <p class="sub">按 DistServe §3.3 的 OPT-66B / 512-token 算例做线性外推：1.13 GB × (tokens / 512)，再乘请求率。简化模拟，不是源码还原；未覆盖 KV 压缩、分块/分层传输、链路竞争与 connector 协议开销。</p>
+  </div>
+</section>
+
+<section class="block" id="result">
+  <div class="sec-head"><span class="sec-num">06</span><h2>切片把 P99 TBT 压下来，代价是 TTFT 与额外算力</h2></div>
+  <p class="sec-sub">读完这节你应该知道：Sarathi-Serve 的消融表怎么读，容量收益的条件是什么，以及 DistServe/Splitwise 的数字为什么不能直接横向比较。</p>
+
+  <p>
+    Sarathi-Serve 的 Table 4 把 hybrid batching 与 chunked prefills 分开做消融：128 条请求、Yi-34B、两张 A100、token budget 1024 <span class="mono" data-src="Sarathi-Serve Table 4">Table 4</span>。
+    表里 openchat_sharegpt4 与 arxiv_summarization 两个数据集各有 P50 TTFT、P99 TBT 两列，共 4 个数值列。
+  </p>
+  <p><strong>Table 4 · hybrid batching 与 chunked prefills 的消融（单位：秒；条件见上）</strong></p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Scheduler</th><th>openchat P50 TTFT</th><th>openchat P99 TBT</th><th>arxiv P50 TTFT</th><th>arxiv P99 TBT</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>hybrid-batching-only</td><td class="num">0.53</td><td class="num">0.68</td><td class="num">3.78</td><td class="num">1.38</td></tr>
+        <tr><td>chunked-prefills-only</td><td class="num">1.04</td><td class="num">0.17</td><td class="num">5.38</td><td class="num">0.20</td></tr>
+        <tr class="best"><td>Sarathi-Serve (combined)</td><td class="num">0.76</td><td class="num">0.14</td><td class="num">3.90</td><td class="num">0.17</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>
+    先看 TBT。combined 相比 hybrid-only，openchat 的 P99 TBT 从 0.68 s 降到 0.14 s，低 <strong>0.54 s</strong>，为前者的 <strong>1/4.86</strong>（约 4.86 倍加速）；arxiv 从 1.38 s 降到 0.17 s。这正是 stall-free 的目标：长 prefill 被切碎，decode 不再被整段 prefill 卡住。
+  </p>
+  <p>
+    再看 TTFT。combined 相比 chunked-only，openchat 的 P50 TTFT 从 1.04 s 降到 0.76 s，低 <strong>0.28 s</strong>，为前者的 <strong>1/1.37</strong>；arxiv 从 5.38 s 降到 3.90 s，低 <strong>1.48 s</strong>，为前者的 <strong>1/1.38</strong>。
+    但 combined 的 TTFT 并不优于 hybrid-only：openchat 是 0.76 s 对 0.53 s，高 <strong>0.23 s</strong>；arxiv 是 3.90 s 对 3.78 s，高 <strong>0.12 s</strong>。切片让首 token 更晚，这是 chunked prefill 的代价，不是免费的收益。
+  </p>
+  <p>
+    容量收益也都有条件。Sarathi-Serve 在 Mistral-7B / 单 A100 上相对 vLLM 达到 <strong>2.6 倍</strong> serving capacity；Yi-34B / 两张 A100 上最高 <strong>3.7 倍</strong>；Falcon-180B 在 pipeline parallelism 下端到端最高 <strong>5.6 倍</strong> <span class="mono" data-src="Sarathi-Serve §1">§1</span>。
+    在严格 SLO（Mistral-7B，100 ms）下用 token budget 512，容量是 vLLM 的 <strong>3.5 倍</strong>；在宽松 SLO（Yi-34B，1 s）下用 2048，是 <strong>1.65 倍</strong> <span class="mono" data-src="Sarathi-Serve §5.2">§5.2</span>。
+    这些数字对应不同模型、GPU 和 SLO，不能把「2.6 倍」当成通用常数。
+  </p>
+  <p>
+    PD 分离的数字来自另一套指标。DistServe 在 90% SLO 达成下，相对 DeepSpeed-MII 的 chatbot 基线（1.6–7.4×）可服务 <strong>7.4 倍</strong>更多请求；相对 vLLM 的 summarization/OPT-66B 结果，可承受 <strong>12.6 倍</strong>更紧的 SLO <span class="mono" data-src="DistServe §6.2">§6.2</span>。
+    Splitwise 的集群设计则报告：相比现有设计，吞吐高 <strong>1.4 倍</strong>且成本低 <strong>20%</strong>；或者在相同功耗与成本下吞吐高 <strong>2.35 倍</strong> <span class="mono" data-src="Splitwise §1">§1</span>。
+    这些是不同论文、不同基线、不同 SLO 定义下的结果；把它们与 Sarathi 的「2.6 倍」并列可以看趋势，不能当成同一张排行榜。
+  </p>
+  <p>
+    一个反直觉的点：vLLM 的 disaggregated prefill 实现并不提升吞吐。vLLM 文档明确写「Disaggregated prefill DOES NOT improve throughput」<span class="mono" data-src="docs/features/disagg_prefill.md:16">docs/features/disagg_prefill.md:16</span>，它优化的是 TTFT/ITL 的独立调节 <span class="mono" data-src="docs/features/disagg_prefill.md:12">docs/features/disagg_prefill.md:12</span>与尾 ITL 的控制 <span class="mono" data-src="docs/features/disagg_prefill.md:13">docs/features/disagg_prefill.md:13</span>。
+    DistServe 的 7.4 倍是「在同样的 TTFT/TPOT SLO 下，每 GPU 能服务的请求率」，不是单卡 token/s 的裸吞吐。把 goodput 与 throughput 混为一谈，会读错这一类结果。
+  </p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>什么时候别用：预算、缓存、带宽三本账</h2></div>
+  <p class="sec-sub">读完这节你应该知道：chunked prefill 与 prefix caching 如何相互影响，PD 分离的传输开销什么时候会吞掉收益，以及哪些 vLLM 默认值不能直接套。</p>
+
+  <div class="three-col">
+    <div class="card">
+      <div class="card-head"><span class="pill pa">chunk 开销</span></div>
+      <h4>块越碎，额外算力越多</h4>
+      <p>chunk 512 时 Yi-34B 的 prefill 开销最高约 25%，chunk 2048 时接近可忽略 <span class="mono" data-src="Sarathi-Serve Figure 14">Figure 14</span>；chunk 257 相比 256 可多 32% 的 prefill 时间 <span class="mono" data-src="Sarathi-Serve §4.3">§4.3</span>。若 SLO 不紧，没必要把预算压得很小。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p1">prefix cache</span></div>
+      <h4>命中前缀会改变「长 prompt」的定义</h4>
+      <p>prefix cache 只缓存完整块 <span class="mono" data-src="docs/design/prefix_caching.md:22">docs/design/prefix_caching.md:22</span>。调度器先把 <code>num_computed_tokens</code> 推到命中前缀的块边界，chunked prefill 再对剩余 token 切片；同一个 prompt 在冷缓存与热缓存下的 chunk 数不同。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PD 带宽</span></div>
+      <h4>KV 传输有硬门槛</h4>
+      <p>512-token / OPT-66B 约 1.13 GB；10 req/s 就要 90 Gbps <span class="mono" data-src="DistServe §3.3">§3.3</span>。跨节点只有 25 Gbps 时，必须把配对的 prefill/decode 放到同节点走 NVLink，否则传输会成为瓶颈。</p>
+    </div>
+  </div>
+
+  <h3>7.1 chunked prefill 与 prefix caching 的相互影响</h3>
+  <p>
+    两者共享 <code>num_computed_tokens</code> 这个进度变量。prefix cache 命中后，调度器从命中前缀的末尾开始补 token；chunked prefill 只对「尚未计算的后缀」切片，所以一个看起来很长的 prompt，在热缓存下可能只剩很短的 prefill。反过来，冷缓存下同一 prompt 会被切成更多块，TTFT 更晚、chunk 开销更高。
+  </p>
+  <p>
+    由于 vLLM 只缓存完整块 <span class="mono" data-src="docs/design/prefix_caching.md:22">docs/design/prefix_caching.md:22</span>，chunk 边界未落在块边界时，该 chunk 末尾不足一块的部分不会进入 prefix cache；它要等块被填满后才能被后续请求复用。chunk 切得越碎，可复用的粒度越受限，这是 chunked prefill 与 prefix cache 之间的一个结构性摩擦 <span class="infer">推断</span>（依据：prefix cache 的「只缓存完整块」规则与 chunk 的任意 token 边界）。这不影响输出正确性，但会影响多轮对话、共享 system prompt 这类前缀复用场景的收益。
+  </p>
+  <p>
+    还有一层：prefix cache 命中会让 <code>long_prefill_token_threshold</code> 更容易「不触发」。阈值比较的是本步 <code>num_new_tokens</code>，而 cache 命中已经把可计算 token 数减小；原本会被 cap 的长 prompt，热缓存下可能一次就补完 <span class="mono" data-src="源码 vllm/v1/core/sched/scheduler.py:866">源码 vllm/v1/core/sched/scheduler.py:866</span> <span class="infer">推断</span>（依据：阈值比较的是本步 <code>num_new_tokens</code>，prefix cache 命中会先减小它）。调阈值时要把缓存命中率一起看，不能只看 prompt 长度。
+  </p>
+
+  <h3>7.2 PD 分离的传输与部署边界</h3>
+  <p>
+    OPT-175B 的延迟拆分里 KV 传输只占不到 0.1% 总延迟 <span class="mono" data-src="DistServe §6.3">§6.3</span>；Figure 10(b) 三个 OPT 模型的 CDF 中，95% 以上的请求低于 30 ms <span class="mono" data-src="DistServe Figure 10">Figure 10</span>；但这个结果依赖「同节点 NVLink」的放置。跨节点带宽只有 25 Gbps 的测试床上，10 req/s 的 1.13 GB/请求对应 90 Gbps，已经超过链路容量。DistServe 因此把放置算法作为系统的一部分，而不是部署后的调优项 <span class="mono" data-src="DistServe §4.2">§4.2</span>。
+  </p>
+  <p>
+    PD 分离还有资源账。Sarathi-Serve 在相关工作里指出：分离需要把每个请求的 KV 从 prefill 迁到 decode，缺少高带宽互联时会很困难；同时 prefill 副本的 GPU 显存容量没有被充分利用，因为只有 decode 副本负责长期保存 KV <span class="mono" data-src="Sarathi-Serve §6">§6</span>。
+    Splitwise 用 mixed pool 缓解池子碎片，但 mixed 池使用 mixed continuous batching <span class="mono" data-src="Splitwise §IV-A">§IV-A</span>，原本 prompt 池与 token 池之间的隔离在这个池内不再成立 <span class="infer">推断</span>（依据：mixed 池把 prompt 与 token 任务放进同一 continuous batch）。
+  </p>
+  <p>
+    长上下文会同时放大两边：KV 大小随 prompt 线性增长，prefill 计算随 prompt 平方增长。DistServe 在讨论长上下文时认为，传输的相对占比会因 prefill 计算增长更快而下降，但绝对传输量仍在上升；分离在长上下文下依然有价值，前提仍是带宽与放置 <span class="mono" data-src="DistServe §7">§7</span>。
+  </p>
+  <p>
+    DistServe 的 §7 还划了两条边界：离线、吞吐优先的场景，chunked-prefill 这类同池方案可能更合适；只有少量 GPU 的资源受限场景，分离架构的搜索空间很小，非分离系统更简单 <span class="mono" data-src="DistServe §7">§7</span>。这是适用范围的问题：DistServe 优化的是 goodput，不是所有场景的默认答案；离线吞吐优先或资源受限时，同池方案仍然更合适。
+  </p>
+
+  <h3>7.3 vLLM 默认值不是通用答案</h3>
+  <p>
+    <code>max_num_batched_tokens</code> 的 2048 只是 SchedulerConfig 的代码默认；真实服务由 EngineArgs 按 GPU 与 UsageContext 覆写：A100 80GB 的 API server 落在 2048 档，H100/H200 的 API server 是 8192，≥160 GiB 的 GPU 是 16384；offline LLM 类则分别是 8192 / 16384 <span class="mono" data-src="vllm/engine/arg_utils.py:3004">vllm/engine/arg_utils.py:3004</span>。
+    所以「vLLM 默认 2048」只在特定硬件与使用方式下成立，不能当成所有部署的默认。
+  </p>
+  <p>
+    <code>enable_chunked_prefill</code> 的 <code>True</code> 也不是无条件：EngineArgs 在用户未设置时按模型是否支持来决定，encoder-decoder 模型会被强制关闭 <span class="mono" data-src="vllm/config/scheduler.py:335">vllm/config/scheduler.py:335</span>；关闭后还必须满足 <code>max_num_batched_tokens ≥ max_model_len</code> <span class="mono" data-src="vllm/config/scheduler.py:358">vllm/config/scheduler.py:358</span>。
+    <code>long_prefill_token_threshold</code> 默认 0（不设 cap），且只在「chunked prefill 开启 + 不止一条可调度请求」时生效；单请求场景下它被忽略 <span class="mono" data-src="vllm/v1/core/sched/scheduler.py:781">vllm/v1/core/sched/scheduler.py:781</span>。
+  </p>
+  <p>
+    选择上可以按三本账判断：如果只有一个 GPU 池、SLO 主要卡 TBT、prompt 长但还能接受额外算力，chunked prefill 是低改造成本的选择；如果 TTFT 与 TPOT 需要分别调、集群有高带宽互联、流量足以填满两个池，PD 分离能把干扰与并行策略解耦；如果跨节点带宽有限又无法同节点配对，PD 的 KV 传输会先成为瓶颈，此时不要把 DistServe 的 0.1% 当成自己集群的预期。
+  </p>
+  <p>
+    最后一句话留给口径：Sarathi-Serve 的 2.6/3.7/5.6 倍是「serving capacity」，DistServe 的 7.4 倍是「90% SLO 下的请求率」，Splitwise 的 1.4/2.35 倍是「集群吞吐或同功耗吞吐」；vLLM 的 2048 是「代码默认值」。这些数字回答的是不同问题，页面把它们分开放，就是为了避免互相冒充。
+  </p>
+</section>
+
+<footer>
+  <div>Chunked Prefill / Sarathi-Serve · DistServe · Splitwise · vLLM V1 Scheduler</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2403.02310">Sarathi-Serve (arXiv:2403.02310v3)</a> ·
+    <a href="https://arxiv.org/abs/2401.09670">DistServe (arXiv:2401.09670v3)</a> ·
+    <a href="https://arxiv.org/abs/2311.18677">Splitwise (arXiv:2311.18677v2)</a><br>
+    代码：<a href="https://github.com/vllm-project/vllm/tree/e740bad">vLLM @ e740bad</a> ·
+    <a href="https://docs.vllm.ai/en/latest/configuration/optimization.html#chunked-prefill">Chunked Prefill 文档</a> ·
+    <a href="https://docs.vllm.ai/en/latest/features/disagg_prefill.html">Disaggregated Prefilling 文档</a><br>
+    笔记：<a href="/一些参数/">一些参数（vLLM 参数与 PD 分离）</a>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var p = document.getElementById('bf-p');
+  var d = document.getElementById('bf-d');
+  var b = document.getElementById('bf-b');
+  var c = document.getElementById('bf-c');
+  if (!p || !d || !b || !c) return;
+
+  var out = document.getElementById('bf-out');
+  var pv = document.getElementById('bf-pv');
+  var dv = document.getElementById('bf-dv');
+  var bv = document.getElementById('bf-bv');
+  var cv = document.getElementById('bf-cv');
+  var decEl = document.getElementById('bf-dec');
+  var chunkEl = document.getElementById('bf-chunk');
+  var leftEl = document.getElementById('bf-left');
+  var reset = document.getElementById('bf-reset');
+
+  function num(el) { return parseInt(el.value, 10); }
+  function setText(el, v) { if (el) el.textContent = String(v); }
+  function setBar(id, value, total) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var pct = total > 0 ? Math.max(0, Math.min(100, value / total * 100)) : 0;
+    el.style.width = pct + '%';
+  }
+
+  function render() {
+    var P = num(p), D = num(d), B = num(b), C = num(c);
+    setText(pv, P); setText(dv, D); setText(bv, B); setText(cv, C);
+
+    if (D >= B) {
+      setText(decEl, D); setText(chunkEl, 0); setText(leftEl, 0);
+      setBar('bf-dec-bar', D, D); setBar('bf-chunk-bar', 0, 1); setBar('bf-left-bar', 0, 1);
+      if (out) {
+        out.innerHTML = 'decode 已占满 <strong>' + B + '</strong> 的预算；本步不排 prefill。' +
+          '把 decode tokens 调小，或把 token budget 调大，才能给 prefill 留出空间。';
+      }
+      return;
+    }
+
+    var avail = B - D;
+    var cap = C > 0 ? C : P;
+    var per = Math.min(cap, avail, P);
+    var steps = per > 0 ? Math.ceil(P / per) : 0;
+    var last = steps > 0 ? P - (steps - 1) * per : 0;
+    var left = B - D - per;
+
+    setText(decEl, D); setText(chunkEl, per); setText(leftEl, left);
+    setBar('bf-dec-bar', D, B); setBar('bf-chunk-bar', per, B); setBar('bf-left-bar', left, B);
+
+    var capText = C > 0
+      ? 'cap=' + C + '，chunk 被 cap 与剩余预算共同截断。'
+      : 'cap=0（vLLM 默认不设单请求上限），prefill 可吃满剩余预算。';
+    if (out) {
+      out.innerHTML = 'decode <strong>' + D + '</strong> tokens，prefill 每步 <strong>' + per +
+        '</strong> tokens，预算 <strong>' + B + '</strong>；prefill 需 <strong>' + steps +
+        '</strong> 步，最后一步 <strong>' + last + '</strong> tokens。' + capText;
+    }
+  }
+
+  [p, d, b, c].forEach(function (el) { el.addEventListener('input', render); });
+  if (reset) {
+    reset.addEventListener('click', function () {
+      p.value = 5000; d.value = 128; b.value = 2048; c.value = 512;
+      render();
+    });
+  }
+  render();
+})();
+
+(function () {
+  var p = document.getElementById('kv-p');
+  var r = document.getElementById('kv-r');
+  if (!p || !r) return;
+
+  var out = document.getElementById('kv-out');
+  var pv = document.getElementById('kv-pv');
+  var rv = document.getElementById('kv-rv');
+  var sizeEl = document.getElementById('kv-size');
+  var bwEl = document.getElementById('kv-bw');
+  var gbpsEl = document.getElementById('kv-gbps');
+  var reset = document.getElementById('kv-reset');
+
+  var BASE_TOKENS = 512;
+  var GB_PER_BASE = 1.13;
+
+  function render() {
+    var P = parseInt(p.value, 10);
+    var R = parseFloat(r.value);
+    var kv = GB_PER_BASE * P / BASE_TOKENS;
+    var gbps = kv * R;
+    var gbit = gbps * 8;
+
+    if (pv) pv.textContent = String(P);
+    if (rv) rv.textContent = R.toFixed(1);
+    if (sizeEl) sizeEl.textContent = kv.toFixed(2) + ' GB';
+    if (bwEl) bwEl.textContent = gbps.toFixed(1) + ' GB/s';
+    if (gbpsEl) gbpsEl.textContent = gbit.toFixed(1);
+
+    var sizeBar = document.getElementById('kv-size-bar');
+    var bwBar = document.getElementById('kv-bw-bar');
+    var gbpsBar = document.getElementById('kv-gbps-bar');
+    if (sizeBar) sizeBar.style.width = Math.min(100, kv / 8 * 100) + '%';
+    if (bwBar) bwBar.style.width = Math.min(100, gbps / 20 * 100) + '%';
+    if (gbpsBar) gbpsBar.style.width = Math.min(100, gbit / 200 * 100) + '%';
+
+    if (out) {
+      out.innerHTML = P + ' tokens → <strong>' + kv.toFixed(2) + ' GB</strong> KV；' +
+        R.toFixed(1) + ' req/s → <strong>' + gbps.toFixed(1) + ' GB/s</strong> = <strong>' +
+        gbit.toFixed(1) + ' Gbps</strong>。';
+    }
+  }
+
+  p.addEventListener('input', render);
+  r.addEventListener('input', render);
+  if (reset) {
+    reset.addEventListener('click', function () {
+      p.value = 512; r.value = 10; render();
+    });
+  }
+  render();
+})();
+</script>
+</body>
+</html>

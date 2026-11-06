@@ -1,0 +1,591 @@
+<!-- LEDGER
+| 值 | 出处 | 公式 |
+| 512 | Table 1 | 8*64 |
+| 6 | Table 1 | 3072/512 |
+| 64 | 源码 megatron/core/num_microbatches_calculator.py:381-388 | 2*8*4 |
+| 131072 | 源码 megatron/core/num_microbatches_calculator.py:381-388 | 2*8*4*2048 |
+| 4096 | 源码 megatron/core/num_microbatches_calculator.py:381-388 | 2*2048 |
+| 128 | 源码 megatron/core/num_microbatches_calculator.py:381-388 | 1*16*8 |
+| 524288 | 源码 megatron/core/num_microbatches_calculator.py:381-388 | 1*16*8*4096 |
+| 4096 | 源码 megatron/core/num_microbatches_calculator.py:381-388 | 1*4096 |
+| 16 | 源码 megatron/core/parallel_state.py:883-895 | 4*2*2 |
+| 4 | 源码 megatron/core/parallel_state.py:883-895 | 64/16 |
+| 32 | 源码 megatron/core/parallel_state.py:883-895 | 8*4*1 |
+| 4 | 源码 megatron/core/parallel_state.py:883-895 | 128/32 |
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-source-version="v5">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Megatron-LM 与 PAI-Megatron：一次训练是怎么装配起来的</title>
+<meta name="description" content="从 Megatron-LM 70f7a26（含 Megatron-Core）源码看训练入口、TransformerConfig、并行组、数据管线、checkpoint 与训练步；对照 PAI-Megatron-Patch 的模型适配、权重转换和版本耦合。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/visual-reading/base.css">
+<style>
+.tbl-note{font-size:13px;color:var(--text-soft);margin:18px 0 8px;line-height:1.7}
+code{overflow-wrap:anywhere}
+.flow-svg .box{fill:var(--bg-surface);stroke:var(--border-strong);stroke-width:1}
+.flow-svg .box-accent{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.5}
+.flow-svg .box-muted{fill:var(--bg-soft);stroke:var(--border)}
+.flow-svg .t{font-size:13px;font-weight:600;fill:var(--text)}
+.flow-svg .s{font-size:11.5px;fill:var(--text-muted)}
+.flow-svg .h{font-size:14px;font-weight:700;fill:var(--text)}
+.flow-svg .lbl{font-size:11px;fill:var(--text-soft)}
+.small-note{font-size:12.5px;color:var(--text-soft);line-height:1.7}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <a class="logo" href="/visual-reading/" title="返回精读列表">←</a>
+    <div class="label">Megatron / PAI</div>
+    <nav>
+      <a href="#problem">问题</a>
+      <a href="#prior">已有方案</a>
+      <a href="#method">方法</a>
+      <a href="#accounting">账本</a>
+      <a href="#flow">流程</a>
+      <a href="#effect">效果</a>
+      <a href="#limits">边界</a>
+    </nav>
+  </div>
+</div>
+
+<div class="wrap">
+
+<header class="hero">
+  <span class="tag"><span class="dot"></span>训练框架 · SC21 / 源码</span>
+  <h1>Megatron-LM 与 PAI-Megatron：一次训练是怎么装配起来的</h1>
+  <p class="hero-sub">大模型训练脚本真正难的不是写一行 loss，而是把<strong>配置、并行组、数据切分、checkpoint 和训练步</strong>装成一条可复现的流水线。Megatron-LM 参考实现（megatron/training + pretrain_gpt.py）把这条流水线收进 <code>pretrain()</code>；Megatron-Core（megatron/core）提供 TransformerConfig、并行组、schedules、checkpoint 等构件；PAI-Megatron-Patch 在它外面补模型、tokenizer、数据和权重转换。</p>
+  <div class="meta">
+    <span>Megatron-LM SC21 · Megatron-LM <code>70f7a26</code>（含 Megatron-Core） · PAI <code>a098ca5</code></span>
+    <a href="https://arxiv.org/abs/2104.04473v5" target="_blank" rel="noopener">论文 v5 ↗</a>
+    <a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a26" target="_blank" rel="noopener">Megatron-Core ↗</a>
+    <a href="https://github.com/alibaba/PAI-Megatron-Patch/tree/a098ca5" target="_blank" rel="noopener">PAI 仓库 ↗</a>
+  </div>
+</header>
+
+<div class="tldr">
+  <div class="tldr-head">TL;DR · 30 秒抓住核心</div>
+  <p>Megatron-LM 的训练入口不是“一个 main 跑所有模型”。<strong>pretrain_gpt.py 只负责把 CLI 参数变成 TransformerConfig / GPTModelConfig 和 PretrainConfigContainer</strong>，然后交给 <code>pretrain()</code>；初始化、模型装配、数据、循环、checkpoint 都在后者。</p>
+  <p>并行组在 <code>initialize_model_parallel</code> 里一次建好：<code>model_size = TP × PP × CP × GTP</code>，<code>DP = world_size / model_size</code>。训练步的 batch 账本因此是 <strong>GBS = micro_batch_size × DP × num_microbatches</strong>。</p>
+  <p>训练步固定为 <code>zero_grad → forward_backward_func → optimizer.step</code>；常规路径下，用哪种 schedule 只看 PP/VP 是否大于 1。checkpoint 默认走 <code>torch_dist</code> 的分片状态字典，模型/优化器/调度器/RNG 与进度一起存。</p>
+  <p>PAI 的 mcore 示例直接调用 Megatron-LM 的 <code>pretrain()</code>（<code>megatron.training</code>），自己提供 model_provider、forward_step、数据 provider 和 tokenizer；它的版本耦合点在启动脚本固定的 Megatron 快照，以及少量只对某个 commit 生效的 core patch。</p>
+  <div class="metrics">
+    <div class="metric"><div class="v" data-src="Table 1">1008.0<small>B</small></div><div class="k">Table 1 最大行；弱扩展，不是同一模型换卡数</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">163<small>TFLOP/s</small></div><div class="k">1T 行每卡端到端吞吐</div></div>
+    <div class="metric"><div class="v" data-src="Table 1">52<small>%</small></div><div class="k">1T 行达到的峰值占比</div></div>
+  </div>
+</div>
+
+<section class="block" id="problem">
+  <div class="sec-head"><span class="sec-num">01</span><h2>换一个模型，训练脚本的装配就要重来</h2></div>
+  <p class="sec-sub">读完这节你应该知道：为什么“有 TP/PP 算法”不等于“有可复用的训练系统”。</p>
+
+  <p>SC21 论文开篇把约束说得很直接：模型参数已经放不进单卡显存；只靠数据并行又会遇到两个上限，一是每卡 batch 太小、利用率下降，二是可用设备数被 batch size 限制（<code>§1</code>）。所以训练系统必须把 tensor、pipeline、data 三种并行组合起来（论文称 PTD-P，<code>§2</code>）。</p>
+
+  <p>但“组合”不是调用一个函数。一次训练至少要回答五个装配问题：模型由哪些层 spec 组成；TP/PP/CP 的进程组怎么建；每个 rank 读哪一段数据；一次 optimizer step 跨多少 micro-batch；checkpoint 按什么 layout 分片、恢复时怎么映射回当前并行组。算法可以复用，<strong>这五件事的胶水仍然按模型、按集群、按版本变化</strong>。</p>
+
+  <p>Megatron-LM 仓库里能直接看到这种“入口按模型分家”：<code>pretrain_gpt.py</code>、<code>pretrain_hybrid.py</code>、<code>pretrain_vlm.py</code> 各有一个入口；<code>examples/t5/pretrain_t5.py</code> 和 <code>examples/bert/pretrain_bert.py</code> 也各自定义 <code>get_batch</code>、<code>forward_step</code> 和 dataset provider。例如 GPT 的 <code>get_batch</code> 在 <code>pretrain_gpt.py:112</code>，<code>forward_step</code> 在 <code>:330</code>，dataset provider 在 <code>:452</code>；T5 的同名函数在 <code>examples/t5/pretrain_t5.py:145</code>、<code>:175</code>、<code>:202</code>。核心组件是共享的，装配脚本不是。</p>
+
+  <p>这篇页面讲的是“框架怎么组织一次训练”，不重复 TP/PP 的算法推导。TP 的切分与通信账见 <a href="/tensor-parallel-megatron/">Tensor Parallel（Megatron）</a>，PP 的调度与 bubble 见 <a href="/pipeline-parallel/">Pipeline Parallel</a>。</p>
+</section>
+
+<section class="block" id="prior">
+  <div class="sec-head"><span class="sec-num">02</span><h2>手写循环与模型自研：两条路都能跑，卡点都在系统层</h2></div>
+  <p class="sec-sub">读完这节你应该知道：已有方案各自把哪些问题留给了使用者。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">路线 A</span><h4>手写 PyTorch 训练循环</h4></div>
+      <p>一个 <code>for batch in loader</code>、一次 <code>loss.backward()</code>、一次 <code>optimizer.step()</code>，在单卡或纯 DDP 下足够透明。代价是：一旦模型放不下，TP/PP/CP 的集合通信、micro-batch 调度、梯度累积边界、分片 checkpoint、RNG 与数据进度都要自己补。</p>
+      <p>这些逻辑彼此耦合：batch 怎么切取决于 TP/CP，checkpoint 怎么存取决于 TP/PP，恢复又依赖数据消费进度。把它们散落在脚本里，任何一处改动都要重新验证训练语义。</p>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">路线 B</span><h4>每个模型自研一套训练栈</h4></div>
+      <p>模型团队围绕一个新结构写自己的 pretrain 脚本、并行策略和权重转换器。模型迭代快，但同一套训练系统被复制多份：配置项命名不同、checkpoint layout 不兼容、扩到多机时每套都要重新调。</p>
+      <p>PAI 的 README 把这条路的动机写得很直白：用 Transformers 或 DeepSpeed 造模型很方便，但训练效率偏低，模型超过 10B 后更明显（<code>PAI README.md:18</code>）。PAI 想做的就是把 Megatron 的加速能力接到这些模型上，而不是再造一个训练器。</p>
+    </div>
+  </div>
+
+  <p>Megatron 的回应是“共享循环 + 可配置模型装配”：训练循环只写一次，模型差异收敛到 layer spec、model provider 和 dataset provider；并行度由配置给出，进程组由 core 统一创建；checkpoint 由 core 的分片格式负责。SC21 把 TP、PP、DP 的组合称为 PTD-P，并进一步讨论 interleaved schedule 与 batch 配置（<code>§2</code>、<code>§5.1</code>）。</p>
+</section>
+
+<section class="block" id="method">
+  <div class="sec-head"><span class="sec-num">03</span><h2>Megatron 把一次训练拆成五件事：配置、初始化、模型装配、数据、循环</h2></div>
+  <p class="sec-sub">读完这节你应该知道：每个行为到底落在哪个文件、哪个函数，以及 PAI 在哪里插进来。</p>
+
+  <h3>3.1 入口：先把 CLI 参数收成配置容器</h3>
+  <p><code>pretrain_gpt.py</code> 的 <code>__main__</code> 只做一条装配链：解析参数 → 构造 <code>GPTModelConfig</code> → 构造 <code>PretrainConfigContainer</code> → 写入全局 run config → 调用 <code>pretrain()</code>（<code>pretrain_gpt.py:496-519</code>）。这一步没有建模型，也没有建进程组；它只是把“这次训练是什么”变成可传递的对象。</p>
+
+  <p>配置容器把一次训练拆成若干段：<code>train</code>、<code>validation</code>、<code>model</code>、<code>optimizer</code>、<code>scheduler</code>、<code>data</code>、<code>ddp</code>、<code>dist</code>、<code>rng</code>、<code>logger</code>、<code>checkpoint</code>、<code>profiling</code>、<code>tokenizer</code>、<code>rl</code>、<code>rerun_state_machine</code>、<code>straggler</code>（<code>megatron/training/argument_utils.py:1030-1049</code>）。以后新增一个训练开关，优先落进对应 section，而不是继续往全局 argparse 里塞。</p>
+
+  <p>模型结构落在 <code>TransformerConfig</code>：它继承 <code>ModelParallelConfig</code>（<code>megatron/core/transformer/transformer_config.py:61</code>），一边放 <code>num_layers</code>、<code>hidden_size</code>、<code>num_attention_heads</code>、<code>ffn_hidden_size</code>（<code>:72</code>、<code>:170</code>、<code>:173</code>、<code>:211</code>），一边继承 <code>tensor_model_parallel_size</code>、<code>pipeline_model_parallel_size</code>、<code>sequence_parallel</code>、<code>context_parallel_size</code>、<code>expert_model_parallel_size</code>（<code>megatron/core/model_parallel_config.py:59</code>、<code>:112</code>、<code>:123</code>、<code>:129</code>、<code>:186</code>）。<code>core_transformer_config_from_args</code> 按 dataclass 字段名逐项从 argparse 里取值（<code>argument_utils.py:413-417</code>），所以“CLI 参数名 = config 字段名”是这套配置体系能对齐的原因。</p>
+
+  <p><code>GPTModelConfig</code> 再把模型专属参数和 builder 绑在一起：它内嵌 <code>transformer</code>，并用 <code>builder</code> 这个 ClassVar 指向 <code>GPTModelBuilder</code>（<code>megatron/training/models/gpt.py:144-160</code>）。<code>ModelConfig.get_builder_cls()</code> 动态 import builder（<code>megatron/training/models/base.py:128-135</code>），<code>GPTModelBuilder.build_distributed_models()</code> 负责建 stage、加 TP 属性、上 GPU、包 mix-precision 和 DDP（<code>models/gpt.py:351-411</code>、<code>models/dist_utils.py:50-134</code>）。旧的 <code>model_provider</code> / <code>gpt_builder</code> 路径仍然保留：<code>model_provider.py:21-63</code> 把 builder 转发给具体函数，<code>gpt_builders.py:26-56</code> 按 <code>--spec</code>、experimental attention、MoE、heterogeneous、TE/local 选择 layer spec，MTP block 再单独构造，然后构造 <code>GPTModel</code>（<code>:92-110</code>）。两条路径的取舍在 <code>setup_model_and_optimizer</code> 里：有 <code>cfg.model</code> 就走 builder，没有就退回 <code>model_provider_func</code>（<code>training.py:2968-2999</code>）。</p>
+
+  <h3>3.2 初始化：先建 torch.distributed，再建并行组</h3>
+  <p><code>pretrain()</code> 的第一件大事是 <code>initialize_megatron(...)</code>（<code>training.py:1853-1866</code>）。它先校验 CUDA（<code>initialize.py:87-89</code>），初始化 runtime services，然后在 <code>_initialize_distributed</code> 里调用 <code>torch.distributed.init_process_group</code>（<code>initialize.py:415-432</code>），最后调用 <code>mpu.initialize_model_parallel(...)</code> 建所有并行组（<code>initialize.py:457-481</code>）。默认 rank 排列是 <code>tp-cp-ep-dp-pp</code>（<code>initialize.py:475</code>）。</p>
+
+  <div class="eq">
+    model_size = <span class="hl-a">TP</span> × <span class="hl-b">PP</span> × <span class="hl-c">CP</span> × GTP<br>
+    DP = world_size / model_size
+  </div>
+  <p class="eq-cap">源码：<code>megatron/core/parallel_state.py:883-895</code>；GTP 是 generalized tensor parallelism 的权重分片轴，普通训练取 1；以上是未启用 GTP sequence-sharding layout（<code>gtp_remat_num_sequence_shards == 1</code>）时的算法；启用该 layout（<code>gtp_remat_num_sequence_shards != 1</code>）时 <code>model_size</code> 会被 <code>layout.minimum_world_size</code> 覆盖（<code>:889-890</code>）。world_size 不能被 model_size 整除时直接抛 <code>RuntimeError</code>（<code>:892-893</code>）。</p>
+
+  <p>并行组不是“按需临时建”的：TP、PP、CP、EP、DP 以及它们的组合组在启动时一次建好，后面的层、DDP、optimizer、checkpoint 都从 <code>ProcessGroupCollection</code> 里取。这样训练步里不需要再判断“我现在在哪个组”，组关系已经编码在 rank layout 里。</p>
+
+  <h3>3.3 模型装配：spec 决定一层长什么样，builder 决定 stage 怎么摊</h3>
+  <p>layer spec 是“层的配方”。<code>gpt_builder</code> 先看 <code>--spec</code> 是否显式给了模块；否则按 <code>transformer_impl</code>、MoE、heterogeneous、experimental attention、MTP 等分支选择 spec（<code>gpt_builders.py:33-70</code>）。选完 spec 才构造 <code>GPTModel</code>，把 <code>vocab_size</code>、<code>max_sequence_length</code>、<code>pre_process</code>/<code>post_process</code>、并行组等传进去（<code>:92-110</code>）。</p>
+
+  <p>PP 和 VPP 的“stage 切片”不在这段代码里：<code>build_distributed_models</code> 会按 <code>virtual_pipeline_model_parallel_size</code> 建多个 stage（<code>models/dist_utils.py:65-125</code>），每个 stage 的 <code>pre_process</code>/<code>post_process</code> 由 VP/PP rank 推导（<code>models/gpt.py:319-324</code>）。这也是为什么同一份模型代码既能跑 PP=1，也能跑 PP=64：模型只描述“一层”，stage 由 builder 组织。</p>
+
+  <h3>3.4 数据：dataset 只负责样本，入口负责按 TP/CP 切</h3>
+  <p>数据侧先建 dataset，再包 dataloader，最后包 iterator。<code>build_train_valid_test_data_iterators</code> 接受 <code>single</code>、<code>cyclic</code>、<code>external</code> 三种 dataloader 类型（<code>training.py:6309-6348</code>）；GPT 的 provider 最终落到 <code>build_gpt_datasets</code>（<code>megatron/training/datasets/providers.py:76-114</code>），由 <code>BlendedMegatronDatasetBuilder</code> 建 <code>GPTDataset</code>。<code>GPTDataset</code> 包着 <code>IndexedDataset</code>，后者读 <code>.bin</code>/<code>.idx</code> 文件（<code>megatron/core/datasets/gpt_dataset.py:178</code>、<code>:240-264</code>），<code>__getitem__</code> 返回 tokens、labels、loss_mask、position_ids 等（<code>:302</code>）。</p>
+
+  <p>“只让部分 rank 建 dataset”是显式规则：<code>is_dataset_built_on_rank_explicit</code> 要求 TP rank 0，并且只在 first/last PP stage（或 MTP rank）建；sequence packing 例外，会在每个 PP stage 建（<code>providers.py:39-51</code>）。读 batch 时，TP rank 0 先 <code>next(data_iterator)</code>，再广播到 TP 组（<code>pretrain_gpt.py:166-191</code>），最后按 CP 切序列（<code>:210-215</code>）。所以 dataset 不需要知道 TP/CP；并行切分留在入口的 <code>get_batch</code> 里。</p>
+
+  <h3>3.5 训练步与 checkpoint：循环只认回调，不认具体模型</h3>
+  <p><code>train_step</code> 的顺序是固定的：清 grad buffer 和 optimizer grad（<code>training.py:3473-3478</code>）→ 调 <code>forward_backward_func</code>（<code>:3573-3585</code>）→ <code>optimizer.step()</code>（<code>:3661-3662</code>）。<code>forward_backward_func</code> 在 <code>train()</code> 入口按 PP/VP 选择一次（<code>training.py:5071-5073</code>）：PP=1 用 no-pipeline，PP&gt;1 且 VP=None 用 1F1B，VP 非空用 interleaved（<code>megatron/core/pipeline_parallel/schedules.py:157-167</code>）。训练循环本身不依赖具体模型的 forward 实现，模型差异通过 <code>forward_step</code> 回调进来（GPT 的实现在 <code>pretrain_gpt.py:330-449</code>）。</p>
+
+  <p>checkpoint 是训练状态的一部分，不是训练结束后的导出。<code>save_checkpoint</code> 存模型、优化器、调度器、RNG、迭代数和已消费样本（<code>checkpointing.py:640-880</code>）；<code>load_checkpoint</code> 在模型和优化器建好之后调用（<code>training.py:3155-3188</code>），把分片状态映射回当前并行 layout。<code>torch_dist</code> 的 save/load 策略把 MCore 的 <code>ShardedTensor</code> 转成 PyTorch distributed checkpoint（<code>dist_checkpointing/strategies/torch.py:684-690</code>、<code>:924-945</code>）。一个容易忽略的限制：内置文本 dataloader 的批内位置不存，只有支持该接口的 Energon 多模态 dataloader 会存（<code>checkpointing.py:677-678</code>）；文本训练恢复靠已消费样本数和数据顺序。</p>
+</section>
+
+<section class="block" id="accounting">
+  <div class="sec-head"><span class="sec-num">04</span><h2>并行度决定 batch 账本：GBS = mbs × DP × 微批数</h2></div>
+  <p class="sec-sub">读完这节你应该知道：给定并行度和 micro-batch，怎么算出一次 optimizer step 真正吃了多少样本、多少 token。</p>
+
+  <p>Megatron 的 batch 账本只有三个角色：<code>micro_batch_size</code>（每张卡一个 micro-batch 里的样本数）、<code>num_microbatches</code>（梯度累积多少个小批）、<code>data_parallel_size</code>（有多少路独立数据副本）。它们和 global batch 的关系是：</p>
+
+  <div class="eq">
+    GBS = <span class="hl-a">micro_batch_size</span> × <span class="hl-b">DP</span> × <span class="hl-c">num_microbatches</span><br>
+    num_microbatches = GBS / (micro_batch_size × DP)
+  </div>
+  <p class="eq-cap">源码：<code>megatron/core/num_microbatches_calculator.py:386-397</code>；<code>DP</code> 取 <code>args.data_parallel_size</code>，标准无 GTP 时等于 <code>world_size / (TP × PP × CP)</code>（<code>megatron/training/arguments.py:483-499</code>）。</p>
+
+  <p>两个边界条件必须一起看。第一，<code>GBS</code> 必须能被 <code>micro_batch_size × DP</code> 整除，否则 core 直接断言失败（<code>num_microbatches_calculator.py:381-386</code>）；打开 <code>--decrease-batch-size-if-needed</code> 时，它会向下取整到可整除的 GBS（<code>:368-379</code>）。第二，如果没显式给 <code>--global-batch-size</code>，默认值是 <code>micro_batch_size × batch_parallel_size</code>（<code>arguments.py:640-643</code>），也就是只跑一个 micro-batch 的 GBS。</p>
+
+  <div class="sim" id="batch-sim">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button">方向：由 mbs 与累积步数反推 GBS<span class="r-sub">Megatron 实际是由 GBS 反算 num_microbatches</span></button>
+    </div>
+    <div class="slots" id="batch-slots">
+      <div class="slot"><div class="slot-name">micro_batch_size</div><div class="slot-val" id="batch-mbs-v">2</div></div>
+      <div class="slot"><div class="slot-name">seq_len</div><div class="slot-val" id="batch-seq-v">2048</div></div>
+      <div class="slot"><div class="slot-name">DP</div><div class="slot-val" id="batch-dp-v">8</div></div>
+      <div class="slot"><div class="slot-name">grad_accum</div><div class="slot-val" id="batch-ga-v">4</div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="batch-mbs">micro_batch_size <span class="v" id="batch-mbs-r">2</span></label>
+        <input id="batch-mbs" type="range" min="1" max="8" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label for="batch-seq">seq_len <span class="v" id="batch-seq-r">2048</span></label>
+        <input id="batch-seq" type="range" min="512" max="8192" step="512" value="2048">
+      </div>
+      <div class="ctrl">
+        <label for="batch-dp">DP <span class="v" id="batch-dp-r">8</span></label>
+        <input id="batch-dp" type="range" min="1" max="64" step="1" value="8">
+      </div>
+      <div class="ctrl">
+        <label for="batch-ga">grad_accum <span class="v" id="batch-ga-r">4</span></label>
+        <input id="batch-ga" type="range" min="1" max="64" step="1" value="4">
+      </div>
+    </div>
+    <div class="slots s3" id="batch-out">
+      <div class="slot hit"><div class="slot-name">样本 / step</div><div class="slot-val" id="batch-samples">64</div></div>
+      <div class="slot hit"><div class="slot-name">tokens / step</div><div class="slot-val" id="batch-tokens">131072</div></div>
+      <div class="slot hit"><div class="slot-name">tokens / rank / microstep</div><div class="slot-val" id="batch-per-rank">4096</div></div>
+    </div>
+    <div class="readout" data-src="源码 megatron/core/num_microbatches_calculator.py:381-388">
+      <div class="r-head">当前读数</div>
+      <div><strong id="batch-echo-samples">64</strong> 个样本/step = <span id="batch-echo-mbs">2</span> × <span id="batch-echo-dp">8</span> × <span id="batch-echo-ga">4</span>；<strong id="batch-echo-tokens">131072</strong> tokens/step = 样本数 × <span id="batch-echo-seq">2048</span>。每个 DP rank 每个 microstep 读 <strong id="batch-echo-per-rank">4096</strong> 个 token。</div>
+    </div>
+    <div class="small-note">这里的 <code>grad_accum</code> 就是 Megatron 的 <code>num_microbatches</code>。页面把它当输入，等价于先定 <code>GBS = mbs × DP × grad_accum</code>；实际启动时 Megatron 由 GBS 反算 micro-batch 数。</div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组参数 → 与 batch 交互读数逐位对账<span class="sum-sub">固定长度、无 packing、无 drop_last</span></summary>
+    <div class="details-body">
+      <p>口径：<code>samples = mbs × DP × grad_accum</code>；<code>tokens = samples × seq_len</code>；<code>per_rank_microstep = mbs × seq_len</code>。DP 取独立数据副本数，不含 CP；序列是固定长度。</p>
+      <p><strong>组 A：mbs=2，seq_len=2048，DP=8，grad_accum=4</strong><br>
+      samples = 2 × 8 × 4 = <code>64</code><br>
+      tokens = 64 × 2048 = <code>131072</code><br>
+      per rank microstep = 2 × 2048 = <code>4096</code></p>
+      <p><strong>组 B：mbs=1，seq_len=4096，DP=16，grad_accum=8</strong><br>
+      samples = 1 × 16 × 8 = <code>128</code><br>
+      tokens = 128 × 4096 = <code>524288</code><br>
+      per rank microstep = 1 × 4096 = <code>4096</code></p>
+      <p>把滑块调到这两组，页面读数应分别显示 64 / 131072 / 4096 与 128 / 524288 / 4096。变长序列、sequence packing、drop_last、“最后一个不完整 global batch”以及 micro-batch ramp-up 的边界不在这个公式里；它们会让 tokens/step 与 samples × seq_len 不再相等。</p>
+    </div>
+  </details>
+
+  <h3>并行组映射：TP、PP、CP 先把 world 切掉，剩下才是 DP</h3>
+  <p>第二个交互把配置项直接映到并行组。给定 <code>world_size</code>、<code>TP</code>、<code>PP</code>、<code>CP</code>，先算一个模型副本占多少 rank：<code>model_size = TP × PP × CP</code>；再用 <code>DP = world_size / model_size</code> 得到数据副本数。core 只接受整除的配置，否则 <code>initialize_model_parallel</code> 会报错（<code>parallel_state.py:892-893</code>）。</p>
+
+  <div class="sim" id="par-sim">
+    <div class="sim-top">
+      <button class="rule-btn active" type="button">配置项 → 并行组<span class="r-sub">GTP=1，CP 单独成组</span></button>
+    </div>
+    <div class="slots" id="par-slots">
+      <div class="slot"><div class="slot-name">world_size</div><div class="slot-val" id="par-world-v">64</div></div>
+      <div class="slot"><div class="slot-name">TP</div><div class="slot-val" id="par-tp-v">4</div></div>
+      <div class="slot"><div class="slot-name">PP</div><div class="slot-val" id="par-pp-v">2</div></div>
+      <div class="slot"><div class="slot-name">CP</div><div class="slot-val" id="par-cp-v">2</div></div>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="par-world">world_size <span class="v" id="par-world-r">64</span></label>
+        <input id="par-world" type="range" min="8" max="1024" step="8" value="64">
+      </div>
+      <div class="ctrl">
+        <label for="par-tp">TP <span class="v" id="par-tp-r">4</span></label>
+        <input id="par-tp" type="range" min="1" max="8" step="1" value="4">
+      </div>
+      <div class="ctrl">
+        <label for="par-pp">PP <span class="v" id="par-pp-r">2</span></label>
+        <input id="par-pp" type="range" min="1" max="16" step="1" value="2">
+      </div>
+      <div class="ctrl">
+        <label for="par-cp">CP <span class="v" id="par-cp-r">2</span></label>
+        <input id="par-cp" type="range" min="1" max="8" step="1" value="2">
+      </div>
+    </div>
+    <div class="slots s3" id="par-out">
+      <div class="slot hit"><div class="slot-name">每副本 rank 数</div><div class="slot-val" id="par-model">16</div></div>
+      <div class="slot hit"><div class="slot-name">DP 副本数</div><div class="slot-val" id="par-dp">4</div></div>
+      <div class="slot hit"><div class="slot-name">状态</div><div class="slot-val" id="par-state">整除，可启动</div></div>
+    </div>
+    <div class="readout" data-src="源码 megatron/core/parallel_state.py:883-895">
+      <div class="r-head">当前映射</div>
+      <div><code>model_size = <span id="par-echo-tp">4</span> × <span id="par-echo-pp">2</span> × <span id="par-echo-cp">2</span> = <strong id="par-echo-model">16</strong></code>；<code>DP = <span id="par-echo-world">64</span> / 16 = <strong id="par-echo-dp">4</strong></code>。每个 DP 副本内部再按 TP/PP/CP 分工；CP rank 处理同一 batch 的不同序列分片，所以 CP 不增加独立样本数。</div>
+    </div>
+    <div class="small-note">非整除时会显示“不整除”；这正是 core 抛 <code>RuntimeError</code> 的条件（<code>parallel_state.py:892-893</code>）。梯度归约用的是 DP×CP 组合组，但 batch 账本里的 DP 是残差数据副本数，两者不要混用。</div>
+  </div>
+
+  <details class="handcalc">
+    <summary>手算：两组配置 → 与并行映射读数逐位对账<span class="sum-sub">GTP=1</span></summary>
+    <div class="details-body">
+      <p>口径：<code>model_size = TP × PP × CP</code>；<code>DP = world_size / model_size</code>；只接受整除。</p>
+      <p><strong>组 A：world=64，TP=4，PP=2，CP=2</strong><br>
+      model_size = 4 × 2 × 2 = <code>16</code><br>
+      DP = 64 / 16 = <code>4</code></p>
+      <p><strong>组 B：world=128，TP=8，PP=4，CP=1</strong><br>
+      model_size = 8 × 4 × 1 = <code>32</code><br>
+      DP = 128 / 32 = <code>4</code></p>
+      <p>把滑块调到这两组，页面应分别显示 16 / 4 与 32 / 4。若输入 world=48、TP=8、PP=2、CP=2，则 model_size=32、48 不能被 32 整除，页面状态应变为“不整除”，对应 core 的启动报错。</p>
+    </div>
+  </details>
+
+  <p>用 SC21 的 1T 行做一次交叉核对：Table 1 给出 TP=8、PP=64、3072 张 GPU；Table 1 没有列 CP，按 CP=1 代入（<span class="infer">推断</span>，依据是表中未出现 CP 列），<code>model_size = 8 × 64 = 512</code>，<code>DP = 3072 / 512 = 6</code>。也就是说这一行主要靠 PP 把模型摊到 64 个 stage，数据副本只有 6 路。这个结果与表中 batch=3072 并排看即可，不需要反推 micro-batch。</p>
+</section>
+
+<section class="block" id="flow">
+  <div class="sec-head"><span class="sec-num">05</span><h2>启动是单向装配，训练步是闭环</h2></div>
+  <p class="sec-sub">读完这节你应该知道：一次训练从 launcher 到第一个 optimizer step，中间到底按什么顺序经过哪些对象。</p>
+
+  <figure>
+    <svg class="flow-svg" viewBox="0 0 900 680" role="img" aria-labelledby="flow-title flow-desc">
+      <title id="flow-title">Megatron 训练启动与训练步数据流</title>
+      <desc id="flow-desc">左侧是从启动脚本、配置、初始化、模型和优化器、数据与 checkpoint 到 train 循环的装配顺序；右侧是一个训练步从取 batch 到保存 checkpoint 的闭环；底部是 PAI 适配层调用同一个 pretrain 的路径。</desc>
+      <defs>
+        <marker id="flow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 z" fill="var(--text-soft)"></path>
+        </marker>
+      </defs>
+
+      <text class="h" x="30" y="24">启动装配 · 从脚本到 train()</text>
+      <rect class="box" x="30" y="40" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="63" text-anchor="middle">torchrun / PAI launcher</text>
+      <text class="s" x="240" y="82" text-anchor="middle">run_mcore_qwen3.sh</text>
+
+      <rect class="box" x="30" y="110" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="133" text-anchor="middle">pretrain_gpt.py</text>
+      <text class="s" x="240" y="152" text-anchor="middle">parse args → config</text>
+
+      <rect class="box" x="30" y="180" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="203" text-anchor="middle">TransformerConfig + GPTModelConfig</text>
+      <text class="s" x="240" y="222" text-anchor="middle">PretrainConfigContainer</text>
+
+      <rect class="box" x="30" y="250" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="273" text-anchor="middle">initialize_megatron</text>
+      <text class="s" x="240" y="292" text-anchor="middle">torch.distributed + mpu groups</text>
+
+      <rect class="box" x="30" y="320" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="343" text-anchor="middle">setup_model_and_optimizer</text>
+      <text class="s" x="240" y="362" text-anchor="middle">builder/spec → DDP → optimizer → load_checkpoint</text>
+
+      <rect class="box" x="30" y="390" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="413" text-anchor="middle">datasets + data iterators</text>
+      <text class="s" x="240" y="432" text-anchor="middle">IndexedDataset + single/cyclic/external</text>
+
+      <rect class="box box-accent" x="30" y="460" width="420" height="56" rx="8"></rect>
+      <text class="t" x="240" y="483" text-anchor="middle">train()</text>
+      <text class="s" x="240" y="502" text-anchor="middle">zero_grad → fwd/bwd → step</text>
+
+      <line x1="240" y1="96" x2="240" y2="108" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="240" y1="166" x2="240" y2="178" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="240" y1="236" x2="240" y2="248" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="240" y1="306" x2="240" y2="318" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="240" y1="376" x2="240" y2="388" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="240" y1="446" x2="240" y2="458" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+
+      <text class="h" x="500" y="24">一个训练步 · 闭环</text>
+      <rect class="box" x="500" y="50" width="370" height="64" rx="8"></rect>
+      <text class="t" x="685" y="75" text-anchor="middle">get_batch（forward_step 内）</text>
+      <text class="s" x="685" y="96" text-anchor="middle">TP rank 0 读 → broadcast → CP 切</text>
+
+      <rect class="box" x="500" y="140" width="370" height="64" rx="8"></rect>
+      <text class="t" x="685" y="165" text-anchor="middle">forward_step</text>
+      <text class="s" x="685" y="186" text-anchor="middle">model → loss</text>
+
+      <rect class="box" x="500" y="230" width="370" height="64" rx="8"></rect>
+      <text class="t" x="685" y="255" text-anchor="middle">forward_backward_func</text>
+      <text class="s" x="685" y="276" text-anchor="middle">1F1B / interleaved</text>
+
+      <rect class="box" x="500" y="320" width="370" height="64" rx="8"></rect>
+      <text class="t" x="685" y="345" text-anchor="middle">optimizer.step</text>
+      <text class="s" x="685" y="366" text-anchor="middle">grad clip → param update</text>
+
+      <rect class="box box-muted" x="500" y="410" width="370" height="64" rx="8"></rect>
+      <text class="t" x="685" y="435" text-anchor="middle">save_checkpoint</text>
+      <text class="s" x="685" y="456" text-anchor="middle">interval / async</text>
+
+      <line x1="685" y1="114" x2="685" y2="138" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="685" y1="204" x2="685" y2="228" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="685" y1="294" x2="685" y2="318" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="685" y1="384" x2="685" y2="408" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <path d="M685 474 L685 505 L490 505 L490 82 L500 82" fill="none" stroke="var(--text-soft)" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#flow-arrow)"></path>
+      <text class="lbl" x="500" y="525">next iteration</text>
+
+      <text class="h" x="30" y="560">PAI 适配层 · mcore 示例调用 core 的 pretrain()</text>
+      <rect class="box box-muted" x="30" y="575" width="260" height="60" rx="8"></rect>
+      <text class="t" x="160" y="598" text-anchor="middle">run_mcore_qwen3.sh</text>
+      <text class="s" x="160" y="617" text-anchor="middle">PYTHONPATH → Megatron-LM-250624</text>
+
+      <rect class="box box-muted" x="320" y="575" width="260" height="60" rx="8"></rect>
+      <text class="t" x="450" y="598" text-anchor="middle">megatron_patch</text>
+      <text class="s" x="450" y="617" text-anchor="middle">model · tokenizer · data</text>
+
+      <rect class="box box-muted" x="610" y="575" width="260" height="60" rx="8"></rect>
+      <text class="t" x="740" y="598" text-anchor="middle">pretrain_qwen.py</text>
+      <text class="s" x="740" y="617" text-anchor="middle">→ core pretrain()</text>
+
+      <line x1="290" y1="605" x2="318" y2="605" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+      <line x1="580" y1="605" x2="608" y2="605" stroke="var(--text-soft)" stroke-width="1.5" marker-end="url(#flow-arrow)"></line>
+    </svg>
+    <figcaption>左侧顺序来自 <code>pretrain()</code> 的调用链（<code>training.py:1853-1866</code>、<code>:2135-2147</code>（内部 <code>:3155-3188</code> 加载 checkpoint）→ <code>:2160-2200</code>（数据 iterator）→ <code>:2285</code>）；右侧循环来自 <code>train_step</code>（<code>:3473-3478</code>、<code>:3573-3585</code>、<code>:3661-3662</code>）。PAI 的 mcore 示例提供 model_provider、forward_step、数据与 tokenizer，不替换 pretrain() 的循环/调度/优化器/checkpoint 机制。</figcaption>
+  </figure>
+
+  <p>启动阶段的顺序是单向的：入口解析参数并构造配置容器 → <code>initialize_megatron</code> 建进程组与并行组 → <code>setup_model_and_optimizer</code> 建 stage、包 DDP、建 optimizer，并在函数末尾（若给了 <code>--load</code>）调用 <code>load_checkpoint</code> → 建 dataset/dataloader/iterator → 进入 <code>train()</code>（<code>training.py:1853-1866</code>、<code>:2135-2147</code>，内部 <code>:3155-3188</code>、<code>:2160-2200</code>、<code>:2283-2301</code>）。checkpoint 在数据 iterator 之前加载，是因为分片状态要按当前的 TP/PP/DP layout 映射，恢复的已消费样本数会决定 iterator 起点。</p>
+
+  <p>训练步是闭环：<code>train_step</code> 先清梯度，再让 <code>forward_backward_func</code> 处理 <code>num_microbatches</code> 个 micro-batch；每个 schedule 在末尾调用 <code>finalize_model_grads</code> 做 DP/CP 梯度归约与按 token 数缩放（<code>training.py:5005-5006</code>、<code>schedules.py:857-865</code>、<code>finalize_model_grads.py:723-735</code>），最后统一 <code>optimizer.step()</code>（含 grad clip 与参数更新，<code>optimizer.py:580-591</code>）。模型侧只提供 <code>forward_step</code>：它从 iterator 取一个 batch、调用 <code>model(...)</code>、返回输出和 loss 函数（<code>pretrain_gpt.py:330-449</code>）。训练循环不认识 GPT 的 loss，也不认识 Qwen 的 tokenizer；它只认这个回调契约。</p>
+</section>
+
+<section class="block" id="effect">
+  <div class="sec-head"><span class="sec-num">06</span><h2>SC21 的弱扩展表：1008B 模型在 3072 张 A100 上达到每卡 163 TFLOP/s</h2></div>
+  <p class="sec-sub">读完这节你应该知道：这套装配在论文里跑出了什么数字，以及这些数字的条件是什么。</p>
+
+  <p>实验跑在 Selene 集群：每节点 8 张 80GB A100，每节点 8 个 200Gbps HDR InfiniBand HCA，单卡 16 位峰值 312 TFLOP/s（<code>§5</code>）。所有行使用 vocabulary 51200、序列长度 2048，并开启 interleaved pipeline schedule 与 scatter/gather 优化（<code>§5.1</code>）。</p>
+
+  <p class="tbl-note">Table 1 · 弱扩展吞吐（转录自 SC21 Table 1）。每一行是不同规模的 GPT 模型，不是同一个模型换卡数；因此不能把相邻行读成加速比。</p>
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>参数 (B)</th>
+          <th>heads</th>
+          <th>hidden</th>
+          <th>layers</th>
+          <th>TP</th>
+          <th>PP</th>
+          <th>GPUs</th>
+          <th>batch</th>
+          <th>TFLOP/s/GPU</th>
+          <th>% peak</th>
+          <th>聚合 PFLOPS</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="num">1.7</td><td class="num">24</td><td class="num">2304</td><td class="num">24</td><td class="num">1</td><td class="num">1</td><td class="num">32</td><td class="num">512</td><td class="num">137</td><td class="num">44%</td><td class="num">4.4</td></tr>
+        <tr><td class="num">3.6</td><td class="num">32</td><td class="num">3072</td><td class="num">30</td><td class="num">2</td><td class="num">1</td><td class="num">64</td><td class="num">512</td><td class="num">138</td><td class="num">44%</td><td class="num">8.8</td></tr>
+        <tr><td class="num">7.5</td><td class="num">32</td><td class="num">4096</td><td class="num">36</td><td class="num">4</td><td class="num">1</td><td class="num">128</td><td class="num">512</td><td class="num">142</td><td class="num">46%</td><td class="num">18.2</td></tr>
+        <tr><td class="num">18.4</td><td class="num">48</td><td class="num">6144</td><td class="num">40</td><td class="num">8</td><td class="num">1</td><td class="num">256</td><td class="num">1024</td><td class="num">135</td><td class="num">43%</td><td class="num">34.6</td></tr>
+        <tr><td class="num">39.1</td><td class="num">64</td><td class="num">8192</td><td class="num">48</td><td class="num">8</td><td class="num">2</td><td class="num">512</td><td class="num">1536</td><td class="num">138</td><td class="num">44%</td><td class="num">70.8</td></tr>
+        <tr><td class="num">76.1</td><td class="num">80</td><td class="num">10240</td><td class="num">60</td><td class="num">8</td><td class="num">4</td><td class="num">1024</td><td class="num">1792</td><td class="num">140</td><td class="num">45%</td><td class="num">143.8</td></tr>
+        <tr><td class="num">145.6</td><td class="num">96</td><td class="num">12288</td><td class="num">80</td><td class="num">8</td><td class="num">8</td><td class="num">1536</td><td class="num">2304</td><td class="num">148</td><td class="num">47%</td><td class="num">227.1</td></tr>
+        <tr><td class="num">310.1</td><td class="num">128</td><td class="num">16384</td><td class="num">96</td><td class="num">8</td><td class="num">16</td><td class="num">1920</td><td class="num">2160</td><td class="num">155</td><td class="num">50%</td><td class="num">297.4</td></tr>
+        <tr><td class="num">529.6</td><td class="num">128</td><td class="num">20480</td><td class="num">105</td><td class="num">8</td><td class="num">35</td><td class="num">2520</td><td class="num">2520</td><td class="num">163</td><td class="num">52%</td><td class="num">410.2</td></tr>
+        <tr class="best"><td class="num">1008.0</td><td class="num">160</td><td class="num">25600</td><td class="num">128</td><td class="num">8</td><td class="num">64</td><td class="num">3072</td><td class="num">3072</td><td class="num">163</td><td class="num">52%</td><td class="num">502.0</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>把表读成三件事。第一，论文把整张表概括为到 3072 张 A100 的 super-linear scaling：模型变大后矩阵乘更大，GPU 利用率提高，而通信时间相对计算没有明显增长（<code>§5.1</code>）。逐行看并非单调——18.4B 行是 135 TFLOP/s、43%，最大行是 163 TFLOP/s、52%；峰值占比的范围是 43% 到 52%。第二，1T 行的并行配置是 TP=8、PP=64、3072 张卡；按 core 的公式（CP 按 1 计，<span class="infer">推断</span>，因为表中没有 CP 列）得到 <code>model_size=512</code>、<code>DP=6</code>，说明这一行主要靠 64 级 PP 摊开模型，数据副本只有 6 路。第三，<code>§5.1</code> 写 “a trillion parameters”，Abstract 写 “1 trillion parameters”。</p>
+
+  <p>论文正文还给两个端到端估算：175B 的 GPT-3 在 1024 张 A100 上、batch 1536、每卡 140 TFLOP/s，训练 300B token 约 34 天；1T 模型在 3072 张 A100 上、每卡 163 TFLOP/s，训练 450B token 约 84 天（<code>§5.1</code>）。这些吞吐是端到端数字，包含数据加载、optimizer step 与通信，不是单个 GEMM 的峰值（<code>§5.1</code>）。</p>
+</section>
+
+<section class="block" id="limits">
+  <div class="sec-head"><span class="sec-num">07</span><h2>PAI 的主路径是适配层，legacy 路径带训练循环副本</h2></div>
+  <p class="sec-sub">读完这节你应该知道：哪些事该找 Megatron-Core，哪些事该找 PAI patch，以及升级时会在哪里断。</p>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-head"><span class="pill p1">Megatron-LM</span><h4>训练栈（megatron/training + megatron/core）</h4></div>
+      <ul>
+        <li><code>pretrain()</code> 的训练循环、初始化、模型/优化器装配、数据 iterator、checkpoint（<code>training.py:1746</code>，<code>:1853</code>，<code>:2135</code>，<code>:6309</code>，<code>checkpointing.py:640</code>）。</li>
+        <li>并行组与 rank layout：<code>initialize_model_parallel</code>（<code>parallel_state.py:629</code>），<code>model_size</code>/<code>DP</code> 的计算与整除校验（<code>:883-895</code>）。</li>
+        <li>schedule 选择：no-pipeline、1F1B、interleaved（<code>schedules.py:157-167</code>）。</li>
+        <li>配置对象：<code>TransformerConfig</code>、<code>GPTModelConfig</code>、<code>PretrainConfigContainer</code>（<code>transformer_config.py:61</code>、<code>models/gpt.py:144</code>、<code>argument_utils.py:978</code>）。</li>
+        <li><code>megatron/core</code> 提供 TransformerConfig、initialize_model_parallel、schedules、dist_checkpointing；<code>megatron/training</code> 与根入口脚本提供 pretrain()、train_step、checkpointing、GPTModelConfig、PretrainConfigContainer。</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-head"><span class="pill p2">PAI-Megatron-Patch</span><h4>模型与权重适配</h4></div>
+      <ul>
+        <li>模型库、tokenizer、HF↔MCore 权重转换（<code>PAI README.md:83-86</code>）；数据 provider 与 patch 参数（<code>megatron_patch/data/__init__.py:45-55</code>、<code>megatron_patch/arguments.py:156</code>）。</li>
+        <li>示例启动脚本把 Megatron 后端固定在特定快照：Qwen3 脚本指向 <code>Megatron-LM-250624</code>（<code>run_mcore_qwen3.sh:6</code>）。</li>
+        <li>mcore 入口直接 import Megatron-LM 的 <code>pretrain</code>（<code>megatron.training</code>），再传自己的 <code>model_provider</code>、<code>forward_step</code>、dataset provider（<code>pretrain_qwen.py:30-34</code>、<code>:139-144</code>）。</li>
+        <li>仓库也保留旧版循环副本：<code>megatron_patch/training.py:51</code> 定义 <code>pretrain</code>，<code>:307</code> 定义 <code>train_step</code>；部分 legacy 示例直接 import 它（<code>examples/llama2/pretrain_megatron_llama.py:31</code>）。</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>所以“PAI 不改 Megatron 核心”要加限定词。它的 mcore 主路径是外挂：不把新模块写进 core，只通过 <code>PYTHONPATH</code> 把 <code>megatron_patch</code> 和固定的 Megatron 快照拼在一起（<code>run_mcore_qwen3.sh:6</code>），Qwen3 的 <code>pretrain_qwen.py</code> 最终调用 Megatron-LM 的 <code>pretrain</code>（<code>megatron.training</code>）。但仓库里同时存在两份“旧世界”：<code>megatron_patch/training.py</code> 是旧版训练循环的副本，<code>megatron_patch/initialize.py</code> 是旧版初始化的副本；它们服务的是仍按旧 API 写的 legacy 示例。把 PAI 理解成“纯 patch、绝不含训练循环”会漏掉这条路径；而 <code>fixes/</code> 下的 patch 又会直接改 core，强度见下。</p>
+
+  <h3>版本耦合：两处硬绑定 + 一处可选 patch</h3>
+  <p>第一处是启动脚本的 <code>PYTHONPATH</code>：<code>run_mcore_qwen3.sh:6</code> 指向 <code>backends/megatron/Megatron-LM-250624</code>；这个子模块在 PAI 仓库里的 gitlink 是 <code>6a6cd478839d90cf09a837adf8c79cbc844bc920</code>。同一仓库虽然还放了 <code>250908</code> 快照，但 Qwen3 示例没有用它。</p>
+
+  <p>第二处是代码接口。PAI 的 <code>pretrain_qwen.py:139-144</code> 用位置参数调用 <code>pretrain(provider, model_provider, ModelType, forward_step, extra_args_provider=...)</code>；本页读到的 Megatron-LM <code>70f7a26</code> 里，<code>pretrain</code> 的第一个参数已经是 <code>cfg_container</code>（<code>training.py:1746</code>）。把 PAI 的入口直接套到新 core 上，先撞的是签名，不是模型。</p>
+
+  <p>第三处是可选 fixes。<code>megatron_patch/fixes/yarn_args/README.md:5-7</code> 明确写“仅适用于 Megatron-LM-250328”，并给出 commit <code>6ba97dd37150a6bfba03d31808674211cf2a4d0d</code>；同属 <code>fixes/</code> 的 <code>optimizer_offloading</code> 也限定同一版本。这类 patch 会直接改 core 文件，和“外挂 adapter”不是同一种耦合强度。</p>
+
+  <h3>模型适配成本：不是改一个配置项</h3>
+  <p>接一个新模型，至少要准备四类东西：模型侧的 layer spec / model provider（<code>pretrain_qwen.py:39-131</code> 是一个可读的样板）；tokenizer 类型与词表 padding（<code>megatron_patch/arguments.py:156</code> 注册 <code>--patch-tokenizer-type</code>，<code>megatron_patch/tokenizer/__init__.py:46-54</code> 按类型构造）；数据 provider（<code>megatron_patch/data/__init__.py:45-55</code>）；以及 HF↔MCore 的分布式转换脚本（<code>toolkits/distributed_checkpoints_convertor/README.md:3-5</code>）。这些都不是 <code>TransformerConfig</code> 里的一个布尔开关。</p>
+
+  <p>权重转换还有自己的约束：转换器基于 <code>torch_dist</code>，其 README 要求训练时把 <code>--ckpt-format torch</code> 显式改成 <code>torch_dist</code>；转换脚本不会复制 tokenizer，需要手动拷配置；当前只测了 GPU 路径（<code>toolkits/distributed_checkpoints_convertor/README.md:10-17</code>）。这里又有一层版本差：本页读到的 core <code>70f7a26</code> 里 <code>CheckpointConfig.ckpt_format</code> 默认已经是 <code>torch_dist</code>（<code>megatron/training/config/training_config.py:603</code>），而 PAI 转换器 README 仍按旧默认 <code>torch</code> 写。转换完不等于可以直接训练，还要把 tokenizer、配置和启动脚本补齐。</p>
+
+  <h3>框架不解决的问题</h3>
+  <ul>
+    <li><strong>不替你选并行度。</strong> core 的入口接收调用者给的 TP/PP/CP/EP 尺寸，只校验整除（<code>parallel_state.py:892-893</code>）；模型多大、切几路、PP 多少 stage，仍要人来定。</li>
+    <li><strong>不保证每个模型都支持。</strong> GPT 有 <code>GPTModelConfig</code> 和 <code>gpt_builder</code>，T5/BERT/Mamba/VLM 各有自己的入口（<code>pretrain_gpt.py</code>、<code>examples/t5/pretrain_t5.py</code>、<code>examples/bert/pretrain_bert.py</code>、<code>pretrain_mamba.py</code>、<code>pretrain_vlm.py</code>）；新结构仍要写 spec。</li>
+    <li><strong>不保存内置文本 dataloader 的批内位置。</strong> 只有支持该接口的 Energon 多模态 dataloader 会存；文本训练靠已消费样本数和数据顺序恢复（<code>checkpointing.py:677-678</code>）。</li>
+    <li><strong>PAI 示例不是完整断点续训。</strong> Qwen3 脚本显式传 <code>--no-load-optim</code>、<code>--no-load-rng</code>、<code>--no-save-optim</code>（<code>run_mcore_qwen3.sh:474-475</code>、<code>:486</code>），它适合从已有权重继续训练，不是从 optimizer 状态原地恢复。</li>
+    <li><strong>数据质量、学习率、集群调度不在框架内。</strong> 这些环节由数据管线、超参搜索和调度器负责；训练框架只负责把给定的配置跑成可复现的 step 与 checkpoint。</li>
+  </ul>
+
+  <p>什么时候别用这套：只需要单卡或纯 DDP 的小模型，Megatron 的 CUDA 断言、并行组和分片 checkpoint 只会增加约束（<code>initialize.py:87-89</code>）；需要比 PAI 固定快照更新的 Megatron 特性，又不想 port patch，直接读 core 源码比改 PAI 入口更省事；模型不在 PAI 模型库里，适配成本要先按上面四类文件估一遍。</p>
+</section>
+
+<footer>
+  <div>Megatron-LM: Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM（SC21）</div>
+  <div class="src">
+    原文：<a href="https://arxiv.org/abs/2104.04473v5">https://arxiv.org/abs/2104.04473v5</a>（以 v5 为准）<br>
+    代码：<a href="https://github.com/NVIDIA/Megatron-LM/tree/70f7a26">Megatron-Core 70f7a26</a> · <a href="https://github.com/alibaba/PAI-Megatron-Patch/tree/a098ca5">PAI-Megatron-Patch a098ca5</a><br>
+    笔记：<a href="/ai阅读megatron/">ai阅读megatron</a> · 相关页：<a href="/tensor-parallel-megatron/">Tensor Parallel</a> · <a href="/pipeline-parallel/">Pipeline Parallel</a><br>
+    版本说明：论文数字以 arXiv v5 的 Table 1 / §5.1 为准；源码行为以 Megatron-LM <code>70f7a26</code>（含 Megatron-Core）与 PAI 仓库 <code>a098ca5</code>（本次克隆的 HEAD）为准。PAI 侧固定读取该 commit 下的文件与 README。笔记里的 pretrain 签名/版本为旧版，本页以 70f7a26 为准。
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  var sim = document.getElementById('batch-sim');
+  if (!sim) return;
+  var mbs = document.getElementById('batch-mbs');
+  var seq = document.getElementById('batch-seq');
+  var dp = document.getElementById('batch-dp');
+  var ga = document.getElementById('batch-ga');
+  if (!mbs || !seq || !dp || !ga) return;
+
+  function val(el) { return el ? parseInt(el.value, 10) : 0; }
+  function put(id, v) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = String(v);
+  }
+
+  function update() {
+    var m = val(mbs), s = val(seq), d = val(dp), g = val(ga);
+    put('batch-mbs-v', m);
+    put('batch-seq-v', s);
+    put('batch-dp-v', d);
+    put('batch-ga-v', g);
+    put('batch-mbs-r', m);
+    put('batch-seq-r', s);
+    put('batch-dp-r', d);
+    put('batch-ga-r', g);
+    var samples = m * d * g;
+    var tokens = samples * s;
+    var perRank = m * s;
+    put('batch-samples', samples);
+    put('batch-tokens', tokens);
+    put('batch-per-rank', perRank);
+    put('batch-echo-samples', samples);
+    put('batch-echo-tokens', tokens);
+    put('batch-echo-mbs', m);
+    put('batch-echo-seq', s);
+    put('batch-echo-dp', d);
+    put('batch-echo-ga', g);
+    put('batch-echo-per-rank', perRank);
+  }
+
+  [mbs, seq, dp, ga].forEach(function (el) {
+    el.addEventListener('input', update);
+  });
+  update();
+})();
+
+(function () {
+  var sim = document.getElementById('par-sim');
+  if (!sim) return;
+  var world = document.getElementById('par-world');
+  var tp = document.getElementById('par-tp');
+  var pp = document.getElementById('par-pp');
+  var cp = document.getElementById('par-cp');
+  if (!world || !tp || !pp || !cp) return;
+
+  function val(el) { return el ? parseInt(el.value, 10) : 0; }
+  function put(id, v) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = String(v);
+  }
+
+  function update() {
+    var w = val(world), t = val(tp), p = val(pp), c = val(cp);
+    put('par-world-v', w);
+    put('par-tp-v', t);
+    put('par-pp-v', p);
+    put('par-cp-v', c);
+    put('par-world-r', w);
+    put('par-tp-r', t);
+    put('par-pp-r', p);
+    put('par-cp-r', c);
+    var modelSize = t * p * c;
+    var valid = modelSize > 0 && w % modelSize === 0;
+    var dpSize = valid ? w / modelSize : 0;
+    put('par-model', modelSize);
+    put('par-dp', valid ? dpSize : '—');
+    put('par-state', valid ? '整除，可启动' : '不整除');
+    put('par-echo-tp', t);
+    put('par-echo-pp', p);
+    put('par-echo-cp', c);
+    put('par-echo-model', modelSize);
+    put('par-echo-world', w);
+    put('par-echo-dp', valid ? dpSize : '—');
+  }
+
+  [world, tp, pp, cp].forEach(function (el) {
+    el.addEventListener('input', update);
+  });
+  update();
+})();
+</script>
+</body>
+</html>
